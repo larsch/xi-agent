@@ -44,14 +44,17 @@ impl Tool for CmdTool {
                 None => return ToolResult::err("Missing required parameter: command"),
             };
 
+            let wrapped_command = format!("\"{command}\"");
             let output = match tokio::process::Command::new("cmd.exe")
+                .arg("/D") // Disable AutoRun commands from registry.
+                .arg("/S") // Preserve predictable quote handling with /C.
                 .arg("/C")
-                .arg(&command)
+                .raw_arg(&wrapped_command)
                 .output()
                 .await
             {
                 Ok(o) => o,
-                Err(e) => return ToolResult::err(format!("Failed to spawn cmd.exe: {e}")),
+                Err(e) => return ToolResult::err(format!("Failed to run cmd.exe: {e}")),
             };
 
             let exit_code = output.status.code().unwrap_or(-1);
@@ -137,5 +140,87 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.to_lowercase().contains("ok"));
         assert!(!result.content.contains("exit 0"));
+    }
+
+    #[tokio::test]
+    async fn cmd_allows_double_quoted_arguments() {
+        let tool = CmdTool;
+        let args = serde_json::json!({"command": "echo \"a b\""});
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("a b"),
+            "double-quoted argument did not round-trip: {}",
+            result.content
+        );
+        assert!(!result.content.contains("exit 1"));
+    }
+
+    #[tokio::test]
+    async fn cmd_backslash_escaped_quotes_are_literal() {
+        let tool = CmdTool;
+        let args = serde_json::json!({"command": "echo \\\"a b\\\""});
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("a b"),
+            "expected echoed payload to include a b: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("\\\""),
+            "expected literal backslash+quote sequence from \\\" escaping: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_wrapped_command_string_fails() {
+        let tool = CmdTool;
+        let args = serde_json::json!({"command": "\"echo \\\"a b\\\"\""});
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.to_lowercase().contains("cannot find")
+                || result.content.to_lowercase().contains("not recognized"),
+            "expected wrapped command string to fail: {}",
+            result.content
+        );
+        assert!(result.content.contains("exit 1"));
+    }
+
+    #[tokio::test]
+    async fn cmd_invokes_external_program_with_spaced_argument() {
+        let tool = CmdTool;
+        let args = serde_json::json!({
+            "command": "powershell -NoProfile -Command \"Write-Output 'a b'\""
+        });
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("a b"),
+            "external command did not receive spaced argument: {}",
+            result.content
+        );
+        assert!(!result.content.contains("exit 1"));
+    }
+
+    #[tokio::test]
+    async fn cmd_handles_double_quoted_windows_path_argument() {
+        let tool = CmdTool;
+        let args = serde_json::json!({
+            "command": "dir \"C:\\Program Files\""
+        });
+        let result = tool.execute(args).await;
+
+        assert!(
+            result.content.to_lowercase().contains("program files"),
+            "double-quoted Windows path argument did not execute properly: {}",
+            result.content
+        );
     }
 }
