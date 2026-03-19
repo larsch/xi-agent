@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, MAX_SELECTION_VISIBLE},
+    auth::AuthFlow,
     commands::CompletionItem,
     llm::{AssistantPhase, Role},
     provider::context_window_for_model,
@@ -85,9 +86,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let terminal_height = f.area().height as usize;
     let width = f.area().width as usize;
 
-    // Reset every frame; only set again below if the login panel is visible.
-    app.login_url_link_pos = None;
-
     let input_line_count = app.textarea.lines().len().max(1);
     let max_input_height = (terminal_height * 40 / 100).max(1);
     let input_height = input_line_count.min(max_input_height) as u16;
@@ -107,13 +105,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         0
     };
 
-    // Selection menu: suppressed while login is active.
-    let selection_header_height: u16 = if app.selection_mode && !app.login_active {
-        1
-    } else {
-        0
-    };
-    let selection_items_height: u16 = if app.selection_mode && !app.login_active {
+    // Selection menu: shown whenever selection_mode is active, including on
+    // top of the login panel (for the LoginAction menu).
+    let selection_header_height: u16 = if app.selection_mode { 1 } else { 0 };
+    let selection_items_height: u16 = if app.selection_mode {
         app.selection_items.len().clamp(1, MAX_SELECTION_VISIBLE) as u16
     } else {
         0
@@ -124,10 +119,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // the login header + content rows take their place.
     let login_header_height: u16 = if app.login_active { 1 } else { 0 };
     let login_content_height: u16 = if app.login_active {
-        let mut h = 1usize; // status/info line
-        if app.login_url.is_some() {
-            h += 1; // blank separator
-            h += 1; // single URL link row
+        // 1 instruction line + 1 status/info line
+        let mut h = 2usize;
+        if let Some(url) = &app.login_url {
+            // URL label row + however many wrapped lines the URL needs.
+            let url_indent = LOGIN_URL_INDENT.len();
+            let wrap_width = width.saturating_sub(url_indent).max(1);
+            let url_lines = wrap_str(url, wrap_width).len();
+            h += 1 + url_lines; // "  URL:" header + wrapped content
         }
         if app.login_code.is_some() {
             h += 1;
@@ -241,9 +240,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Selection menu ────────────────────────────────────────────────────────
-    if app.selection_mode && !app.login_active {
+    if app.selection_mode {
         // Header row: title on the left, key hints on the right.
-        const HINTS: &str = "↑↓ navigate   type filter   Enter select   Esc cancel  ";
+        let hints = if app.selection_filter_enabled() {
+            "↑↓ navigate   type filter   Enter select   Esc cancel  "
+        } else {
+            "↑↓ navigate   Enter select   Esc cancel  "
+        };
         let title = app.selection_title;
         let query = if app.selection_query.is_empty() {
             "".to_string()
@@ -251,7 +254,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             format!("filter: {}", app.selection_query)
         };
         let query_width = query.width();
-        let gap = width.saturating_sub(title.width() + query_width + HINTS.width());
+        let gap = width.saturating_sub(title.width() + query_width + hints.width());
         let header_line = Line::from(vec![
             Span::styled(
                 title,
@@ -266,7 +269,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 Style::default().fg(Color::Yellow).bg(SELECTION_HEADER_BG),
             ),
             Span::styled(
-                HINTS,
+                hints.to_string(),
                 Style::default().fg(Color::DarkGray).bg(SELECTION_HEADER_BG),
             ),
         ]);
@@ -317,10 +320,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             .clone()
             .unwrap_or_else(|| "provider".to_string());
 
-        // Header row.
-        const ESC_HINT: &str = "Esc cancel  ";
+        // Header: static hints — actions are accessed via Enter (action menu).
+        const LOGIN_HINTS: &str = "Enter actions  Esc cancel  ";
         let title = format!("  Authenticating: {provider}");
-        let gap = width.saturating_sub(title.width() + ESC_HINT.width());
+        let gap = width.saturating_sub(title.width() + LOGIN_HINTS.width());
         let header_line = Line::from(vec![
             Span::styled(
                 title,
@@ -331,14 +334,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             ),
             Span::styled(" ".repeat(gap), Style::default().bg(LOGIN_HEADER_BG)),
             Span::styled(
-                ESC_HINT,
+                LOGIN_HINTS,
                 Style::default().fg(Color::DarkGray).bg(LOGIN_HEADER_BG),
             ),
         ]);
         f.render_widget(Paragraph::new(vec![header_line]), login_hdr_area);
 
         // Content rows.
-        let content_lines = build_login_content_lines(app, login_body_area.y, width);
+        let content_lines = build_login_content_lines(app, width);
         f.render_widget(Paragraph::new(content_lines), login_body_area);
     }
 
@@ -377,28 +380,34 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
 // ── Login panel content rendering ─────────────────────────────────────────────
 
-/// The visible label rendered for the OSC 8 browser hyperlink.
-pub const LOGIN_LINK_LABEL: &str = "open in browser →";
-/// Column offset where the link label begins ("  URL: " = 7 chars).
-const LOGIN_LINK_COL: u16 = 7;
+/// Indentation applied to each wrapped URL line.
+const LOGIN_URL_INDENT: &str = "    ";
 
-/// Build the content rows for the login panel (status line + URL link + code).
-/// Also records the terminal position of the URL link label in
-/// `app.login_url_link_pos` so the main loop can overlay OSC 8 escape codes
-/// after the Ratatui frame is flushed.
-fn build_login_content_lines(
-    app: &mut App,
-    login_body_top: u16,
-    width: usize,
-) -> Vec<Line<'static>> {
+/// Build the content rows for the login panel.
+///
+/// Layout (when a URL is present):
+/// ```
+///   <instruction line>
+///   <status / progress line>
+///   URL:
+///     <url line 1>
+///     <url line 2>   ← only when URL wraps
+///   Code: ABCD-1234  ← Copilot device flow only
+/// ```
+///
+/// The URL is displayed as plain, selectable text wrapped across as many lines
+/// as needed — no OSC 8 hyperlink tricks that would break in most terminals.
+fn build_login_content_lines(app: &mut App, width: usize) -> Vec<Line<'static>> {
+    let instruction_style = Style::default()
+        .fg(Color::Rgb(180, 180, 200))
+        .bg(LOGIN_CONTENT_BG);
     let status_style = Style::default().fg(Color::White).bg(LOGIN_CONTENT_BG);
     let url_key_style = Style::default()
         .fg(Color::Rgb(120, 200, 255))
         .bg(LOGIN_CONTENT_BG);
     let url_val_style = Style::default()
         .fg(Color::Rgb(100, 220, 100))
-        .bg(LOGIN_CONTENT_BG)
-        .add_modifier(ratatui::style::Modifier::UNDERLINED);
+        .bg(LOGIN_CONTENT_BG);
     let code_key_style = Style::default()
         .fg(Color::Rgb(120, 200, 255))
         .bg(LOGIN_CONTENT_BG);
@@ -408,7 +417,23 @@ fn build_login_content_lines(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Status / progress line (row 0 of the body area).
+    // Row 0 — instruction text (flow-dependent).
+    let instruction = match app.login_auth_flow {
+        Some(AuthFlow::DeviceCode) => {
+            "  Open the URL below, then enter the code shown into the browser."
+        }
+        Some(AuthFlow::RedirectCallback) => {
+            "  Open the URL below; the browser will redirect back automatically."
+        }
+        None => "  Follow the browser prompt to authenticate.",
+    };
+    let instr_len = instruction.width();
+    lines.push(Line::from(vec![
+        Span::styled(instruction.to_string(), instruction_style),
+        fill(instr_len),
+    ]));
+
+    // Row 1 — status / progress line.
     let info = app.login_info.clone();
     let info_len = info.width();
     lines.push(Line::from(vec![
@@ -416,24 +441,28 @@ fn build_login_content_lines(
         fill(2 + info_len),
     ]));
 
-    if app.login_url.is_some() {
-        // Blank separator (row 1).
-        lines.push(Line::from(vec![fill(0)]));
-
-        // URL link row (row 2): Ratatui renders the visible label; the main
-        // loop overlays the OSC 8 sequence at the recorded position.
-        let url_row = login_body_top + 2;
-        app.login_url_link_pos = Some((url_row, LOGIN_LINK_COL));
-
-        let label_len = LOGIN_LINK_LABEL.width();
-        let used = LOGIN_LINK_COL as usize + label_len;
+    // Rows 2+ — URL label + wrapped URL lines.
+    if let Some(url) = &app.login_url {
+        let url_label = "  URL:";
+        let url_label_len = url_label.width();
         lines.push(Line::from(vec![
-            Span::styled("  URL: ", url_key_style),
-            Span::styled(LOGIN_LINK_LABEL, url_val_style),
-            fill(used),
+            Span::styled(url_label.to_string(), url_key_style),
+            fill(url_label_len),
         ]));
+
+        let indent_len = LOGIN_URL_INDENT.len();
+        let wrap_width = width.saturating_sub(indent_len).max(1);
+        for chunk in wrap_str(url, wrap_width) {
+            let used = indent_len + chunk.width();
+            lines.push(Line::from(vec![
+                Span::styled(LOGIN_URL_INDENT.to_string(), fill_style),
+                Span::styled(chunk, url_val_style),
+                fill(used),
+            ]));
+        }
     }
 
+    // Final row — device code (Copilot only).
     if let Some(code) = &app.login_code {
         const CODE_PREFIX: &str = "  Code: ";
         let used = CODE_PREFIX.len() + code.len();

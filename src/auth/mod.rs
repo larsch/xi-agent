@@ -8,18 +8,33 @@ use tokio::sync::mpsc::UnboundedSender;
 pub mod codex;
 pub mod copilot;
 pub mod gemini;
+pub mod open_url;
 pub mod paths;
 pub mod store;
 pub mod types;
 
 pub use store::AuthStore;
 
+/// Describes what the user needs to do after receiving an [`LoginEvent::AuthCode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthFlow {
+    /// GitHub device-code flow: open the URL **and** type the short code shown
+    /// on screen into the browser.
+    DeviceCode,
+    /// PKCE redirect flow (Codex, Gemini): open the URL; the browser will
+    /// redirect back to localhost automatically once the user approves.
+    RedirectCallback,
+}
+
 #[derive(Debug, Clone)]
 pub enum LoginEvent {
     Info(String),
     AuthCode {
         url: String,
+        /// Short user-facing code to be entered in the browser (device flow only).
         code: Option<String>,
+        /// Which flow is in use, so the UI can show appropriate instructions.
+        flow: AuthFlow,
     },
     Success {
         provider: String,
@@ -57,6 +72,7 @@ pub async fn login_provider(
                         let _ = tx.send(LoginEvent::AuthCode {
                             url: verification_uri,
                             code: Some(user_code),
+                            flow: AuthFlow::DeviceCode,
                         });
                     }
                     copilot::CopilotLoginEvent::Progress(msg) => {
@@ -77,7 +93,11 @@ pub async fn login_provider(
             let creds = codex::login(
                 |ev| match ev {
                     codex::CodexLoginEvent::OpenBrowser(url) => {
-                        let _ = tx.send(LoginEvent::AuthCode { url, code: None });
+                        let _ = tx.send(LoginEvent::AuthCode {
+                            url,
+                            code: None,
+                            flow: AuthFlow::RedirectCallback,
+                        });
                     }
                     codex::CodexLoginEvent::Progress(msg) => {
                         let _ = tx.send(LoginEvent::Info(msg));
@@ -97,7 +117,11 @@ pub async fn login_provider(
             let creds = gemini::login(
                 |ev| match ev {
                     gemini::GeminiLoginEvent::OpenBrowser(url) => {
-                        let _ = tx.send(LoginEvent::AuthCode { url, code: None });
+                        let _ = tx.send(LoginEvent::AuthCode {
+                            url,
+                            code: None,
+                            flow: AuthFlow::RedirectCallback,
+                        });
                     }
                     gemini::GeminiLoginEvent::Progress(msg) => {
                         let _ = tx.send(LoginEvent::Info(msg));

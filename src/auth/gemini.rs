@@ -1,5 +1,4 @@
 use std::{
-    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -100,7 +99,6 @@ pub async fn login(
     }
 
     on_event(GeminiLoginEvent::OpenBrowser(url.to_string()));
-    let _ = open_url(url.as_str());
 
     on_event(GeminiLoginEvent::Progress(
         "Waiting for browser callback…".to_string(),
@@ -407,24 +405,6 @@ fn random_urlsafe(len: usize) -> String {
 fn pkce_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
-}
-
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(url).spawn()?;
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
-        Ok(())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Command::new("xdg-open").arg(url).spawn()?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use std::{
-    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -71,10 +70,7 @@ pub async fn login(
         verification_uri: device.verification_uri.clone(),
         user_code: device.user_code.clone(),
     });
-    log::debug!("copilot device flow: opening browser at {}", device.verification_uri);
-    let _ = open_url(&device.verification_uri);
-    log::debug!(
-        "copilot device flow started: uri={} interval={} expires_in={}",
+    log::debug!("copilot device flow started: uri={} interval={} expires_in={}",
         device.verification_uri,
         device.interval,
         device.expires_in
@@ -192,24 +188,6 @@ fn extract_base_url(token: &str) -> Option<String> {
         .map(|rest| format!("api.{rest}"))
         .unwrap_or_else(|| domain.to_string());
     Some(format!("https://{api_domain}"))
-}
-
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(url).spawn()?;
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
-        Ok(())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Command::new("xdg-open").arg(url).spawn()?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

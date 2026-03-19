@@ -10,7 +10,7 @@ use crate::{
         AgentLoopConfig, run_agent_loop,
         types::{AgentEvent, AskRequest, AskRequestTx, AskUserOption, AskUserResponse},
     },
-    auth::{self, LoginEvent},
+    auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     llm::{AssistantPhase, LlmProvider, Message, Role, UsageStats},
     provider::ProviderKind,
@@ -29,6 +29,17 @@ pub enum SelectionResult {
     ResumeSession(String),
     AskOption(String),
     AskFreeform,
+    /// A login-panel action was selected.
+    LoginAction(LoginActionKind),
+}
+
+/// Actions available in the login action menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginActionKind {
+    OpenBrowser,
+    CopyUrl,
+    CopyCode,
+    Cancel,
 }
 
 struct PendingAsk {
@@ -46,6 +57,7 @@ enum SelectionKind {
     LoginProvider,
     ResumeSession,
     AskUser,
+    LoginAction,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -117,6 +129,9 @@ pub struct App {
     pub login_info: String,
     pub login_url: Option<String>,
     pub login_code: Option<String>,
+    /// Which OAuth flow is in use; drives the UI's instruction text and
+    /// available keyboard actions.
+    pub login_auth_flow: Option<AuthFlow>,
     pub login_needs_rebuild: bool,
     pub refresh_in_progress: bool,
     pub retry_after_refresh: bool,
@@ -125,10 +140,14 @@ pub struct App {
     pub retry_model_fetch_after_refresh: bool,
     auth_retry_budget: u8,
     login_cancel: Option<Arc<AtomicBool>>,
-    /// Set by `ui::draw()` each frame: terminal (row, col) of the "open in
-    /// browser" link label, used by the main loop to overlay OSC 8 hyperlink
-    /// escape codes after the Ratatui frame is flushed.
-    pub login_url_link_pos: Option<(u16, u16)>,
+    /// Persistent clipboard instance used during the login flow.
+    ///
+    /// On Linux the clipboard is owned by the process: dropping the
+    /// `arboard::Clipboard` instance releases ownership and the text
+    /// disappears from other applications.  We therefore keep it alive for
+    /// the entire duration of the login panel and only drop it once login
+    /// finishes.
+    clipboard: Option<arboard::Clipboard>,
 
     // ── Session persistence ───────────────────────────────────────────────────
     session_store: Option<SessionStore>,
@@ -208,13 +227,14 @@ impl App {
             login_info: String::new(),
             login_url: None,
             login_code: None,
+            login_auth_flow: None,
             login_needs_rebuild: false,
             refresh_in_progress: false,
             retry_after_refresh: false,
             retry_model_fetch_after_refresh: false,
             auth_retry_budget: 0,
             login_cancel: None,
-            login_url_link_pos: None,
+            clipboard: None,
             session_store: None,
             current_session_id: None,
             current_cwd: String::new(),
@@ -526,6 +546,7 @@ impl App {
             Some(SelectionKind::LoginProvider)
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
+            | Some(SelectionKind::LoginAction)
             | None => None,
         };
 
@@ -659,12 +680,25 @@ impl App {
             && !self.models_loading
     }
 
+    /// Returns true if the active selection menu supports free-text filtering.
+    /// The login-action menu is a fixed short list and disables filtering.
+    pub fn selection_filter_enabled(&self) -> bool {
+        self.selection_kind != Some(SelectionKind::LoginAction)
+    }
+
     pub fn selection_add_char(&mut self, c: char) {
+        // The login action menu is a small fixed list; filtering adds no value.
+        if self.selection_kind == Some(SelectionKind::LoginAction) {
+            return;
+        }
         self.selection_query.push(c);
         self.apply_selection_filter();
     }
 
     pub fn selection_backspace(&mut self) {
+        if self.selection_kind == Some(SelectionKind::LoginAction) {
+            return;
+        }
         self.selection_query.pop();
         self.apply_selection_filter();
     }
@@ -727,6 +761,21 @@ impl App {
                     (item.complete_to == "/ask_user_freeform")
                         .then_some(SelectionResult::AskFreeform)
                 }),
+            Some(SelectionKind::LoginAction) => match item.complete_to.as_str() {
+                Self::LOGIN_ACTION_OPEN_BROWSER => {
+                    Some(SelectionResult::LoginAction(LoginActionKind::OpenBrowser))
+                }
+                Self::LOGIN_ACTION_COPY_URL => {
+                    Some(SelectionResult::LoginAction(LoginActionKind::CopyUrl))
+                }
+                Self::LOGIN_ACTION_COPY_CODE => {
+                    Some(SelectionResult::LoginAction(LoginActionKind::CopyCode))
+                }
+                Self::LOGIN_ACTION_CANCEL => {
+                    Some(SelectionResult::LoginAction(LoginActionKind::Cancel))
+                }
+                _ => None,
+            },
             None => None,
         }?;
 
@@ -844,6 +893,151 @@ impl App {
         self.reset_textarea();
     }
 
+    // ── Login panel actions ───────────────────────────────────────────────────
+
+    // Internal complete_to tokens for login action items.
+    const LOGIN_ACTION_OPEN_BROWSER: &str = "/login_action open_browser";
+    const LOGIN_ACTION_COPY_URL: &str = "/login_action copy_url";
+    const LOGIN_ACTION_COPY_CODE: &str = "/login_action copy_code";
+    const LOGIN_ACTION_CANCEL: &str = "/login_action cancel";
+
+    /// Build a single login-action `CompletionItem`.
+    fn login_action_item(label: &str, detail: &str, token: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            detail: detail.to_string(),
+            complete_to: token.to_string(),
+            loading: false,
+            error: false,
+        }
+    }
+
+    /// Open the action selection menu for the active login panel.
+    ///
+    /// Items are populated based on what is currently available:
+    /// - "Open browser" and "Copy URL" only when a URL has arrived
+    /// - "Copy code" only when a device code is present (Copilot flow)
+    /// - "Cancel" always
+    pub fn enter_login_action_menu(&mut self) {
+        if !self.login_active {
+            return;
+        }
+
+        let mut items: Vec<CompletionItem> = Vec::new();
+        if self.login_url.is_some() {
+            items.push(Self::login_action_item(
+                "Open browser",
+                "Launch the authentication URL in your default browser",
+                Self::LOGIN_ACTION_OPEN_BROWSER,
+            ));
+            items.push(Self::login_action_item(
+                "Copy URL",
+                "Copy the authentication URL to the clipboard",
+                Self::LOGIN_ACTION_COPY_URL,
+            ));
+        }
+        if self.login_code.is_some() {
+            items.push(Self::login_action_item(
+                "Copy code",
+                "Copy the device code to the clipboard",
+                Self::LOGIN_ACTION_COPY_CODE,
+            ));
+        }
+        items.push(Self::login_action_item(
+            "Cancel",
+            "Abort the login flow",
+            Self::LOGIN_ACTION_CANCEL,
+        ));
+
+        self.selection_mode = true;
+        self.selection_kind = Some(SelectionKind::LoginAction);
+        self.selection_title = "  Login actions  ";
+        self.selection_query.clear();
+        self.set_selection_items(items);
+    }
+
+    /// Execute a login action chosen from the action menu.
+    pub fn apply_login_action(&mut self, action: LoginActionKind) {
+        // Always close the menu first so the login panel is visible behind
+        // the feedback message written to login_info.
+        self.exit_selection_mode();
+
+        match action {
+            LoginActionKind::OpenBrowser => {
+                let Some(url) = self.login_url.clone() else {
+                    return;
+                };
+                match auth::open_url::open_url(&url) {
+                    Ok(()) => {
+                        log::debug!("login: opened browser for {url}");
+                        self.login_info = "Browser opened.".to_string();
+                    }
+                    Err(e) => {
+                        log::debug!("login: failed to open browser: {e}");
+                        self.login_info =
+                            format!("Could not open browser: {e}. Copy the URL manually.");
+                    }
+                }
+            }
+            LoginActionKind::CopyUrl => {
+                let Some(url) = self.login_url.clone() else {
+                    return;
+                };
+                match self.clipboard_set(url) {
+                    Ok(()) => {
+                        log::debug!("login: copied URL to clipboard");
+                        self.login_info = "URL copied to clipboard.".to_string();
+                    }
+                    Err(e) => {
+                        log::debug!("login: clipboard unavailable: {e}");
+                        self.login_info =
+                            "Clipboard unavailable — select the URL above to copy.".to_string();
+                    }
+                }
+            }
+            LoginActionKind::CopyCode => {
+                let Some(code) = self.login_code.clone() else {
+                    return;
+                };
+                match self.clipboard_set(code) {
+                    Ok(()) => {
+                        log::debug!("login: copied device code to clipboard");
+                        self.login_info = "Code copied to clipboard.".to_string();
+                    }
+                    Err(e) => {
+                        log::debug!("login: clipboard unavailable: {e}");
+                        self.login_info =
+                            "Clipboard unavailable — type the code shown above manually."
+                                .to_string();
+                    }
+                }
+            }
+            LoginActionKind::Cancel => {
+                self.cancel_login();
+            }
+        }
+    }
+
+    /// Copy `text` to the clipboard using the persistent `self.clipboard`
+    /// instance. Lazily initialises it on first call. Returns an error
+    /// string on failure.
+    fn clipboard_set(&mut self, text: String) -> Result<(), String> {
+        // Lazily open the clipboard and keep it alive for the whole login
+        // session. On Linux the clipboard is owner-based: dropping the
+        // Clipboard instance clears the content for other applications.
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        self.clipboard
+            .as_mut()
+            .unwrap()
+            .set_text(text)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn start_login(&mut self, provider: &str) {
         if self.login_active {
             return;
@@ -856,6 +1050,7 @@ impl App {
         self.login_info = format!("Starting login for {provider}...");
         self.login_url = None;
         self.login_code = None;
+        self.login_auth_flow = None;
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.login_cancel = Some(cancel.clone());
@@ -880,10 +1075,14 @@ impl App {
                 log::debug!("login info: {msg}");
                 self.login_info = msg;
             }
-            LoginEvent::AuthCode { url, code } => {
+            LoginEvent::AuthCode { url, code, flow } => {
                 log::debug!("login auth prompt: url={} has_code={}", url, code.is_some());
                 self.login_url = Some(url);
                 self.login_code = code;
+                self.login_auth_flow = Some(flow);
+                // Automatically open the action menu so the user can choose
+                // how to proceed without needing to know any keyboard shortcuts.
+                self.enter_login_action_menu();
             }
             LoginEvent::Success { provider } => {
                 log::debug!("login success: provider={provider}");
@@ -929,6 +1128,11 @@ impl App {
                 self.login_active = false;
                 self.login_provider = None;
                 self.login_cancel = None;
+                self.login_auth_flow = None;
+                self.exit_selection_mode();
+                // Drop the clipboard instance; on Linux this releases clipboard
+                // ownership so the content is no longer served by this process.
+                self.clipboard = None;
             }
         }
     }
