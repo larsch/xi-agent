@@ -5,7 +5,9 @@ use std::{
 };
 
 use crate::auth::paths::auth_file_path;
-use crate::auth::types::{AuthFile, CodexCredentials, CopilotCredentials, ProviderCredentials};
+use crate::auth::types::{
+    AuthFile, CodexCredentials, CopilotCredentials, GeminiCredentials, ProviderCredentials,
+};
 
 pub struct AuthStore {
     path: PathBuf,
@@ -66,6 +68,23 @@ impl AuthStore {
         }
     }
 
+    pub fn get_gemini(&self) -> Option<GeminiCredentials> {
+        match self.data.providers.get("gemini") {
+            Some(ProviderCredentials::Gemini {
+                access_token,
+                refresh_token,
+                expires_at,
+                project_id,
+            }) => Some(GeminiCredentials {
+                access_token: access_token.clone(),
+                refresh_token: refresh_token.clone(),
+                expires_at: *expires_at,
+                project_id: project_id.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     pub fn set_copilot(&mut self, creds: CopilotCredentials) {
         self.data.providers.insert(
             "copilot".to_string(),
@@ -86,6 +105,18 @@ impl AuthStore {
                 refresh_token: creds.refresh_token,
                 expires_at: creds.expires_at,
                 account_id: creds.account_id,
+            },
+        );
+    }
+
+    pub fn set_gemini(&mut self, creds: GeminiCredentials) {
+        self.data.providers.insert(
+            "gemini".to_string(),
+            ProviderCredentials::Gemini {
+                access_token: creds.access_token,
+                refresh_token: creds.refresh_token,
+                expires_at: creds.expires_at,
+                project_id: creds.project_id,
             },
         );
     }
@@ -155,6 +186,15 @@ mod tests {
         }
     }
 
+    fn gemini_creds() -> GeminiCredentials {
+        GeminiCredentials {
+            access_token: "at_gemini".to_string(),
+            refresh_token: "rt_gemini".to_string(),
+            expires_at: 7_777_777_777,
+            project_id: "project-123".to_string(),
+        }
+    }
+
     #[test]
     fn load_missing_path_returns_default() {
         let dir = TempDir::new().unwrap();
@@ -162,6 +202,7 @@ mod tests {
         let store = AuthStore::load(&path).unwrap();
         assert!(store.get_copilot().is_none());
         assert!(store.get_codex().is_none());
+        assert!(store.get_gemini().is_none());
     }
 
     #[test]
@@ -201,6 +242,23 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_gemini() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("auth.toml");
+
+        let mut store = AuthStore::load(&path).unwrap();
+        store.set_gemini(gemini_creds());
+        store.save().unwrap();
+
+        let store2 = AuthStore::load(&path).unwrap();
+        let got = store2.get_gemini().expect("gemini creds should be present");
+        assert_eq!(got.access_token, "at_gemini");
+        assert_eq!(got.refresh_token, "rt_gemini");
+        assert_eq!(got.expires_at, 7_777_777_777);
+        assert_eq!(got.project_id, "project-123");
+    }
+
+    #[test]
     fn set_copilot_preserves_codex() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("auth.toml");
@@ -208,11 +266,13 @@ mod tests {
         let mut store = AuthStore::load(&path).unwrap();
         store.set_copilot(copilot_creds());
         store.set_codex(codex_creds());
+        store.set_gemini(gemini_creds());
         store.save().unwrap();
 
         let store2 = AuthStore::load(&path).unwrap();
         assert!(store2.get_copilot().is_some(), "copilot should survive");
         assert!(store2.get_codex().is_some(), "codex should survive");
+        assert!(store2.get_gemini().is_some(), "gemini should survive");
     }
 
     #[test]

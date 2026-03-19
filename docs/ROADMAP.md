@@ -34,9 +34,6 @@ Render assistant output as Markdown instead of raw text.
 Messages API (`/v1/messages`). Include native tool-calling support and
 `thinking` block extraction.
 
-### Gemini provider support
-`GeminiProvider` implementing `LlmProvider` against the Google Gemini API.
-
 ---
 
 ## ⚪ Out of scope (for now)

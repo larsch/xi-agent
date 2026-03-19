@@ -15,6 +15,8 @@ pub struct TauConfig {
     pub ollama: OllamaConfig,
     #[serde(default)]
     pub codex: CodexConfig,
+    #[serde(default)]
+    pub gemini: GeminiConfig,
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
@@ -37,6 +39,12 @@ pub struct OllamaConfig {
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct CodexConfig {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
+pub struct GeminiConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
 }
@@ -77,7 +85,9 @@ impl TauConfig {
 }
 
 pub fn config_path() -> anyhow::Result<PathBuf> {
-    Ok(crate::dirs::project_dirs()?.config_dir().join("config.toml"))
+    Ok(crate::dirs::project_dirs()?
+        .config_dir()
+        .join("config.toml"))
 }
 
 #[cfg(test)]
@@ -102,6 +112,10 @@ model = "gpt-4o"
 base_url = "https://chatgpt.com/backend-api/codex"
 model = "gpt-5"
 
+[gemini]
+base_url = "https://cloudcode-pa.googleapis.com"
+model = "gemini-2.5-pro"
+
 [ollama]
 base_url = "http://localhost:11434"
 model = "llama3.1"
@@ -124,10 +138,14 @@ model = "llama3.1"
         );
         assert_eq!(cfg.codex.model.as_deref(), Some("gpt-5"));
         assert_eq!(
+            cfg.gemini.base_url.as_deref(),
+            Some("https://cloudcode-pa.googleapis.com")
+        );
+        assert_eq!(cfg.gemini.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(
             cfg.ollama.base_url.as_deref(),
             Some("http://localhost:11434")
         );
         assert_eq!(cfg.ollama.model.as_deref(), Some("llama3.1"));
     }
-
 }

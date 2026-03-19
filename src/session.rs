@@ -28,8 +28,7 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn open() -> anyhow::Result<Self> {
-        let dirs = project_dirs()
-            .context("Could not resolve platform data directory for tau")?;
+        let dirs = project_dirs().context("Could not resolve platform data directory for tau")?;
         let sessions_dir = dirs.data_dir().join("sessions");
         fs::create_dir_all(&sessions_dir).with_context(|| {
             format!("Failed to create sessions dir: {}", sessions_dir.display())

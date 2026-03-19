@@ -209,7 +209,10 @@ mod tests {
     fn extract_base_url_uses_domain_as_is_when_not_proxy_prefixed() {
         let token = "k=v;proxy-ep=enterprise.githubcopilot.com";
         let base = extract_base_url(token);
-        assert_eq!(base, Some("https://enterprise.githubcopilot.com".to_string()));
+        assert_eq!(
+            base,
+            Some("https://enterprise.githubcopilot.com".to_string())
+        );
     }
 
     #[test]

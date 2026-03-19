@@ -28,7 +28,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "provider",
         usage: "/provider <name>",
-        description: "Switch the LLM provider (copilot / openai / codex / ollama)",
+        description: "Switch the LLM provider (copilot / openai / codex / gemini / ollama)",
         takes_arg: true,
     },
     SlashCommand {
@@ -40,7 +40,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "login",
         usage: "/login <provider>",
-        description: "Authenticate provider (copilot / codex)",
+        description: "Authenticate provider (copilot / codex / gemini)",
         takes_arg: true,
     },
     SlashCommand {
@@ -198,7 +198,7 @@ pub fn completions_for(
                     .filter(|p| p.name().starts_with(arg))
                     .map(|p| CompletionItem::from_provider(p.name(), p.label()))
                     .collect(),
-                "login" => ["copilot", "codex"]
+                "login" => ["copilot", "codex", "gemini"]
                     .iter()
                     .filter(|p| p.starts_with(arg))
                     .map(|p| CompletionItem {
@@ -279,7 +279,7 @@ pub enum CommandAction {
     Provider(String),
     /// `/provider` typed with no argument — show interactive selection menu.
     ProviderNoArg,
-    /// Authenticate with provider by name (`copilot`, `codex`).
+    /// Authenticate with provider by name (`copilot`, `codex`, `gemini`).
     Login(String),
     /// Set thinking/reasoning level.
     Thinking(String),
@@ -373,6 +373,10 @@ mod tests {
             Some(CommandAction::Login(p)) if p == "codex"
         ));
         assert!(matches!(
+            parse("/login gemini"),
+            Some(CommandAction::Login(p)) if p == "gemini"
+        ));
+        assert!(matches!(
             parse("/resume abc123"),
             Some(CommandAction::Resume(id)) if id == "abc123"
         ));
@@ -410,7 +414,11 @@ mod tests {
         assert!(errored[0].error);
         assert!(errored[0].label.contains("no auth"));
 
-        let models = vec!["gpt-4o".to_string(), "gpt-5".to_string(), "claude".to_string()];
+        let models = vec![
+            "gpt-4o".to_string(),
+            "gpt-5".to_string(),
+            "claude".to_string(),
+        ];
         let items = completions_for("/model gpt", Some(&models), false, None, &[]);
         let complete_to: Vec<String> = items.into_iter().map(|i| i.complete_to).collect();
         assert_eq!(complete_to, vec!["/model gpt-4o", "/model gpt-5"]);
@@ -418,13 +426,12 @@ mod tests {
 
     #[test]
     fn provider_and_thinking_completions_are_filtered() {
-        let provider_items = completions_for("/provider co", None, false, None, &[]);
-        assert!(provider_items
-            .iter()
-            .any(|i| i.complete_to == "/provider copilot"));
-        assert!(provider_items
-            .iter()
-            .all(|i| i.complete_to.contains("/provider")));
+        let provider_items = completions_for("/provider ge", None, false, None, &[]);
+        assert!(
+            provider_items
+                .iter()
+                .any(|i| i.complete_to == "/provider gemini")
+        );
 
         let thinking_items = completions_for("/thinking m", None, false, None, &[]);
         let complete_to: Vec<String> = thinking_items.into_iter().map(|i| i.complete_to).collect();

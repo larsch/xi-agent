@@ -41,6 +41,13 @@ pub enum ProviderCredentials {
         expires_at: i64,
         account_id: String,
     },
+    #[serde(rename = "gemini")]
+    Gemini {
+        access_token: String,
+        refresh_token: String,
+        expires_at: i64,
+        project_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +64,14 @@ pub struct CodexCredentials {
     pub refresh_token: String,
     pub expires_at: i64,
     pub account_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeminiCredentials {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
+    pub project_id: String,
 }
 
 #[cfg(test)]
@@ -124,15 +139,28 @@ mod tests {
                 account_id: "acct_123".to_string(),
             },
         );
+        auth.providers.insert(
+            "gemini".to_string(),
+            ProviderCredentials::Gemini {
+                access_token: "gem_tok".to_string(),
+                refresh_token: "gem_ref".to_string(),
+                expires_at: 333,
+                project_id: "proj-123".to_string(),
+            },
+        );
 
         let json = serde_json::to_string(&auth).expect("serialize");
         let round_trip: AuthFile = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(round_trip.version, 1);
-        assert_eq!(round_trip.providers.len(), 2);
+        assert_eq!(round_trip.providers.len(), 3);
         assert!(matches!(
             round_trip.providers.get("codex"),
             Some(ProviderCredentials::Codex { account_id, .. }) if account_id == "acct_123"
+        ));
+        assert!(matches!(
+            round_trip.providers.get("gemini"),
+            Some(ProviderCredentials::Gemini { project_id, .. }) if project_id == "proj-123"
         ));
     }
 }

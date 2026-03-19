@@ -17,7 +17,7 @@ thinking output, and slash commands are all implemented. See
 
 - [x] Initial text-based UI with input box and streaming output
 - [x] Core agent loop (streaming, tools, thinking output)
-- [x] Multiple providers (Copilot, OpenAI, Codex, Ollama)
+- [x] Multiple providers (Copilot, OpenAI, Codex, Gemini, Ollama)
 - [x] Interactive authentication
 - [x] Basic tools (file read/write/edit, find files, ask user, shell commands)
 - [x] Bash on Unix, PowerShell and cmd.exe on Windows
@@ -37,7 +37,6 @@ Low priority:
 
 - [ ] Markdown rendering (currently just raw text)
 - [ ] Anthropic provider support
-- [ ] Gemini provider support
 
 Out of scope (for now):
 
@@ -62,7 +61,12 @@ Supported providers:
 - `copilot`
 - `openai`
 - `codex`
+- `gemini`
 - `ollama`
+
+Authentication notes:
+- `copilot`, `codex`, and `gemini` use interactive `/login <provider>`.
+- `openai` uses `[openai].api_key` in `config.toml`.
 
 ## Configuration
 
@@ -97,6 +101,10 @@ model = "gpt-4o"
 base_url = "https://chatgpt.com/backend-api/codex"
 model = "gpt-5.4"
 
+[gemini]
+base_url = "https://cloudcode-pa.googleapis.com"
+model = "gemini-2.5-pro"
+
 [ollama]
 base_url = "http://localhost:11434"
 model = "llama3.1"
@@ -112,7 +120,7 @@ Environment variables:
 
 | Flag                    | Short | Description                                      |
 |-------------------------|-------|--------------------------------------------------|
-| `--provider <name>`     | `-P`  | Override provider (copilot / openai / codex / ollama) |
+| `--provider <name>`     | `-P`  | Override provider (copilot / openai / codex / gemini / ollama) |
 | `--model <name>`        | `-m`  | Override model name                              |
 | `--print <prompt…>`     | `-p`  | Non-interactive: print response and exit         |
 
@@ -138,8 +146,9 @@ Environment variables:
 | `/model`             | Open interactive model picker                    |
 | `/model <name>`      | Switch to a named model                          |
 | `/provider`          | Open interactive provider picker                 |
-| `/provider <name>`   | Switch provider (copilot / openai / codex / ollama) |
-| `/login`             | Open interactive auth provider picker (copilot / codex) |
+| `/provider <name>`   | Switch provider (copilot / openai / codex / gemini / ollama) |
+| `/thinking <level>`  | Set reasoning effort (off / minimal / low / medium / high / xhigh) |
+| `/login`             | Open interactive auth provider picker (copilot / codex / gemini) |
 | `/login <provider>`  | Authenticate provider                            |
 | `/resume`            | Open session picker (local + foreign sessions)   |
 | `/quit`              | Quit                                             |
@@ -170,3 +179,10 @@ tau -p what does src/agent/mod.rs do
 
 Tool calls are printed to stderr; final output goes to stdout, making it
 pipeline-friendly.
+
+## Thinking / reasoning notes
+
+- `/thinking` applies only where provider/model mappings support it.
+- For Gemini provider:
+  - Gemini 2.x models use `thinkingBudget`.
+  - Gemini 3.x models use `thinkingLevel`.

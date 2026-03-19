@@ -76,10 +76,7 @@ impl CopilotProvider {
                 copilot_extra_headers(),
             ))
         } else if m.contains("codex") || m.starts_with("gpt-5") {
-            let responses_url = format!(
-                "{}/v1/responses",
-                resolved_base_url.trim_end_matches('/')
-            );
+            let responses_url = format!("{}/v1/responses", resolved_base_url.trim_end_matches('/'));
             log::debug!(
                 "copilot transport resolved: api=openai-responses base_url={} endpoint={}",
                 resolved_base_url,
@@ -132,7 +129,11 @@ impl LlmProvider for CopilotProvider {
         }
     }
 
-    fn stream_chat_with_tools(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>) -> LlmStream {
+    fn stream_chat_with_tools(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+    ) -> LlmStream {
         match &self.inner {
             CopilotInner::OpenAi(p) => p.stream_chat_with_tools(messages, tools),
             CopilotInner::Anthropic(p) => p.stream_chat_with_tools(messages, tools),

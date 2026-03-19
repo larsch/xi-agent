@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub mod codex;
 pub mod copilot;
+pub mod gemini;
 pub mod paths;
 pub mod store;
 pub mod types;
@@ -92,6 +93,26 @@ pub async fn login_provider(
                 store.save()
             })
         }
+        "gemini" => {
+            let creds = gemini::login(
+                |ev| match ev {
+                    gemini::GeminiLoginEvent::OpenBrowser(url) => {
+                        let _ = tx.send(LoginEvent::AuthCode { url, code: None });
+                    }
+                    gemini::GeminiLoginEvent::Progress(msg) => {
+                        let _ = tx.send(LoginEvent::Info(msg));
+                    }
+                },
+                cancel.clone(),
+            )
+            .await;
+
+            creds.map(|creds| {
+                let mut store = AuthStore::load_default()?;
+                store.set_gemini(creds);
+                store.save()
+            })
+        }
         _ => Err(anyhow::anyhow!(
             "Unsupported provider for /login: {provider}"
         )),
@@ -144,6 +165,18 @@ pub async fn refresh_provider(provider: &str, tx: UnboundedSender<LoginEvent>) {
                     .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
                 let refreshed = codex::refresh(&creds.refresh_token).await?;
                 store.set_codex(refreshed);
+                store.save()
+            }
+            .await
+        }
+        "gemini" => {
+            async {
+                let mut store = AuthStore::load_default()?;
+                let creds = store
+                    .get_gemini()
+                    .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
+                let refreshed = gemini::refresh(&creds.refresh_token, &creds.project_id).await?;
+                store.set_gemini(refreshed);
                 store.save()
             }
             .await

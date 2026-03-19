@@ -43,7 +43,7 @@ use thinking::ThinkingLevel;
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// LLM provider to use (copilot, openai, codex, ollama).
+    /// LLM provider to use (copilot, openai, codex, gemini, ollama).
     #[arg(long, short = 'P', value_name = "PROVIDER")]
     provider: Option<String>,
 
@@ -630,6 +630,7 @@ fn resolve_model(cli_override: Option<&str>, kind: &ProviderKind, config: &TauCo
             ProviderKind::Copilot => config.copilot.model.clone(),
             ProviderKind::OpenAi => config.openai.model.clone(),
             ProviderKind::Codex => config.codex.model.clone(),
+            ProviderKind::Gemini => config.gemini.model.clone(),
             ProviderKind::Ollama => config.ollama.model.clone(),
         })
         .unwrap_or_else(|| kind.default_model().to_string())
@@ -648,6 +649,7 @@ fn persist_provider_model_selection(
         ProviderKind::Copilot => config.copilot.model = Some(model.to_string()),
         ProviderKind::OpenAi => config.openai.model = Some(model.to_string()),
         ProviderKind::Codex => config.codex.model = Some(model.to_string()),
+        ProviderKind::Gemini => config.gemini.model = Some(model.to_string()),
         ProviderKind::Ollama => config.ollama.model = Some(model.to_string()),
     }
 

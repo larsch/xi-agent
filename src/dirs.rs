@@ -27,10 +27,24 @@ pub fn print_dirs() {
     };
 
     let rows: &[(&str, &str, &dyn Fn() -> std::path::PathBuf)] = &[
-        ("config",   "config.toml  — provider, model, and general settings",  &|| dirs.config_dir().join("config.toml")),
-        ("auth",     "auth.toml    — stored authentication tokens",            &|| dirs.data_dir().join("auth.toml")),
-        ("sessions", "sessions/    — conversation history",                    &|| dirs.data_dir().join("sessions")),
-        ("logs",     "tau-debug-*  — debug logs (enabled by TAU_DEBUG=1)",     &|| dirs.cache_dir().to_path_buf()),
+        (
+            "config",
+            "config.toml  — provider, model, and general settings",
+            &|| dirs.config_dir().join("config.toml"),
+        ),
+        (
+            "auth",
+            "auth.toml    — stored authentication tokens",
+            &|| dirs.data_dir().join("auth.toml"),
+        ),
+        ("sessions", "sessions/    — conversation history", &|| {
+            dirs.data_dir().join("sessions")
+        }),
+        (
+            "logs",
+            "tau-debug-*  — debug logs (enabled by TAU_DEBUG=1)",
+            &|| dirs.cache_dir().to_path_buf(),
+        ),
     ];
 
     let label_width = rows.iter().map(|(k, _, _)| k.len()).max().unwrap_or(0);

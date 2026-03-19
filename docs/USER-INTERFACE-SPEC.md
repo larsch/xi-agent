@@ -19,7 +19,7 @@
 
 ## Login panel
 
-When `/login <provider>` is active the input area is replaced by a login panel
+When `/login <provider>` is active (currently `copilot`, `codex`, or `gemini`) the input area is replaced by a login panel
 injected at the bottom of the screen (the same vertical layout slot as the
 selection menu).
 

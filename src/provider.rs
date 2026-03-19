@@ -7,6 +7,9 @@ use crate::{
         LlmProvider,
         codex::{CodexProvider, DEFAULT_BASE_URL as CODEX_DEFAULT_BASE_URL},
         copilot::CopilotProvider,
+        gemini::{
+            DEFAULT_BASE_URL as GEMINI_DEFAULT_BASE_URL, GeminiProvider, GeminiThinkingLevel,
+        },
         ollama::OllamaProvider,
         openai::OpenAiProvider,
     },
@@ -19,6 +22,7 @@ pub enum ProviderKind {
     Copilot,
     OpenAi,
     Codex,
+    Gemini,
     Ollama,
 }
 
@@ -28,6 +32,7 @@ impl ProviderKind {
             Self::Copilot => "copilot",
             Self::OpenAi => "openai",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
             Self::Ollama => "ollama",
         }
     }
@@ -37,12 +42,19 @@ impl ProviderKind {
             Self::Copilot => "GitHub Copilot",
             Self::OpenAi => "OpenAI API",
             Self::Codex => "OpenAI Codex (chatgpt.com)",
+            Self::Gemini => "Google Gemini CLI (Cloud Code Assist)",
             Self::Ollama => "Ollama (local)",
         }
     }
 
     pub fn all() -> &'static [ProviderKind] {
-        &[Self::Copilot, Self::OpenAi, Self::Codex, Self::Ollama]
+        &[
+            Self::Copilot,
+            Self::OpenAi,
+            Self::Codex,
+            Self::Gemini,
+            Self::Ollama,
+        ]
     }
 
     pub fn from_name(s: &str) -> Option<Self> {
@@ -50,6 +62,7 @@ impl ProviderKind {
             "copilot" | "github-copilot" => Some(Self::Copilot),
             "openai" => Some(Self::OpenAi),
             "codex" => Some(Self::Codex),
+            "gemini" | "google-gemini" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
             _ => None,
         }
@@ -61,6 +74,7 @@ impl ProviderKind {
             Self::Copilot => "gpt-4o",
             Self::OpenAi => "gpt-4o",
             Self::Codex => "gpt-5.4",
+            Self::Gemini => "gemini-2.5-pro",
             Self::Ollama => "llama3.1",
         }
     }
@@ -98,6 +112,9 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
     }
     if m.starts_with("gpt-5") {
         return Some(200_000);
+    }
+    if m.contains("gemini") {
+        return Some(1_000_000);
     }
     if m.contains("claude-3-5") || m.contains("claude-3.5") {
         return Some(200_000);
@@ -165,6 +182,7 @@ pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport
             ),
         },
         ProviderKind::Codex => ThinkingSupport::Applied,
+        ProviderKind::Gemini => ThinkingSupport::Applied,
         ProviderKind::OpenAi => {
             ThinkingSupport::Ignored("openai chat-completions provider does not map thinking yet")
         }
@@ -230,6 +248,27 @@ pub fn build_provider(
                 .with_reasoning_effort(thinking.to_reasoning_effort().map(ToString::to_string));
             Ok(Arc::new(p))
         }
+        ProviderKind::Gemini => {
+            let store = AuthStore::load_default()?;
+            let creds = store.get_gemini().ok_or_else(|| {
+                anyhow::anyhow!("Not authenticated for gemini. Run /login gemini.")
+            })?;
+            let base_url = config
+                .gemini
+                .base_url
+                .clone()
+                .unwrap_or_else(|| GEMINI_DEFAULT_BASE_URL.to_string());
+            let mapped_thinking = match thinking {
+                ThinkingLevel::Off => None,
+                ThinkingLevel::Minimal => Some(GeminiThinkingLevel::Minimal),
+                ThinkingLevel::Low => Some(GeminiThinkingLevel::Low),
+                ThinkingLevel::Medium => Some(GeminiThinkingLevel::Medium),
+                ThinkingLevel::High | ThinkingLevel::XHigh => Some(GeminiThinkingLevel::High),
+            };
+            let p = GeminiProvider::new(base_url, model, creds.access_token, creds.project_id)
+                .with_thinking_level(mapped_thinking);
+            Ok(Arc::new(p))
+        }
         ProviderKind::Ollama => {
             let base = config
                 .ollama
@@ -284,5 +323,13 @@ mod tests {
             thinking_support_for(&ProviderKind::Copilot, "gpt-4o"),
             ThinkingSupport::Ignored(_)
         ));
+    }
+
+    #[test]
+    fn thinking_support_applies_for_gemini() {
+        assert_eq!(
+            thinking_support_for(&ProviderKind::Gemini, "gemini-2.5-pro"),
+            ThinkingSupport::Applied
+        );
     }
 }

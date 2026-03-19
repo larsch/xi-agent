@@ -4,8 +4,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use chrono::{Local, Utc};
 use crate::dirs::PROJECT_DIRS;
+use chrono::{Local, Utc};
 use log::{LevelFilter, Log, Metadata, Record};
 
 static LOG_ENABLED: OnceLock<bool> = OnceLock::new();

@@ -33,8 +33,10 @@ src/
   llm/
     mod.rs           — LlmProvider trait, Message/Role/LlmEvent/ToolDefinition types
     openai.rs        — OpenAiProvider (OpenAI Chat Completions, tool-calling)
-    copilot.rs       — CopilotProvider (thin wrapper around OpenAiProvider)
-    codex.rs         — CodexProvider (chatgpt.com backend)
+    copilot.rs       — CopilotProvider (route by model: OpenAI/Anthropic/Codex transports)
+    codex.rs         — CodexProvider (chatgpt.com/backend-api responses)
+    anthropic.rs     — AnthropicProvider (Messages API transport)
+    gemini.rs        — GeminiProvider (Google Cloud Code Assist streaming)
     ollama.rs        — OllamaProvider (streaming NDJSON via /api/chat)
 ```
 
@@ -177,8 +179,6 @@ provider is active.
 - **Context window management** — no truncation or summarisation when
   conversation history exceeds the model's context window. See
   [plan](plans/2026-03-14-context-management.md).
-- **Anthropic and Gemini providers** — only Copilot, OpenAI, Codex, and
-  Ollama are implemented.
 - **Deeper test coverage** — auth store persistence is covered; tool
   implementations, agent loop, and provider wire format still lack tests. See
   [plan](plans/2026-03-14-tests.md) and [auth tests plan](plans/2026-03-15-auth-tests-plan.md).

@@ -436,7 +436,9 @@ impl App {
             }
             Err(e) => {
                 let is_auth_401 = e.contains(" 401")
-                    && (self.current_provider == "copilot" || self.current_provider == "codex");
+                    && (self.current_provider == "copilot"
+                        || self.current_provider == "codex"
+                        || self.current_provider == "gemini");
 
                 if is_auth_401 && !self.refresh_in_progress {
                     log::debug!(
@@ -623,7 +625,7 @@ impl App {
         self.selection_kind = Some(SelectionKind::LoginProvider);
         self.selection_title = "  Login provider  ";
         self.selection_query.clear();
-        let items = ["copilot", "codex"]
+        let items = ["copilot", "codex", "gemini"]
             .iter()
             .map(|p| CompletionItem {
                 label: (*p).to_string(),
@@ -1209,7 +1211,9 @@ impl App {
                 self.steering_tx = None;
                 self.queued_steering.clear();
                 let is_auth_401 = e.contains(" 401")
-                    && (self.current_provider == "copilot" || self.current_provider == "codex");
+                    && (self.current_provider == "copilot"
+                        || self.current_provider == "codex"
+                        || self.current_provider == "gemini");
 
                 if is_auth_401 && self.auth_retry_budget > 0 && !self.refresh_in_progress {
                     log::debug!(
