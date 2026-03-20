@@ -1341,7 +1341,8 @@ impl App {
     }
 
     pub fn scroll_down(&mut self) {
-        self.auto_scroll = true;
+        self.auto_scroll = false;
+        self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
     }
 
     // ── Agent event handling ──────────────────────────────────────────────────
