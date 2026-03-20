@@ -80,55 +80,68 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
-pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
-    style_textarea(app);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PanelHeights {
+    completion_height: u16,
+    selection_header_height: u16,
+    selection_items_height: u16,
+    login_header_height: u16,
+    login_content_height: u16,
+    halfblock_height: u16,
+    input_height: u16,
+    info_height: u16,
+}
 
-    let terminal_height = f.area().height as usize;
-    let width = f.area().width as usize;
+#[derive(Debug, Clone, Copy)]
+struct PanelInputs<'a> {
+    terminal_height: usize,
+    width: usize,
+    input_line_count: usize,
+    show_info: bool,
+    login_active: bool,
+    selection_mode: bool,
+    selection_items_len: usize,
+    completions_len: usize,
+    resume_hint_visible: bool,
+    login_url: Option<&'a str>,
+    has_login_code: bool,
+}
 
-    let input_line_count = app.textarea.lines().len().max(1);
-    let max_input_height = (terminal_height * 40 / 100).max(1);
-    let input_height = input_line_count.min(max_input_height) as u16;
+fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
+    let capped_input = input
+        .input_line_count
+        .max(1)
+        .min((input.terminal_height * 40 / 100).max(1)) as u16;
 
-    // Info bar: 1 row when show_info is active, 0 otherwise.
-    let info_height: u16 = if app.show_info { 1 } else { 0 };
+    let info_height: u16 = if input.show_info { 1 } else { 0 };
 
-    // Completion popup: suppressed while login is active.
-    let resume_hint_visible = app.should_show_resume_hint();
-    let completion_height = if app.login_active || app.selection_mode {
+    let completion_height = if input.login_active || input.selection_mode {
         0
-    } else if !app.completions.is_empty() {
-        app.completions.len() as u16
-    } else if resume_hint_visible {
+    } else if input.completions_len > 0 {
+        input.completions_len as u16
+    } else if input.resume_hint_visible {
         1
     } else {
         0
     };
 
-    // Selection menu: shown whenever selection_mode is active, including on
-    // top of the login panel (for the LoginAction menu).
-    let selection_header_height: u16 = if app.selection_mode { 1 } else { 0 };
-    let selection_items_height: u16 = if app.selection_mode {
-        app.selection_items.len().clamp(1, MAX_SELECTION_VISIBLE) as u16
+    let selection_header_height: u16 = if input.selection_mode { 1 } else { 0 };
+    let selection_items_height: u16 = if input.selection_mode {
+        input.selection_items_len.clamp(1, MAX_SELECTION_VISIBLE) as u16
     } else {
         0
     };
 
-    // ── Login panel dimensions ─────────────────────────────────────────────
-    // When login is active the input box and its halfblock borders are hidden;
-    // the login header + content rows take their place.
-    let login_header_height: u16 = if app.login_active { 1 } else { 0 };
-    let login_content_height: u16 = if app.login_active {
-        // 1 instruction line + 1 status/info line
+    let login_header_height: u16 = if input.login_active { 1 } else { 0 };
+    let login_content_height: u16 = if input.login_active {
         let mut h = 2usize;
-        if let Some(url) = &app.login_url {
-            // URL label row + however many wrapped lines the URL needs.
+        if let Some(url) = input.login_url {
             let url_indent = LOGIN_URL_INDENT.len();
-            let wrap_width = width.saturating_sub(url_indent).max(1);
+            let wrap_width = input.width.saturating_sub(url_indent).max(1);
             let url_lines = wrap_str(url, wrap_width).len();
-            h += 1 + url_lines; // "  URL:" header + wrapped content
+            h += 1 + url_lines;
         }
-        if app.login_code.is_some() {
+        if input.has_login_code {
             h += 1;
         }
         h as u16
@@ -136,9 +149,41 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         0
     };
 
-    // Input area and its halfblock borders are suppressed during login.
-    let effective_input_height = if app.login_active { 0 } else { input_height };
-    let hb_height: u16 = if app.login_active { 0 } else { 1 };
+    let input_height = if input.login_active { 0 } else { capped_input };
+    let halfblock_height: u16 = if input.login_active { 0 } else { 1 };
+
+    PanelHeights {
+        completion_height,
+        selection_header_height,
+        selection_items_height,
+        login_header_height,
+        login_content_height,
+        halfblock_height,
+        input_height,
+        info_height,
+    }
+}
+
+pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
+    style_textarea(app);
+
+    let terminal_height = f.area().height as usize;
+    let width = f.area().width as usize;
+    let resume_hint_visible = app.should_show_resume_hint();
+
+    let layout = compute_panel_heights(PanelInputs {
+        terminal_height,
+        width,
+        input_line_count: app.textarea.lines().len(),
+        show_info: app.show_info,
+        login_active: app.login_active,
+        selection_mode: app.selection_mode,
+        selection_items_len: app.selection_items.len(),
+        completions_len: app.completions.len(),
+        resume_hint_visible,
+        login_url: app.login_url.as_deref(),
+        has_login_code: app.login_code.is_some(),
+    });
 
     // Layout: chat log | completions | sel header | sel items
     //       | login header | login content
@@ -146,16 +191,16 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),                          // 0: chat log
-            Constraint::Length(completion_height),       // 1: completion popup
-            Constraint::Length(selection_header_height), // 2: selection header
-            Constraint::Length(selection_items_height),  // 3: selection items
-            Constraint::Length(login_header_height),     // 4: login header
-            Constraint::Length(login_content_height),    // 5: login content
-            Constraint::Length(hb_height),               // 6: ▄ top edge
-            Constraint::Length(effective_input_height),  // 7: input textarea
-            Constraint::Length(hb_height),               // 8: ▀ bottom edge
-            Constraint::Length(info_height),             // 9: info bar
+            Constraint::Min(1),                                 // 0: chat log
+            Constraint::Length(layout.completion_height),       // 1: completion popup
+            Constraint::Length(layout.selection_header_height), // 2: selection header
+            Constraint::Length(layout.selection_items_height),  // 3: selection items
+            Constraint::Length(layout.login_header_height),     // 4: login header
+            Constraint::Length(layout.login_content_height),    // 5: login content
+            Constraint::Length(layout.halfblock_height),        // 6: ▄ top edge
+            Constraint::Length(layout.input_height),            // 7: input textarea
+            Constraint::Length(layout.halfblock_height),        // 8: ▀ bottom edge
+            Constraint::Length(layout.info_height),             // 9: info bar
         ])
         .split(f.area());
 
@@ -221,7 +266,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Completion popup / resume hint ───────────────────────────────────────
-    if completion_height > 0 {
+    if layout.completion_height > 0 {
         if !app.completions.is_empty() {
             let popup_lines =
                 build_completion_lines(&app.completions, app.completion_selected, width);
@@ -276,7 +321,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         f.render_widget(Paragraph::new(vec![header_line]), sel_header_area);
 
         // Item rows.
-        if selection_items_height > 0 {
+        if layout.selection_items_height > 0 {
             let item_lines = if app.selection_items.is_empty() {
                 vec![Line::from(vec![
                     Span::styled("  ", Style::default().bg(SELECTION_BG)),
@@ -1077,14 +1122,510 @@ fn format_context_size(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::llm::{AssistantPhase, Message};
+    use crate::{
+        agent::AgentLoopConfig,
+        llm::{AssistantPhase, Message},
+        provider::ProviderKind,
+        thinking::ThinkingLevel,
+    };
+    use serde_json::json;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn make_app() -> App {
+        App::new(
+            "gpt-4o",
+            &ProviderKind::Copilot,
+            ThinkingLevel::Medium,
+            AgentLoopConfig {
+                tools: HashMap::new(),
+                before_tool_call: None,
+                after_tool_call: None,
+            },
+        )
+    }
+
+    fn render_to_plain_lines(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw succeeds");
+
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let mut row = String::new();
+                for x in 0..width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn layout_hides_input_and_halfblocks_when_login_active() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 40,
+            width: 100,
+            input_line_count: 8,
+            show_info: false,
+            login_active: true,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 3,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+
+        assert_eq!(heights.input_height, 0);
+        assert_eq!(heights.halfblock_height, 0);
+        assert_eq!(heights.login_header_height, 1);
+        assert!(heights.login_content_height >= 2);
+    }
+
+    #[test]
+    fn layout_hides_completion_when_login_or_selection_active() {
+        let login = compute_panel_heights(PanelInputs {
+            terminal_height: 40,
+            width: 100,
+            input_line_count: 2,
+            show_info: false,
+            login_active: true,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 5,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+        let selection = compute_panel_heights(PanelInputs {
+            terminal_height: 40,
+            width: 100,
+            input_line_count: 2,
+            show_info: false,
+            login_active: false,
+            selection_mode: true,
+            selection_items_len: 4,
+            completions_len: 5,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+
+        assert_eq!(login.completion_height, 0);
+        assert_eq!(selection.completion_height, 0);
+    }
+
+    #[test]
+    fn layout_shows_resume_hint_row_when_applicable() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 30,
+            width: 100,
+            input_line_count: 1,
+            show_info: false,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: true,
+            login_url: None,
+            has_login_code: false,
+        });
+        assert_eq!(heights.completion_height, 1);
+    }
+
+    #[test]
+    fn layout_selection_item_rows_are_clamped_to_max_visible() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 40,
+            width: 100,
+            input_line_count: 1,
+            show_info: false,
+            login_active: false,
+            selection_mode: true,
+            selection_items_len: MAX_SELECTION_VISIBLE + 10,
+            completions_len: 0,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+
+        assert_eq!(heights.selection_header_height, 1);
+        assert_eq!(
+            heights.selection_items_height as usize,
+            MAX_SELECTION_VISIBLE
+        );
+    }
+
+    #[test]
+    fn layout_input_height_is_capped_at_40_percent_of_terminal() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 20,
+            width: 80,
+            input_line_count: 99,
+            show_info: false,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+        assert_eq!(heights.input_height, 8);
+        assert_eq!(heights.halfblock_height, 1);
+    }
+
+    #[test]
+    fn layout_info_bar_height_follows_toggle() {
+        let hidden = compute_panel_heights(PanelInputs {
+            terminal_height: 20,
+            width: 80,
+            input_line_count: 1,
+            show_info: false,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+        let shown = compute_panel_heights(PanelInputs {
+            terminal_height: 20,
+            width: 80,
+            input_line_count: 1,
+            show_info: true,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+
+        assert_eq!(hidden.info_height, 0);
+        assert_eq!(shown.info_height, 1);
+    }
+
+    #[test]
+    fn layout_handles_small_terminals_without_underflow() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 1,
+            width: 2,
+            input_line_count: 0,
+            show_info: true,
+            login_active: true,
+            selection_mode: true,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: true,
+            login_url: Some("https://example.com/very/long/url"),
+            has_login_code: true,
+        });
+
+        assert!(heights.input_height <= 1);
+        assert_eq!(heights.selection_header_height, 1);
+        assert_eq!(heights.selection_items_height, 1);
+        assert!(heights.login_content_height >= 2);
+    }
+
+    #[test]
+    fn draw_login_mode_renders_auth_header_and_hides_input_textarea() {
+        let mut app = make_app();
+        app.login_active = true;
+        app.login_provider = Some("copilot".to_string());
+        app.login_info = "Waiting for browser".to_string();
+
+        app.textarea.insert_char('x');
+
+        let lines = render_to_plain_lines(&mut app, 80, 20);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Authenticating: copilot"), "{joined}");
+        assert!(!joined.contains('x'), "{joined}");
+    }
+
+    #[test]
+    fn draw_selection_mode_renders_title_and_visible_items() {
+        let mut app = make_app();
+        app.selection_mode = true;
+        app.selection_title = "  Pick item  ";
+        app.selection_items = vec![
+            CompletionItem {
+                label: "alpha".to_string(),
+                detail: String::new(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+            },
+            CompletionItem {
+                label: "beta".to_string(),
+                detail: String::new(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+            },
+        ];
+
+        let lines = render_to_plain_lines(&mut app, 80, 20);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Pick item"), "{joined}");
+        assert!(joined.contains("alpha"), "{joined}");
+        assert!(joined.contains("beta"), "{joined}");
+    }
+
+    #[test]
+    fn draw_info_bar_renders_provider_model_context_sections() {
+        let mut app = make_app();
+        app.show_info = true;
+
+        let lines = render_to_plain_lines(&mut app, 120, 20);
+        let joined = lines.join("\n");
+        assert!(joined.contains("provider copilot"), "{joined}");
+        assert!(joined.contains("model gpt-4o"), "{joined}");
+        assert!(joined.contains("context"), "{joined}");
+    }
+
+    #[test]
+    fn login_content_uses_device_flow_instruction() {
+        let mut app = make_app();
+        app.login_auth_flow = Some(AuthFlow::DeviceCode);
+        app.login_info = "Waiting".to_string();
+
+        let lines = build_login_content_lines(&mut app, 80);
+        let row0 = line_text(&lines[0]);
+        assert!(row0.contains("enter the code shown"), "{row0}");
+    }
+
+    #[test]
+    fn login_content_uses_redirect_flow_instruction() {
+        let mut app = make_app();
+        app.login_auth_flow = Some(AuthFlow::RedirectCallback);
+        app.login_info = "Waiting".to_string();
+
+        let lines = build_login_content_lines(&mut app, 80);
+        let row0 = line_text(&lines[0]);
+        assert!(row0.contains("redirect back automatically"), "{row0}");
+    }
+
+    #[test]
+    fn login_content_wraps_url_for_narrow_width() {
+        let mut app = make_app();
+        app.login_info = "Waiting".to_string();
+        app.login_url = Some("https://example.com/very/long/path/that/should/wrap".to_string());
+
+        let lines = build_login_content_lines(&mut app, 20);
+        assert!(
+            lines.len() >= 5,
+            "expected wrapped URL rows, got {}",
+            lines.len()
+        );
+        assert!(lines.iter().any(|l| line_text(l).contains("URL:")));
+    }
+
+    #[test]
+    fn login_content_shows_code_row_only_when_present() {
+        let mut without_code = make_app();
+        without_code.login_info = "Waiting".to_string();
+        let lines_without = build_login_content_lines(&mut without_code, 80);
+        assert!(!lines_without.iter().any(|l| line_text(l).contains("Code:")));
+
+        let mut with_code = make_app();
+        with_code.login_info = "Waiting".to_string();
+        with_code.login_code = Some("ABCD-1234".to_string());
+        let lines_with = build_login_content_lines(&mut with_code, 80);
+        assert!(lines_with.iter().any(|l| line_text(l).contains("Code:")));
+    }
+
+    #[test]
+    fn completion_rows_omit_separator_when_detail_empty() {
+        let items = vec![CompletionItem {
+            label: "/model gpt-4o".to_string(),
+            detail: String::new(),
+            complete_to: "/model gpt-4o".to_string(),
+            loading: false,
+            error: false,
+        }];
+        let lines = build_completion_lines(&items, 0, 80);
+        assert!(!line_text(&lines[0]).contains('—'));
+    }
+
+    #[test]
+    fn completion_loading_rows_render_without_detail_column() {
+        let items = vec![CompletionItem {
+            label: "loading models…".to_string(),
+            detail: "ignored".to_string(),
+            complete_to: String::new(),
+            loading: true,
+            error: false,
+        }];
+        let lines = build_completion_lines(&items, 0, 80);
+        let row = line_text(&lines[0]);
+        assert!(row.contains("loading models…"));
+        assert!(!row.contains('—'));
+    }
+
+    #[test]
+    fn completion_label_column_alignment_is_structurally_consistent() {
+        let items = vec![
+            CompletionItem {
+                label: "/m".to_string(),
+                detail: "first".to_string(),
+                complete_to: "/m".to_string(),
+                loading: false,
+                error: false,
+            },
+            CompletionItem {
+                label: "/very-long-command".to_string(),
+                detail: "second".to_string(),
+                complete_to: "/very-long-command".to_string(),
+                loading: false,
+                error: false,
+            },
+        ];
+
+        let lines = build_completion_lines(&items, 0, 120);
+        let first = line_text(&lines[0]);
+        let second = line_text(&lines[1]);
+        assert_eq!(first.find('—'), second.find('—'));
+    }
+
+    #[test]
+    fn selection_window_respects_scroll_and_max_visible() {
+        let items: Vec<CompletionItem> = (0..30)
+            .map(|i| CompletionItem {
+                label: format!("item-{i}"),
+                detail: String::new(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+            })
+            .collect();
+
+        let lines = build_selection_lines(&items, 0, 5, 80);
+        assert_eq!(lines.len(), MAX_SELECTION_VISIBLE);
+        assert!(line_text(&lines[0]).contains("item-5"));
+        assert!(line_text(lines.last().expect("expected last line")).contains("item-16"));
+    }
+
+    #[test]
+    fn selection_selected_row_contains_cursor_prefix() {
+        let items: Vec<CompletionItem> = (0..8)
+            .map(|i| CompletionItem {
+                label: format!("item-{i}"),
+                detail: String::new(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+            })
+            .collect();
+
+        let lines = build_selection_lines(&items, 6, 5, 80);
+        assert!(line_text(&lines[1]).contains("▶ item-6"));
+        assert!(!line_text(&lines[0]).contains('▶'));
+    }
+
+    #[test]
+    fn selection_loading_row_renders_label_only() {
+        let items = vec![CompletionItem {
+            label: "fetching…".to_string(),
+            detail: "unused".to_string(),
+            complete_to: String::new(),
+            loading: true,
+            error: false,
+        }];
+
+        let lines = build_selection_lines(&items, 0, 0, 80);
+        let row = line_text(&lines[0]);
+        assert!(row.contains("fetching…"));
+        assert!(!row.contains("▶ "));
+    }
+
+    #[test]
+    fn hidden_user_messages_are_not_rendered() {
+        let mut hidden = Message::user("secret");
+        hidden.hidden = true;
+        let lines = build_log_lines(&[hidden, Message::assistant("shown")], false, &[], 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "💬 shown");
+    }
+
+    #[test]
+    fn streaming_empty_assistant_message_shows_cursor() {
+        let lines = build_log_lines(&[Message::assistant("")], true, &[], 80);
+        assert_eq!(line_text(&lines[0]), "💭 ▋");
+    }
+
+    #[test]
+    fn stream_suffix_is_only_on_final_visible_chunk() {
+        let lines = build_log_lines(
+            &[Message::assistant("abcdefghijklmnopqrstuvwxyz")],
+            true,
+            &[],
+            8,
+        );
+        let rows_with_cursor: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| line_text(l).contains('▋').then_some(idx))
+            .collect();
+
+        assert_eq!(rows_with_cursor.len(), 1);
+        assert_eq!(rows_with_cursor[0], lines.len() - 1);
+    }
+
+    #[test]
+    fn user_message_renders_block_edges() {
+        let lines = build_log_lines(&[Message::user("hi")], false, &[], 10);
+        assert_eq!(line_text(&lines[0]), "▄▄▄▄▄▄▄▄▄▄");
+        assert_eq!(line_text(&lines[1]), "hi        ");
+        assert_eq!(line_text(&lines[2]), "▀▀▀▀▀▀▀▀▀▀");
+    }
+
+    #[test]
+    fn read_file_tool_call_annotates_range_from_next_result_header() {
+        let messages = vec![
+            Message::tool_call("1", "read_file", json!({"path": "src/main.rs"})),
+            Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
+        ];
+
+        let lines = build_log_lines(&messages, false, &[], 120);
+        assert!(line_text(&lines[0]).contains("[10-20/300]"));
+    }
+
+    #[test]
+    fn read_file_result_display_omits_header_line() {
+        let messages = vec![
+            Message::tool_call("1", "read_file", json!({"path": "src/main.rs"})),
+            Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
+        ];
+
+        let lines = build_log_lines(&messages, false, &[], 120);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(!rendered.contains("[lines 10-20 of 300]"));
+        assert!(rendered.contains("│alpha"));
+    }
+
+    #[test]
+    fn tool_result_preview_truncates_with_ellipsis_after_limit() {
+        let messages = vec![
+            Message::tool_call("1", "bash", json!({"command": "echo hi"})),
+            Message::tool_result("1", "a".repeat(250), false),
+        ];
+
+        let lines = build_log_lines(&messages, false, &[], 300);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains('…'));
     }
 
     #[test]

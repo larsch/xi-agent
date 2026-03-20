@@ -70,7 +70,8 @@ pub async fn login(
         verification_uri: device.verification_uri.clone(),
         user_code: device.user_code.clone(),
     });
-    log::debug!("copilot device flow started: uri={} interval={} expires_in={}",
+    log::debug!(
+        "copilot device flow started: uri={} interval={} expires_in={}",
         device.verification_uri,
         device.interval,
         device.expires_in
