@@ -9,6 +9,11 @@ const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB
 
 pub struct BashTool;
 
+#[derive(serde::Deserialize)]
+struct BashArgs {
+    command: String,
+}
+
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "bash"
@@ -39,9 +44,9 @@ impl Tool for BashTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let command = match args.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c.to_string(),
-                None => return ToolResult::err("Missing required parameter: command"),
+            let BashArgs { command } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
 
             let output = match tokio::process::Command::new("sh")
@@ -189,5 +194,27 @@ mod tests {
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn bash_wrong_type_for_command_is_error() {
+        let tool = BashTool;
+        let args = serde_json::json!({"command": 42});
+        let result = tool.execute(args).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Invalid arguments"),
+            "expected 'Invalid arguments' in error: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_extra_fields_are_ignored() {
+        let tool = BashTool;
+        let args = serde_json::json!({"command": "echo hi", "timeout": 30});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("hi"));
     }
 }

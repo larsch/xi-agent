@@ -1,6 +1,16 @@
 use std::sync::Arc;
 
-use crate::agent::types::ToolRegistry;
+use serde::de::DeserializeOwned;
+
+use crate::agent::types::{ToolRegistry, ToolResult};
+
+/// Deserialize a JSON `args` object into a typed struct, returning a
+/// `ToolResult::err` on failure.  Used by every built-in tool to replace
+/// the repetitive `args.get("x").and_then(|v| v.as_str())` pattern.
+pub(super) fn parse_args<T: DeserializeOwned>(args: serde_json::Value) -> Result<T, ToolResult> {
+    serde_json::from_value::<T>(args)
+        .map_err(|e| ToolResult::err(format!("Invalid arguments: {e}")))
+}
 
 pub mod ask_user;
 #[cfg(not(target_os = "windows"))]
@@ -56,4 +66,47 @@ pub fn register_builtin_tools(ask_tx: Option<AskRequestTx>) -> ToolRegistry {
     }
 
     registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_args;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Simple {
+        x: String,
+    }
+
+    #[test]
+    fn parse_args_ok_for_valid_json() {
+        let v = serde_json::json!({"x": "hello"});
+        let r: Result<Simple, _> = parse_args(v);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().x, "hello");
+    }
+
+    #[test]
+    fn parse_args_err_for_missing_field() {
+        let v = serde_json::json!({});
+        let r: Result<Simple, _> = parse_args(v);
+        let err = r.unwrap_err();
+        assert!(err.is_error);
+        assert!(err.content.contains("Invalid arguments"));
+    }
+
+    #[test]
+    fn parse_args_err_for_wrong_type() {
+        let v = serde_json::json!({"x": 99});
+        let r: Result<Simple, _> = parse_args(v);
+        assert!(r.unwrap_err().is_error);
+    }
+
+    #[test]
+    fn parse_args_ignores_extra_fields() {
+        let v = serde_json::json!({"x": "hi", "extra": true});
+        let r: Result<Simple, _> = parse_args(v);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().x, "hi");
+    }
 }

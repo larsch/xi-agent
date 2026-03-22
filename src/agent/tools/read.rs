@@ -6,6 +6,13 @@ use crate::agent::types::{Tool, ToolResult};
 
 pub struct ReadFileTool;
 
+#[derive(serde::Deserialize)]
+struct ReadFileArgs {
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
         "read_file"
@@ -44,18 +51,14 @@ impl Tool for ReadFileTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return ToolResult::err("Missing required parameter: path"),
+            let ReadFileArgs {
+                path,
+                offset,
+                limit,
+            } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
-            let offset = args
-                .get("offset")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
 
             let content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
@@ -169,5 +172,28 @@ mod tests {
         let args = serde_json::json!({"path": "/nonexistent/path/to/file.txt"});
         let result = tool.execute(args).await;
         assert!(result.is_error, "expected error for missing file");
+    }
+
+    #[tokio::test]
+    async fn read_wrong_type_for_path_is_error() {
+        let tool = ReadFileTool;
+        let args = serde_json::json!({"path": 42});
+        let result = tool.execute(args).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Invalid arguments"),
+            "expected 'Invalid arguments' in error: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn read_extra_fields_are_ignored() {
+        let f = write_temp("hello\n");
+        let tool = ReadFileTool;
+        let args = serde_json::json!({"path": f.path().to_str().unwrap(), "unknown": true});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("hello"));
     }
 }

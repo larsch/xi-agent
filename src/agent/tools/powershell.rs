@@ -9,6 +9,11 @@ const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB
 
 pub struct PowerShellTool;
 
+#[derive(serde::Deserialize)]
+struct PowerShellArgs {
+    command: String,
+}
+
 impl Tool for PowerShellTool {
     fn name(&self) -> &str {
         "powershell"
@@ -42,9 +47,9 @@ impl Tool for PowerShellTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let command = match args.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c.to_string(),
-                None => return ToolResult::err("Missing required parameter: command"),
+            let PowerShellArgs { command } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
 
             let output = match tokio::process::Command::new("powershell.exe")

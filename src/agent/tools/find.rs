@@ -10,6 +10,13 @@ const DEFAULT_LIMIT: usize = 1000;
 
 pub struct FindTool;
 
+#[derive(serde::Deserialize)]
+struct FindArgs {
+    pattern: String,
+    path: Option<String>,
+    limit: Option<usize>,
+}
+
 impl Tool for FindTool {
     fn name(&self) -> &str {
         "find_files"
@@ -49,20 +56,16 @@ impl Tool for FindTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return ToolResult::err("Missing required parameter: pattern"),
+            let FindArgs {
+                pattern,
+                path,
+                limit,
+            } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
-            let search_dir = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".")
-                .to_string();
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize)
-                .unwrap_or(DEFAULT_LIMIT);
+            let search_dir = path.unwrap_or_else(|| ".".to_string());
+            let limit = limit.unwrap_or(DEFAULT_LIMIT);
 
             // Compile the glob pattern up front so we can report errors early.
             // We use `**/<pattern>` anchoring so bare patterns like `*.rs`
@@ -146,5 +149,71 @@ impl Tool for FindTool {
 
             ToolResult::ok(output)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::types::Tool;
+
+    #[tokio::test]
+    async fn find_missing_pattern_is_error() {
+        let tool = FindTool;
+        let args = serde_json::json!({});
+        let result = tool.execute(args).await;
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn find_wrong_type_for_pattern_is_error() {
+        let tool = FindTool;
+        let args = serde_json::json!({"pattern": 42});
+        let result = tool.execute(args).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Invalid arguments"),
+            "expected 'Invalid arguments' in error: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn find_extra_fields_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.rs"), "fn main() {}").unwrap();
+        let tool = FindTool;
+        let args = serde_json::json!({
+            "pattern": "*.rs",
+            "path": dir.path().to_str().unwrap(),
+            "recursive": true
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(result.content.contains("hello.rs"));
+    }
+
+    #[tokio::test]
+    async fn find_returns_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.rs"), "").unwrap();
+        std::fs::write(dir.path().join("bar.txt"), "").unwrap();
+        let tool = FindTool;
+        let args = serde_json::json!({
+            "pattern": "*.rs",
+            "path": dir.path().to_str().unwrap()
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("foo.rs"),
+            "expected foo.rs: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("bar.txt"),
+            "unexpected bar.txt: {}",
+            result.content
+        );
     }
 }

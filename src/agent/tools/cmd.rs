@@ -9,6 +9,11 @@ const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB
 
 pub struct CmdTool;
 
+#[derive(serde::Deserialize)]
+struct CmdArgs {
+    command: String,
+}
+
 impl Tool for CmdTool {
     fn name(&self) -> &str {
         "cmd"
@@ -39,9 +44,9 @@ impl Tool for CmdTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let command = match args.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c.to_string(),
-                None => return ToolResult::err("Missing required parameter: command"),
+            let CmdArgs { command } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
 
             let wrapped_command = format!("\"{command}\"");

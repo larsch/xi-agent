@@ -17,6 +17,24 @@ impl AskUserTool {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct AskUserArgs {
+    question: String,
+    context: Option<String>,
+    /// Kept as raw Value because option items can be strings or objects, and
+    /// some models emit a JSON-encoded string instead of an array.  The
+    /// existing `parse_options` helper handles all of these cases.
+    options: Option<Value>,
+    #[serde(rename = "allowMultiple", default)]
+    allow_multiple: bool,
+    #[serde(rename = "allowFreeform", default = "default_allow_freeform")]
+    allow_freeform: bool,
+}
+
+fn default_allow_freeform() -> bool {
+    true
+}
+
 impl Tool for AskUserTool {
     fn name(&self) -> &str {
         "ask_user"
@@ -77,27 +95,29 @@ impl Tool for AskUserTool {
                 return ToolResult::err("ask_user is unavailable in non-interactive mode");
             };
 
-            let question = match args.get("question").and_then(Value::as_str) {
-                Some(q) if !q.trim().is_empty() => q.trim().to_string(),
-                _ => return ToolResult::err("Missing required parameter: question"),
+            let AskUserArgs {
+                question,
+                context,
+                options,
+                allow_multiple,
+                allow_freeform,
+            } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
 
-            let context = args
-                .get("context")
-                .and_then(Value::as_str)
+            let question = question.trim().to_string();
+            if question.is_empty() {
+                return ToolResult::err("question must not be empty");
+            }
+
+            let context = context
+                .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned);
 
-            let options = parse_options(args.get("options"));
-            let allow_multiple = args
-                .get("allowMultiple")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let allow_freeform = args
-                .get("allowFreeform")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let options = parse_options(options.as_ref());
 
             let (reply_tx, reply_rx) = oneshot::channel();
 

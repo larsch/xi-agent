@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repository is a Rust AI coding assistant harness.
+This repository is a AI agent harness for the terminal, built with Rust.
 
 ## General rules
 

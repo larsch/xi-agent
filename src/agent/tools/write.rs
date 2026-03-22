@@ -6,6 +6,12 @@ use crate::agent::types::{Tool, ToolResult};
 
 pub struct WriteTool;
 
+#[derive(serde::Deserialize)]
+struct WriteArgs {
+    path: String,
+    content: String,
+}
+
 impl Tool for WriteTool {
     fn name(&self) -> &str {
         "write_file"
@@ -38,13 +44,9 @@ impl Tool for WriteTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return ToolResult::err("Missing required parameter: path"),
-            };
-            let content = match args.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c.to_string(),
-                None => return ToolResult::err("Missing required parameter: content"),
+            let WriteArgs { path, content } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
 
             // Create parent directories if needed.
@@ -113,5 +115,32 @@ mod tests {
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(path.exists(), "file not created in nested dirs");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep\n");
+    }
+
+    #[tokio::test]
+    async fn write_wrong_type_for_content_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let tool = WriteTool;
+        let args = serde_json::json!({"path": path.to_str().unwrap(), "content": 99});
+        let result = tool.execute(args).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Invalid arguments"),
+            "expected 'Invalid arguments' in error: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn write_extra_fields_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let tool = WriteTool;
+        let args =
+            serde_json::json!({"path": path.to_str().unwrap(), "content": "hi\n", "mode": "644"});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi\n");
     }
 }

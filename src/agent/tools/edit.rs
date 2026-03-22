@@ -6,6 +6,13 @@ use crate::agent::types::{Tool, ToolResult};
 
 pub struct EditTool;
 
+#[derive(serde::Deserialize)]
+struct EditArgs {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
 impl Tool for EditTool {
     fn name(&self) -> &str {
         "edit_file"
@@ -44,17 +51,13 @@ impl Tool for EditTool {
         args: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return ToolResult::err("Missing required parameter: path"),
-            };
-            let old_text = match args.get("old_text").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
-                None => return ToolResult::err("Missing required parameter: old_text"),
-            };
-            let new_text = match args.get("new_text").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
-                None => return ToolResult::err("Missing required parameter: new_text"),
+            let EditArgs {
+                path,
+                old_text,
+                new_text,
+            } = match super::parse_args(args) {
+                Ok(a) => a,
+                Err(e) => return e,
             };
 
             let content = match tokio::fs::read_to_string(&path).await {
@@ -144,5 +147,39 @@ mod tests {
             "expected count in error: {}",
             result.content
         );
+    }
+
+    #[tokio::test]
+    async fn edit_wrong_type_for_old_text_is_error() {
+        let f = write_temp("hello world\n");
+        let tool = EditTool;
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "old_text": false,
+            "new_text": "goodbye"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Invalid arguments"),
+            "expected 'Invalid arguments' in error: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_extra_fields_are_ignored() {
+        let f = write_temp("hello world\n");
+        let path = f.path().to_str().unwrap().to_string();
+        let tool = EditTool;
+        let args = serde_json::json!({
+            "path": path,
+            "old_text": "hello",
+            "new_text": "goodbye",
+            "dry_run": true
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world\n");
     }
 }
