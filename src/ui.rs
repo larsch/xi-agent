@@ -2,9 +2,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, MAX_SELECTION_VISIBLE},
@@ -66,6 +66,8 @@ fn style_textarea(app: &mut App) {
     app.textarea
         .set_cursor_line_style(Style::default().bg(INPUT_BG));
 }
+
+const TAB_WIDTH: usize = 4;
 
 /// Render a full-width row of halfblock characters in `color` so that a
 /// coloured panel appears to have a smooth sub-character edge against the
@@ -254,6 +256,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .block(Block::default().borders(Borders::NONE))
         .scroll((app.log_scroll as u16, 0));
 
+    f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_area);
 
     if total_lines > inner_height {
@@ -800,7 +803,8 @@ fn build_log_lines(
 /// Wraps if the label is wider than `width`, renders in the given `color`.
 fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: usize, color: Color) {
     let style = Style::default().fg(color);
-    let chunks = wrap_str(content, width);
+    let normalized = normalize_terminal_segment(content, 0);
+    let chunks = wrap_str(&normalized, width);
     for chunk in chunks {
         out.push(Line::from(vec![Span::styled(chunk, style)]));
     }
@@ -850,7 +854,8 @@ fn append_tool_result_block(
 
     for seg_idx in visible {
         let segment = segments[seg_idx];
-        let chunks = wrap_str(segment, content_width);
+        let normalized = normalize_terminal_segment(segment, 1);
+        let chunks = wrap_str(&normalized, content_width);
         for chunk in chunks {
             out.push(Line::from(vec![
                 Span::styled("│", marker_style),
@@ -898,7 +903,8 @@ fn append_message_dim(
     for seg_idx in visible {
         let segment = segments[seg_idx];
         let is_last_visible_seg = Some(seg_idx) == last_visible;
-        let chunks = wrap_str(segment, width);
+        let normalized = normalize_terminal_segment(segment, 0);
+        let chunks = wrap_str(&normalized, width);
         let last_chunk = chunks.len() - 1;
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
@@ -960,7 +966,8 @@ fn append_message(
     for seg_idx in visible {
         let segment = segments[seg_idx];
         let is_last_visible_seg = Some(seg_idx) == last_visible;
-        let chunks = wrap_str(segment, width);
+        let normalized = normalize_terminal_segment(segment, 0);
+        let chunks = wrap_str(&normalized, width);
         let last_chunk = chunks.len() - 1;
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
@@ -1029,6 +1036,31 @@ fn wrap_str(text: &str, width: usize) -> Vec<String> {
         .into_iter()
         .map(|cow| cow.into_owned())
         .collect()
+}
+
+fn normalize_terminal_segment(text: &str, start_col: usize) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut col = start_col;
+
+    for ch in text.chars() {
+        match ch {
+            '\t' => {
+                let spaces = TAB_WIDTH - (col % TAB_WIDTH);
+                normalized.push_str(&" ".repeat(spaces));
+                col += spaces;
+            }
+            c if c.is_control() => {
+                normalized.push(' ');
+                col += 1;
+            }
+            c => {
+                normalized.push(c);
+                col += c.width().unwrap_or(0);
+            }
+        }
+    }
+
+    normalized
 }
 
 // ── Info bar ──────────────────────────────────────────────────────────────────
@@ -1158,7 +1190,10 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         terminal.draw(|f| draw(f, app)).expect("draw succeeds");
 
-        let buf = terminal.backend().buffer();
+        buffer_to_plain_lines(terminal.backend().buffer(), width, height)
+    }
+
+    fn buffer_to_plain_lines(buf: &ratatui::buffer::Buffer, width: u16, height: u16) -> Vec<String> {
         (0..height)
             .map(|y| {
                 let mut row = String::new();
@@ -1704,6 +1739,17 @@ mod tests {
     }
 
     #[test]
+    fn normalize_terminal_segment_expands_tabs_from_current_column() {
+        assert_eq!(normalize_terminal_segment("\talpha", 0), "    alpha");
+        assert_eq!(normalize_terminal_segment("\talpha", 1), "   alpha");
+    }
+
+    #[test]
+    fn normalize_terminal_segment_replaces_control_chars_with_spaces() {
+        assert_eq!(normalize_terminal_segment("a\rb\u{1b}[31m", 0), "a b [31m");
+    }
+
+    #[test]
     fn tool_result_block_prefixes_each_line() {
         let mut out = Vec::new();
         append_tool_result_block(&mut out, "line one\nline two", 80, Color::Green);
@@ -1730,6 +1776,37 @@ mod tests {
             assert!(text.starts_with('│'));
             assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 4);
         }
+    }
+
+    #[test]
+    fn tool_result_block_expands_leading_tabs_after_prefix() {
+        let mut out = Vec::new();
+        append_tool_result_block(&mut out, "\talpha", 20, Color::Green);
+        assert_eq!(line_text(&out[0]), "│   alpha");
+    }
+
+    #[test]
+    fn redraw_clears_stale_tool_output_cells() {
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mut app = make_app();
+        app.messages = vec![Message::tool_result(
+            "1",
+            "tool output that used to be much longer",
+            false,
+        )];
+
+        terminal.draw(|f| draw(f, &mut app)).expect("first draw succeeds");
+
+        app.messages = vec![Message::tool_result("1", "short", false)];
+
+        terminal
+            .draw(|f| draw(f, &mut app))
+            .expect("second draw succeeds");
+
+        let joined = buffer_to_plain_lines(terminal.backend().buffer(), 40, 10).join("\n");
+        assert!(joined.contains("│short"), "{joined}");
+        assert!(!joined.contains("much longer"), "{joined}");
     }
 
     #[test]
