@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    common::send_streaming_request,
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
 };
@@ -255,30 +256,13 @@ impl LlmProvider for OllamaProvider {
                 log::debug!("[TAU_DEBUG] → ollama request:\n{json}");
             }
 
-            let response = match client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to connect to Ollama at {url}: {e}"))
-            {
+            let response = match send_streaming_request(
+                client.post(&url).json(&body),
+                "Ollama",
+            ).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LlmEvent::Error(e.to_string());
-                    return;
-                }
+                Err(e) => { yield LlmEvent::Error(e); return; }
             };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(1000).collect();
-                log::warn!("ollama api error: status={} body={}", status, preview);
-                yield LlmEvent::Error(format!("Ollama returned {status}: {text}"));
-                return;
-            }
-
-            log::debug!("← HTTP {} from ollama", response.status());
 
             let mut byte_stream = response.bytes_stream();
             let mut buf = String::new();
@@ -340,30 +324,13 @@ impl LlmProvider for OllamaProvider {
                 log::debug!("[TAU_DEBUG] → ollama request:\n{json}");
             }
 
-            let response = match client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to connect to Ollama at {url}: {e}"))
-            {
+            let response = match send_streaming_request(
+                client.post(&url).json(&body),
+                "Ollama",
+            ).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LlmEvent::Error(e);
-                    return;
-                }
+                Err(e) => { yield LlmEvent::Error(e); return; }
             };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(1000).collect();
-                log::warn!("ollama api error: status={} body={}", status, preview);
-                yield LlmEvent::Error(format!("Ollama returned {status}: {text}"));
-                return;
-            }
-
-            log::debug!("← HTTP {} from ollama", response.status());
 
             let mut byte_stream = response.bytes_stream();
             let mut buf = String::new();

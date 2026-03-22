@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 use super::{
+    common::{infer_initiator, normalize_tool_name, send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
 };
@@ -91,31 +92,13 @@ impl AnthropicProvider {
                 req = req.header("X-Initiator", infer_initiator(&messages));
             }
 
-            let response = match req
-                .send()
-                .await
-                .map_err(|e| format!("Failed to connect to Anthropic at {url}: {e}"))
-            {
+            let response = match send_streaming_request(req, "Anthropic").await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LlmEvent::Error(e);
-                    return;
-                }
+                Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(1000).collect();
-                log::warn!("anthropic api error: status={} body={}", status, preview);
-                yield LlmEvent::Error(format!("Anthropic returned {status}: {text}"));
-                return;
-            }
-
-            log::debug!("← HTTP {} from anthropic", response.status());
-
             let mut byte_stream = response.bytes_stream();
-            let mut buf = String::new();
+            let mut sse = SseLineDecoder::new();
             // Track streaming tool_use blocks: content index → accumulated state.
             let mut tool_blocks: HashMap<u64, ToolBlock> = HashMap::new();
             let mut emitted_tool_intent = false;
@@ -129,34 +112,18 @@ impl AnthropicProvider {
                         return;
                     }
                 };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
+                sse.push_bytes(&bytes);
 
-                while let Some(pos) = buf.find('\n') {
-                    let raw = buf[..pos].trim().to_string();
-                    buf.drain(..=pos);
-
-                    // Skip blank lines and `event:` type lines — event type is
-                    // redundant because each data payload carries a `type` field.
-                    if raw.is_empty() || raw.starts_with(':') || raw.starts_with("event:") {
-                        continue;
-                    }
-
-                    let data = match raw.strip_prefix("data:") {
-                        Some(d) => d.trim(),
-                        None => continue,
-                    };
-
+                while let Some(data) = sse.next_data_line() {
                     if data == "[DONE]" {
                         yield LlmEvent::Done;
                         return;
                     }
 
-                    if !data.is_empty() {
-                        log::debug!("[TAU_DEBUG] ← anthropic chunk {line_num}: {data}");
-                        line_num += 1;
-                    }
+                    log::debug!("[TAU_DEBUG] ← anthropic chunk {line_num}: {data}");
+                    line_num += 1;
 
-                    let ev: serde_json::Value = match serde_json::from_str(data) {
+                    let ev: serde_json::Value = match serde_json::from_str(&data) {
                         Ok(v) => v,
                         Err(e) => {
                             yield LlmEvent::Error(format!("Parse error: {e}"));
@@ -320,13 +287,6 @@ fn extract_usage_stats(ev: &serde_json::Value) -> Option<UsageStats> {
     }
 }
 
-fn infer_initiator(messages: &[Message]) -> &'static str {
-    match messages.last().map(|m| &m.role) {
-        Some(Role::User) | None => "user",
-        _ => "agent",
-    }
-}
-
 // ── LlmProvider impl ──────────────────────────────────────────────────────────
 
 impl LlmProvider for AnthropicProvider {
@@ -362,17 +322,6 @@ fn known_models() -> Vec<String> {
 }
 
 // ── Message conversion ────────────────────────────────────────────────────────
-
-fn normalize_tool_name(name: &str) -> &str {
-    match name {
-        "👀" => "read_file",
-        "✍️" => "write_file",
-        "📝" => "edit_file",
-        "💻" => "bash",
-        "🔍" => "find_files",
-        other => other,
-    }
-}
 
 /// Convert tau `Message` history into the Anthropic Messages API format.
 ///

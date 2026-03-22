@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    common::{infer_initiator, normalize_tool_name, send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
 };
@@ -94,31 +95,14 @@ impl OpenAiProvider {
             if use_dynamic_initiator {
                 req = req.header("X-Initiator", infer_initiator(&messages));
             }
-            let response = match req
-                .send()
-                .await
-                .map_err(|e| format!("Failed to connect to OpenAI at {url}: {e}"))
-            {
+
+            let response = match send_streaming_request(req, "OpenAI").await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LlmEvent::Error(e);
-                    return;
-                }
+                Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(1000).collect();
-                log::warn!("openai api error: status={} body={}", status, preview);
-                yield LlmEvent::Error(format!("OpenAI returned {status}: {text}"));
-                return;
-            }
-
-            log::debug!("← HTTP {} from openai", response.status());
-
             let mut byte_stream = response.bytes_stream();
-            let mut buf = String::new();
+            let mut sse = SseLineDecoder::new();
             // Accumulate partial tool-call deltas keyed by index.
             let mut tool_calls: HashMap<u32, PartialToolCall> = HashMap::new();
             let mut emitted_tool_intent = false;
@@ -132,23 +116,9 @@ impl OpenAiProvider {
                         return;
                     }
                 };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
+                sse.push_bytes(&bytes);
 
-                while let Some(pos) = buf.find('\n') {
-                    let raw = buf[..pos].trim().to_string();
-                    buf.drain(..=pos);
-
-                    if raw.is_empty() || raw.starts_with(':') {
-                        continue; // blank line or SSE comment
-                    }
-
-                    // Strip "data: " prefix.
-                    let line = if let Some(rest) = raw.strip_prefix("data: ") {
-                        rest.trim()
-                    } else {
-                        continue; // non-data SSE field (event:, id:, retry:)
-                    };
-
+                while let Some(line) = sse.next_data_line() {
                     if line == "[DONE]" {
                         // Flush any accumulated tool calls.
                         let mut calls: Vec<PartialToolCall> = {
@@ -169,12 +139,10 @@ impl OpenAiProvider {
                         break 'outer;
                     }
 
-                    if !line.is_empty() {
-                        log::debug!("[TAU_DEBUG] ← chunk {line_num}: {line}");
-                        line_num += 1;
-                    }
+                    log::debug!("[TAU_DEBUG] ← chunk {line_num}: {line}");
+                    line_num += 1;
 
-                    let chunk: ChatChunk = match serde_json::from_str(line) {
+                    let chunk: ChatChunk = match serde_json::from_str(&line) {
                         Ok(c) => c,
                         Err(e) => {
                             yield LlmEvent::Error(format!("Parse error: {e}"));
@@ -237,13 +205,6 @@ impl OpenAiProvider {
                 }
             }
         })
-    }
-}
-
-fn infer_initiator(messages: &[Message]) -> &'static str {
-    match messages.last().map(|m| &m.role) {
-        Some(Role::User) | None => "user",
-        _ => "agent",
     }
 }
 
@@ -367,17 +328,6 @@ struct ModelEntry {
 
 // ── Serialisation helpers ─────────────────────────────────────────────────────
 
-fn normalize_tool_name(name: &str) -> String {
-    match name {
-        "👀" => "read_file".to_string(),
-        "✍️" => "write_file".to_string(),
-        "📝" => "edit_file".to_string(),
-        "💻" => "bash".to_string(),
-        "🔍" => "find_files".to_string(),
-        _ => name.to_string(),
-    }
-}
-
 /// Convert a tau `Message` history to OpenAI Chat Completions messages.
 ///
 /// The OpenAI API requires that tool calls and their accompanying text live in
@@ -418,7 +368,7 @@ fn to_oai_messages(messages: &[Message]) -> Vec<OaiMessage> {
                             .unwrap_or_else(|| format!("call_{call_idx}")),
                         r#type: "function",
                         function: OaiToolCallFunction {
-                            name: normalize_tool_name(tc.tool_name.as_deref().unwrap_or_default()),
+                            name: normalize_tool_name(tc.tool_name.as_deref().unwrap_or_default()).to_string(),
                             arguments: tc
                                 .tool_args
                                 .as_ref()

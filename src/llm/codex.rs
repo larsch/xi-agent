@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 use super::{
+    common::{infer_initiator, send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
 };
@@ -137,28 +138,13 @@ impl CodexProvider {
             if use_dynamic_initiator {
                 req = req.header("X-Initiator", infer_initiator(&messages));
             }
-            let response = match req
-                .send()
-                .await
-                .map_err(|e| format!("Failed to connect to Codex at {url}: {e}"))
-            {
+            let response = match send_streaming_request(req, "Codex").await {
                 Ok(r) => r,
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(1000).collect();
-                log::warn!("codex api error: status={} body={}", status, preview);
-                yield LlmEvent::Error(format!("Codex returned {status}: {text}"));
-                return;
-            }
-
-            log::debug!("← HTTP {} from codex", response.status());
-
             let mut byte_stream = response.bytes_stream();
-            let mut buf = String::new();
+            let mut sse = SseLineDecoder::new();
             // Track pending function calls keyed by item index or call_id.
             let mut pending_calls: HashMap<String, PendingCall> = HashMap::new();
             let mut current_call_item_id: Option<String> = None;
@@ -170,25 +156,9 @@ impl CodexProvider {
                     Ok(b) => b,
                     Err(e) => { yield LlmEvent::Error(e.to_string()); return; }
                 };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
+                sse.push_bytes(&bytes);
 
-                // SSE uses double-newline as event separator, but we also
-                // handle single-newline `data:` lines for robustness.
-                loop {
-                    // Find next complete SSE event (terminated by \n\n or \n).
-                    let line_end = buf.find('\n');
-                    if line_end.is_none() { break; }
-                    let pos = line_end.unwrap();
-                    let raw = buf[..pos].trim().to_string();
-                    buf.drain(..=pos);
-
-                    if raw.is_empty() || raw.starts_with(':') { continue; }
-
-                    let data = match raw.strip_prefix("data:") {
-                        Some(d) => d.trim(),
-                        None => continue,
-                    };
-
+                while let Some(data) = sse.next_data_line() {
                     if data == "[DONE]" {
                         yield LlmEvent::Done;
                         return;
@@ -197,7 +167,7 @@ impl CodexProvider {
                     log::debug!("[TAU_DEBUG] ← chunk {line_num}: {data}");
                     line_num += 1;
 
-                    let ev: serde_json::Value = match serde_json::from_str(data) {
+                    let ev: serde_json::Value = match serde_json::from_str(&data) {
                         Ok(v) => v,
                         Err(e) => { yield LlmEvent::Error(format!("Parse error: {e}")); return; }
                     };
@@ -473,13 +443,6 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
 
 struct PendingCall {
     arguments: String,
-}
-
-fn infer_initiator(messages: &[Message]) -> &'static str {
-    match messages.last().map(|m| &m.role) {
-        Some(Role::User) | None => "user",
-        _ => "agent",
-    }
 }
 
 // ── Known models ──────────────────────────────────────────────────────────────

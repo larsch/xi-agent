@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 
 use super::{
+    common::{send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
 };
@@ -76,7 +77,7 @@ impl GeminiProvider {
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             );
 
-            let response = match client
+            let req = client
                 .post(&url)
                 .bearer_auth(&access_token)
                 .header("Content-Type", "application/json")
@@ -87,29 +88,15 @@ impl GeminiProvider {
                     "Client-Metadata",
                     r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
                 )
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to connect to Gemini at {url}: {e}"))
-            {
+                .json(&body);
+
+            let response = match send_streaming_request(req, "Gemini").await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LlmEvent::Error(e);
-                    return;
-                }
+                Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(1000).collect();
-                log::warn!("gemini api error: status={} body={}", status, preview);
-                yield LlmEvent::Error(format!("Gemini returned {status}: {text}"));
-                return;
-            }
-
             let mut byte_stream = response.bytes_stream();
-            let mut buf = String::new();
+            let mut sse = SseLineDecoder::new();
             let mut emitted_tool_intent = false;
 
             while let Some(chunk) = byte_stream.next().await {
@@ -120,26 +107,10 @@ impl GeminiProvider {
                         return;
                     }
                 };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
+                sse.push_bytes(&bytes);
 
-                while let Some(pos) = buf.find('\n') {
-                    let raw = buf[..pos].trim().to_string();
-                    buf.drain(..=pos);
-
-                    if raw.is_empty() || raw.starts_with(':') {
-                        continue;
-                    }
-                    let line = if let Some(rest) = raw.strip_prefix("data:") {
-                        rest.trim()
-                    } else {
-                        continue;
-                    };
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    let chunk: serde_json::Value = match serde_json::from_str(line) {
+                while let Some(line) = sse.next_data_line() {
+                    let chunk: serde_json::Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
