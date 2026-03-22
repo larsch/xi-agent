@@ -182,50 +182,14 @@ pub trait StreamingResponse {
 
 ---
 
-### 5. Implicit Tool Trait Coupling to serde_json
+### 5. ~~Implicit Tool Trait Coupling to serde_json~~ ✅ RESOLVED
 
-**Severity:** Medium  
-**File:** `src/agent/types.rs`, `src/agent/tools/`
+**Resolved in:** `87423f5 Refactor tool args`
 
-Tools accept `serde_json::Value` directly:
-```rust
-pub trait Tool: Send + Sync {
-    fn execute(&self, args: serde_json::Value) 
-        -> Pin<Box<dyn Future<Output = ToolResult> + Send + '_>>;
-}
-```
+**Original severity:** Medium  
+**Files:** `src/agent/types.rs`, `src/agent/tools/`
 
-**Problems:**
-1. No schema validation until runtime
-2. Tools manually check for required keys; no type safety
-3. Schema definition is separate from implementation (schema_json + execute)
-4. Easy to have schema-implementation mismatch
-
-**Example from bash.rs:**
-```rust
-let command = match args.get("command").and_then(|v| v.as_str()) {
-    Some(c) => c.to_string(),
-    None => return ToolResult::err("Missing required parameter: command"),
-};
-```
-
-This pattern repeats in every tool. Errors are runtime, not compile-time.
-
-**Recommendation:** Define a schema-validating wrapper or use a derive macro:
-```rust
-#[derive(Deserialize)]
-pub struct BashArgs {
-    command: String,  // Required at compile time
-}
-
-pub trait TypedTool: Send + Sync {
-    type Args: serde::de::DeserializeOwned;
-    
-    async fn execute(&self, args: Self::Args) -> ToolResult;
-    
-    fn schema() -> serde_json::Value { /* auto-generated */ }
-}
-```
+A shared `parse_args<T: DeserializeOwned>()` helper was introduced in `src/agent/tools/mod.rs`. Every built-in tool now defines a `#[derive(serde::Deserialize)]` args struct and calls `parse_args()` instead of manually extracting fields from `serde_json::Value`. Type mismatches and missing required fields are caught by `serde_json::from_value` and surfaced as a `ToolResult::err("Invalid arguments: …")`, eliminating the repetitive per-field guard pattern. Tests covering wrong-type and extra-field cases were added alongside the refactor.
 
 ---
 
@@ -264,54 +228,19 @@ This is a hack. Steering and tool execution have no clean interaction model.
 
 ---
 
-### 7. Provider Routing Logic Duplication
+### 7. ~~Provider Routing Logic Duplication~~ ✅ RESOLVED
 
-**Severity:** Medium  
-**File:** `src/provider.rs`
+**Resolved in:** `37c335d feat(copilot): drive model routing and context window from /models API`
 
-Copilot routing is defined in two places:
-1. `classify_copilot_route()` to select API route based on model
-2. Similar logic in `thinking_support_for()` 
-3. Model defaults are hardcoded in `ProviderKind::default_model()`
+**Original severity:** Medium  
+**File:** `src/provider.rs`, `src/llm/copilot.rs`
 
-**Problem:** Model-specific logic is scattered. Adding a new model requires changes in multiple places.
+A process-global metadata cache (`OnceLock<RwLock<HashMap<String, CopilotModelMeta>>>`) was introduced in `src/llm/copilot.rs`, populated as a side-effect of `list_models()`. Each entry stores the vendor string and optional context-window size exactly as returned by the `/models` API endpoint.
 
-**Example:**
-```rust
-fn classify_copilot_route(model: &str) -> CopilotApiRoute {
-    let m = model.to_ascii_lowercase();
-    if m.starts_with("claude") {
-        CopilotApiRoute::AnthropicMessages
-    } else if m.contains("codex") || m.starts_with("gpt-5") {
-        CopilotApiRoute::OpenAiResponses
-    } else {
-        CopilotApiRoute::OpenAiChatCompletions
-    }
-}
-```
+- `classify_copilot_route()` now checks cached vendor first: `"Anthropic"` → `AnthropicMessages`, with name-heuristics retained only as a cold-start fallback (before the cache is populated) or for OpenAI sub-routing where the API provides no disambiguating field.
+- `context_window_for_model()` checks the cache first, so the info bar stays accurate for new Copilot models without requiring a code change.
 
-If a new GPT-5 variant arrives, you must update:
-- `classify_copilot_route()` (model classification)
-- `thinking_support_for()` (thinking level support)
-- Possibly default models
-
-**Recommendation:** Create a model registry or metadata table:
-```rust
-struct ModelMetadata {
-    route: CopilotApiRoute,
-    thinking_support: ThinkingSupport,
-    context_window: usize,
-}
-
-static MODELS: &[(&str, ModelMetadata)] = &[
-    ("gpt-5.4-codex", ModelMetadata { 
-        route: OpenAiResponses,
-        thinking_support: Applied,
-        context_window: 200_000,
-    }),
-    // ...
-];
-```
+New models that report a vendor in the API response are automatically routed correctly; the hardcoded name-heuristic surface is reduced to the remaining OpenAI sub-routing cases (`codex` / `gpt-5` → Responses API) where no API field currently disambiguates.
 
 ---
 
@@ -704,6 +633,8 @@ pub fn on_ask_user_request(&mut self, req: AskRequest) { }
 4. **Pass cancellation token to agent loop:** Use `tokio::sync::watch` instead of task.abort()
 5. **Add FileLock to session persistence:** Prevent concurrent write corruption
 6. **Document channel ordering guarantees:** Or switch to a unified event loop
+7. ~~**Use typed args structs in tools:** Replace manual `args.get()` chains with `#[derive(Deserialize)]`~~ ✅ Done (`87423f5`)
+8. ~~**Drive Copilot routing from API metadata:** Use vendor/context-window fields from `/models` response~~ ✅ Done (`37c335d`)
 
 ---
 
