@@ -1,179 +1,241 @@
-# Copilot model routing metadata consolidation
+# Copilot model metadata from the REST API
 
 **Date:** 2026-03-22  
-**Status:** Planned  
+**Status:** Done  
 **Priority:** Medium  
-**Risk:** Low — internal reorganisation of `src/provider.rs`; no behaviour change  
+**Risk:** Low-Medium — adds a cache + new deserialization; existing heuristics stay as fallback  
 **Source:** TAU-REVIEW.md §7 (Provider Routing Logic Duplication) and §8 (Thinking Level Mapping)
 
 ---
 
 ## Problem
 
-When determining how to handle a Copilot request, `src/provider.rs` contains
-two independent functions that each do their own model-name prefix matching:
+`src/provider.rs` contains three independent functions that each do their own
+model-name prefix matching to answer questions about a Copilot model:
 
-```rust
-fn classify_copilot_route(model: &str) -> CopilotApiRoute {
-    let m = model.to_ascii_lowercase();
-    if m.starts_with("claude") { ... }
-    else if m.contains("codex") || m.starts_with("gpt-5") { ... }
-    else { ... }
-}
+1. `classify_copilot_route()` — which API endpoint to use
+2. `thinking_support_for()` — does this route expose reasoning effort?
+3. `context_window_for_model()` — 50-line chain of `starts_with` / `contains` guards
 
-pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport {
-    match kind {
-        ProviderKind::Copilot => match classify_copilot_route(model) {
-            CopilotApiRoute::OpenAiResponses => ThinkingSupport::Applied,
-            CopilotApiRoute::AnthropicMessages => ThinkingSupport::Ignored("..."),
-            CopilotApiRoute::OpenAiChatCompletions => ThinkingSupport::Ignored("..."),
-        },
-        ...
-    }
+All three are based on hard-coded guesses about model names.  New Copilot
+models require updates in multiple places, and the guesses can become stale.
+
+The Copilot `/models` REST endpoint (already called by `CopilotProvider::list_models()`)
+returns richer metadata that includes:
+
+```json
+{
+  "id": "claude-3.7-sonnet",
+  "vendor": "Anthropic",
+  "capabilities": {
+    "limits": {
+      "max_context_window_tokens": 200000,
+      "max_output_tokens": 64000
+    },
+    "supports": { "streaming": true, "tool_calls": true }
+  }
 }
 ```
 
-Adding a new Copilot-routed model requires touching `classify_copilot_route`
-and reviewing `thinking_support_for` separately. The association between a
-model prefix, its API route, and whether thinking is applied lives nowhere
-explicitly — it is only inferable by reading both functions together.
+Key fields available in the response:
 
-The same scattered pattern exists for `context_window_for_model` — a separate
-50-line chain of `if m.starts_with(...)` — though this function is not
-Copilot-specific.
+| Field | Replaces |
+|---|---|
+| `vendor` | `m.starts_with("claude")` → Anthropic routing heuristic |
+| `capabilities.limits.max_context_window_tokens` | Hard-coded Copilot entries in `context_window_for_model()` |
+
+The Chat Completions vs. Responses API distinction (for OpenAI-vendor models)
+is **not** encoded in any known public field; name heuristics are retained for
+that split.
 
 ## Goals
 
-1. Introduce a `CopilotModelEntry` struct and a static lookup table
-   that associates a model-name prefix with its route and thinking-support
-   classification, as the single source of truth for Copilot model behaviour.
-2. Rewrite `classify_copilot_route` and `thinking_support_for` to derive from
-   the table, eliminating the duplicated matching logic.
-3. No behaviour change — the rewritten functions must pass all existing tests.
-4. Make the table the natural place to add future model entries.
+1. Parse `vendor` and `capabilities.limits.max_context_window_tokens` from the
+   Copilot `/models` response and cache them in memory.
+2. Use the cached `vendor` field to drive Anthropic vs. OpenAI routing, replacing
+   the `starts_with("claude")` name heuristic as the primary path.
+3. Use the cached context-window value in `context_window_for_model()` for
+   Copilot models, so the display stays accurate when new models appear without
+   a code change.
+4. Keep existing name heuristics as a cold-start fallback (cache empty on first
+   request before `list_models()` has been called).
+5. No breaking changes to any public function signatures or the `LlmProvider` trait.
 
 ## Non-goals
 
-- Migrating `context_window_for_model` to the same table in this plan (deferred;
-  it is not Copilot-specific and context window sizes are already loosely coupled
-  to routing).
-- Removing `classify_copilot_route` as a named function — it may stay as a
-  thin wrapper over the table lookup.
-- Changing `ProviderKind`, `ThinkingSupport`, or `CopilotApiRoute` enums.
+- Replacing name heuristics for the OpenAI Chat Completions / Responses split
+  (no public API field distinguishes these today).
+- Driving `thinking_support_for()` directly from the API (it continues to derive
+  from the route, which is correct).
+- Migrating non-Copilot providers to the same cache (Ollama, Gemini, etc. have
+  their own metadata mechanisms).
+- Persisting the cache across process restarts (in-memory only).
 
 ## Design
 
-### `CopilotModelEntry` and static table in `src/provider.rs`
+### Cache structure in `src/llm/copilot.rs`
 
 ```rust
-struct CopilotModelEntry {
-    /// Model-name prefix to match (case-insensitive).
-    prefix: &'static str,
-    route: CopilotApiRoute,
-    thinking: ThinkingSupport,
+/// Metadata fetched from the Copilot `/models` endpoint for a single model.
+#[derive(Debug, Clone)]
+pub struct CopilotModelMeta {
+    /// Provider vendor string as returned by the API, e.g. "Anthropic" or
+    /// "Azure OpenAI".  Empty string when not present in the response.
+    pub vendor: String,
+    /// Maximum context-window size in tokens, when reported by the API.
+    pub max_context_window_tokens: Option<usize>,
 }
 
-/// Lookup table for Copilot model routing and thinking support.
-///
-/// Entries are checked in order; the first matching prefix wins.
-/// Models not matching any entry fall through to the default (ChatCompletions).
-static COPILOT_MODELS: &[CopilotModelEntry] = &[
-    CopilotModelEntry {
-        prefix: "claude",
-        route: CopilotApiRoute::AnthropicMessages,
-        thinking: ThinkingSupport::Ignored(
-            "copilot anthropic route has no thinking mapping yet",
-        ),
-    },
-    CopilotModelEntry {
-        prefix: "gpt-5",
-        route: CopilotApiRoute::OpenAiResponses,
-        thinking: ThinkingSupport::Applied,
-    },
-];
+/// Process-global cache populated by `list_models()`.
+/// Keyed by the exact model `id` returned by the API (case-preserved).
+static COPILOT_MODEL_CACHE: OnceLock<RwLock<HashMap<String, CopilotModelMeta>>> =
+    OnceLock::new();
 
-/// Models matched by substring rather than prefix get their own entries.
-/// Currently: any model whose name contains "codex".
-static COPILOT_MODELS_CONTAINS: &[CopilotModelEntry] = &[
-    CopilotModelEntry {
-        prefix: "codex",          // matched with `contains`, not `starts_with`
-        route: CopilotApiRoute::OpenAiResponses,
-        thinking: ThinkingSupport::Applied,
-    },
-];
-
-/// Default for unrecognised Copilot models.
-const COPILOT_DEFAULT: CopilotModelEntry = CopilotModelEntry {
-    prefix: "",
-    route: CopilotApiRoute::OpenAiChatCompletions,
-    thinking: ThinkingSupport::Ignored(
-        "copilot chat-completions route does not expose reasoning.effort",
-    ),
-};
-```
-
-### Rewritten `classify_copilot_route`
-
-```rust
-fn classify_copilot_route(model: &str) -> CopilotApiRoute {
-    copilot_model_entry(model).route
-}
-
-fn copilot_model_entry(model: &str) -> &'static CopilotModelEntry {
-    let m = model.to_ascii_lowercase();
-    COPILOT_MODELS
-        .iter()
-        .find(|e| m.starts_with(e.prefix))
-        .or_else(|| COPILOT_MODELS_CONTAINS.iter().find(|e| m.contains(e.prefix)))
-        .unwrap_or(&COPILOT_DEFAULT)
+fn cache() -> &'static RwLock<HashMap<String, CopilotModelMeta>> {
+    COPILOT_MODEL_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 ```
 
-### Rewritten `thinking_support_for` (Copilot branch)
+### New deserialization structs (private to `copilot.rs`)
 
 ```rust
-pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport {
-    match kind {
-        ProviderKind::Copilot => copilot_model_entry(model).thinking,
-        ProviderKind::Codex   => ThinkingSupport::Applied,
-        ProviderKind::Gemini  => ThinkingSupport::Applied,
-        ProviderKind::OpenAi  => ThinkingSupport::Ignored(
-            "openai chat-completions provider does not map thinking yet",
-        ),
-        ProviderKind::Ollama  => ThinkingSupport::Ignored(
-            "ollama provider does not support mapped thinking levels",
-        ),
+#[derive(Deserialize)]
+struct ApiModelsResponse {
+    data: Vec<ApiModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ApiModelEntry {
+    id: String,
+    #[serde(default)]
+    vendor: String,
+    #[serde(default)]
+    capabilities: ApiModelCapabilities,
+}
+
+#[derive(Deserialize, Default)]
+struct ApiModelCapabilities {
+    #[serde(default)]
+    limits: ApiModelLimits,
+}
+
+#[derive(Deserialize, Default)]
+struct ApiModelLimits {
+    max_context_window_tokens: Option<usize>,
+}
+```
+
+### `fetch_and_cache_models()` helper (private)
+
+Replaces the forwarding call to `self.models_provider.list_models()` with a
+direct HTTP request that parses full metadata:
+
+```rust
+async fn fetch_and_cache_models(
+    base_url: String,
+    access_token: String,
+    extra_headers: Vec<(String, String)>,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    // ... HTTP request (mirrors existing openai list_models logic) ...
+    let parsed: ApiModelsResponse = response.json().await?;
+
+    // Populate cache
+    if let Ok(mut map) = cache().write() {
+        for entry in &parsed.data {
+            map.insert(entry.id.clone(), CopilotModelMeta {
+                vendor: entry.vendor.clone(),
+                max_context_window_tokens: entry.capabilities.limits.max_context_window_tokens,
+            });
+        }
+    }
+
+    let mut ids: Vec<String> = parsed.data.into_iter().map(|e| e.id).collect();
+    ids.sort();
+    Ok(ids)
+}
+```
+
+### Updated `CopilotProvider::list_models()`
+
+```rust
+fn list_models(&self) -> ModelListFuture {
+    let base_url = self.base_url.clone();       // new field, see below
+    let token    = self.access_token.clone();   // new field
+    let headers  = copilot_extra_headers();
+    Box::pin(fetch_and_cache_models(base_url, token, headers))
+}
+```
+
+`CopilotProvider` gains two new private fields (`base_url: String`,
+`access_token: String`) so the async future can be constructed without
+capturing `self`.  The existing `models_provider: OpenAiProvider` field
+is removed.
+
+### Public cache-query helpers (on `CopilotProvider`)
+
+```rust
+impl CopilotProvider {
+    /// Look up the vendor string for `model` from the cache.
+    /// Returns `None` when the cache is unpopulated or the model is absent.
+    pub fn cached_vendor(model: &str) -> Option<String> {
+        cache().read().ok()?.get(model).map(|m| m.vendor.clone())
+    }
+
+    /// Look up the context-window token limit for `model` from the cache.
+    pub fn cached_context_window(model: &str) -> Option<usize> {
+        cache().read().ok()?.get(model)?.max_context_window_tokens
     }
 }
 ```
 
-The `thinking_support_for` function no longer needs its own `match
-classify_copilot_route(model)` arm — it reads directly from the table entry.
+### Updated `classify_copilot_route()` in `src/provider.rs`
 
-### Alternative: merging prefix/contains into one table
-
-If the distinction between prefix-match and contains-match entries is
-considered noise, a small `MatchKind` enum can unify the two:
+Cache is checked first; name heuristics serve as cold-start fallback:
 
 ```rust
-enum MatchKind { Prefix, Contains }
-
-struct CopilotModelEntry {
-    pattern: &'static str,
-    match_kind: MatchKind,
-    route: CopilotApiRoute,
-    thinking: ThinkingSupport,
+fn classify_copilot_route(model: &str) -> CopilotApiRoute {
+    // Primary: use vendor from API metadata if available.
+    if let Some(vendor) = CopilotProvider::cached_vendor(model) {
+        if vendor.eq_ignore_ascii_case("anthropic") {
+            return CopilotApiRoute::AnthropicMessages;
+        }
+        // For OpenAI-vendor models, fall through to name heuristics below
+        // (the Responses vs. Chat-Completions split is not in the API).
+    }
+    // Fallback / OpenAI sub-routing: name heuristics.
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("claude") {
+        CopilotApiRoute::AnthropicMessages
+    } else if m.contains("codex") || m.starts_with("gpt-5") {
+        CopilotApiRoute::OpenAiResponses
+    } else {
+        CopilotApiRoute::OpenAiChatCompletions
+    }
 }
 ```
 
-This is the preferred approach if the contains-match set grows beyond one entry.
-The primary design above keeps it simple for now.
+### Updated `context_window_for_model()` in `src/provider.rs`
+
+```rust
+pub fn context_window_for_model(model: &str) -> Option<usize> {
+    // Primary: Copilot API metadata (accurate, stays up to date).
+    if let Some(cw) = CopilotProvider::cached_context_window(model) {
+        return Some(cw);
+    }
+    // Fallback: hard-coded table for all other providers (Gemini, Ollama, etc.)
+    // and Copilot models used before list_models() has been called.
+    let m = model.to_ascii_lowercase();
+    // ... (existing if-chain, unchanged) ...
+}
+```
 
 ## Affected files
 
 | File | Change |
-|------|--------|
-| `src/provider.rs` | Add `CopilotModelEntry`, `COPILOT_MODELS`, `copilot_model_entry()`; rewrite the two functions |
+|---|---|
+| `src/llm/copilot.rs` | Add cache statics and types; add `fetch_and_cache_models()`; expose `cached_vendor()` / `cached_context_window()`; update `list_models()` and `new()`; add `base_url`/`access_token` fields; remove `models_provider` field |
+| `src/provider.rs` | Update `classify_copilot_route()` to check cache first; update `context_window_for_model()` to check cache first |
 
 No other files change.
 
@@ -181,103 +243,103 @@ No other files change.
 
 ### Preserve existing tests
 
-All tests in `src/provider.rs` under `mod tests` must continue to pass
-unchanged — they are the correctness guard for this refactor.
+All tests in `src/provider.rs` under `mod tests` must continue to pass unchanged
+— they exercise the fallback heuristic path, which is still present.
 
-### Add table-coverage tests
-
-Add one test per static table entry to verify the table lookup agrees with the
-documented intent. These tests double as documentation:
+### New unit tests in `src/llm/copilot.rs`
 
 ```rust
-// --- prefix-matched entries ---
-
 #[test]
-fn copilot_entry_claude_routes_to_anthropic() {
-    let entry = copilot_model_entry("claude-sonnet-4.5");
-    assert_eq!(entry.route, CopilotApiRoute::AnthropicMessages);
-    assert!(matches!(entry.thinking, ThinkingSupport::Ignored(_)));
+fn cached_vendor_returns_none_for_unknown_model() {
+    assert!(CopilotProvider::cached_vendor("unknown-model-xyz").is_none());
 }
 
 #[test]
-fn copilot_entry_gpt5_routes_to_responses() {
-    let entry = copilot_model_entry("gpt-5.3-turbo");
-    assert_eq!(entry.route, CopilotApiRoute::OpenAiResponses);
-    assert_eq!(entry.thinking, ThinkingSupport::Applied);
+fn cached_context_window_returns_none_for_unknown_model() {
+    assert!(CopilotProvider::cached_context_window("unknown-model-xyz").is_none());
 }
 
-// --- contains-matched entries ---
-
 #[test]
-fn copilot_entry_codex_in_name_routes_to_responses() {
-    let entry = copilot_model_entry("gpt-5.3-codex");
-    assert_eq!(entry.route, CopilotApiRoute::OpenAiResponses);
-    assert_eq!(entry.thinking, ThinkingSupport::Applied);
-}
-
-// --- default ---
-
-#[test]
-fn copilot_entry_unknown_model_uses_default_route() {
-    let entry = copilot_model_entry("some-future-model");
-    assert_eq!(entry.route, CopilotApiRoute::OpenAiChatCompletions);
-    assert!(matches!(entry.thinking, ThinkingSupport::Ignored(_)));
-}
-
-// --- case-insensitivity ---
-
-#[test]
-fn copilot_entry_lookup_is_case_insensitive() {
+fn cache_round_trips_vendor_and_context_window() {
+    // Directly insert into the cache to simulate a list_models() call.
+    cache().write().unwrap().insert(
+        "test-anthropic-model".to_string(),
+        CopilotModelMeta {
+            vendor: "Anthropic".to_string(),
+            max_context_window_tokens: Some(200_000),
+        },
+    );
     assert_eq!(
-        copilot_model_entry("CLAUDE-3").route,
-        copilot_model_entry("claude-3").route,
+        CopilotProvider::cached_vendor("test-anthropic-model").as_deref(),
+        Some("Anthropic")
+    );
+    assert_eq!(
+        CopilotProvider::cached_context_window("test-anthropic-model"),
+        Some(200_000)
     );
 }
 ```
 
-### Add a consistency assertion (optional, compile-time-ish)
-
-A single test that iterates over all entries and asserts that no two entries
-with the same `MatchKind` have one prefix that is a prefix of another (which
-would make the second entry unreachable). This prevents accidental shadowing
-when entries are added:
+### New unit tests in `src/provider.rs`
 
 ```rust
 #[test]
-fn copilot_model_table_has_no_shadowed_prefix_entries() {
-    for (i, a) in COPILOT_MODELS.iter().enumerate() {
-        for b in COPILOT_MODELS.iter().skip(i + 1) {
-            assert!(
-                !a.prefix.starts_with(b.prefix) && !b.prefix.starts_with(a.prefix),
-                "table entries '{}' and '{}' shadow each other",
-                a.prefix, b.prefix
-            );
-        }
-    }
+fn classify_copilot_route_uses_cached_vendor_for_anthropic() {
+    // Pre-populate cache with a synthetic model whose name gives no hint.
+    crate::llm::copilot::test_helpers::insert_cache(
+        "future-ai-model",
+        "Anthropic",
+        Some(200_000),
+    );
+    assert_eq!(
+        classify_copilot_route("future-ai-model"),
+        CopilotApiRoute::AnthropicMessages
+    );
+}
+
+#[test]
+fn context_window_prefers_cache_over_hard_coded_table() {
+    crate::llm::copilot::test_helpers::insert_cache("gpt-4o", "Azure OpenAI", Some(999_999));
+    // Cache wins over the hard-coded 128_000 for gpt-4o.
+    assert_eq!(context_window_for_model("gpt-4o"), Some(999_999));
 }
 ```
 
+A `#[cfg(test)] pub mod test_helpers` block in `copilot.rs` exposes
+`insert_cache()` so the provider-level tests can seed the global cache
+without duplicating the locking boilerplate.
+
 ## Implementation steps
 
-1. Add `CopilotModelEntry` struct and the two static tables.
-2. Add `copilot_model_entry()` helper.
-3. Replace body of `classify_copilot_route()` with `copilot_model_entry(model).route`.
-4. Replace Copilot branch of `thinking_support_for()` with `copilot_model_entry(model).thinking`.
-5. Run `cargo test` — existing tests must pass without modification.
-6. Add new table-coverage tests.
-7. Run quality gates.
+1. Add `CopilotModelMeta`, cache statics, `cache()` accessor, and
+   deserialization structs to `copilot.rs`.
+2. Add `fetch_and_cache_models()` async function.
+3. Add `cached_vendor()` and `cached_context_window()` static methods to
+   `CopilotProvider`.
+4. Add `base_url` and `access_token` fields to `CopilotProvider`; remove
+   `models_provider` field; update `new()` and `list_models()` accordingly.
+5. Update `classify_copilot_route()` in `provider.rs` to check cache first.
+6. Update `context_window_for_model()` in `provider.rs` to check cache first.
+7. Run `cargo test` — existing tests must pass without modification.
+8. Add new cache unit tests.
+9. Run quality gates.
 
 ## Verification checklist
 
 1. `cargo fmt`
 2. `cargo clippy --all-targets`
-3. `cargo test` — all existing provider tests pass; new coverage tests added
-4. No `if m.starts_with` / `if m.contains` chains remain in the Copilot routing
-   code path
+3. `cargo test` — all existing provider + copilot tests pass; new tests added
+4. With a live Copilot token: `list_models()` populates the cache; a model
+   selected from the picker routes via `cached_vendor()` rather than name
+   heuristics (visible in debug log: `copilot transport resolved: …`)
+5. Context-window display in the info bar shows the API-reported value for a
+   model fetched via `list_models()`
 
 ## Risks and mitigations
 
 | Risk | Likelihood | Mitigation |
-|------|-----------|------------|
-| Table entry order introduces a behaviour difference for a model that matches two prefixes | Low | The shadowing test catches overlapping entries; existing tests guard current behaviour |
-| `CopilotApiRoute` or `ThinkingSupport` gains non-`Copy` fields later | Very low | Both are currently `Copy`; table entries are `'static` — a future change would require moving entries to `OnceCell` or similar |
+|---|---|---|
+| Copilot API response omits `vendor` or `capabilities.limits` for some models | Low–Medium | All fields use `#[serde(default)]`; missing fields leave the cache entry with `None` / empty string, and fallback heuristics take over |
+| Global cache causes test pollution across parallel test runs | Medium | Cache is write-once per key (new inserts overwrite); `test_helpers::insert_cache` is only available in `#[cfg(test)]`; tests using it should be in a single-threaded test or use unique model names |
+| `OnceLock<RwLock<…>>` read contention | Very low | CLI tool with one active task at a time; contention is negligible |
+| `base_url` / `access_token` fields increase `CopilotProvider` size | Negligible | Both are small heap strings; `CopilotProvider` is always boxed behind `Arc<dyn LlmProvider>` |

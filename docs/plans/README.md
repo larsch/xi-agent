@@ -19,9 +19,10 @@ This directory intentionally contains only active, decision-relevant planning/de
   obvious misconfigurations (unknown provider name, openai without api_key) as
   startup messages rather than deferred runtime errors. (Review §10)
 
-- `2026-03-22-provider-model-metadata.md` — Consolidate the two independent
-  Copilot model-name matching functions (`classify_copilot_route` and
-  `thinking_support_for`) into a single static metadata table. (Review §7, §8)
+- `2026-03-22-provider-model-metadata.md` — Use the Copilot `/models` REST API
+  to drive model routing (`vendor` field) and context-window display
+  (`capabilities.limits.max_context_window_tokens`), with name heuristics
+  retained as cold-start fallback. (Review §7, §8)
 
 - `2026-03-22-agent-cancellation.md` — Two-phase: (A) add `.kill_on_drop(true)`
   to shell tool commands so child processes are killed on abort; (B) add an

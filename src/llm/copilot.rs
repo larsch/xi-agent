@@ -1,7 +1,59 @@
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+
+use serde::Deserialize;
+
 use super::anthropic::AnthropicProvider;
 use super::codex::CodexProvider;
 use super::openai::OpenAiProvider;
 use super::{LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition};
+
+// ── Model metadata cache ──────────────────────────────────────────────────────
+
+/// Metadata fetched from the Copilot `/models` endpoint for a single model.
+#[derive(Debug, Clone)]
+pub struct CopilotModelMeta {
+    /// Provider vendor string as returned by the API, e.g. `"Anthropic"` or
+    /// `"Azure OpenAI"`.  Empty string when not present in the response.
+    pub vendor: String,
+    /// Maximum context-window size in tokens, when reported by the API.
+    pub max_context_window_tokens: Option<usize>,
+}
+
+/// Process-global cache populated by [`CopilotProvider::list_models`].
+/// Keyed by the exact model `id` returned by the API (case-preserved).
+static COPILOT_MODEL_CACHE: OnceLock<RwLock<HashMap<String, CopilotModelMeta>>> = OnceLock::new();
+
+fn cache() -> &'static RwLock<HashMap<String, CopilotModelMeta>> {
+    COPILOT_MODEL_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+// ── Deserialization types (private) ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ApiModelsResponse {
+    data: Vec<ApiModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ApiModelEntry {
+    id: String,
+    #[serde(default)]
+    vendor: String,
+    #[serde(default)]
+    capabilities: ApiModelCapabilities,
+}
+
+#[derive(Deserialize, Default)]
+struct ApiModelCapabilities {
+    #[serde(default)]
+    limits: ApiModelLimits,
+}
+
+#[derive(Deserialize, Default)]
+struct ApiModelLimits {
+    max_context_window_tokens: Option<usize>,
+}
 
 // ── Shared Copilot headers ────────────────────────────────────────────────────
 
@@ -28,6 +80,70 @@ fn copilot_extra_headers() -> Vec<(String, String)> {
     ]
 }
 
+// ── Async model fetch ─────────────────────────────────────────────────────────
+
+/// Fetches the Copilot `/models` endpoint, populates the metadata cache,
+/// and returns a sorted list of model IDs.
+async fn fetch_and_cache_models(
+    base_url: String,
+    access_token: String,
+    extra_headers: Vec<(String, String)>,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url).bearer_auth(&access_token);
+    for (k, v) in &extra_headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    log::debug!("→ GET {url}");
+    let response = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("copilot list_models error: {e}");
+            return Err(format!("request failed: {e}"));
+        }
+    };
+    let status = response.status();
+    log::debug!("← HTTP {status} from copilot list_models");
+    if !status.is_success() {
+        let msg = if status.as_u16() == 401 {
+            "401 Unauthorized — run /login to authenticate".to_string()
+        } else {
+            format!("HTTP {status}")
+        };
+        log::warn!("copilot list_models failed: {msg}");
+        return Err(msg);
+    }
+    let parsed: ApiModelsResponse = match response.json().await {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("copilot list_models parse error: {e}");
+            return Err(format!("failed to parse response: {e}"));
+        }
+    };
+
+    // Populate cache with vendor and context-window metadata.
+    if let Ok(mut map) = cache().write() {
+        for entry in &parsed.data {
+            map.insert(
+                entry.id.clone(),
+                CopilotModelMeta {
+                    vendor: entry.vendor.clone(),
+                    max_context_window_tokens: entry
+                        .capabilities
+                        .limits
+                        .max_context_window_tokens,
+                },
+            );
+        }
+        log::debug!("copilot model cache populated: {} entries", map.len());
+    }
+
+    let mut ids: Vec<String> = parsed.data.into_iter().map(|e| e.id).collect();
+    ids.sort();
+    Ok(ids)
+}
+
 // ── Route enum ────────────────────────────────────────────────────────────────
 
 /// Which inner provider handles a given Copilot model.
@@ -46,9 +162,10 @@ enum CopilotInner {
 pub struct CopilotProvider {
     /// The inner provider selected based on the current model.
     inner: CopilotInner,
-    /// An `OpenAiProvider` pointed at the Copilot base URL, used exclusively
-    /// for `list_models()` calls.
-    models_provider: OpenAiProvider,
+    /// Resolved API base URL, stored for use in `list_models()`.
+    base_url: String,
+    /// Bearer token, stored for use in `list_models()`.
+    access_token: String,
 }
 
 impl CopilotProvider {
@@ -62,61 +179,91 @@ impl CopilotProvider {
             .map(|s| s.to_string())
             .unwrap_or_else(|| extract_base_url(access_token));
 
-        let m = model.to_ascii_lowercase();
-        let inner = if m.starts_with("claude") {
-            log::debug!(
-                "copilot transport resolved: api=anthropic-messages base_url={} endpoint=/v1/messages",
-                resolved_base_url
-            );
-            CopilotInner::Anthropic(AnthropicProvider::new_with_headers(
-                resolved_base_url.clone(),
-                model,
-                access_token,
-                true, // bearer_auth
-                copilot_extra_headers(),
-            ))
-        } else if m.contains("codex") || m.starts_with("gpt-5") {
-            let responses_url = format!("{}/v1/responses", resolved_base_url.trim_end_matches('/'));
-            log::debug!(
-                "copilot transport resolved: api=openai-responses base_url={} endpoint={}",
-                resolved_base_url,
-                responses_url
-            );
-            CopilotInner::Codex(
-                CodexProvider::new_with_headers(
-                    responses_url,
-                    model,
-                    access_token,
-                    copilot_extra_headers(),
-                )
-                .with_reasoning_effort(reasoning_effort),
-            )
-        } else {
-            log::debug!(
-                "copilot transport resolved: api=openai-chat-completions base_url={} endpoint=/chat/completions",
-                resolved_base_url
-            );
-            CopilotInner::OpenAi(OpenAiProvider::new_with_headers(
-                resolved_base_url.clone(),
-                model,
-                access_token,
-                copilot_extra_headers(),
-            ))
-        };
-
-        // The models provider always uses the OpenAI `/models` endpoint,
-        // regardless of the current model's API route.
-        let models_provider = OpenAiProvider::new_with_headers(
-            resolved_base_url,
+        let inner = build_inner(
             model,
             access_token,
-            copilot_extra_headers(),
+            &resolved_base_url,
+            reasoning_effort,
         );
 
         Self {
             inner,
-            models_provider,
+            base_url: resolved_base_url,
+            access_token: access_token.to_string(),
         }
+    }
+
+    /// Look up the vendor string for `model` from the cache.
+    ///
+    /// Returns `None` when the cache is unpopulated or the model is absent.
+    pub fn cached_vendor(model: &str) -> Option<String> {
+        let map = cache().read().ok()?;
+        map.get(model).map(|m| m.vendor.clone())
+    }
+
+    /// Look up the context-window token limit for `model` from the cache.
+    ///
+    /// Returns `None` when the cache is unpopulated or the model is absent.
+    pub fn cached_context_window(model: &str) -> Option<usize> {
+        let map = cache().read().ok()?;
+        map.get(model)?.max_context_window_tokens
+    }
+}
+
+/// Build the correct inner provider based on the cached vendor (primary) or
+/// model-name heuristics (cold-start fallback).
+fn build_inner(
+    model: &str,
+    access_token: &str,
+    base_url: &str,
+    reasoning_effort: Option<String>,
+) -> CopilotInner {
+    // Primary: vendor from the API metadata cache.
+    let vendor = CopilotProvider::cached_vendor(model).unwrap_or_default();
+    let use_anthropic = vendor.eq_ignore_ascii_case("anthropic")
+        // Cold-start fallback: when vendor is unknown, use name heuristic.
+        || (vendor.is_empty() && model.to_ascii_lowercase().starts_with("claude"));
+
+    if use_anthropic {
+        log::debug!(
+            "copilot transport resolved: api=anthropic-messages base_url={base_url} endpoint=/v1/messages"
+        );
+        return CopilotInner::Anthropic(AnthropicProvider::new_with_headers(
+            base_url.to_string(),
+            model,
+            access_token,
+            true, // bearer_auth
+            copilot_extra_headers(),
+        ));
+    }
+
+    // For OpenAI-vendor models the Responses vs. Chat-Completions split is not
+    // encoded in the API; use name heuristics.
+    let m = model.to_ascii_lowercase();
+    if m.contains("codex") || m.starts_with("gpt-5") {
+        let responses_url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
+        log::debug!(
+            "copilot transport resolved: api=openai-responses base_url={base_url} endpoint={responses_url}"
+        );
+        CopilotInner::Codex(
+            CodexProvider::new_with_headers(
+                responses_url,
+                model,
+                access_token,
+                copilot_extra_headers(),
+            )
+            .with_reasoning_effort(reasoning_effort),
+        )
+    } else {
+        log::debug!(
+            "copilot transport resolved: api=openai-chat-completions base_url={base_url} endpoint=/chat/completions"
+        );
+        CopilotInner::OpenAi(OpenAiProvider::new_with_headers(
+            base_url.to_string(),
+            model,
+            access_token,
+            copilot_extra_headers(),
+        ))
     }
 }
 
@@ -141,10 +288,13 @@ impl LlmProvider for CopilotProvider {
         }
     }
 
-    /// Always fetches the full model list from the Copilot `/models` endpoint,
-    /// regardless of which model is currently active.
+    /// Fetches the full model list from the Copilot `/models` endpoint and
+    /// populates the metadata cache as a side-effect.
     fn list_models(&self) -> ModelListFuture {
-        self.models_provider.list_models()
+        let base_url = self.base_url.clone();
+        let access_token = self.access_token.clone();
+        let headers = copilot_extra_headers();
+        Box::pin(fetch_and_cache_models(base_url, access_token, headers))
     }
 }
 
@@ -165,4 +315,70 @@ fn extract_base_url(token: &str) -> String {
         return format!("https://{api_domain}");
     }
     "https://api.individual.githubcopilot.com".to_string()
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub mod test_helpers {
+    use super::{CopilotModelMeta, cache};
+
+    /// Insert a synthetic entry into the global cache.
+    /// Use unique model names in tests to avoid cross-test pollution.
+    pub fn insert_cache(model: &str, vendor: &str, context_window: Option<usize>) {
+        cache()
+            .write()
+            .unwrap()
+            .insert(
+                model.to_string(),
+                CopilotModelMeta {
+                    vendor: vendor.to_string(),
+                    max_context_window_tokens: context_window,
+                },
+            );
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::{CopilotProvider, test_helpers};
+
+    #[test]
+    fn cached_vendor_returns_none_for_unknown_model() {
+        assert!(CopilotProvider::cached_vendor("__unknown_vendor_model__").is_none());
+    }
+
+    #[test]
+    fn cached_context_window_returns_none_for_unknown_model() {
+        assert!(CopilotProvider::cached_context_window("__unknown_cw_model__").is_none());
+    }
+
+    #[test]
+    fn cache_round_trips_vendor_and_context_window() {
+        test_helpers::insert_cache(
+            "__test_anthropic_model__",
+            "Anthropic",
+            Some(200_000),
+        );
+        assert_eq!(
+            CopilotProvider::cached_vendor("__test_anthropic_model__").as_deref(),
+            Some("Anthropic")
+        );
+        assert_eq!(
+            CopilotProvider::cached_context_window("__test_anthropic_model__"),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn cache_round_trips_empty_vendor_and_none_context_window() {
+        test_helpers::insert_cache("__test_no_meta_model__", "", None);
+        assert_eq!(
+            CopilotProvider::cached_vendor("__test_no_meta_model__").as_deref(),
+            Some("")
+        );
+        assert!(CopilotProvider::cached_context_window("__test_no_meta_model__").is_none());
+    }
 }

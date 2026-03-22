@@ -81,8 +81,20 @@ impl ProviderKind {
 }
 
 /// Return the context-window size (in tokens) for a known model name.
+///
+/// Checks the Copilot model metadata cache first (populated by
+/// `CopilotProvider::list_models()`), then falls back to a hard-coded table
+/// for other providers and for Copilot models used before `list_models()` has
+/// been called.
+///
 /// Returns `None` for unrecognised models.
 pub fn context_window_for_model(model: &str) -> Option<usize> {
+    // Primary: live metadata from the Copilot /models API.
+    if let Some(cw) = CopilotProvider::cached_context_window(model) {
+        return Some(cw);
+    }
+
+    // Fallback: hard-coded table for all other providers and cold-start.
     // Normalise to lowercase for matching.
     let m = model.to_ascii_lowercase();
     // Check prefixes / substrings for common model families.
@@ -155,11 +167,20 @@ pub enum ThinkingSupport {
 
 /// Classify Copilot model routing in a provider-agnostic way.
 ///
-/// This mirrors pi-mono's model metadata behavior:
-/// - Claude models -> Anthropic Messages API.
-/// - Codex and GPT-5 family models -> OpenAI Responses API.
-/// - Everything else -> OpenAI Chat Completions API.
+/// Uses the cached `vendor` field from the Copilot `/models` API as the
+/// primary signal.  Falls back to model-name heuristics on cold start (before
+/// `list_models()` has populated the cache) and for the OpenAI
+/// Chat-Completions vs. Responses split (not exposed in the API).
 fn classify_copilot_route(model: &str) -> CopilotApiRoute {
+    // Primary: vendor from the API metadata cache.
+    if let Some(vendor) = CopilotProvider::cached_vendor(model)
+        && vendor.eq_ignore_ascii_case("anthropic")
+    {
+        return CopilotApiRoute::AnthropicMessages;
+        // For OpenAI-vendor models fall through to name heuristics below;
+        // the Responses vs. Chat-Completions split is not in the API.
+    }
+    // Fallback / OpenAI sub-routing: name heuristics.
     let m = model.to_ascii_lowercase();
     if m.starts_with("claude") {
         CopilotApiRoute::AnthropicMessages
@@ -282,7 +303,11 @@ pub fn build_provider(
 
 #[cfg(test)]
 mod tests {
-    use super::{CopilotApiRoute, ThinkingSupport, classify_copilot_route, thinking_support_for};
+    use super::{
+        CopilotApiRoute, ThinkingSupport, classify_copilot_route, context_window_for_model,
+        thinking_support_for,
+    };
+    use crate::llm::copilot::test_helpers;
     use crate::provider::ProviderKind;
 
     #[test]
@@ -331,5 +356,55 @@ mod tests {
             thinking_support_for(&ProviderKind::Gemini, "gemini-2.5-pro"),
             ThinkingSupport::Applied
         );
+    }
+
+    // ── Cache-driven routing ─────────────────────────────────────────────────
+
+    #[test]
+    fn classify_copilot_route_uses_cached_vendor_for_anthropic() {
+        // A model whose name gives no Anthropic hint, but the API says "Anthropic".
+        test_helpers::insert_cache("__future_ai_model__", "Anthropic", Some(200_000));
+        assert_eq!(
+            classify_copilot_route("__future_ai_model__"),
+            CopilotApiRoute::AnthropicMessages
+        );
+    }
+
+    #[test]
+    fn classify_copilot_route_falls_back_to_heuristic_for_openai_vendor() {
+        // OpenAI vendor does not disambiguate Chat-Completions vs Responses;
+        // name heuristic must still fire.  This model name has no prefix/substring
+        // that would trigger the Responses path, so it falls to Chat-Completions.
+        test_helpers::insert_cache("__openai_vendor_model__", "Azure OpenAI", None);
+        assert_eq!(
+            classify_copilot_route("__openai_vendor_model__"),
+            CopilotApiRoute::OpenAiChatCompletions
+        );
+    }
+
+    // ── Cache-driven context window ──────────────────────────────────────────
+
+    #[test]
+    fn context_window_prefers_cache_over_hard_coded_table() {
+        // Seed cache with a non-standard size to prove it wins over the table.
+        test_helpers::insert_cache("__gpt_4o_cache_test__", "Azure OpenAI", Some(999_999));
+        assert_eq!(
+            context_window_for_model("__gpt_4o_cache_test__"),
+            Some(999_999)
+        );
+    }
+
+    #[test]
+    fn context_window_falls_back_to_table_when_cache_miss() {
+        // gpt-4o is not seeded with this exact key — falls back to hard-coded table.
+        assert_eq!(context_window_for_model("gpt-4o"), Some(128_000));
+    }
+
+    #[test]
+    fn context_window_falls_back_to_table_when_cache_has_no_limit() {
+        test_helpers::insert_cache("__no_limit_model__", "OpenAI", None);
+        // Cache entry exists but carries no context-window value; table has no
+        // match either → None.
+        assert_eq!(context_window_for_model("__no_limit_model__"), None);
     }
 }

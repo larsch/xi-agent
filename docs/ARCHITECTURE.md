@@ -16,7 +16,7 @@ src/
   ui.rs              — all ratatui rendering, pre-wrapping, scroll logic
   commands.rs        — slash-command registry and completion items
   config.rs          — config.toml loading (XDG + HOME fallback)
-  provider.rs        — ProviderKind enum, build_provider(), context-window table
+  provider.rs        — ProviderKind enum, build_provider(), context-window fallback table
   session.rs         — persisted chat session storage/index
   auth/              — provider auth store + login/refresh flows
   agent/
@@ -33,7 +33,7 @@ src/
   llm/
     mod.rs           — LlmProvider trait, Message/Role/LlmEvent/ToolDefinition types
     openai.rs        — OpenAiProvider (OpenAI Chat Completions, tool-calling)
-    copilot.rs       — CopilotProvider (route by model: OpenAI/Anthropic/Codex transports)
+    copilot.rs       — CopilotProvider (route by model: vendor from /models cache, name heuristics fallback)
     codex.rs         — CodexProvider (chatgpt.com/backend-api responses)
     anthropic.rs     — AnthropicProvider (Messages API transport)
     gemini.rs        — GeminiProvider (Google Cloud Code Assist streaming)
