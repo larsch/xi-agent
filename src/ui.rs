@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
@@ -219,15 +219,24 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Chat log ──────────────────────────────────────────────────────────────
     let inner_height = log_area.height as usize;
-    let pane_width = log_area.width as usize;
+    let mut log_content_area = log_area;
 
     // Pre-wrapped lines: each Line is exactly one visual row.
-    let mut lines = build_log_lines(
-        &app.messages,
-        app.streaming,
-        &app.queued_steering,
-        pane_width,
-    );
+    let mut lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, log_area.width as usize);
+
+    let log_scrollbar_area = if lines.len() > inner_height {
+        let (content_area, scrollbar_area) = split_scrollbar_column(log_area);
+        log_content_area = content_area;
+        lines = build_log_lines(
+            &app.messages,
+            app.streaming,
+            &app.queued_steering,
+            log_content_area.width as usize,
+        );
+        scrollbar_area
+    } else {
+        None
+    };
 
     // Store log height for use as page size in the event loop.
     app.last_log_height = inner_height;
@@ -257,13 +266,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .scroll((app.log_scroll as u16, 0));
 
     f.render_widget(Clear, log_area);
-    f.render_widget(log_paragraph, log_area);
+    f.render_widget(log_paragraph, log_content_area);
 
     if total_lines > inner_height {
         let mut scrollbar_state = ScrollbarState::new(max_scroll + 1).position(app.log_scroll);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            log_area,
+            log_scrollbar_area.unwrap_or(log_area),
             &mut scrollbar_state,
         );
     }
@@ -325,6 +334,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
         // Item rows.
         if layout.selection_items_height > 0 {
+            let selection_total = app.selection_items.len();
+            let selection_scrollbar_needed = selection_total > MAX_SELECTION_VISIBLE;
+            let (selection_content_area, selection_scrollbar_area) =
+                if selection_scrollbar_needed {
+                    split_scrollbar_column(sel_items_area)
+                } else {
+                    (sel_items_area, None)
+                };
             let item_lines = if app.selection_items.is_empty() {
                 vec![Line::from(vec![
                     Span::styled("  ", Style::default().bg(SELECTION_BG)),
@@ -341,20 +358,19 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     &app.selection_items,
                     app.selection_selected,
                     app.selection_scroll,
-                    width,
+                    selection_content_area.width as usize,
                 )
             };
-            f.render_widget(Paragraph::new(item_lines), sel_items_area);
+            f.render_widget(Paragraph::new(item_lines), selection_content_area);
 
             // Scrollbar when the list is longer than the visible window.
-            let total = app.selection_items.len();
-            if total > MAX_SELECTION_VISIBLE {
-                let max_scroll = total - MAX_SELECTION_VISIBLE;
+            if selection_scrollbar_needed {
+                let max_scroll = selection_total - MAX_SELECTION_VISIBLE;
                 let mut sb_state =
                     ScrollbarState::new(max_scroll + 1).position(app.selection_scroll);
                 f.render_stateful_widget(
                     Scrollbar::new(ScrollbarOrientation::VerticalRight),
-                    sel_items_area,
+                    selection_scrollbar_area.unwrap_or(sel_items_area),
                     &mut sb_state,
                 );
             }
@@ -1036,6 +1052,18 @@ fn wrap_str(text: &str, width: usize) -> Vec<String> {
         .into_iter()
         .map(|cow| cow.into_owned())
         .collect()
+}
+
+fn split_scrollbar_column(area: Rect) -> (Rect, Option<Rect>) {
+    if area.width > 1 {
+        let parts = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    }
 }
 
 fn normalize_terminal_segment(text: &str, start_col: usize) -> String {
@@ -1807,6 +1835,54 @@ mod tests {
         let joined = buffer_to_plain_lines(terminal.backend().buffer(), 40, 10).join("\n");
         assert!(joined.contains("│short"), "{joined}");
         assert!(!joined.contains("much longer"), "{joined}");
+    }
+
+    #[test]
+    fn log_user_background_does_not_extend_into_scrollbar_column() {
+        let backend = ratatui::backend::TestBackend::new(20, 8);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mut app = make_app();
+        app.messages = vec![
+            Message::user("one"),
+            Message::user("two"),
+            Message::user("three"),
+            Message::user("four"),
+        ];
+
+        terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
+
+        let buf = terminal.backend().buffer();
+        let rightmost_x = 19;
+        for y in 0..8 {
+            assert_ne!(buf[(rightmost_x, y)].bg, USER_BG);
+        }
+    }
+
+    #[test]
+    fn selection_background_does_not_extend_into_scrollbar_column() {
+        let backend = ratatui::backend::TestBackend::new(30, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mut app = make_app();
+        app.selection_mode = true;
+        app.selection_items = (0..30)
+            .map(|i| CompletionItem {
+                label: format!("item-{i}"),
+                detail: String::new(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+            })
+            .collect();
+
+        terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
+
+        let buf = terminal.backend().buffer();
+        let rightmost_x = 29;
+        for y in 0..20 {
+            let bg = buf[(rightmost_x, y)].bg;
+            assert_ne!(bg, SELECTION_BG);
+            assert_ne!(bg, SELECTION_SEL_BG);
+        }
     }
 
     #[test]
