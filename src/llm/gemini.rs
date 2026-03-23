@@ -1,9 +1,9 @@
 use futures_util::StreamExt;
 
 use super::{
-    common::{send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
+    common::{SseLineDecoder, send_streaming_request},
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";

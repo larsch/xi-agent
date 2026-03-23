@@ -2,9 +2,9 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 use super::{
-    common::{infer_initiator, send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
+    common::{SseLineDecoder, infer_initiator, send_streaming_request},
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";

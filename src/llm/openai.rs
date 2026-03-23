@@ -6,9 +6,9 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::{infer_initiator, normalize_tool_name, send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
+    common::{SseLineDecoder, infer_initiator, normalize_tool_name, send_streaming_request},
 };
 
 pub struct OpenAiProvider {
@@ -368,7 +368,8 @@ fn to_oai_messages(messages: &[Message]) -> Vec<OaiMessage> {
                             .unwrap_or_else(|| format!("call_{call_idx}")),
                         r#type: "function",
                         function: OaiToolCallFunction {
-                            name: normalize_tool_name(tc.tool_name.as_deref().unwrap_or_default()).to_string(),
+                            name: normalize_tool_name(tc.tool_name.as_deref().unwrap_or_default())
+                                .to_string(),
                             arguments: tc
                                 .tool_args
                                 .as_ref()

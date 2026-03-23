@@ -2,9 +2,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::send_streaming_request,
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
-    ToolDefinition, UsageStats,
+    ToolDefinition, UsageStats, common::send_streaming_request,
 };
 
 pub struct OllamaProvider {

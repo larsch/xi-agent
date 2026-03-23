@@ -2,9 +2,9 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 use super::{
-    common::{infer_initiator, normalize_tool_name, send_streaming_request, SseLineDecoder},
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
     ToolDefinition, UsageStats,
+    common::{SseLineDecoder, infer_initiator, normalize_tool_name, send_streaming_request},
 };
 
 pub struct AnthropicProvider {

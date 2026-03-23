@@ -129,10 +129,7 @@ async fn fetch_and_cache_models(
                 entry.id.clone(),
                 CopilotModelMeta {
                     vendor: entry.vendor.clone(),
-                    max_context_window_tokens: entry
-                        .capabilities
-                        .limits
-                        .max_context_window_tokens,
+                    max_context_window_tokens: entry.capabilities.limits.max_context_window_tokens,
                 },
             );
         }
@@ -179,12 +176,7 @@ impl CopilotProvider {
             .map(|s| s.to_string())
             .unwrap_or_else(|| extract_base_url(access_token));
 
-        let inner = build_inner(
-            model,
-            access_token,
-            &resolved_base_url,
-            reasoning_effort,
-        );
+        let inner = build_inner(model, access_token, &resolved_base_url, reasoning_effort);
 
         Self {
             inner,
@@ -326,16 +318,13 @@ pub mod test_helpers {
     /// Insert a synthetic entry into the global cache.
     /// Use unique model names in tests to avoid cross-test pollution.
     pub fn insert_cache(model: &str, vendor: &str, context_window: Option<usize>) {
-        cache()
-            .write()
-            .unwrap()
-            .insert(
-                model.to_string(),
-                CopilotModelMeta {
-                    vendor: vendor.to_string(),
-                    max_context_window_tokens: context_window,
-                },
-            );
+        cache().write().unwrap().insert(
+            model.to_string(),
+            CopilotModelMeta {
+                vendor: vendor.to_string(),
+                max_context_window_tokens: context_window,
+            },
+        );
     }
 }
 
@@ -357,11 +346,7 @@ mod tests {
 
     #[test]
     fn cache_round_trips_vendor_and_context_window() {
-        test_helpers::insert_cache(
-            "__test_anthropic_model__",
-            "Anthropic",
-            Some(200_000),
-        );
+        test_helpers::insert_cache("__test_anthropic_model__", "Anthropic", Some(200_000));
         assert_eq!(
             CopilotProvider::cached_vendor("__test_anthropic_model__").as_deref(),
             Some("Anthropic")

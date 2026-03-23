@@ -238,7 +238,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let mut log_content_area = log_area;
 
     // Pre-wrapped lines: each Line is exactly one visual row.
-    let mut lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, log_area.width as usize);
+    let mut lines = build_log_lines(
+        &app.messages,
+        app.streaming,
+        &app.queued_steering,
+        log_area.width as usize,
+    );
 
     let log_scrollbar_area = if lines.len() > inner_height {
         let (content_area, scrollbar_area) = split_scrollbar_column(log_area);
@@ -352,12 +357,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         if layout.selection_items_height > 0 {
             let selection_total = app.selection_items.len();
             let selection_scrollbar_needed = selection_total > MAX_SELECTION_VISIBLE;
-            let (selection_content_area, selection_scrollbar_area) =
-                if selection_scrollbar_needed {
-                    split_scrollbar_column(sel_items_area)
-                } else {
-                    (sel_items_area, None)
-                };
+            let (selection_content_area, selection_scrollbar_area) = if selection_scrollbar_needed {
+                split_scrollbar_column(sel_items_area)
+            } else {
+                (sel_items_area, None)
+            };
             let item_lines = if app.selection_items.is_empty() {
                 vec![Line::from(vec![
                     Span::styled("  ", Style::default().bg(SELECTION_BG)),
@@ -1128,7 +1132,11 @@ fn wrap_input_line(text: &str, width: usize) -> Vec<String> {
         *line_w += piece.width();
     };
 
-    let handle_run = |run_text: &str, is_ws: bool, out: &mut Vec<String>, line: &mut String, line_w: &mut usize| {
+    let handle_run = |run_text: &str,
+                      is_ws: bool,
+                      out: &mut Vec<String>,
+                      line: &mut String,
+                      line_w: &mut usize| {
         if run_text.is_empty() {
             return;
         }
@@ -1433,7 +1441,11 @@ mod tests {
         buffer_to_plain_lines(terminal.backend().buffer(), width, height)
     }
 
-    fn buffer_to_plain_lines(buf: &ratatui::buffer::Buffer, width: u16, height: u16) -> Vec<String> {
+    fn buffer_to_plain_lines(
+        buf: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
         (0..height)
             .map(|y| {
                 let mut row = String::new();
@@ -1448,13 +1460,23 @@ mod tests {
     #[test]
     fn input_wrap_prefers_word_boundaries() {
         let chunks = wrap_input_line("hello world from tau", 11);
-        assert_eq!(chunks, vec!["hello world".to_string(), " from tau".to_string()]);
+        assert_eq!(
+            chunks,
+            vec!["hello world".to_string(), " from tau".to_string()]
+        );
     }
 
     #[test]
     fn input_wrap_splits_long_tokens_at_viewport_boundary() {
         let chunks = wrap_input_line("small superlongtokenhere", 10);
-        assert_eq!(chunks, vec!["small supe".to_string(), "rlongtoken".to_string(), "here".to_string()]);
+        assert_eq!(
+            chunks,
+            vec![
+                "small supe".to_string(),
+                "rlongtoken".to_string(),
+                "here".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -2077,7 +2099,9 @@ mod tests {
             false,
         )];
 
-        terminal.draw(|f| draw(f, &mut app)).expect("first draw succeeds");
+        terminal
+            .draw(|f| draw(f, &mut app))
+            .expect("first draw succeeds");
 
         app.messages = vec![Message::tool_result("1", "short", false)];
 

@@ -1,9 +1,9 @@
 use clap::Parser;
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -113,7 +113,8 @@ async fn main() -> io::Result<()> {
         stdout,
         SetTitle(&window_title),
         EnterAlternateScreen,
-        EnableMouseCapture
+        EnableMouseCapture,
+        EnableBracketedPaste
     )?;
 
     let mut keyboard_enhancements_enabled = false;
@@ -261,7 +262,8 @@ async fn main() -> io::Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
@@ -276,6 +278,10 @@ enum RunResult {
     ChangeModel(String),
     ChangeProvider(String),
     ChangeThinking(ThinkingLevel),
+}
+
+fn normalize_paste_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 struct UnavailableProvider {
@@ -572,6 +578,18 @@ async fn run(
                         MouseEventKind::ScrollDown => app.scroll_down_lines(3),
                         _ => {}
                     },
+                    Event::Paste(text) => {
+                        if !app.login_active {
+                            if app.selection_mode {
+                                app.exit_selection_mode();
+                            }
+                            app.textarea.insert_str(normalize_paste_text(&text));
+                            app.update_completions();
+                            if app.should_fetch_models() {
+                                app.start_model_fetch(provider);
+                            }
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -765,8 +783,14 @@ async fn run_print_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_model, resolve_thinking_level};
+    use super::{normalize_paste_text, resolve_model, resolve_thinking_level};
     use crate::{config::TauConfig, provider::ProviderKind, thinking::ThinkingLevel};
+
+    #[test]
+    fn normalize_paste_text_converts_crlf_and_cr_to_lf() {
+        let pasted = "a\r\nb\rc\n";
+        assert_eq!(normalize_paste_text(pasted), "a\nb\nc\n");
+    }
 
     #[test]
     fn resolve_model_prefers_cli_over_config() {

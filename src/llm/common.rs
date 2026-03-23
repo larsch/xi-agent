@@ -54,9 +54,7 @@ pub struct SseLineDecoder {
 
 impl SseLineDecoder {
     pub fn new() -> Self {
-        Self {
-            buf: String::new(),
-        }
+        Self { buf: String::new() }
     }
 
     /// Append raw bytes from the network into the internal buffer.
