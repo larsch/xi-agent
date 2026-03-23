@@ -109,6 +109,20 @@ struct PanelInputs<'a> {
     has_login_code: bool,
 }
 
+fn input_visual_line_count(lines: &[String], width: usize) -> usize {
+    if width == 0 {
+        return lines.len().max(1);
+    }
+
+    let mut count = 0usize;
+    for line in lines {
+        let normalized = normalize_terminal_segment(line, 0);
+        count += wrap_input_line(&normalized, width).len();
+    }
+
+    count.max(1)
+}
+
 fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
     let capped_input = input
         .input_line_count
@@ -173,10 +187,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let width = f.area().width as usize;
     let resume_hint_visible = app.should_show_resume_hint();
 
+    let input_line_count = input_visual_line_count(app.textarea.lines(), width);
+
     let layout = compute_panel_heights(PanelInputs {
         terminal_height,
         width,
-        input_line_count: app.textarea.lines().len(),
+        input_line_count,
         show_info: app.show_info,
         login_active: app.login_active,
         selection_mode: app.selection_mode,
@@ -423,7 +439,33 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Input box ─────────────────────────────────────────────────────────────
     if !app.login_active {
-        f.render_widget(&app.textarea, input_area);
+        // tui-textarea scrolls horizontally for long single lines.
+        // For chat-style input we want visual hard-wrapping instead.
+        let input_width = input_area.width as usize;
+        let input_lines = app.textarea.lines().to_vec();
+        let cursor = app.textarea.cursor();
+        let wrapped = wrap_input_for_render(&input_lines, cursor, input_width);
+        let wrapped_lines = wrapped.lines;
+        let wrapped_cursor = wrapped.cursor;
+
+        let paragraph = Paragraph::new(Text::from(
+            wrapped_lines
+                .into_iter()
+                .map(Line::from)
+                .collect::<Vec<Line<'static>>>(),
+        ))
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default().bg(INPUT_BG)),
+        )
+        .style(Style::default().fg(Color::White).bg(INPUT_BG));
+
+        f.render_widget(paragraph, input_area);
+
+        let cursor_x = input_area.x.saturating_add(wrapped_cursor.1 as u16);
+        let cursor_y = input_area.y.saturating_add(wrapped_cursor.0 as u16);
+        f.set_cursor_position((cursor_x, cursor_y));
     }
 
     // ── Info bar ──────────────────────────────────────────────────────────────
@@ -1054,6 +1096,176 @@ fn wrap_str(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// Wrap a single input line.
+///
+/// Rule set:
+/// - Regular tokens (<= 50% of the viewport width) use normal word-wrap.
+/// - Long tokens (> 50% of width) are split at the viewport boundary.
+fn wrap_input_line(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0usize;
+
+    // Iterate over alternating runs of whitespace and non-whitespace so we can
+    // preserve typed spaces while applying token-aware wrapping.
+    let mut run = String::new();
+    let mut run_is_ws: Option<bool> = None;
+
+    let flush_line = |out: &mut Vec<String>, line: &mut String, line_w: &mut usize| {
+        out.push(std::mem::take(line));
+        *line_w = 0;
+    };
+
+    let append_piece = |line: &mut String, line_w: &mut usize, piece: &str| {
+        line.push_str(piece);
+        *line_w += piece.width();
+    };
+
+    let handle_run = |run_text: &str, is_ws: bool, out: &mut Vec<String>, line: &mut String, line_w: &mut usize| {
+        if run_text.is_empty() {
+            return;
+        }
+
+        if is_ws {
+            // Preserve whitespace exactly; wrap at viewport boundary if needed.
+            for ch in run_text.chars() {
+                let ch_w = ch.width().unwrap_or(0);
+                if *line_w + ch_w > width && !line.is_empty() {
+                    flush_line(out, line, line_w);
+                }
+                line.push(ch);
+                *line_w += ch_w;
+                if *line_w >= width {
+                    flush_line(out, line, line_w);
+                }
+            }
+            return;
+        }
+
+        let token_w = run_text.width();
+        let long_token = token_w.saturating_mul(2) > width;
+
+        if long_token {
+            // Requested behaviour: split long tokens at window boundary.
+            for ch in run_text.chars() {
+                let ch_w = ch.width().unwrap_or(0);
+                if *line_w + ch_w > width && !line.is_empty() {
+                    flush_line(out, line, line_w);
+                }
+                line.push(ch);
+                *line_w += ch_w;
+                if *line_w >= width {
+                    flush_line(out, line, line_w);
+                }
+            }
+        } else if *line_w + token_w <= width {
+            append_piece(line, line_w, run_text);
+        } else if line.is_empty() {
+            // Defensive: should rarely happen for "small" tokens, but keep safe.
+            append_piece(line, line_w, run_text);
+        } else {
+            flush_line(out, line, line_w);
+            append_piece(line, line_w, run_text);
+        }
+    };
+
+    for ch in text.chars() {
+        let is_ws = ch.is_whitespace();
+        match run_is_ws {
+            None => {
+                run_is_ws = Some(is_ws);
+                run.push(ch);
+            }
+            Some(kind) if kind == is_ws => run.push(ch),
+            Some(kind) => {
+                handle_run(&run, kind, &mut out, &mut line, &mut line_w);
+                run.clear();
+                run.push(ch);
+                run_is_ws = Some(is_ws);
+            }
+        }
+    }
+
+    if let Some(kind) = run_is_ws {
+        handle_run(&run, kind, &mut out, &mut line, &mut line_w);
+    }
+
+    if out.is_empty() || !line.is_empty() {
+        out.push(line);
+    }
+
+    out
+}
+
+#[derive(Debug, Clone)]
+struct WrappedInput {
+    lines: Vec<String>,
+    cursor: (usize, usize),
+}
+
+fn wrap_input_for_render(lines: &[String], cursor: (usize, usize), width: usize) -> WrappedInput {
+    if width == 0 {
+        return WrappedInput {
+            lines: lines.to_vec(),
+            cursor,
+        };
+    }
+
+    let mut wrapped_lines: Vec<String> = Vec::new();
+    let mut wrapped_cursor = (0usize, 0usize);
+
+    for (row_idx, line) in lines.iter().enumerate() {
+        let normalized = normalize_terminal_segment(line, 0);
+        let chunks = wrap_input_line(&normalized, width);
+
+        if row_idx == cursor.0 {
+            let mut before = String::new();
+            for ch in normalized.chars().take(cursor.1) {
+                before.push(ch);
+            }
+            let before_w = before.width();
+
+            let mut consumed = 0usize;
+            let mut row_off = 0usize;
+            let mut col_off = 0usize;
+
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let chunk_w = chunk.width();
+                if before_w <= consumed + chunk_w {
+                    row_off = idx;
+                    col_off = before_w.saturating_sub(consumed);
+                    break;
+                }
+                consumed += chunk_w;
+                if idx == chunks.len() - 1 {
+                    row_off = idx;
+                    col_off = chunk_w;
+                }
+            }
+
+            wrapped_cursor = (wrapped_lines.len() + row_off, col_off);
+        }
+
+        wrapped_lines.extend(chunks);
+    }
+
+    if wrapped_lines.is_empty() {
+        wrapped_lines.push(String::new());
+    }
+
+    WrappedInput {
+        lines: wrapped_lines,
+        cursor: wrapped_cursor,
+    }
+}
+
 fn split_scrollbar_column(area: Rect) -> (Rect, Option<Rect>) {
     if area.width > 1 {
         let parts = Layout::default()
@@ -1231,6 +1443,47 @@ mod tests {
                 row.trim_end().to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn input_wrap_prefers_word_boundaries() {
+        let chunks = wrap_input_line("hello world from tau", 11);
+        assert_eq!(chunks, vec!["hello world".to_string(), " from tau".to_string()]);
+    }
+
+    #[test]
+    fn input_wrap_splits_long_tokens_at_viewport_boundary() {
+        let chunks = wrap_input_line("small superlongtokenhere", 10);
+        assert_eq!(chunks, vec!["small supe".to_string(), "rlongtoken".to_string(), "here".to_string()]);
+    }
+
+    #[test]
+    fn input_visual_line_count_wraps_long_lines() {
+        let lines = vec!["short".to_string(), "12345 67890".to_string()];
+        let count = input_visual_line_count(&lines, 6);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn layout_uses_visual_input_line_count_for_wrapped_input() {
+        let wrapped_lines = input_visual_line_count(&["a very long single line".to_string()], 8);
+        assert!(wrapped_lines > 1);
+
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 20,
+            width: 8,
+            input_line_count: wrapped_lines,
+            show_info: false,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            login_url: None,
+            has_login_code: false,
+        });
+
+        assert_eq!(heights.input_height as usize, wrapped_lines);
     }
 
     #[test]
