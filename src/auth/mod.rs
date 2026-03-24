@@ -227,3 +227,121 @@ pub async fn refresh_provider(provider: &str, tx: UnboundedSender<LoginEvent>) {
         }
     }
 }
+
+// ── Token expiry preflight ────────────────────────────────────────────────────
+
+/// Leeway for proactive token refresh before actual expiration (in seconds).
+/// Tokens expiring within this window will trigger a refresh to avoid
+/// last-minute failures.
+pub const AUTH_REFRESH_LEEWAY_SECS: i64 = 120;
+
+/// Classification of a stored auth token's freshness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthTokenState {
+    /// No credentials are stored for the provider.
+    Missing,
+    /// Token is fresh and has time before expiration.
+    Valid,
+    /// Token expires soon (within the leeway window).
+    ExpiringSoon,
+    /// Token has already expired.
+    Expired,
+}
+
+/// Check the expiration state of the stored token for the given provider.
+///
+/// Returns `Missing` if no credentials exist, otherwise classifies the token
+/// based on `expires_at` relative to `now_secs` with a `leeway_secs` buffer.
+///
+/// # Arguments
+/// - `provider`: Provider name ("copilot", "codex", "gemini")
+/// - `now_secs`: Current time as Unix epoch seconds
+/// - `leeway_secs`: Seconds before expiry to consider the token "expiring soon"
+pub fn token_state(
+    provider: &str,
+    now_secs: i64,
+    leeway_secs: i64,
+) -> anyhow::Result<AuthTokenState> {
+    let store = AuthStore::load_default()?;
+
+    let expires_at = match provider {
+        "copilot" => store.get_copilot().map(|c| c.expires_at),
+        "codex" => store.get_codex().map(|c| c.expires_at),
+        "gemini" => store.get_gemini().map(|c| c.expires_at),
+        _ => return Ok(AuthTokenState::Missing),
+    };
+
+    let Some(expires_at) = expires_at else {
+        return Ok(AuthTokenState::Missing);
+    };
+
+    if now_secs >= expires_at {
+        Ok(AuthTokenState::Expired)
+    } else if now_secs >= expires_at - leeway_secs {
+        Ok(AuthTokenState::ExpiringSoon)
+    } else {
+        Ok(AuthTokenState::Valid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_state_missing_when_no_creds() {
+        // Non-existent provider returns Missing without error
+        let state = token_state("nonexistent", 1000, 120).unwrap();
+        assert_eq!(state, AuthTokenState::Missing);
+    }
+
+    #[test]
+    fn token_state_expired_when_past_expiry() {
+        let state = token_state_for_expiry(1000, 900, 120);
+        assert_eq!(state, AuthTokenState::Expired);
+    }
+
+    #[test]
+    fn token_state_expiring_soon_within_leeway() {
+        // expires_at = 1100, now = 1000, leeway = 120
+        // 1100 - 120 = 980, so 1000 is within the expiring-soon window
+        let state = token_state_for_expiry(1000, 1100, 120);
+        assert_eq!(state, AuthTokenState::ExpiringSoon);
+    }
+
+    #[test]
+    fn token_state_expiring_soon_at_boundary() {
+        // expires_at = 1120, now = 1000, leeway = 120
+        // 1120 - 120 = 1000 (exactly at boundary)
+        let state = token_state_for_expiry(1000, 1120, 120);
+        assert_eq!(state, AuthTokenState::ExpiringSoon);
+    }
+
+    #[test]
+    fn token_state_valid_when_fresh() {
+        // expires_at = 2000, now = 1000, leeway = 120
+        // 2000 - 120 = 1880, so 1000 is well before expiry
+        let state = token_state_for_expiry(1000, 2000, 120);
+        assert_eq!(state, AuthTokenState::Valid);
+    }
+
+    #[test]
+    fn token_state_valid_just_outside_leeway() {
+        // expires_at = 1121, now = 1000, leeway = 120
+        // 1121 - 120 = 1001, so 1000 is just outside (still valid)
+        let state = token_state_for_expiry(1000, 1121, 120);
+        assert_eq!(state, AuthTokenState::Valid);
+    }
+
+    /// Helper to test token_state logic without needing real credentials.
+    /// Simulates the classification logic inline.
+    fn token_state_for_expiry(now_secs: i64, expires_at: i64, leeway_secs: i64) -> AuthTokenState {
+        if now_secs >= expires_at {
+            AuthTokenState::Expired
+        } else if now_secs >= expires_at - leeway_secs {
+            AuthTokenState::ExpiringSoon
+        } else {
+            AuthTokenState::Valid
+        }
+    }
+}

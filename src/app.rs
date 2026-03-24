@@ -47,6 +47,15 @@ struct PendingAsk {
     allow_freeform: bool,
 }
 
+/// Target operation to retry after token refresh completes.
+#[derive(Debug, Clone, Copy)]
+enum RetryTarget {
+    /// Retry the last agent turn (chat request).
+    AgentTurn,
+    /// Retry the model list fetch.
+    ModelFetch,
+}
+
 /// Maximum number of rows shown in the selection menu before scrolling.
 pub const MAX_SELECTION_VISIBLE: usize = 12;
 
@@ -393,6 +402,80 @@ impl App {
         )
     }
 
+    /// Trigger a token refresh for unauthorized errors and set up automatic retry.
+    ///
+    /// Returns `true` if refresh was triggered, `false` if conditions weren't met
+    /// (already refreshing, provider doesn't support refresh, etc.).
+    fn trigger_auth_refresh(&mut self, target: RetryTarget) -> bool {
+        if !self.provider_supports_token_refresh() || self.refresh_in_progress {
+            return false;
+        }
+
+        log::debug!(
+            "triggering token refresh: provider={} target={:?}",
+            self.current_provider,
+            target
+        );
+
+        self.refresh_in_progress = true;
+
+        match target {
+            RetryTarget::AgentTurn => {
+                self.retry_after_refresh = true;
+            }
+            RetryTarget::ModelFetch => {
+                self.retry_model_fetch_after_refresh = true;
+            }
+        }
+
+        let provider = self.current_provider.clone();
+        let tx = self.login_tx.clone();
+        tokio::spawn(async move {
+            auth::refresh_provider(&provider, tx).await;
+        });
+
+        true
+    }
+
+    /// Check if the current provider's token needs proactive refresh before
+    /// making a request. If so, trigger refresh and return `true`.
+    ///
+    /// This prevents requests from failing mid-flight due to known token expiry.
+    /// Guards: only triggers when not already streaming and not already refreshing.
+    fn check_token_preflight(&mut self, target: RetryTarget) -> bool {
+        if self.streaming || self.refresh_in_progress || !self.provider_supports_token_refresh() {
+            return false;
+        }
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let state = match auth::token_state(
+            &self.current_provider,
+            now_secs,
+            auth::AUTH_REFRESH_LEEWAY_SECS,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("preflight token check failed: {e}");
+                return false;
+            }
+        };
+
+        match state {
+            auth::AuthTokenState::Expired | auth::AuthTokenState::ExpiringSoon => {
+                log::debug!(
+                    "preflight: token {:?}, triggering refresh before request",
+                    state
+                );
+                self.trigger_auth_refresh(target)
+            }
+            _ => false,
+        }
+    }
+
     /// Reset the input area to a blank state between submissions.
     /// Also clears any active completion state.
     pub fn reset_textarea(&mut self) {
@@ -444,6 +527,12 @@ impl App {
 
     /// Spawn a background task to fetch the model list from the provider.
     pub fn start_model_fetch(&mut self, provider: &DynProvider) {
+        // Proactive token refresh check before fetching models
+        if self.check_token_preflight(RetryTarget::ModelFetch) {
+            // Refresh triggered; fetch will be retried after refresh completes
+            return;
+        }
+
         self.models_loading = true;
         self.model_fetch_error = None;
         let future = provider.list_models();
@@ -463,21 +552,10 @@ impl App {
                 self.model_fetch_error = None;
             }
             Err(e) => {
-                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized
-                    && self.provider_supports_token_refresh();
+                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
 
-                if is_unauthorized && !self.refresh_in_progress {
-                    log::debug!(
-                        "list_models returned 401, attempting token refresh: provider={}",
-                        self.current_provider
-                    );
-                    self.refresh_in_progress = true;
-                    self.retry_model_fetch_after_refresh = true;
-                    let provider = self.current_provider.clone();
-                    let tx = self.login_tx.clone();
-                    tokio::spawn(async move {
-                        auth::refresh_provider(&provider, tx).await;
-                    });
+                if is_unauthorized && self.trigger_auth_refresh(RetryTarget::ModelFetch) {
+                    // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
                     self.model_fetch_error = Some(e.to_string());
                 }
@@ -1243,6 +1321,13 @@ impl App {
         self.reset_textarea();
         self.latest_usage = None;
         self.auto_scroll = true;
+
+        // Proactive token refresh check before starting the request
+        if self.check_token_preflight(RetryTarget::AgentTurn) {
+            // Refresh triggered; request will be retried after refresh completes
+            return;
+        }
+
         self.streaming = true;
         self.auth_retry_budget = 1;
 
@@ -1279,6 +1364,13 @@ impl App {
         self.reset_textarea();
         self.latest_usage = None;
         self.auto_scroll = true;
+
+        // Proactive token refresh check before starting the request
+        if self.check_token_preflight(RetryTarget::AgentTurn) {
+            // Refresh triggered; request will be retried after refresh completes
+            return;
+        }
+
         self.streaming = true;
         self.auth_retry_budget = 1;
 
@@ -1421,24 +1513,21 @@ impl App {
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
-                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized
-                    && self.provider_supports_token_refresh();
 
-                if is_unauthorized && self.auth_retry_budget > 0 && !self.refresh_in_progress {
+                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
+
+                if is_unauthorized
+                    && self.auth_retry_budget > 0
+                    && self.trigger_auth_refresh(RetryTarget::AgentTurn)
+                {
                     log::debug!(
-                        "received 401, attempting token refresh: provider={} remaining_budget={}",
+                        "received 401, refresh triggered: provider={} remaining_budget={}",
                         self.current_provider,
                         self.auth_retry_budget
                     );
                     self.auth_retry_budget -= 1;
-                    self.refresh_in_progress = true;
-                    self.retry_after_refresh = true;
                     self.streaming = false;
-                    let provider = self.current_provider.clone();
-                    let tx = self.login_tx.clone();
-                    tokio::spawn(async move {
-                        auth::refresh_provider(&provider, tx).await;
-                    });
+                    // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
                     self.messages
                         .push(Message::assistant(format!("[Error: {e}]")));
