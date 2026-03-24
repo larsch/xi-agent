@@ -1,8 +1,8 @@
 # TAU Code Review
 
-**Date:** 2026-03-22  
+**Date:** 2026-03-22 (last refreshed: 2026-03-24)  
 **Scope:** Architecture, structure, abstractions, complexity, correctness, maintainability  
-**Build Status:** ✅ Compiles clean, 0 clippy warnings, 146 tests passing
+**Build Status:** ✅ Compiles clean, 0 clippy warnings, 229 tests passing
 
 ---
 
@@ -19,7 +19,8 @@ None identified. The codebase compiles cleanly with no warnings or test failures
 **Severity:** High  
 **File:** `src/app.rs` (55KB)
 
-The `App` struct now has **70+ fields**. Current state:
+The `App` struct now has **~95 fields** (was ~70 at review time; grown further with auth
+preflight and thinking fields added post-review). Current state:
 - Message history (1 field)
 - Textarea input state (1 field)
 - Scroll/display state (5 fields)
@@ -71,9 +72,9 @@ pub struct App {
 ### 3. Monolithic Event Loop
 
 **Severity:** High  
-**File:** `src/main.rs`, lines ~430–750
+**File:** `src/main.rs`, lines ~340–667
 
-The `run()` function contains a **320-line tokio::select!** block handling:
+The `run()` function contains a **327-line tokio::select!** block handling:
 - Terminal key events + mouse
 - LLM streaming events
 - Model list fetches
@@ -141,6 +142,11 @@ This makes the event loop testable and extensible.
 
 **Severity:** Medium-High  
 **Files:** `src/llm/openai.rs`, `src/llm/codex.rs`, `src/llm/gemini.rs`, etc.
+
+**Partial improvement in `416c270`:** HTTP status → typed error mapping is now centralized
+in `llm/common.rs` (`ProviderError`/`ProviderErrorKind`), eliminating the per-provider 401
+string heuristics described below. The remaining duplication is SSE stream parsing and
+provider-specific message serialization.
 
 Each provider independently implements:
 - Message serialization to provider-specific format
@@ -304,7 +310,7 @@ pub fn abort_agent_loop(&mut self) {
 ```
 
 **Problem:** 
-1. Dropping a task handle doesn't guarantee prompt cancellation
+1. Dropping a task handle doesn't guarantee prompt cancellation of long-running tools
 2. If the agent loop is in a long-running tool, it will continue past cancellation
 3. No explicit cancellation token passed to agent loop
 
@@ -312,18 +318,13 @@ pub fn abort_agent_loop(&mut self) {
 1. User starts long bash command
 2. User presses Esc to abort
 3. `abort_agent_loop()` drops the handle
-4. Agent loop is still in `bash.execute()`, waiting for process
-5. Process continues running
-6. When it finishes, agent loop polls the channel (now dead) and panics?
+4. Agent loop is still in `bash.execute()`, waiting for the subprocess
+5. The subprocess continues running until it exits naturally
 
-Actually, looking closer, the agent spawns in isolation:
-```rust
-tokio::spawn(async move {
-    agent::run_agent_loop(...).await;
-});
-```
-
-If the loop is dropped, the channel senders are dropped. The loop will then receive `None` on recv() and exit gracefully. But this is implicit and fragile.
+Note: the channel-close scenario is actually safe — when the task handle is dropped,
+the `UnboundedSender` in `App` is dropped too, causing `recv()` in the agent loop to
+return `None` and exit cleanly. The real problem is that in-flight tool executions
+(especially long-running bash commands) are not interrupted.
 
 **Recommendation:** Pass an explicit cancellation token:
 ```rust
