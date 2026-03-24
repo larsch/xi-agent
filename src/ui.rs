@@ -840,6 +840,10 @@ fn build_log_lines(
                 } else {
                     msg.content.clone()
                 };
+                // Strip leading/trailing whitespace from tool output so that
+                // commands that emit a trailing newline (or leading blank lines)
+                // don't create spurious empty lines in the chat log display.
+                let content_for_display = content_for_display.trim().to_string();
 
                 let preview: String = content_for_display.chars().take(200).collect();
                 let truncated = content_for_display.len() > 200;
@@ -2223,5 +2227,42 @@ mod tests {
     #[test]
     fn split_read_file_header_rejects_non_header() {
         assert!(split_read_file_header("alpha\nbeta").is_none());
+    }
+
+    #[test]
+    fn tool_result_display_strips_leading_and_trailing_whitespace() {
+        let messages = vec![
+            Message::tool_call("1", "bash", json!({"command": "echo hi"})),
+            Message::tool_result("1", "\n\n  output line  \n\n", false),
+        ];
+
+        let lines = build_log_lines(&messages, false, &[], 80);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        // After trimming the whole string, we get "output line" (leading/trailing
+        // whitespace including the surrounding blank lines is stripped).
+        assert!(rendered.contains("│output line"), "{rendered}");
+        // No blank-line prefix: first rendered tool result content line should
+        // contain "output line", not an empty marker.
+        let result_lines: Vec<_> = lines
+            .iter()
+            .map(line_text)
+            .filter(|l| l.starts_with('│'))
+            .collect();
+        assert_eq!(result_lines.len(), 1, "should be exactly one result line: {rendered}");
+        assert!(result_lines[0].contains("output line"), "{rendered}");
+    }
+
+    #[test]
+    fn tool_result_display_trims_trailing_newline() {
+        let messages = vec![
+            Message::tool_call("1", "bash", json!({"command": "uptime"})),
+            Message::tool_result("1", "load: 1.0\n", false),
+        ];
+
+        let lines = build_log_lines(&messages, false, &[], 80);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("│load: 1.0"), "{rendered}");
+        // No extra blank line after the content.
+        assert!(!rendered.contains("│load: 1.0\n│"), "{rendered}");
     }
 }

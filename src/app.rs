@@ -480,6 +480,53 @@ impl App {
 
     /// Reset the input area to a blank state between submissions.
     /// Also clears any active completion state.
+    /// Sanitize free-form text before it enters the conversation.
+    ///
+    /// Rules applied in order:
+    /// 1. Leading and trailing *newlines* are stripped (spaces and other
+    ///    horizontal whitespace at the start/end of the first/last line are
+    ///    preserved — indentation is meaningful).
+    /// 2. Sequences matching `(\s*\n){3,}` are collapsed to `\n\n` (one blank
+    ///    line).  This handles both runs of bare newlines and "blank" lines
+    ///    that contain only spaces or tabs.  Up to two consecutive newlines
+    ///    (one blank line) are preserved as meaningful paragraph separators.
+    ///    Line content (including leading indentation) is never modified.
+    pub fn sanitize_text(text: &str) -> String {
+        // Strip only leading/trailing newlines, not spaces — indentation must
+        // be preserved on the first and last lines.
+        let trimmed = text.trim_matches('\n');
+        // Split on newlines and reassemble while capping runs of
+        // whitespace-only lines at 1 (= at most 2 newlines between content
+        // lines).  A line is "blank" when it contains only horizontal
+        // whitespace; its content is not emitted, but it counts toward the
+        // run.  Non-blank lines are emitted verbatim (indentation intact).
+        //
+        // Example: "a\n\n\nb" → ["a","","","b"] → "a\n\nb"
+        let mut result = String::with_capacity(trimmed.len());
+        let mut pending_empty = 0usize;
+        let mut has_content = false;
+        for line in trimmed.split('\n') {
+            if line.chars().all(|c| c == ' ' || c == '\t') {
+                // Blank / whitespace-only line.
+                if has_content {
+                    pending_empty += 1;
+                }
+            } else {
+                if has_content {
+                    // Separator newline + at most one blank line (= 2 newlines).
+                    result.push('\n');
+                    if pending_empty > 0 {
+                        result.push('\n');
+                    }
+                }
+                pending_empty = 0;
+                has_content = true;
+                result.push_str(line);
+            }
+        }
+        result
+    }
+
     pub fn reset_textarea(&mut self) {
         self.textarea = Self::make_textarea();
         self.completions.clear();
@@ -1333,7 +1380,7 @@ impl App {
     pub fn enqueue_steering_from_input(&mut self) {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
-        let trimmed = text.trim().to_string();
+        let trimmed = Self::sanitize_text(&text);
         if trimmed.is_empty() || !self.streaming || self.login_active {
             return;
         }
@@ -1353,7 +1400,7 @@ impl App {
     pub fn submit(&mut self, provider: &DynProvider) {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
-        let trimmed = text.trim().to_string();
+        let trimmed = Self::sanitize_text(&text);
         if trimmed.is_empty() || self.streaming || self.login_active {
             return;
         }
@@ -1399,7 +1446,8 @@ impl App {
             return;
         }
 
-        let mut msg = Message::user(text.trim());
+        let sanitized = Self::sanitize_text(&text);
+        let mut msg = Message::user(sanitized);
         msg.hidden = true;
         self.messages.push(msg);
         self.persist_messages();
@@ -1503,6 +1551,16 @@ impl App {
             AgentEvent::TextToken { text, phase } => {
                 self.ensure_assistant_message();
                 if let Some(last) = self.messages.last_mut() {
+                    // Strip leading newlines from the very first token so that
+                    // models that begin their response with a blank line don't
+                    // produce visual leading empty lines in the chat log.
+                    // Spaces are preserved — indentation on the first line is
+                    // intentional.
+                    let text = if last.content.is_empty() {
+                        text.trim_start_matches('\n').to_string()
+                    } else {
+                        text
+                    };
                     last.content.push_str(&text);
                     if phase != AssistantPhase::Unknown {
                         last.assistant_phase = Some(phase);
@@ -1549,6 +1607,16 @@ impl App {
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
+                // Trim trailing whitespace/newlines from the last assistant
+                // message once the stream is complete. Some models append a
+                // trailing newline or spaces that would otherwise show as a
+                // blank line at the end of the response. Also collapse any
+                // runs of 3+ newlines to 2 (one blank line).
+                if let Some(last) = self.messages.last_mut()
+                    && last.role == Role::Assistant
+                {
+                    last.content = Self::sanitize_text(&last.content);
+                }
                 self.persist_messages();
             }
             AgentEvent::Error(e) => {
@@ -1591,5 +1659,134 @@ impl App {
         while let Ok(ev) = self.event_rx.try_recv() {
             self.apply_event(ev);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::{
+        agent::AgentLoopConfig,
+        llm::AssistantPhase,
+        provider::ProviderKind,
+        thinking::ThinkingLevel,
+    };
+
+    fn make_app() -> App {
+        App::new(
+            "gpt-4o",
+            &ProviderKind::Copilot,
+            ThinkingLevel::Off,
+            AgentLoopConfig {
+                tools: HashMap::new(),
+                before_tool_call: None,
+                after_tool_call: None,
+            },
+        )
+    }
+
+    #[test]
+    fn text_token_strips_leading_newlines_from_first_token() {
+        let mut app = make_app();
+        app.apply_event(AgentEvent::TextToken {
+            text: "\n\n  hello".to_string(),
+            phase: AssistantPhase::Unknown,
+        });
+        let content = &app.messages.last().unwrap().content;
+        // Leading newlines stripped, but the leading spaces (indentation) kept.
+        assert_eq!(content, "  hello", "leading newlines should be stripped but indent preserved");
+    }
+
+    #[test]
+    fn text_token_preserves_whitespace_in_subsequent_tokens() {
+        let mut app = make_app();
+        app.apply_event(AgentEvent::TextToken {
+            text: "first".to_string(),
+            phase: AssistantPhase::Unknown,
+        });
+        app.apply_event(AgentEvent::TextToken {
+            text: "\n  indented".to_string(),
+            phase: AssistantPhase::Unknown,
+        });
+        let content = &app.messages.last().unwrap().content;
+        assert_eq!(
+            content, "first\n  indented",
+            "whitespace in non-first tokens must be preserved"
+        );
+    }
+
+    #[test]
+    fn done_event_trims_trailing_whitespace_from_assistant_message() {
+        let mut app = make_app();
+        app.streaming = true;
+        app.apply_event(AgentEvent::TextToken {
+            text: "answer\n\n".to_string(),
+            phase: AssistantPhase::Unknown,
+        });
+        app.apply_event(AgentEvent::Done);
+        let content = &app.messages.last().unwrap().content;
+        assert_eq!(content, "answer", "trailing whitespace should be trimmed");
+    }
+
+    #[test]
+    fn done_event_does_not_trim_non_assistant_last_message() {
+        let mut app = make_app();
+        app.streaming = true;
+        app.messages.push(Message::user("hello  "));
+        app.apply_event(AgentEvent::Done);
+        // The user message should not have been modified.
+        let last = app.messages.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.content, "hello  ");
+    }
+
+    #[test]
+    fn sanitize_text_strips_leading_and_trailing_newlines_only() {
+        // Leading/trailing newlines are removed; spaces are preserved.
+        assert_eq!(App::sanitize_text("\n\nhello\n\n"), "hello");
+        assert_eq!(App::sanitize_text("\n\n  hello  \n\n"), "  hello  ");
+        // Leading spaces on a line are preserved (indentation is meaningful).
+        assert_eq!(App::sanitize_text("  indented"), "  indented");
+    }
+
+    #[test]
+    fn sanitize_text_preserves_up_to_two_consecutive_newlines() {
+        assert_eq!(App::sanitize_text("a\nb"), "a\nb");
+        assert_eq!(App::sanitize_text("a\n\nb"), "a\n\nb");
+    }
+
+    #[test]
+    fn sanitize_text_collapses_three_or_more_newlines_to_two() {
+        assert_eq!(App::sanitize_text("a\n\n\nb"), "a\n\nb");
+        assert_eq!(App::sanitize_text("a\n\n\n\n\nb"), "a\n\nb");
+        assert_eq!(App::sanitize_text("a\n\n\nb\n\n\n\nc"), "a\n\nb\n\nc");
+    }
+
+    #[test]
+    fn sanitize_text_collapses_whitespace_only_lines_like_blank_lines() {
+        // A line containing only spaces counts as blank — matches (\s*\n){3,}.
+        assert_eq!(App::sanitize_text("a\n   \n\nb"), "a\n\nb");
+        assert_eq!(App::sanitize_text("a\n \n \n \nb"), "a\n\nb");
+    }
+
+    #[test]
+    fn sanitize_text_empty_and_whitespace_only_returns_empty() {
+        assert_eq!(App::sanitize_text(""), "");
+        assert_eq!(App::sanitize_text("   \n\n\n   "), "");
+    }
+
+    #[test]
+    fn done_event_collapses_excess_newlines_in_assistant_message() {
+        let mut app = make_app();
+        app.streaming = true;
+        app.apply_event(AgentEvent::TextToken {
+            text: "para1\n\n\n\npara2".to_string(),
+            phase: AssistantPhase::Unknown,
+        });
+        app.apply_event(AgentEvent::Done);
+        let content = &app.messages.last().unwrap().content;
+        assert_eq!(content, "para1\n\npara2");
     }
 }
