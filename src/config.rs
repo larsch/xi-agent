@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::Context;
 
@@ -6,6 +6,8 @@ use anyhow::Context;
 pub struct TauConfig {
     pub provider: Option<String>,
     pub thinking: Option<String>,
+    #[serde(default)]
+    pub thinking_by_model: HashMap<String, String>,
 
     #[serde(default)]
     pub openai: OpenAiConfig,
@@ -100,6 +102,10 @@ mod tests {
 provider = "openai"
 thinking = "low"
 
+[thinking_by_model]
+gpt-4o-mini = "minimal"
+gpt-5 = "high"
+
 [openai]
 api_key = "sk-test"
 base_url = "https://api.openai.com/v1"
@@ -125,6 +131,14 @@ model = "llama3.1"
 
         assert_eq!(cfg.provider.as_deref(), Some("openai"));
         assert_eq!(cfg.thinking.as_deref(), Some("low"));
+        assert_eq!(
+            cfg.thinking_by_model.get("gpt-4o-mini").map(String::as_str),
+            Some("minimal")
+        );
+        assert_eq!(
+            cfg.thinking_by_model.get("gpt-5").map(String::as_str),
+            Some("high")
+        );
         assert_eq!(cfg.openai.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
             cfg.openai.base_url.as_deref(),

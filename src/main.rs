@@ -99,7 +99,7 @@ async fn main() -> io::Result<()> {
 
     // Priority: --model flag > config.toml > provider default.
     let mut current_model = resolve_model(cli.model.as_deref(), &current_kind, &config);
-    let mut current_thinking = resolve_thinking_level(&config);
+    let mut current_thinking = resolve_thinking_level_for_model(&config, &current_model);
 
     let window_folder = std::env::current_dir()
         .ok()
@@ -191,9 +191,14 @@ async fn main() -> io::Result<()> {
 
             Ok(RunResult::RebuildProvider) => {}
 
-            Ok(RunResult::ChangeModel(name)) => {
+            Ok(RunResult::ChangeModel {
+                name,
+                prompt_thinking_selection,
+            }) => {
                 app.current_model = name.clone();
                 current_model = name;
+                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                app.current_thinking = current_thinking;
                 // Invalidate cached model list so the next fetch is fresh.
                 app.available_models = None;
                 persist_provider_model_selection(
@@ -209,6 +214,12 @@ async fn main() -> io::Result<()> {
                     &current_model,
                     current_thinking,
                 );
+                if prompt_thinking_selection
+                    && thinking_support_for(&current_kind, &current_model)
+                        == ThinkingSupport::Applied
+                {
+                    app.enter_thinking_selection_mode();
+                }
             }
 
             Ok(RunResult::ChangeProvider(name)) => {
@@ -216,6 +227,8 @@ async fn main() -> io::Result<()> {
                     current_kind = kind;
                     current_model = resolve_model(None, &current_kind, &config);
                     app.current_model = current_model.clone();
+                    current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                    app.current_thinking = current_thinking;
                     app.current_provider = current_kind.name().to_string();
                     app.available_models = None;
                     persist_provider_model_selection(
@@ -275,7 +288,10 @@ async fn main() -> io::Result<()> {
 enum RunResult {
     Quit,
     RebuildProvider,
-    ChangeModel(String),
+    ChangeModel {
+        name: String,
+        prompt_thinking_selection: bool,
+    },
     ChangeProvider(String),
     ChangeThinking(ThinkingLevel),
 }
@@ -382,7 +398,13 @@ async fn run(
                                 KeyCode::Enter if key.modifiers.is_empty() => {
                                     match app.apply_selection() {
                                         Some(SelectionResult::Model(m)) => {
-                                            return Ok(RunResult::ChangeModel(m));
+                                            return Ok(RunResult::ChangeModel {
+                                                name: m,
+                                                prompt_thinking_selection: true,
+                                            });
+                                        }
+                                        Some(SelectionResult::Thinking(level)) => {
+                                            return Ok(RunResult::ChangeThinking(level));
                                         }
                                         Some(SelectionResult::Provider(p)) => {
                                             return Ok(RunResult::ChangeProvider(p));
@@ -486,7 +508,10 @@ async fn run(
                                             return Ok(RunResult::Quit);
                                         }
                                         Some(CommandAction::Model(name)) => {
-                                            return Ok(RunResult::ChangeModel(name));
+                                            return Ok(RunResult::ChangeModel {
+                                                name,
+                                                prompt_thinking_selection: true,
+                                            });
                                         }
                                         Some(CommandAction::ModelNoArg) => {
                                             app.enter_model_selection_mode();
@@ -501,6 +526,18 @@ async fn run(
                                             app.enter_provider_selection_mode();
                                         }
                                         Some(CommandAction::Thinking(raw)) => {
+                                            let thinking_supported =
+                                                ProviderKind::from_name(&app.current_provider)
+                                                    .map(|kind| {
+                                                        thinking_support_for(
+                                                            &kind,
+                                                            &app.current_model,
+                                                        ) == ThinkingSupport::Applied
+                                                    })
+                                                    .unwrap_or(false);
+                                            if !thinking_supported {
+                                                continue;
+                                            }
                                             match ThinkingLevel::parse(&raw) {
                                                 Some(level) => {
                                                     return Ok(RunResult::ChangeThinking(level));
@@ -513,10 +550,18 @@ async fn run(
                                             }
                                         }
                                         Some(CommandAction::ThinkingNoArg) => {
-                                            app.messages.push(llm::Message::assistant(format!(
-                                                "[current thinking: {}]",
-                                                app.current_thinking.as_str()
-                                            )));
+                                            let thinking_supported =
+                                                ProviderKind::from_name(&app.current_provider)
+                                                    .map(|kind| {
+                                                        thinking_support_for(
+                                                            &kind,
+                                                            &app.current_model,
+                                                        ) == ThinkingSupport::Applied
+                                                    })
+                                                    .unwrap_or(false);
+                                            if thinking_supported {
+                                                app.enter_thinking_selection_mode();
+                                            }
                                         }
                                         Some(CommandAction::Login(provider)) => {
                                             app.start_login(&provider);
@@ -651,6 +696,9 @@ fn persist_provider_model_selection(
 ) {
     config.provider = Some(kind.name().to_string());
     config.thinking = Some(thinking.as_str().to_string());
+    config
+        .thinking_by_model
+        .insert(model.to_string(), thinking.as_str().to_string());
     match kind {
         ProviderKind::Copilot => config.copilot.model = Some(model.to_string()),
         ProviderKind::OpenAi => config.openai.model = Some(model.to_string()),
@@ -667,16 +715,17 @@ fn persist_provider_model_selection(
     }
 }
 
-fn resolve_thinking_level(config: &TauConfig) -> ThinkingLevel {
+fn resolve_thinking_level_for_model(config: &TauConfig, model: &str) -> ThinkingLevel {
     config
-        .thinking
-        .as_deref()
-        .and_then(ThinkingLevel::parse)
+        .thinking_by_model
+        .get(model)
+        .and_then(|raw| ThinkingLevel::parse(raw))
+        .or_else(|| config.thinking.as_deref().and_then(ThinkingLevel::parse))
         .unwrap_or(ThinkingLevel::Off)
 }
 
 fn maybe_warn_thinking_unsupported(
-    app: &mut App,
+    _app: &mut App,
     kind: &ProviderKind,
     model: &str,
     thinking: ThinkingLevel,
@@ -685,13 +734,13 @@ fn maybe_warn_thinking_unsupported(
         return;
     }
     if let ThinkingSupport::Ignored(reason) = thinking_support_for(kind, model) {
-        app.messages.push(Message::assistant(format!(
-            "[thinking '{}' is configured but currently ignored for provider={} model={}: {}]",
+        log::debug!(
+            "thinking '{}' ignored for provider={} model={}: {}",
             thinking.as_str(),
             kind.name(),
             model,
             reason
-        )));
+        );
     }
 }
 
@@ -707,7 +756,7 @@ async fn run_print_mode(
 ) -> io::Result<()> {
     let current_kind = resolve_provider_kind(provider_override, config);
     let current_model = resolve_model(model_override, &current_kind, config);
-    let current_thinking = resolve_thinking_level(config);
+    let current_thinking = resolve_thinking_level_for_model(config, &current_model);
 
     let provider = build_provider(&current_kind, &current_model, current_thinking, config)
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
@@ -783,7 +832,7 @@ async fn run_print_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_paste_text, resolve_model, resolve_thinking_level};
+    use super::{normalize_paste_text, resolve_model, resolve_thinking_level_for_model};
     use crate::{config::TauConfig, provider::ProviderKind, thinking::ThinkingLevel};
 
     #[test]
@@ -838,19 +887,32 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_uses_config() {
+    fn resolve_thinking_uses_model_specific_config() {
+        let mut cfg = TauConfig {
+            thinking: Some("minimal".to_string()),
+            ..TauConfig::default()
+        };
+        cfg.thinking_by_model
+            .insert("gpt-5".to_string(), "high".to_string());
+
+        let level = resolve_thinking_level_for_model(&cfg, "gpt-5");
+        assert_eq!(level, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn resolve_thinking_falls_back_to_global_config() {
         let cfg = TauConfig {
             thinking: Some("minimal".to_string()),
             ..TauConfig::default()
         };
-        let level = resolve_thinking_level(&cfg);
+        let level = resolve_thinking_level_for_model(&cfg, "gpt-4o");
         assert_eq!(level, ThinkingLevel::Minimal);
     }
 
     #[test]
     fn resolve_thinking_defaults_to_off() {
         let cfg = TauConfig::default();
-        let level = resolve_thinking_level(&cfg);
+        let level = resolve_thinking_level_for_model(&cfg, "gpt-4o");
         assert_eq!(level, ThinkingLevel::Off);
     }
 }

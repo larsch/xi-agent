@@ -13,7 +13,7 @@ use crate::{
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     llm::{AssistantPhase, LlmProvider, Message, Role, UsageStats},
-    provider::ProviderKind,
+    provider::{ProviderKind, ThinkingSupport, thinking_support_for},
     session::SessionStore,
     skills::SkillMeta,
     thinking::ThinkingLevel,
@@ -24,6 +24,7 @@ use crate::{
 /// Value returned when the user confirms a choice in the selection menu.
 pub enum SelectionResult {
     Model(String),
+    Thinking(ThinkingLevel),
     Provider(String),
     LoginProvider(String),
     ResumeSession(String),
@@ -62,6 +63,7 @@ pub const MAX_SELECTION_VISIBLE: usize = 12;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectionKind {
     Model,
+    Thinking,
     Provider,
     LoginProvider,
     ResumeSession,
@@ -504,8 +506,19 @@ impl App {
         let available = self.available_models.as_deref();
         let loading = self.models_loading;
         let fetch_error = self.model_fetch_error.as_deref();
-        let new =
-            commands::completions_for(&input, available, loading, fetch_error, &self.loaded_skills);
+        let thinking_enabled = ProviderKind::from_name(&self.current_provider)
+            .map(|kind| {
+                thinking_support_for(&kind, &self.current_model) == ThinkingSupport::Applied
+            })
+            .unwrap_or(false);
+        let new = commands::completions_for(
+            &input,
+            available,
+            loading,
+            fetch_error,
+            &self.loaded_skills,
+            thinking_enabled,
+        );
 
         if new.len() != self.completions.len() {
             self.completion_selected = 0;
@@ -626,6 +639,9 @@ impl App {
     fn select_current_default(&mut self) {
         let target = match self.selection_kind {
             Some(SelectionKind::Model) => Some(format!("/model {}", self.current_model)),
+            Some(SelectionKind::Thinking) => {
+                Some(format!("/thinking {}", self.current_thinking.as_str()))
+            }
             Some(SelectionKind::Provider) => Some(format!("/provider {}", self.current_provider)),
             Some(SelectionKind::LoginProvider)
             | Some(SelectionKind::ResumeSession)
@@ -705,6 +721,27 @@ impl App {
         } else {
             vec![CompletionItem::loading_indicator()]
         };
+        self.set_selection_items(items);
+        self.select_current_default();
+    }
+
+    /// Open the thinking-level selection menu.
+    pub fn enter_thinking_selection_mode(&mut self) {
+        self.reset_textarea();
+        self.selection_mode = true;
+        self.selection_kind = Some(SelectionKind::Thinking);
+        self.selection_title = "  Select thinking  ";
+        self.selection_query.clear();
+        let items = ThinkingLevel::all()
+            .iter()
+            .map(|lvl| CompletionItem {
+                label: lvl.as_str().to_string(),
+                detail: String::new(),
+                complete_to: format!("/thinking {}", lvl.as_str()),
+                loading: false,
+                error: false,
+            })
+            .collect();
         self.set_selection_items(items);
         self.select_current_default();
     }
@@ -825,6 +862,11 @@ impl App {
                 .complete_to
                 .strip_prefix("/model ")
                 .map(|name| SelectionResult::Model(name.to_string())),
+            Some(SelectionKind::Thinking) => item
+                .complete_to
+                .strip_prefix("/thinking ")
+                .and_then(ThinkingLevel::parse)
+                .map(SelectionResult::Thinking),
             Some(SelectionKind::Provider) => item
                 .complete_to
                 .strip_prefix("/provider ")

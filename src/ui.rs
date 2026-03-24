@@ -11,7 +11,7 @@ use crate::{
     auth::AuthFlow,
     commands::CompletionItem,
     llm::{AssistantPhase, Role},
-    provider::context_window_for_model,
+    provider::{ProviderKind, ThinkingSupport, context_window_for_model, thinking_support_for},
     tool_presentation,
 };
 
@@ -476,10 +476,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if app.show_info {
         let context_window = context_window_for_model(&app.current_model);
         let used_tokens = app.latest_usage.and_then(|u| u.used_tokens());
+        let thinking = ProviderKind::from_name(&app.current_provider).and_then(|kind| {
+            (thinking_support_for(&kind, &app.current_model) == ThinkingSupport::Applied)
+                .then_some(app.current_thinking.as_str())
+        });
         let info_line = build_info_line(
             &app.current_provider,
             &app.current_model,
-            app.current_thinking.as_str(),
+            thinking,
             context_window,
             used_tokens,
             width,
@@ -1320,7 +1324,7 @@ const INFO_BG: Color = Color::Rgb(20, 20, 30);
 fn build_info_line<'a>(
     provider: &str,
     model: &str,
-    thinking: &str,
+    thinking: Option<&str>,
     context_window: Option<usize>,
     used_tokens: Option<usize>,
     width: usize,
@@ -1334,7 +1338,7 @@ fn build_info_line<'a>(
     let hint = "Ctrl+I";
     let context_value = format_context_value(context_window, used_tokens);
     // Build all the content spans.
-    let content_spans: Vec<Span<'a>> = vec![
+    let mut content_spans: Vec<Span<'a>> = vec![
         Span::styled(" ", fill_style),
         Span::styled("provider", key_style),
         Span::styled(" ", fill_style),
@@ -1343,25 +1347,31 @@ fn build_info_line<'a>(
         Span::styled("model", key_style),
         Span::styled(" ", fill_style),
         Span::styled(model.to_string(), val_style),
-        Span::styled("  │  ", sep_style),
-        Span::styled("thinking", key_style),
-        Span::styled(" ", fill_style),
-        Span::styled(thinking.to_string(), val_style),
-        Span::styled("  │  ", sep_style),
-        Span::styled("context", key_style),
-        Span::styled(" ", fill_style),
-        Span::styled(context_value.clone(), val_style),
     ];
 
+    if let Some(thinking) = thinking {
+        content_spans.push(Span::styled("  │  ", sep_style));
+        content_spans.push(Span::styled("thinking", key_style));
+        content_spans.push(Span::styled(" ", fill_style));
+        content_spans.push(Span::styled(thinking.to_string(), val_style));
+    }
+
+    content_spans.push(Span::styled("  │  ", sep_style));
+    content_spans.push(Span::styled("context", key_style));
+    content_spans.push(Span::styled(" ", fill_style));
+    content_spans.push(Span::styled(context_value.clone(), val_style));
+
     // Calculate used columns (approximate; ASCII only for labels).
-    let used: usize = 1 // leading space
+    let mut used: usize = 1 // leading space
         + "provider".len() + 1 + provider.len()
         + 5 // sep
-        + "model".len() + 1 + model.len()
-        + 5 // sep
-        + "thinking".len() + 1 + thinking.len()
-        + 5 // sep
-        + "context".len() + 1 + context_value.len();
+        + "model".len() + 1 + model.len();
+
+    if let Some(thinking) = thinking {
+        used += 5 + "thinking".len() + 1 + thinking.len();
+    }
+
+    used += 5 + "context".len() + 1 + context_value.len();
 
     let hint_len = hint.len() + 1; // hint + trailing space
     let fill_len = width.saturating_sub(used + hint_len);
@@ -2185,13 +2195,20 @@ mod tests {
         let line = build_info_line(
             "copilot",
             "gpt-4o",
-            "medium",
+            Some("medium"),
             Some(128_000),
             Some(64_000),
             200,
         );
         let text = line_text(&line);
         assert!(text.contains("context 64k / 128k (50%)"), "{text}");
+    }
+
+    #[test]
+    fn info_line_omits_thinking_when_unavailable() {
+        let line = build_info_line("openai", "gpt-4o", None, Some(128_000), None, 200);
+        let text = line_text(&line);
+        assert!(!text.contains("thinking"), "{text}");
     }
     #[test]
     fn split_read_file_header_parses_and_returns_body() {
