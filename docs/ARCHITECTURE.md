@@ -11,33 +11,37 @@ until the model returns a final answer without tool calls.
 
 ```
 src/
-  main.rs            — tokio entry point, CLI parsing, outer provider loop
-  app.rs             — App state, event handling, submission, scroll
-  ui.rs              — all ratatui rendering, pre-wrapping, scroll logic
-  commands.rs        — slash-command registry and completion items
-  config.rs          — config.toml loading (XDG + HOME fallback)
-  provider.rs        — ProviderKind enum, build_provider(), context-window fallback table
-  session.rs         — persisted chat session storage/index
-  auth/              — provider auth store + login/refresh flows
+  main.rs              — tokio entry point, CLI parsing, outer provider loop
+  app.rs               — App state, event handling, submission, scroll
+  ui.rs                — all ratatui rendering, pre-wrapping, scroll logic
+  commands.rs          — slash-command registry and completion items
+  config.rs            — config.toml loading (XDG + HOME fallback)
+  provider.rs          — ProviderKind enum, build_provider(), context-window fallback table
+  session.rs           — persisted chat session storage/index
+  thinking.rs          — ThinkingLevel enum, parse/serialize, per-model resolution
+  tool_presentation.rs — tool call/result rendering helpers for the TUI
+  auth/                — provider auth store + login/refresh flows + token-state preflight
   agent/
-    mod.rs           — run_agent_loop: the multi-turn agentic loop
-    types.rs         — Tool trait, ToolRegistry, AgentEvent, AgentLoopConfig
-    system_prompt.rs — build_system_prompt: dynamic system prompt
+    mod.rs             — run_agent_loop: the multi-turn agentic loop
+    types.rs           — Tool trait, ToolRegistry, AgentEvent, AgentLoopConfig
+    system_prompt.rs   — build_system_prompt: dynamic system prompt
     tools/
-      mod.rs         — register_builtin_tools()
-      bash.rs        — BashTool  (💻 run shell command)
-      read.rs        — ReadFileTool (👀 read file with offset/limit)
-      write.rs       — WriteTool (✍️ write/overwrite file)
-      edit.rs        — EditTool  (📝 replace exact text in file)
-      find.rs        — FindTool  (🔍 search by name glob or content pattern)
+      mod.rs           — register_builtin_tools()
+      bash.rs          — BashTool  (💻 run shell command)
+      read.rs          — ReadFileTool (👀 read file with offset/limit)
+      write.rs         — WriteTool (✍️ write/overwrite file)
+      edit.rs          — EditTool  (📝 replace exact text in file)
+      find.rs          — FindTool  (🔍 search by name glob or content pattern)
   llm/
-    mod.rs           — LlmProvider trait, Message/Role/LlmEvent/ToolDefinition types
-    openai.rs        — OpenAiProvider (OpenAI Chat Completions, tool-calling)
-    copilot.rs       — CopilotProvider (route by model: vendor from /models cache, name heuristics fallback)
-    codex.rs         — CodexProvider (chatgpt.com/backend-api responses)
-    anthropic.rs     — AnthropicProvider (Messages API transport)
-    gemini.rs        — GeminiProvider (Google Cloud Code Assist streaming)
-    ollama.rs        — OllamaProvider (streaming NDJSON via /api/chat)
+    mod.rs             — LlmProvider trait, Message/Role/LlmEvent/ToolDefinition types
+    error.rs           — ProviderError, ProviderErrorKind (typed HTTP/network failures)
+    common.rs          — shared HTTP helpers: send_streaming_request, status→ProviderError mapping
+    openai.rs          — OpenAiProvider (OpenAI Chat Completions, tool-calling)
+    copilot.rs         — CopilotProvider (route by model: vendor from /models cache, name heuristics fallback)
+    codex.rs           — CodexProvider (chatgpt.com/backend-api responses)
+    anthropic.rs       — AnthropicProvider (Messages API transport)
+    gemini.rs          — GeminiProvider (Google Cloud Code Assist streaming)
+    ollama.rs          — OllamaProvider (streaming NDJSON via /api/chat)
 ```
 
 ## Data Flow
@@ -89,6 +93,11 @@ pub struct Message {
     pub is_error: bool,
 }
 
+// llm/error.rs — typed provider failure
+pub enum ProviderErrorKind { Unauthorized, Forbidden, RateLimited, ServerError, Network, Other }
+pub struct ProviderError { pub kind: ProviderErrorKind, pub status_code: Option<u16>,
+                           pub provider: String, pub message: String }
+
 pub enum LlmEvent {
     Token { text: String, phase: AssistantPhase },
     ThinkingToken(String),
@@ -96,13 +105,13 @@ pub enum LlmEvent {
     ToolIntentStart,
     ToolCall { id: String, name: String, args: serde_json::Value },
     Done,
-    Error(String),
+    Error(ProviderError),   // typed; 401→Unauthorized, 403→Forbidden, 429→RateLimited
 }
 
 pub trait LlmProvider: Send + Sync {
     fn stream_chat(&self, messages: Vec<Message>) -> LlmStream;
     fn stream_chat_with_tools(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>) -> LlmStream;
-    fn list_models(&self) -> ModelListFuture;  // default: returns []
+    fn list_models(&self) -> ModelListFuture;  // Result<Vec<String>, ProviderError>; default: []
 }
 ```
 
@@ -126,7 +135,7 @@ pub enum AgentEvent {
     ToolCallEnd   { id, name, result: ToolResult },
     TurnEnd,
     Done,
-    Error(String),
+    Error(ProviderError),  // typed; display via Display impl for user-facing messages
 }
 
 pub struct AgentLoopConfig {
@@ -170,6 +179,34 @@ loop logic.
 The outer loop in `main` rebuilds the provider and re-enters `run()` on
 every model/provider switch, so `App` and `ui` never depend on which
 provider is active.
+
+**Typed provider errors** — `LlmEvent::Error`, `AgentEvent::Error`, and
+`ModelListFuture` carry `ProviderError` (with `ProviderErrorKind`) rather
+than a raw string. HTTP status is mapped centrally in `llm/common.rs`:
+401→`Unauthorized`, 403→`Forbidden`, 429→`RateLimited`, 5xx→`ServerError`,
+network failures→`Network`. `App` matches on kind directly; no substring
+heuristics. 403 explicitly does **not** trigger a token refresh.
+
+**Proactive auth refresh** — before submitting a request or starting a model
+fetch, `App::check_token_preflight` inspects the stored `expires_at` via
+`auth::token_state`. If the token is `Expired` or `ExpiringSoon` (within
+`AUTH_REFRESH_LEEWAY_SECS` = 120 s), it triggers a refresh and defers the
+request. A reactive fallback on `Unauthorized` errors handles clock skew and
+server-side revocation. The `auth_retry_budget` is not consumed by the
+preflight, leaving one reactive retry available if the request still gets a
+401 after refresh.
+
+**Display-only sanitization** — message content is stored and sent to the
+LLM verbatim. Trailing whitespace per line, leading/trailing newlines, and
+excess blank-line collapsing are applied only at render time inside
+`ui::sanitize_for_display`. This avoids any mutation of LLM context.
+
+**Per-model thinking settings** — `ThinkingLevel` (Off/Minimal/Low/Medium/
+High/XHigh) is resolved at request time from `config.thinking_by_model`
+(per-model override) then `config.thinking` (global default). The `/thinking`
+command cycles levels at runtime and updates the active model's entry.
+Providers that support thinking (Copilot/OpenAI with `o*` models, Anthropic)
+translate the level to their respective API parameter; others ignore it.
 
 ## What Is Not Here Yet
 

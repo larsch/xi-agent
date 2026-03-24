@@ -29,11 +29,6 @@ See [plan](plans/2026-03-14-context-management.md).
 ### Markdown rendering (currently just raw text)
 Render assistant output as Markdown instead of raw text.
 
-### Anthropic provider support
-`AnthropicProvider` implementing `LlmProvider` against the Anthropic
-Messages API (`/v1/messages`). Include native tool-calling support and
-`thinking` block extraction.
-
 ---
 
 ## ⚪ Out of scope (for now)

@@ -1,7 +1,7 @@
 # Proactive Auth Refresh + Typed Unauthorized Errors Plan
 
 **Date:** 2026-03-24  
-**Status:** Proposed  
+**Status:** Done  
 **Priority:** High
 
 ## Chosen direction
