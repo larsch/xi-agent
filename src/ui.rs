@@ -757,7 +757,7 @@ fn build_log_lines(
                 if msg.hidden {
                     continue;
                 }
-                append_message(&mut lines, &msg.content, "", width, true);
+                append_message(&mut lines, &sanitize_for_display(&msg.content), "", width, true);
             }
             Role::System => {
                 // System messages are not displayed in the chat log.
@@ -769,7 +769,7 @@ fn build_log_lines(
 
                 // Render thinking block (if any thinking content has arrived).
                 if !thinking.is_empty() {
-                    append_message_dim(&mut lines, &format!("🧠 {thinking}"), "", width);
+                    append_message_dim(&mut lines, &format!("🧠 {}", sanitize_for_display(thinking)), "", width);
                     // Separator between thinking and answer is lazy: only render
                     // when an answer line will actually be shown.
                     if has_answer {
@@ -796,7 +796,7 @@ fn build_log_lines(
                     let content = if is_streaming_last && msg.content.is_empty() {
                         format!("{answer_icon} ▋")
                     } else {
-                        format!("{answer_icon} {}", msg.content)
+                        format!("{answer_icon} {}", sanitize_for_display(&msg.content))
                     };
                     let suffix = if is_streaming_last && !msg.content.is_empty() {
                         "▋"
@@ -840,10 +840,9 @@ fn build_log_lines(
                 } else {
                     msg.content.clone()
                 };
-                // Strip leading/trailing whitespace from tool output so that
-                // commands that emit a trailing newline (or leading blank lines)
-                // don't create spurious empty lines in the chat log display.
-                let content_for_display = content_for_display.trim().to_string();
+                // Sanitize for display: strip trailing whitespace per line,
+                // leading/trailing newlines, and collapse excess blank lines.
+                let content_for_display = sanitize_for_display(&content_for_display);
 
                 let preview: String = content_for_display.chars().take(200).collect();
                 let truncated = content_for_display.len() > 200;
@@ -1064,6 +1063,52 @@ fn append_message(
     if user {
         out.push(halfblock_line(width, '▀', USER_BG));
     }
+}
+
+/// Sanitize text for display in the chat log.
+///
+/// Rules applied in order:
+/// 1. Strip trailing whitespace (spaces/tabs) from every line.
+/// 2. Strip leading newlines from the start of the string.
+/// 3. Strip trailing newlines from the end of the string.
+/// 4. Collapse runs of 3+ consecutive newlines to exactly 2.
+///
+/// Leading spaces/tabs on content lines (indentation) are never removed.
+/// The original message content stored in memory is not affected.
+fn sanitize_for_display(text: &str) -> String {
+    // Pass 1: strip trailing whitespace from each line.
+    let mut s = String::with_capacity(text.len());
+    for line in text.split('\n') {
+        s.push_str(line.trim_end());
+        s.push('\n');
+    }
+    // Remove the extra trailing '\n' added after the last split segment.
+    if s.ends_with('\n') {
+        s.pop();
+    }
+
+    // Pass 2+3: strip leading and trailing newlines.
+    // Use trim_matches which is char-aware and safe for multi-byte characters.
+    let s = s.trim_matches('\n');
+
+    // Pass 4: collapse 3+ consecutive newlines to 2.
+    let mut result = String::with_capacity(s.len());
+    let mut newline_run = 0usize;
+    for ch in s.chars() {
+        if ch == '\n' {
+            newline_run += 1;
+        } else {
+            for _ in 0..newline_run.min(2) {
+                result.push('\n');
+            }
+            newline_run = 0;
+            result.push(ch);
+        }
+    }
+    for _ in 0..newline_run.min(2) {
+        result.push('\n');
+    }
+    result
 }
 
 fn split_read_file_header(content: &str) -> Option<(usize, usize, usize, &str)> {
@@ -2230,26 +2275,83 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_display_strips_leading_and_trailing_whitespace() {
+    fn sanitize_for_display_strips_trailing_whitespace_per_line() {
+        assert_eq!(sanitize_for_display("hello   \nworld  "), "hello\nworld");
+        assert_eq!(sanitize_for_display("  indented   "), "  indented");
+    }
+
+    #[test]
+    fn sanitize_for_display_strips_leading_and_trailing_newlines() {
+        assert_eq!(sanitize_for_display("\n\nhello\n\n"), "hello");
+        // Leading spaces on the first line are preserved.
+        assert_eq!(sanitize_for_display("\n\n  hello\n\n"), "  hello");
+    }
+
+    #[test]
+    fn sanitize_for_display_preserves_up_to_two_consecutive_newlines() {
+        assert_eq!(sanitize_for_display("a\nb"), "a\nb");
+        assert_eq!(sanitize_for_display("a\n\nb"), "a\n\nb");
+    }
+
+    #[test]
+    fn sanitize_for_display_collapses_three_or_more_newlines_to_two() {
+        assert_eq!(sanitize_for_display("a\n\n\nb"), "a\n\nb");
+        assert_eq!(sanitize_for_display("a\n\n\n\n\nb"), "a\n\nb");
+        assert_eq!(sanitize_for_display("a\n\n\nb\n\n\n\nc"), "a\n\nb\n\nc");
+    }
+
+    #[test]
+    fn sanitize_for_display_handles_multibyte_chars_without_panic() {
+        // ─ is a 3-byte UTF-8 character; trailing-newline stripping must not
+        // slice into the middle of it.
+        assert_eq!(sanitize_for_display("─\n"), "─");
+        assert_eq!(sanitize_for_display("\n─"), "─");
+        assert_eq!(sanitize_for_display("hello ─\n"), "hello ─");
+        assert_eq!(sanitize_for_display("a\n\n\n─ b"), "a\n\n─ b");
+    }
+
+    #[test]
+    fn sanitize_for_display_trailing_whitespace_counts_as_blank_line() {
+        // A line with only spaces between two newlines becomes an empty line;
+        // three or more such separators still collapse to two newlines.
+        assert_eq!(sanitize_for_display("a\n   \n\nb"), "a\n\nb");
+        assert_eq!(sanitize_for_display("a\n \n \n \nb"), "a\n\nb");
+    }
+
+    #[test]
+    fn tool_result_display_strips_leading_and_trailing_newlines_only() {
         let messages = vec![
             Message::tool_call("1", "bash", json!({"command": "echo hi"})),
             Message::tool_result("1", "\n\n  output line  \n\n", false),
         ];
 
         let lines = build_log_lines(&messages, false, &[], 80);
-        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        // After trimming the whole string, we get "output line" (leading/trailing
-        // whitespace including the surrounding blank lines is stripped).
-        assert!(rendered.contains("│output line"), "{rendered}");
-        // No blank-line prefix: first rendered tool result content line should
-        // contain "output line", not an empty marker.
+        // Leading/trailing newlines are stripped; leading spaces (indentation)
+        // on the first content line are preserved.
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
             .filter(|l| l.starts_with('│'))
             .collect();
-        assert_eq!(result_lines.len(), 1, "should be exactly one result line: {rendered}");
-        assert!(result_lines[0].contains("output line"), "{rendered}");
+        assert_eq!(result_lines.len(), 1, "should be exactly one result line");
+        assert!(result_lines[0].contains("  output line"), "indent should be preserved: {:?}", result_lines[0]);
+    }
+
+    #[test]
+    fn tool_result_display_preserves_indentation_on_first_line() {
+        let messages = vec![
+            Message::tool_call("1", "bash", json!({"command": "cat f"})),
+            Message::tool_result("1", "    indented output", false),
+        ];
+
+        let lines = build_log_lines(&messages, false, &[], 80);
+        let result_lines: Vec<_> = lines
+            .iter()
+            .map(line_text)
+            .filter(|l| l.starts_with('│'))
+            .collect();
+        assert!(!result_lines.is_empty());
+        assert!(result_lines[0].contains("    indented output"), "indent stripped: {:?}", result_lines[0]);
     }
 
     #[test]
