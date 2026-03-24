@@ -6,8 +6,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
-    ToolDefinition, UsageStats,
+    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
+    Role, ToolDefinition, UsageStats,
     common::{SseLineDecoder, infer_initiator, normalize_tool_name, send_streaming_request},
 };
 
@@ -112,7 +112,7 @@ impl OpenAiProvider {
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield LlmEvent::Error(e.to_string());
+                        yield LlmEvent::Error(ProviderError::network("OpenAI", e.to_string()));
                         return;
                     }
                 };
@@ -145,7 +145,7 @@ impl OpenAiProvider {
                     let chunk: ChatChunk = match serde_json::from_str(&line) {
                         Ok(c) => c,
                         Err(e) => {
-                            yield LlmEvent::Error(format!("Parse error: {e}"));
+                            yield LlmEvent::Error(ProviderError::other("OpenAI", format!("Parse error: {e}")));
                             return;
                         }
                     };
@@ -509,6 +509,8 @@ impl LlmProvider for OpenAiProvider {
         let extra_headers = self.extra_headers.clone();
         let client = self.client.clone();
         Box::pin(async move {
+            use super::common::map_http_error;
+
             let mut req = client.get(&url).bearer_auth(&api_key);
             for (k, v) in &extra_headers {
                 req = req.header(k.as_str(), v.as_str());
@@ -518,25 +520,28 @@ impl LlmProvider for OpenAiProvider {
                 Ok(r) => r,
                 Err(e) => {
                     log::warn!("openai list_models error: {e}");
-                    return Err(format!("request failed: {e}"));
+                    return Err(ProviderError::network(
+                        "OpenAI",
+                        format!("request failed: {e}"),
+                    ));
                 }
             };
             let status = response.status();
             log::debug!("← HTTP {status} from openai list_models");
             if !status.is_success() {
-                let msg = if status.as_u16() == 401 {
-                    "401 Unauthorized — run /login to authenticate".to_string()
-                } else {
-                    format!("HTTP {status}")
-                };
-                log::warn!("openai list_models failed: {msg}");
-                return Err(msg);
+                let text = response.text().await.unwrap_or_default();
+                let preview: String = text.chars().take(500).collect();
+                log::warn!("openai list_models failed: status={status} body={preview}");
+                return Err(map_http_error("OpenAI", status, text));
             }
             let models: ModelsResponse = match response.json().await {
                 Ok(m) => m,
                 Err(e) => {
                     log::warn!("openai list_models parse error: {e}");
-                    return Err(format!("failed to parse response: {e}"));
+                    return Err(ProviderError::other(
+                        "OpenAI",
+                        format!("failed to parse response: {e}"),
+                    ));
                 }
             };
             let mut ids: Vec<String> = models.data.into_iter().map(|m| m.id).collect();

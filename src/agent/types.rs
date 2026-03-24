@@ -113,8 +113,8 @@ pub enum AgentEvent {
     TurnEnd,
     /// The agent loop finished successfully.
     Done,
-    /// The agent loop encountered a fatal error.
-    Error(String),
+    /// The agent loop encountered a fatal error from the LLM provider.
+    Error(crate::llm::ProviderError),
 }
 
 // ── Agent loop configuration ──────────────────────────────────────────────────

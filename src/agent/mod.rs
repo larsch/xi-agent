@@ -65,7 +65,7 @@ pub async fn run_agent_loop(
         let mut assistant_phase = AssistantPhase::Unknown;
         let mut pending_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, args)
 
-        let mut stream_error: Option<String> = None;
+        let mut stream_error: Option<crate::llm::ProviderError> = None;
 
         while let Some(ev) = stream.next().await {
             match ev {

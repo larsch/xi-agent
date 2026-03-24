@@ -303,12 +303,14 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
 
 #[tokio::test]
 async fn agent_loop_stream_error_is_reported() {
-    let provider = MockProvider::new(vec![vec![LlmEvent::Error("boom".to_string())]]);
+    use crate::llm::ProviderError;
+    let err = ProviderError::other("test", "boom");
+    let provider = MockProvider::new(vec![vec![LlmEvent::Error(err.clone())]]);
     let events = run_and_collect(provider).await;
 
     assert!(
-        matches!(events.last().unwrap(), AgentEvent::Error(e) if e == "boom"),
-        "expected Error('boom') as last event, got: {:?}",
+        matches!(events.last().unwrap(), AgentEvent::Error(e) if e.message == "boom"),
+        "expected Error with 'boom' message as last event, got: {:?}",
         events.last()
     );
 }

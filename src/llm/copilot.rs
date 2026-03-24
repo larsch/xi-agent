@@ -88,7 +88,9 @@ async fn fetch_and_cache_models(
     base_url: String,
     access_token: String,
     extra_headers: Vec<(String, String)>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, super::ProviderError> {
+    use super::common::map_http_error;
+
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
     let mut req = client.get(&url).bearer_auth(&access_token);
@@ -100,25 +102,28 @@ async fn fetch_and_cache_models(
         Ok(r) => r,
         Err(e) => {
             log::warn!("copilot list_models error: {e}");
-            return Err(format!("request failed: {e}"));
+            return Err(super::ProviderError::network(
+                "Copilot",
+                format!("request failed: {e}"),
+            ));
         }
     };
     let status = response.status();
     log::debug!("← HTTP {status} from copilot list_models");
     if !status.is_success() {
-        let msg = if status.as_u16() == 401 {
-            "401 Unauthorized — run /login to authenticate".to_string()
-        } else {
-            format!("HTTP {status}")
-        };
-        log::warn!("copilot list_models failed: {msg}");
-        return Err(msg);
+        let text = response.text().await.unwrap_or_default();
+        let preview: String = text.chars().take(500).collect();
+        log::warn!("copilot list_models failed: status={status} body={preview}");
+        return Err(map_http_error("Copilot", status, text));
     }
     let parsed: ApiModelsResponse = match response.json().await {
         Ok(m) => m,
         Err(e) => {
             log::warn!("copilot list_models parse error: {e}");
-            return Err(format!("failed to parse response: {e}"));
+            return Err(super::ProviderError::other(
+                "Copilot",
+                format!("failed to parse response: {e}"),
+            ));
         }
     };
 

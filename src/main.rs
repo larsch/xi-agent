@@ -292,7 +292,7 @@ impl LlmProvider for UnavailableProvider {
     fn stream_chat(&self, _messages: Vec<Message>) -> LlmStream {
         let msg = self.message.clone();
         Box::pin(async_stream::stream! {
-            yield LlmEvent::Error(msg);
+            yield LlmEvent::Error(llm::ProviderError::other("unavailable", msg));
         })
     }
 

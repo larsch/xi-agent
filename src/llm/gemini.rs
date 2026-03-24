@@ -1,8 +1,8 @@
 use futures_util::StreamExt;
 
 use super::{
-    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
-    ToolDefinition, UsageStats,
+    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
+    Role, ToolDefinition, UsageStats,
     common::{SseLineDecoder, send_streaming_request},
 };
 
@@ -103,7 +103,7 @@ impl GeminiProvider {
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield LlmEvent::Error(e.to_string());
+                        yield LlmEvent::Error(ProviderError::network("Gemini", e.to_string()));
                         return;
                     }
                 };

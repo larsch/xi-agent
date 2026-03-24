@@ -170,8 +170,9 @@ pub struct App {
     /// JoinHandle for the currently running agent loop task (if any).
     agent_task: Option<JoinHandle<()>>,
     /// Receives model lists forwarded from `list_models` tasks.
-    pub(crate) models_rx: tokio::sync::mpsc::UnboundedReceiver<Result<Vec<String>, String>>,
-    models_tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<String>, String>>,
+    pub(crate) models_rx:
+        tokio::sync::mpsc::UnboundedReceiver<Result<Vec<String>, crate::llm::ProviderError>>,
+    models_tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<String>, crate::llm::ProviderError>>,
     /// Receives login status events from background auth tasks.
     pub(crate) login_rx: tokio::sync::mpsc::UnboundedReceiver<LoginEvent>,
     login_tx: tokio::sync::mpsc::UnboundedSender<LoginEvent>,
@@ -385,6 +386,13 @@ impl App {
         TextArea::default()
     }
 
+    fn provider_supports_token_refresh(&self) -> bool {
+        matches!(
+            self.current_provider.as_str(),
+            "copilot" | "codex" | "gemini"
+        )
+    }
+
     /// Reset the input area to a blank state between submissions.
     /// Also clears any active completion state.
     pub fn reset_textarea(&mut self) {
@@ -447,7 +455,7 @@ impl App {
     }
 
     /// Store a freshly fetched model list (or error) and refresh completions.
-    pub fn apply_model_list(&mut self, result: Result<Vec<String>, String>) {
+    pub fn apply_model_list(&mut self, result: Result<Vec<String>, crate::llm::ProviderError>) {
         self.models_loading = false;
         match result {
             Ok(models) => {
@@ -455,12 +463,10 @@ impl App {
                 self.model_fetch_error = None;
             }
             Err(e) => {
-                let is_auth_401 = e.contains(" 401")
-                    && (self.current_provider == "copilot"
-                        || self.current_provider == "codex"
-                        || self.current_provider == "gemini");
+                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized
+                    && self.provider_supports_token_refresh();
 
-                if is_auth_401 && !self.refresh_in_progress {
+                if is_unauthorized && !self.refresh_in_progress {
                     log::debug!(
                         "list_models returned 401, attempting token refresh: provider={}",
                         self.current_provider
@@ -473,7 +479,7 @@ impl App {
                         auth::refresh_provider(&provider, tx).await;
                     });
                 } else {
-                    self.model_fetch_error = Some(e);
+                    self.model_fetch_error = Some(e.to_string());
                 }
             }
         }
@@ -1415,12 +1421,10 @@ impl App {
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
-                let is_auth_401 = e.contains(" 401")
-                    && (self.current_provider == "copilot"
-                        || self.current_provider == "codex"
-                        || self.current_provider == "gemini");
+                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized
+                    && self.provider_supports_token_refresh();
 
-                if is_auth_401 && self.auth_retry_budget > 0 && !self.refresh_in_progress {
+                if is_unauthorized && self.auth_retry_budget > 0 && !self.refresh_in_progress {
                     log::debug!(
                         "received 401, attempting token refresh: provider={} remaining_budget={}",
                         self.current_provider,

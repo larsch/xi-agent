@@ -97,10 +97,40 @@ impl Default for SseLineDecoder {
 
 // ── HTTP streaming request helper ─────────────────────────────────────────────
 
+/// Map an HTTP status code and response body to a typed `ProviderError`.
+///
+/// - 401 → `Unauthorized` (triggers token refresh)
+/// - 403 → `Forbidden` (authenticated but not allowed; does not trigger refresh)
+/// - 429 → `RateLimited`
+/// - 5xx → `ServerError`
+/// - other non-2xx → `Other`
+///
+/// Public for use in provider `list_models()` implementations.
+pub fn map_http_error(
+    provider: &str,
+    status: reqwest::StatusCode,
+    body: String,
+) -> super::ProviderError {
+    use super::{ProviderError, ProviderErrorKind};
+
+    match status.as_u16() {
+        401 => ProviderError::unauthorized(provider, body),
+        403 => ProviderError::forbidden(provider, body),
+        429 => ProviderError::rate_limited(provider, body),
+        500..=599 => ProviderError::server_error(provider, status.as_u16(), body),
+        _ => ProviderError {
+            kind: ProviderErrorKind::Other,
+            status_code: Some(status.as_u16()),
+            provider: provider.to_string(),
+            message: body,
+        },
+    }
+}
+
 /// Send `req` and, on success, return the [`reqwest::Response`].
 ///
 /// On network failure or a non-2xx HTTP status the function returns an `Err`
-/// containing a user-facing error string.  The caller is responsible for
+/// containing a typed [`ProviderError`].  The caller is responsible for
 /// translating that into an [`LlmEvent::Error`] if needed.
 ///
 /// `provider_name` is only used in log and error messages.
@@ -117,18 +147,20 @@ impl Default for SseLineDecoder {
 pub async fn send_streaming_request(
     req: reqwest::RequestBuilder,
     provider_name: &str,
-) -> Result<reqwest::Response, String> {
+) -> Result<reqwest::Response, super::ProviderError> {
+    use super::ProviderError;
+
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to {provider_name}: {e}"))?;
+        .map_err(|e| ProviderError::network(provider_name, format!("Failed to connect: {e}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let preview: String = text.chars().take(1000).collect();
         log::warn!("{provider_name} api error: status={status} body={preview}");
-        return Err(format!("{provider_name} returned {status}: {text}"));
+        return Err(map_http_error(provider_name, status, text));
     }
 
     log::debug!("← HTTP {} from {provider_name}", response.status());
@@ -259,5 +291,55 @@ mod tests {
     fn sse_returns_none_when_buffer_empty() {
         let mut dec = SseLineDecoder::new();
         assert!(dec.next_data_line().is_none());
+    }
+
+    // ── map_http_error ────────────────────────────────────────────────────────
+
+    #[test]
+    fn http_401_maps_to_unauthorized() {
+        let err = map_http_error(
+            "test",
+            reqwest::StatusCode::UNAUTHORIZED,
+            "bad token".into(),
+        );
+        assert_eq!(err.kind, crate::llm::ProviderErrorKind::Unauthorized);
+        assert_eq!(err.status_code, Some(401));
+        assert_eq!(err.message, "bad token");
+    }
+
+    #[test]
+    fn http_403_maps_to_forbidden() {
+        let err = map_http_error("test", reqwest::StatusCode::FORBIDDEN, "quota".into());
+        assert_eq!(err.kind, crate::llm::ProviderErrorKind::Forbidden);
+        assert_eq!(err.status_code, Some(403));
+    }
+
+    #[test]
+    fn http_429_maps_to_rate_limited() {
+        let err = map_http_error(
+            "test",
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "slow down".into(),
+        );
+        assert_eq!(err.kind, crate::llm::ProviderErrorKind::RateLimited);
+        assert_eq!(err.status_code, Some(429));
+    }
+
+    #[test]
+    fn http_503_maps_to_server_error() {
+        let err = map_http_error(
+            "test",
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "overload".into(),
+        );
+        assert_eq!(err.kind, crate::llm::ProviderErrorKind::ServerError);
+        assert_eq!(err.status_code, Some(503));
+    }
+
+    #[test]
+    fn http_418_maps_to_other() {
+        let err = map_http_error("test", reqwest::StatusCode::IM_A_TEAPOT, "teapot".into());
+        assert_eq!(err.kind, crate::llm::ProviderErrorKind::Other);
+        assert_eq!(err.status_code, Some(418));
     }
 }

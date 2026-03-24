@@ -2,8 +2,8 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 use super::{
-    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
-    ToolDefinition, UsageStats,
+    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
+    Role, ToolDefinition, UsageStats,
     common::{SseLineDecoder, infer_initiator, normalize_tool_name, send_streaming_request},
 };
 
@@ -108,7 +108,7 @@ impl AnthropicProvider {
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield LlmEvent::Error(e.to_string());
+                        yield LlmEvent::Error(ProviderError::network("Anthropic", e.to_string()));
                         return;
                     }
                 };
@@ -126,7 +126,7 @@ impl AnthropicProvider {
                     let ev: serde_json::Value = match serde_json::from_str(&data) {
                         Ok(v) => v,
                         Err(e) => {
-                            yield LlmEvent::Error(format!("Parse error: {e}"));
+                            yield LlmEvent::Error(ProviderError::other("Anthropic", format!("Parse error: {e}")));
                             return;
                         }
                     };
@@ -221,7 +221,7 @@ impl AnthropicProvider {
                                 .as_str()
                                 .unwrap_or("Anthropic API error")
                                 .to_string();
-                            yield LlmEvent::Error(msg);
+                            yield LlmEvent::Error(ProviderError::other("Anthropic", msg));
                             return;
                         }
 

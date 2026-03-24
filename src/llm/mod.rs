@@ -1,5 +1,8 @@
 use std::{future::Future, pin::Pin};
 
+pub mod error;
+pub use error::{ProviderError, ProviderErrorKind};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssistantPhase {
     Unknown,
@@ -181,7 +184,7 @@ pub enum LlmEvent {
     /// The stream finished successfully.
     Done,
     /// The request failed.
-    Error(String),
+    Error(ProviderError),
 }
 
 /// Description of a tool sent to the LLM so it can choose to call it.
@@ -197,10 +200,10 @@ pub struct ToolDefinition {
 /// suitable for passing across thread boundaries and storing in `App`.
 pub type LlmStream = Pin<Box<dyn futures_util::Stream<Item = LlmEvent> + Send + 'static>>;
 
-/// A boxed future that resolves to a list of model names, or an error string.
+/// A boxed future that resolves to a list of model names, or a provider error.
 /// Returned by `LlmProvider::list_models`.
 pub type ModelListFuture =
-    Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<Vec<String>, ProviderError>> + Send + 'static>>;
 
 /// Trait every LLM backend must implement.
 ///

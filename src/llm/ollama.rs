@@ -2,8 +2,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, Role,
-    ToolDefinition, UsageStats, common::send_streaming_request,
+    AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
+    Role, ToolDefinition, UsageStats, common::send_streaming_request,
 };
 
 pub struct OllamaProvider {
@@ -229,7 +229,10 @@ fn parse_ndjson_line(
             }
         }
         Err(e) => {
-            events.push(LlmEvent::Error(format!("Parse error: {e}")));
+            events.push(LlmEvent::Error(ProviderError::other(
+                "Ollama",
+                format!("Parse error: {e}"),
+            )));
             return true;
         }
     }
@@ -270,7 +273,7 @@ impl LlmProvider for OllamaProvider {
             while let Some(chunk) = byte_stream.next().await {
                 let bytes = match chunk {
                     Ok(b) => b,
-                    Err(e) => { yield LlmEvent::Error(e.to_string()); return; }
+                    Err(e) => { yield LlmEvent::Error(ProviderError::network("Ollama", e.to_string())); return; }
                 };
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 while let Some(pos) = buf.find('\n') {
@@ -338,7 +341,7 @@ impl LlmProvider for OllamaProvider {
             while let Some(chunk) = byte_stream.next().await {
                 let bytes = match chunk {
                     Ok(b) => b,
-                    Err(e) => { yield LlmEvent::Error(e.to_string()); return; }
+                    Err(e) => { yield LlmEvent::Error(ProviderError::network("Ollama", e.to_string())); return; }
                 };
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 while let Some(pos) = buf.find('\n') {
@@ -361,26 +364,35 @@ impl LlmProvider for OllamaProvider {
         let url = format!("{}/api/tags", self.base_url);
         let client = self.client.clone();
         Box::pin(async move {
+            use super::common::map_http_error;
+
             log::debug!("→ GET {url}");
             let response = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     log::warn!("ollama list_models error: {e}");
-                    return Err(format!("request failed: {e}"));
+                    return Err(ProviderError::network(
+                        "Ollama",
+                        format!("request failed: {e}"),
+                    ));
                 }
             };
             let status = response.status();
             log::debug!("← HTTP {status} from ollama list_models");
             if !status.is_success() {
-                let msg = format!("HTTP {status}");
-                log::warn!("ollama list_models failed: {msg}");
-                return Err(msg);
+                let text = response.text().await.unwrap_or_default();
+                let preview: String = text.chars().take(500).collect();
+                log::warn!("ollama list_models failed: status={status} body={preview}");
+                return Err(map_http_error("Ollama", status, text));
             }
             let tags: TagsResponse = match response.json().await {
                 Ok(t) => t,
                 Err(e) => {
                     log::warn!("ollama list_models parse error: {e}");
-                    return Err(format!("failed to parse response: {e}"));
+                    return Err(ProviderError::other(
+                        "Ollama",
+                        format!("failed to parse response: {e}"),
+                    ));
                 }
             };
             Ok(tags.models.into_iter().map(|m| m.name).collect())
