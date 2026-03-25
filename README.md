@@ -153,6 +153,18 @@ Environment variables:
 | `/resume`            | Open session picker (local + foreign sessions)   |
 | `/quit`              | Quit                                             |
 
+## Skills discovery
+
+`/skill:<name>` uses skills discovered from these roots (in this order):
+
+- `~/.tau/skills`
+- `~/.agents/skills`
+- `%USERPROFILE%\\.agents\\skills` (Windows)
+- `./.agents/skills`
+- `./.tau/skills`
+
+Each skill is expected in a subdirectory containing `SKILL.md` with YAML frontmatter.
+
 ## Built-in tools
 
 The agent has built-in tools out of the box:

@@ -21,6 +21,7 @@ pub struct SkillMeta {
 /// Skill roots:
 /// - `~/.tau/skills`
 /// - `~/.agents/skills`
+/// - `%USERPROFILE%\\.agents\\skills` (Windows)
 /// - `./.agents/skills`
 /// - `./.tau/skills`
 ///
@@ -36,6 +37,12 @@ fn skill_dirs() -> Vec<PathBuf> {
         let home = PathBuf::from(home);
         dirs.push(home.join(".tau").join("skills"));
         dirs.push(home.join(".agents").join("skills"));
+    }
+
+    if cfg!(windows)
+        && let Some(user_profile) = env::var_os("USERPROFILE").filter(|s| !s.is_empty())
+    {
+        dirs.push(PathBuf::from(user_profile).join(".agents").join("skills"));
     }
 
     if let Ok(cwd) = env::current_dir() {
