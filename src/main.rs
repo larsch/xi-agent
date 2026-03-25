@@ -172,6 +172,7 @@ async fn main() -> io::Result<()> {
                         e
                     );
                     app.messages.push(llm::Message::assistant(msg.clone()));
+                    app.mark_log_dirty();
                     Arc::new(UnavailableProvider { message: msg })
                         as Arc<dyn LlmProvider + Send + Sync>
                 }
@@ -596,6 +597,7 @@ async fn run(
                                                     app.messages.push(llm::Message::assistant(format!(
                                                         "[invalid thinking level: '{raw}' (use off|minimal|low|medium|high|xhigh)]"
                                                     )));
+                                                    app.mark_log_dirty();
                                                 }
                                             }
                                         }
@@ -636,6 +638,7 @@ async fn run(
                                                             app.messages.push(llm::Message::assistant(
                                                                 format!("[skill error: {e}]"),
                                                             ));
+                                                            app.mark_log_dirty();
                                                         }
                                                     }
                                                 }
@@ -643,6 +646,7 @@ async fn run(
                                                     app.messages.push(llm::Message::assistant(
                                                         format!("[unknown skill: '{name}']"),
                                                     ));
+                                                    app.mark_log_dirty();
                                                 }
                                             }
                                         }
@@ -766,6 +770,7 @@ fn persist_provider_model_selection(
         app.messages.push(Message::assistant(format!(
             "[failed to persist config.toml: {e}]"
         )));
+        app.mark_log_dirty();
     }
 }
 

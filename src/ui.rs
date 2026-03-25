@@ -193,6 +193,19 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
     }
 }
 
+fn build_log_lines_cached(app: &mut App, width: usize) -> Vec<Line<'static>> {
+    if let Some((rev, cached_width, lines)) = &app.cached_log_lines
+        && *rev == app.log_revision
+        && *cached_width == width
+    {
+        return lines.clone();
+    }
+
+    let lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, width);
+    app.cached_log_lines = Some((app.log_revision, width, lines.clone()));
+    lines
+}
+
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     style_textarea(app);
 
@@ -254,29 +267,40 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Chat log ──────────────────────────────────────────────────────────────
     let inner_height = log_area.height as usize;
-    let mut log_content_area = log_area;
 
     // Pre-wrapped lines: each Line is exactly one visual row.
-    let mut lines = build_log_lines(
-        &app.messages,
-        app.streaming,
-        &app.queued_steering,
-        log_area.width as usize,
-    );
+    // To avoid wrapping the full log twice on every keypress, pick the likely
+    // content width first using the previous frame's scrollbar state.
+    let mut assumed_log_width = log_area.width as usize;
+    if app.log_had_scrollbar && assumed_log_width > 1 {
+        assumed_log_width -= 1;
+    }
 
-    let log_scrollbar_area = if lines.len() > inner_height {
+    let mut lines = build_log_lines_cached(app, assumed_log_width);
+
+    let mut has_scrollbar = lines.len() > inner_height;
+
+    // If our width assumption was wrong, rebuild once with the correct width.
+    if has_scrollbar != app.log_had_scrollbar {
+        let rewrap_width = if has_scrollbar {
+            split_scrollbar_column(log_area).0.width as usize
+        } else {
+            log_area.width as usize
+        };
+
+        lines = build_log_lines_cached(app, rewrap_width);
+        has_scrollbar = lines.len() > inner_height;
+    }
+
+    // Final geometry after potential re-wrap.
+    let (log_content_area, log_scrollbar_area) = if has_scrollbar {
         let (content_area, scrollbar_area) = split_scrollbar_column(log_area);
-        log_content_area = content_area;
-        lines = build_log_lines(
-            &app.messages,
-            app.streaming,
-            &app.queued_steering,
-            log_content_area.width as usize,
-        );
-        scrollbar_area
+        (content_area, scrollbar_area)
     } else {
-        None
+        (log_area, None)
     };
+
+    app.log_had_scrollbar = has_scrollbar;
 
     // Store log height for use as page size in the event loop.
     app.last_log_height = inner_height;
@@ -2308,12 +2332,14 @@ mod tests {
             "tool output that used to be much longer",
             false,
         )];
+        app.mark_log_dirty();
 
         terminal
             .draw(|f| draw(f, &mut app))
             .expect("first draw succeeds");
 
         app.messages = vec![Message::tool_result("1", "short", false)];
+        app.mark_log_dirty();
 
         terminal
             .draw(|f| draw(f, &mut app))

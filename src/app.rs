@@ -1,3 +1,4 @@
+use ratatui::text::Line;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -87,11 +88,20 @@ pub struct App {
     pub input_mode: InputMode,
     pub selected_shell: ShellKind,
     pub available_shells: Vec<ShellKind>,
+    /// Monotonic revision bump for any visible log-content change.
+    /// Used to invalidate UI wrapping caches.
+    pub log_revision: u64,
+    /// Cached pre-wrapped log lines for the most recent `(log_revision, width)`.
+    pub cached_log_lines: Option<(u64, usize, Vec<Line<'static>>)>,
     pub log_scroll: usize,
     /// When true, the view always follows the bottom (auto-scrolls).
     pub auto_scroll: bool,
     /// Height of the log pane from the last draw — used as page-size scrolling.
     pub last_log_height: usize,
+    /// Whether the log pane had a visible scrollbar on the previous frame.
+    /// Used by the renderer to pick the likely wrap width and avoid redundant
+    /// full log re-wrap work on every draw.
+    pub log_had_scrollbar: bool,
     pub streaming: bool,
     /// Optional system prompt prepended to every request.
     pub system_prompt: Option<String>,
@@ -207,6 +217,15 @@ pub struct App {
 type DynProvider = Arc<dyn LlmProvider + Send + Sync + 'static>;
 
 impl App {
+    fn bump_log_revision(&mut self) {
+        self.log_revision = self.log_revision.saturating_add(1);
+        self.cached_log_lines = None;
+    }
+
+    pub fn mark_log_dirty(&mut self) {
+        self.bump_log_revision();
+    }
+
     pub fn new(
         initial_model: impl Into<String>,
         initial_provider: &ProviderKind,
@@ -226,9 +245,12 @@ impl App {
             input_mode: InputMode::Chat,
             selected_shell,
             available_shells,
+            log_revision: 0,
+            cached_log_lines: None,
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
+            log_had_scrollbar: false,
             streaming: false,
             system_prompt: None,
             current_model: initial_model.into(),
@@ -305,6 +327,7 @@ impl App {
                 self.messages.push(Message::assistant(format!(
                     "[session persistence unavailable: {e}]"
                 )));
+                self.bump_log_revision();
             }
         }
     }
@@ -329,6 +352,7 @@ impl App {
             self.messages.push(Message::assistant(
                 "[no resumable session in this working folder]",
             ));
+            self.bump_log_revision();
             return;
         };
         self.resume_session_by_id(&meta.id);
@@ -344,11 +368,13 @@ impl App {
                 self.current_session_id = Some(session_id.to_string());
                 self.auto_scroll = true;
                 self.log_scroll = 0;
+                self.bump_log_revision();
             }
             Err(e) => {
                 self.messages.push(Message::assistant(format!(
                     "[failed to resume session: {e}]"
                 )));
+                self.bump_log_revision();
             }
         }
         self.refresh_resume_availability();
@@ -591,6 +617,7 @@ impl App {
         let mut out_msg = Message::tool_result(call_id, body, output.exit_code != 0);
         out_msg.include_in_llm = false;
         self.messages.push(out_msg);
+        self.bump_log_revision();
 
         self.persist_messages();
         self.exit_shell_mode();
@@ -1326,6 +1353,7 @@ impl App {
                 self.messages.push(Message::assistant(format!(
                     "[login successful: {provider}]"
                 )));
+                self.bump_log_revision();
                 self.persist_messages();
                 self.login_needs_rebuild = true;
             }
@@ -1334,6 +1362,7 @@ impl App {
                 self.messages.push(Message::assistant(format!(
                     "[login failed for {provider}: {message}]"
                 )));
+                self.bump_log_revision();
                 self.persist_messages();
             }
             LoginEvent::RefreshResult {
@@ -1357,6 +1386,7 @@ impl App {
                     self.messages.push(Message::assistant(format!(
                         "[token refresh failed for {provider}: {message}. Run /login {provider}]"
                     )));
+                    self.bump_log_revision();
                     self.persist_messages();
                 }
             }
@@ -1418,6 +1448,7 @@ impl App {
         self.latest_usage = None;
         self.reset_textarea();
         self.auto_scroll = true;
+        self.bump_log_revision();
         self.refresh_resume_availability();
     }
 
@@ -1432,6 +1463,7 @@ impl App {
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
         self.steering_tx = Some(steering_tx);
         self.queued_steering.clear();
+        self.bump_log_revision();
 
         let provider = Arc::clone(provider);
         let tx = self.event_tx.clone();
@@ -1455,6 +1487,7 @@ impl App {
 
         if tx.send(trimmed.clone()).is_ok() {
             self.queued_steering.push(trimmed);
+            self.bump_log_revision();
             self.reset_textarea();
             self.auto_scroll = true;
         }
@@ -1470,6 +1503,7 @@ impl App {
         }
 
         self.messages.push(Message::user(trimmed));
+        self.bump_log_revision();
         self.persist_messages();
         self.reset_textarea();
         self.latest_usage = None;
@@ -1514,6 +1548,7 @@ impl App {
         let mut msg = Message::user(sanitized);
         msg.hidden = true;
         self.messages.push(msg);
+        self.bump_log_revision();
         self.persist_messages();
         self.reset_textarea();
         self.latest_usage = None;
@@ -1548,6 +1583,7 @@ impl App {
             && (last.content.starts_with("[Error:") || last.content.starts_with("[token refresh"))
         {
             self.messages.pop();
+            self.bump_log_revision();
             self.persist_messages();
         }
 
@@ -1573,6 +1609,7 @@ impl App {
             self.queued_steering.clear();
             self.messages
                 .push(Message::assistant("[agent loop aborted]"));
+            self.bump_log_revision();
             self.persist_messages();
         }
     }
@@ -1608,6 +1645,7 @@ impl App {
                         .get_or_insert_with(String::new)
                         .push_str(&token);
                 }
+                self.bump_log_revision();
             }
             AgentEvent::Usage(usage) => {
                 self.latest_usage = Some(usage);
@@ -1620,21 +1658,25 @@ impl App {
                         last.assistant_phase = Some(phase);
                     }
                 }
+                self.bump_log_revision();
             }
             AgentEvent::ToolIntentStart => {
                 self.ensure_assistant_message();
                 if let Some(last) = self.messages.last_mut() {
                     last.assistant_phase = Some(AssistantPhase::Provisional);
                 }
+                self.bump_log_revision();
             }
             AgentEvent::SteeringConsumed { text } => {
                 self.messages.push(Message::user(text.clone()));
                 if let Some(pos) = self.queued_steering.iter().position(|m| m == &text) {
                     self.queued_steering.remove(pos);
                 }
+                self.bump_log_revision();
             }
             AgentEvent::ToolCallStart { id, name, args } => {
                 self.messages.push(Message::tool_call(id, name, args));
+                self.bump_log_revision();
             }
             AgentEvent::ToolCallEnd { id, name, result } => {
                 self.messages.push(Message::tool_result(
@@ -1652,6 +1694,7 @@ impl App {
                 if name == "ask_user" && !result.is_error {
                     self.messages.push(Message::user(result.content));
                 }
+                self.bump_log_revision();
             }
             AgentEvent::TurnEnd => {
                 self.persist_messages();
@@ -1661,12 +1704,14 @@ impl App {
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
+                self.bump_log_revision();
                 self.persist_messages();
             }
             AgentEvent::Error(e) => {
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
+                self.bump_log_revision();
 
                 let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
 
@@ -1685,6 +1730,7 @@ impl App {
                 } else {
                     self.messages
                         .push(Message::assistant(format!("[Error: {e}]")));
+                    self.bump_log_revision();
                     self.streaming = false;
                     self.persist_messages();
                 }
@@ -1695,7 +1741,10 @@ impl App {
     fn ensure_assistant_message(&mut self) {
         match self.messages.last().map(|m| &m.role) {
             Some(Role::Assistant) => {}
-            _ => self.messages.push(Message::assistant("")),
+            _ => {
+                self.messages.push(Message::assistant(""));
+                self.bump_log_revision();
+            }
         }
     }
 
