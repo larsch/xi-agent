@@ -24,13 +24,14 @@ mod dirs;
 mod llm;
 mod provider;
 mod session;
+mod shell;
 mod skills;
 mod thinking;
 mod tool_presentation;
 mod ui;
 
 use agent::{AgentEvent, AgentLoopConfig, build_system_prompt, tools::register_builtin_tools};
-use app::{App, SelectionResult};
+use app::{App, InputMode, SelectionResult};
 use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
@@ -352,12 +353,23 @@ async fn run(
                         if key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            if app.input_mode == InputMode::Shell {
+                                app.exit_shell_mode();
+                                continue;
+                            }
                             return Ok(RunResult::Quit);
                         }
 
                         if key.code == KeyCode::Char('d')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            if app.input_mode == InputMode::Shell {
+                                if app.shell_input_is_empty() {
+                                    app.exit_shell_mode();
+                                }
+                                continue;
+                            }
+
                             let input_is_empty = app
                                 .textarea
                                 .lines()
@@ -380,6 +392,32 @@ async fn run(
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
                             app.resume_latest_for_current_cwd();
+                            continue;
+                        }
+
+                        // ── Shell input mode ─────────────────────────────────
+                        if app.input_mode == InputMode::Shell {
+                            if key.code == KeyCode::Char('s')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                app.cycle_shell();
+                                continue;
+                            }
+
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.exit_shell_mode();
+                                }
+                                KeyCode::Backspace if app.shell_input_is_empty() => {
+                                    app.exit_shell_mode();
+                                }
+                                KeyCode::Enter if key.modifiers.is_empty() => {
+                                    app.submit_shell_command();
+                                }
+                                _ => {
+                                    app.shell_textarea.input(Event::Key(key));
+                                }
+                            }
                             continue;
                         }
 
@@ -465,6 +503,18 @@ async fn run(
                                 app.enter_login_action_menu();
                             }
                             continue;
+                        }
+
+                        if key.code == KeyCode::Char('!') && key.modifiers.is_empty() {
+                            let chat_input_is_empty = app
+                                .textarea
+                                .lines()
+                                .iter()
+                                .all(|line| line.trim().is_empty());
+                            if chat_input_is_empty {
+                                app.enter_shell_mode();
+                                continue;
+                            }
                         }
 
                         match key.code {
@@ -628,10 +678,14 @@ async fn run(
                             if app.selection_mode {
                                 app.exit_selection_mode();
                             }
-                            app.textarea.insert_str(normalize_paste_text(&text));
-                            app.update_completions();
-                            if app.should_fetch_models() {
-                                app.start_model_fetch(provider);
+                            if app.input_mode == InputMode::Shell {
+                                app.shell_textarea.insert_str(normalize_paste_text(&text));
+                            } else {
+                                app.textarea.insert_str(normalize_paste_text(&text));
+                                app.update_completions();
+                                if app.should_fetch_models() {
+                                    app.start_model_fetch(provider);
+                                }
                             }
                         }
                     },

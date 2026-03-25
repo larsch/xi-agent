@@ -47,6 +47,10 @@ pub struct Message {
     /// but is not rendered in the chat log UI.
     #[serde(default)]
     pub hidden: bool,
+    /// When true, this message is included in outbound LLM requests.
+    /// Defaults to true for backwards compatibility.
+    #[serde(default = "default_true")]
+    pub include_in_llm: bool,
     // ── Tool-call fields (Role::ToolCall) ─────────────────────────────────────
     /// Opaque identifier linking a tool call to its result.
     pub tool_call_id: Option<String>,
@@ -59,6 +63,10 @@ pub struct Message {
     pub is_error: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
@@ -67,6 +75,7 @@ impl Message {
             thinking: None,
             assistant_phase: None,
             hidden: false,
+            include_in_llm: true,
             tool_call_id: None,
             tool_name: None,
             tool_args: None,
@@ -81,6 +90,7 @@ impl Message {
             thinking: None,
             assistant_phase: None,
             hidden: false,
+            include_in_llm: true,
             tool_call_id: None,
             tool_name: None,
             tool_args: None,
@@ -95,6 +105,7 @@ impl Message {
             thinking: None,
             assistant_phase: None,
             hidden: false,
+            include_in_llm: true,
             tool_call_id: None,
             tool_name: None,
             tool_args: None,
@@ -114,6 +125,7 @@ impl Message {
             thinking: None,
             assistant_phase: None,
             hidden: false,
+            include_in_llm: true,
             tool_call_id: Some(id.into()),
             tool_name: Some(name.into()),
             tool_args: Some(args),
@@ -133,6 +145,7 @@ impl Message {
             thinking: None,
             assistant_phase: None,
             hidden: false,
+            include_in_llm: true,
             tool_call_id: Some(call_id.into()),
             tool_name: None,
             tool_args: None,

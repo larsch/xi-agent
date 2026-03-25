@@ -7,7 +7,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, MAX_SELECTION_VISIBLE},
+    app::{App, InputMode, MAX_SELECTION_VISIBLE},
     auth::AuthFlow,
     commands::CompletionItem,
     llm::{AssistantPhase, Role},
@@ -17,6 +17,9 @@ use crate::{
 
 /// Background colour of the input panel.
 const INPUT_BG: Color = Color::Rgb(30, 30, 40);
+
+/// Background colour of shell input panel.
+const SHELL_INPUT_BG: Color = Color::Rgb(24, 34, 32);
 
 /// Background colour of user message blocks in the chat log.
 const USER_BG: Color = Color::Rgb(50, 50, 60);
@@ -55,16 +58,26 @@ const LOGIN_CONTENT_BG: Color = Color::Rgb(15, 22, 48);
 fn style_textarea(app: &mut App) {
     // The Block's style fills every cell the widget owns (including empty
     // lines below the cursor); set_style() only covers the text spans.
-    // Both must carry INPUT_BG so the background is uniform.
-    app.textarea.set_block(
+    // Both must carry the mode background so the panel is uniform.
+    let bg = if app.input_mode == InputMode::Shell {
+        SHELL_INPUT_BG
+    } else {
+        INPUT_BG
+    };
+
+    let active = if app.input_mode == InputMode::Shell {
+        &mut app.shell_textarea
+    } else {
+        &mut app.textarea
+    };
+
+    active.set_block(
         Block::default()
             .borders(Borders::NONE)
-            .style(Style::default().bg(INPUT_BG)),
+            .style(Style::default().bg(bg)),
     );
-    app.textarea
-        .set_style(Style::default().fg(Color::White).bg(INPUT_BG));
-    app.textarea
-        .set_cursor_line_style(Style::default().bg(INPUT_BG));
+    active.set_style(Style::default().fg(Color::White).bg(bg));
+    active.set_cursor_line_style(Style::default().bg(bg));
 }
 
 const TAB_WIDTH: usize = 4;
@@ -187,7 +200,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let width = f.area().width as usize;
     let resume_hint_visible = app.should_show_resume_hint();
 
-    let input_line_count = input_visual_line_count(app.textarea.lines(), width);
+    let active_lines = if app.input_mode == InputMode::Shell {
+        app.shell_textarea.lines()
+    } else {
+        app.textarea.lines()
+    };
+
+    let input_line_count = input_visual_line_count(active_lines, width);
 
     let layout = compute_panel_heights(PanelInputs {
         terminal_height,
@@ -372,11 +391,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     Span::styled("  ", Style::default().bg(SELECTION_BG)),
                     Span::styled(
                         "no matches",
-                        Style::default()
-                            .bg(SELECTION_BG)
-                            .add_modifier(
-                                ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
-                            ),
+                        Style::default().bg(SELECTION_BG).add_modifier(
+                            ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
+                        ),
                     ),
                 ])]
             } else {
@@ -439,43 +456,123 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Halfblock edges ───────────────────────────────────────────────────────
     if !app.login_active {
+        let panel_bg = if app.input_mode == InputMode::Shell {
+            SHELL_INPUT_BG
+        } else {
+            INPUT_BG
+        };
         f.render_widget(
-            Paragraph::new(halfblock_line(width, '▄', INPUT_BG)),
+            Paragraph::new(halfblock_line(width, '▄', panel_bg)),
             top_hb_area,
         );
         f.render_widget(
-            Paragraph::new(halfblock_line(width, '▀', INPUT_BG)),
+            Paragraph::new(halfblock_line(width, '▀', panel_bg)),
             bot_hb_area,
         );
     }
 
     // ── Input box ─────────────────────────────────────────────────────────────
     if !app.login_active {
+        let is_shell = app.input_mode == InputMode::Shell;
+        let panel_bg = if is_shell { SHELL_INPUT_BG } else { INPUT_BG };
+
         // tui-textarea scrolls horizontally for long single lines.
         // For chat-style input we want visual hard-wrapping instead.
         let input_width = input_area.width as usize;
-        let input_lines = app.textarea.lines().to_vec();
-        let cursor = app.textarea.cursor();
-        let wrapped = wrap_input_for_render(&input_lines, cursor, input_width);
+
+        let (input_lines, cursor, prefix, hint) = if is_shell {
+            let cwd = if app.current_cwd().is_empty() {
+                ".".to_string()
+            } else {
+                app.current_cwd().to_string()
+            };
+            let prefix = if app.available_shells.len() > 1 {
+                format!(
+                    "[{}] {}{} ",
+                    app.selected_shell.label(),
+                    cwd,
+                    app.selected_shell.prompt_char()
+                )
+            } else {
+                format!("{}{} ", cwd, app.selected_shell.prompt_char())
+            };
+            (
+                app.shell_textarea.lines().to_vec(),
+                app.shell_textarea.cursor(),
+                prefix,
+                (app.available_shells.len() > 1).then_some("Ctrl+S switch".to_string()),
+            )
+        } else {
+            (
+                app.textarea.lines().to_vec(),
+                app.textarea.cursor(),
+                String::new(),
+                None,
+            )
+        };
+
+        let wrap_width = if prefix.is_empty() {
+            input_width
+        } else {
+            input_width.saturating_sub(prefix.width()).max(1)
+        };
+        let wrapped = wrap_input_for_render(&input_lines, cursor, wrap_width);
         let wrapped_lines = wrapped.lines;
         let wrapped_cursor = wrapped.cursor;
 
-        let paragraph = Paragraph::new(Text::from(
-            wrapped_lines
-                .into_iter()
-                .map(Line::from)
-                .collect::<Vec<Line<'static>>>(),
-        ))
-        .block(
-            Block::default()
-                .borders(Borders::NONE)
-                .style(Style::default().bg(INPUT_BG)),
-        )
-        .style(Style::default().fg(Color::White).bg(INPUT_BG));
+        let mut lines: Vec<Line<'static>> = wrapped_lines
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                if idx == 0 && !prefix.is_empty() {
+                    Line::from(vec![
+                        Span::styled(
+                            prefix.clone(),
+                            Style::default().fg(Color::Cyan).bg(panel_bg),
+                        ),
+                        Span::styled(row, Style::default().fg(Color::White).bg(panel_bg)),
+                    ])
+                } else {
+                    Line::from(Span::styled(
+                        row,
+                        Style::default().fg(Color::White).bg(panel_bg),
+                    ))
+                }
+            })
+            .collect();
+
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                prefix.clone(),
+                Style::default().fg(Color::Cyan).bg(panel_bg),
+            )));
+        }
+
+        if let Some(hint) = hint {
+            let hint_style = Style::default()
+                .fg(Color::Rgb(120, 140, 140))
+                .bg(panel_bg)
+                .add_modifier(ratatui::style::Modifier::DIM);
+            if let Some(first) = lines.first_mut() {
+                first
+                    .spans
+                    .push(Span::styled(format!("  {hint}"), hint_style));
+            }
+        }
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::NONE)
+                    .style(Style::default().bg(panel_bg)),
+            )
+            .style(Style::default().fg(Color::White).bg(panel_bg));
 
         f.render_widget(paragraph, input_area);
 
-        let cursor_x = input_area.x.saturating_add(wrapped_cursor.1 as u16);
+        let cursor_x = input_area
+            .x
+            .saturating_add((wrapped_cursor.1 + prefix.width()) as u16);
         let cursor_y = input_area.y.saturating_add(wrapped_cursor.0 as u16);
         f.set_cursor_position((cursor_x, cursor_y));
     }
@@ -640,12 +737,9 @@ fn build_completion_lines(
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(
                         item.label.clone(),
-                        Style::default()
-                            .fg(fg)
-                            .bg(bg)
-                            .add_modifier(
-                                ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
-                            ),
+                        Style::default().fg(fg).bg(bg).add_modifier(
+                            ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
+                        ),
                     ),
                     Span::styled(fill, Style::default().bg(bg)),
                 ]);
@@ -720,12 +814,9 @@ fn build_selection_lines(
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(
                         item.label.clone(),
-                        Style::default()
-                            .fg(fg)
-                            .bg(bg)
-                            .add_modifier(
-                                ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
-                            ),
+                        Style::default().fg(fg).bg(bg).add_modifier(
+                            ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
+                        ),
                     ),
                     Span::styled(fill, Style::default().bg(bg)),
                 ]);
@@ -766,7 +857,13 @@ fn build_log_lines(
                 if msg.hidden {
                     continue;
                 }
-                append_message(&mut lines, &sanitize_for_display(&msg.content), "", width, true);
+                append_message(
+                    &mut lines,
+                    &sanitize_for_display(&msg.content),
+                    "",
+                    width,
+                    true,
+                );
             }
             Role::System => {
                 // System messages are not displayed in the chat log.
@@ -778,7 +875,12 @@ fn build_log_lines(
 
                 // Render thinking block (if any thinking content has arrived).
                 if !thinking.is_empty() {
-                    append_message_dim(&mut lines, &format!("🧠 {}", sanitize_for_display(thinking)), "", width);
+                    append_message_dim(
+                        &mut lines,
+                        &format!("🧠 {}", sanitize_for_display(thinking)),
+                        "",
+                        width,
+                    );
                     // Separator between thinking and answer is lazy: only render
                     // when an answer line will actually be shown.
                     if has_answer {
@@ -817,10 +919,30 @@ fn build_log_lines(
             }
             Role::ToolCall => {
                 let name = msg.tool_name.as_deref().unwrap_or("unknown");
-                let mut label = match msg.tool_args.as_ref() {
-                    Some(args) => tool_presentation::tool_invocation_label(name, args),
-                    None => {
-                        tool_presentation::tool_invocation_label(name, &serde_json::Value::Null)
+                let mut label = if name == "local_shell" {
+                    let prefix = msg
+                        .tool_args
+                        .as_ref()
+                        .and_then(|a| a.get("prefix"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let command = msg
+                        .tool_args
+                        .as_ref()
+                        .and_then(|a| a.get("command"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if prefix.is_empty() {
+                        format!("⚙ {command}")
+                    } else {
+                        format!("⚙ {prefix} {command}")
+                    }
+                } else {
+                    match msg.tool_args.as_ref() {
+                        Some(args) => tool_presentation::tool_invocation_label(name, args),
+                        None => {
+                            tool_presentation::tool_invocation_label(name, &serde_json::Value::Null)
+                        }
                     }
                 };
 
@@ -832,7 +954,12 @@ fn build_log_lines(
                     label.push_str(&format!(" [{start}-{end}/{total}]"));
                 }
 
-                append_message_colored(&mut lines, &label, width, Color::Cyan);
+                let color = if name == "local_shell" {
+                    Color::LightBlue
+                } else {
+                    Color::Cyan
+                };
+                append_message_colored(&mut lines, &label, width, color);
             }
             Role::ToolResult => {
                 let prev_is_read = matches!(
@@ -840,6 +967,12 @@ fn build_log_lines(
                     Some(prev)
                         if prev.role == Role::ToolCall
                             && matches!(prev.tool_name.as_deref(), Some("read" | "read_file"))
+                );
+                let prev_is_local_shell = matches!(
+                    messages.get(idx.saturating_sub(1)),
+                    Some(prev)
+                        if prev.role == Role::ToolCall
+                            && matches!(prev.tool_name.as_deref(), Some("local_shell"))
                 );
 
                 let content_for_display = if prev_is_read {
@@ -860,7 +993,13 @@ fn build_log_lines(
                 } else {
                     preview
                 };
-                let color = if msg.is_error {
+                let color = if prev_is_local_shell {
+                    if msg.is_error {
+                        Color::LightRed
+                    } else {
+                        Color::LightBlue
+                    }
+                } else if msg.is_error {
                     Color::Red
                 } else {
                     Color::Green
@@ -2346,7 +2485,11 @@ mod tests {
             .filter(|l| l.starts_with('│'))
             .collect();
         assert_eq!(result_lines.len(), 1, "should be exactly one result line");
-        assert!(result_lines[0].contains("  output line"), "indent should be preserved: {:?}", result_lines[0]);
+        assert!(
+            result_lines[0].contains("  output line"),
+            "indent should be preserved: {:?}",
+            result_lines[0]
+        );
     }
 
     #[test]
@@ -2363,7 +2506,11 @@ mod tests {
             .filter(|l| l.starts_with('│'))
             .collect();
         assert!(!result_lines.is_empty());
-        assert!(result_lines[0].contains("    indented output"), "indent stripped: {:?}", result_lines[0]);
+        assert!(
+            result_lines[0].contains("    indented output"),
+            "indent stripped: {:?}",
+            result_lines[0]
+        );
     }
 
     #[test]

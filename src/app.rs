@@ -15,6 +15,7 @@ use crate::{
     llm::{AssistantPhase, LlmProvider, Message, Role, UsageStats},
     provider::{ProviderKind, ThinkingSupport, thinking_support_for},
     session::SessionStore,
+    shell::{self, ShellKind},
     skills::SkillMeta,
     thinking::ThinkingLevel,
 };
@@ -71,11 +72,21 @@ enum SelectionKind {
     LoginAction,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMode {
+    Chat,
+    Shell,
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
     pub messages: Vec<Message>,
     pub textarea: TextArea<'static>,
+    pub shell_textarea: TextArea<'static>,
+    pub input_mode: InputMode,
+    pub selected_shell: ShellKind,
+    pub available_shells: Vec<ShellKind>,
     pub log_scroll: usize,
     /// When true, the view always follows the bottom (auto-scrolls).
     pub auto_scroll: bool,
@@ -206,9 +217,15 @@ impl App {
         let (models_tx, models_rx) = tokio::sync::mpsc::unbounded_channel();
         let (login_tx, login_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ask_tx, ask_rx) = tokio::sync::mpsc::unbounded_channel();
+        let available_shells = shell::discover_available_shells();
+        let selected_shell = available_shells.first().copied().unwrap_or(ShellKind::Bash);
         Self {
             messages: Vec::new(),
             textarea: Self::make_textarea(),
+            shell_textarea: Self::make_textarea(),
+            input_mode: InputMode::Chat,
+            selected_shell,
+            available_shells,
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
@@ -290,6 +307,10 @@ impl App {
                 )));
             }
         }
+    }
+
+    pub fn current_cwd(&self) -> &str {
+        &self.current_cwd
     }
 
     pub fn should_show_resume_hint(&self) -> bool {
@@ -478,12 +499,102 @@ impl App {
         }
     }
 
-    /// Reset the input area to a blank state between submissions.
+    /// Reset the chat input area to a blank state between submissions.
     /// Also clears any active completion state.
     pub fn reset_textarea(&mut self) {
         self.textarea = Self::make_textarea();
         self.completions.clear();
         self.completion_selected = 0;
+    }
+
+    pub fn shell_input_is_empty(&self) -> bool {
+        self.shell_textarea
+            .lines()
+            .iter()
+            .all(|line| line.trim().is_empty())
+    }
+
+    pub fn enter_shell_mode(&mut self) {
+        self.input_mode = InputMode::Shell;
+        self.shell_textarea = Self::make_textarea();
+        self.completions.clear();
+        self.completion_selected = 0;
+    }
+
+    pub fn exit_shell_mode(&mut self) {
+        self.input_mode = InputMode::Chat;
+        self.shell_textarea = Self::make_textarea();
+    }
+
+    pub fn cycle_shell(&mut self) {
+        if self.available_shells.len() <= 1 {
+            return;
+        }
+        let idx = self
+            .available_shells
+            .iter()
+            .position(|s| *s == self.selected_shell)
+            .unwrap_or(0);
+        self.selected_shell = self.available_shells[(idx + 1) % self.available_shells.len()];
+    }
+
+    pub fn submit_shell_command(&mut self) {
+        let lines: Vec<String> = self.shell_textarea.lines().to_vec();
+        let command = lines.join("\n").trim().to_string();
+        if command.is_empty() || self.streaming || self.login_active {
+            return;
+        }
+
+        let cwd = if self.current_cwd.is_empty() {
+            ".".to_string()
+        } else {
+            self.current_cwd.clone()
+        };
+        let prompt = self.selected_shell.prompt_char();
+
+        let cmd_prefix = if self.available_shells.len() > 1 {
+            format!("[{}] {}{}", self.selected_shell.label(), cwd, prompt)
+        } else {
+            format!("{}{}", cwd, prompt)
+        };
+
+        let call_id = format!("local-shell-{}", self.messages.len());
+        let mut call_msg = Message::tool_call(
+            call_id.clone(),
+            "local_shell",
+            serde_json::json!({
+                "prefix": cmd_prefix,
+                "command": command,
+            }),
+        );
+        call_msg.include_in_llm = false;
+        self.messages.push(call_msg);
+
+        let output = shell::run_shell_command_blocking(self.selected_shell, &cwd, &command);
+        let mut body = String::new();
+        if !output.stdout.is_empty() {
+            body.push_str(&output.stdout);
+            if !output.stdout.ends_with('\n') {
+                body.push('\n');
+            }
+        }
+        if !output.stderr.is_empty() {
+            body.push_str(&output.stderr);
+            if !output.stderr.ends_with('\n') {
+                body.push('\n');
+            }
+        }
+        if output.exit_code != 0 {
+            body.push_str(&format!("exit {}\n", output.exit_code));
+        }
+
+        let mut out_msg = Message::tool_result(call_id, body, output.exit_code != 0);
+        out_msg.include_in_llm = false;
+        self.messages.push(out_msg);
+
+        self.persist_messages();
+        self.exit_shell_mode();
+        self.auto_scroll = true;
     }
 
     /// True when the input is a single line beginning with `/`.
@@ -1377,7 +1488,7 @@ impl App {
             .system_prompt
             .iter()
             .map(Message::system)
-            .chain(self.messages.iter().cloned())
+            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
             .collect();
 
         if matches!(llm_messages.last().map(|m| &m.role), Some(Role::Assistant))
@@ -1421,7 +1532,7 @@ impl App {
             .system_prompt
             .iter()
             .map(Message::system)
-            .chain(self.messages.iter().cloned())
+            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
             .collect();
 
         self.start_agent_task(llm_messages, provider);
@@ -1448,7 +1559,7 @@ impl App {
             .system_prompt
             .iter()
             .map(Message::system)
-            .chain(self.messages.iter().cloned())
+            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
             .collect();
 
         self.start_agent_task(llm_messages, provider);
@@ -1594,5 +1705,3 @@ impl App {
         }
     }
 }
-
-
