@@ -506,7 +506,9 @@ async fn run(
                             continue;
                         }
 
-                        if key.code == KeyCode::Char('!') && key.modifiers.is_empty() {
+                        if key.code == KeyCode::Char('!')
+                            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                        {
                             let chat_input_is_empty = app
                                 .textarea
                                 .lines()
