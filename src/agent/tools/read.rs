@@ -6,6 +6,44 @@ use crate::agent::types::{Tool, ToolResult};
 
 pub struct ReadFileTool;
 
+fn split_lines_preserving_endings(content: &str) -> Vec<&str> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    let bytes = content.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                lines.push(&content[start..i + 1]);
+                i += 1;
+                start = i;
+            }
+            b'\r' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    lines.push(&content[start..i + 2]);
+                    i += 2;
+                } else {
+                    lines.push(&content[start..i + 1]);
+                    i += 1;
+                }
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+
+    if start < content.len() {
+        lines.push(&content[start..]);
+    }
+
+    lines
+}
+
 #[derive(serde::Deserialize)]
 struct ReadFileArgs {
     path: String,
@@ -65,7 +103,7 @@ impl Tool for ReadFileTool {
                 Err(e) => return ToolResult::err(format!("Failed to read {path}: {e}")),
             };
 
-            let all_lines: Vec<&str> = content.lines().collect();
+            let all_lines = split_lines_preserving_endings(&content);
             let total = all_lines.len();
 
             // offset is 1-indexed; default to line 1
@@ -84,7 +122,7 @@ impl Tool for ReadFileTool {
             if truncated {
                 result.push_str(&format!("[lines {}-{} of {}]\n", start + 1, end, total));
             }
-            result.push_str(&selected.join("\n"));
+            result.push_str(&selected.concat());
 
             ToolResult::ok(result)
         })
@@ -146,6 +184,40 @@ mod tests {
             "should not contain line e: {}",
             result.content
         );
+    }
+
+    #[tokio::test]
+    async fn read_preserves_crlf_line_endings() {
+        let f = write_temp("a\r\nb\r\n");
+        let tool = ReadFileTool;
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "a\r\nb\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_preserves_cr_only_line_endings() {
+        let f = write_temp("a\rb\r");
+        let tool = ReadFileTool;
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "a\rb\r");
+    }
+
+    #[tokio::test]
+    async fn read_offset_with_crlf_keeps_original_endings() {
+        let f = write_temp("a\r\nb\r\nc\r\n");
+        let tool = ReadFileTool;
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "offset": 2,
+            "limit": 1
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "[lines 2-2 of 3]\nb\r\n");
     }
 
     #[tokio::test]

@@ -6,6 +6,40 @@ use crate::agent::types::{Tool, ToolResult};
 
 pub struct WriteTool;
 
+fn count_lines_any_ending(content: &str) -> usize {
+    if content.is_empty() {
+        return 0;
+    }
+
+    let bytes = content.as_bytes();
+    let mut lines = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                lines += 1;
+                i += 1;
+            }
+            b'\r' => {
+                lines += 1;
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    if !matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        lines += 1;
+    }
+
+    lines
+}
+
 #[derive(serde::Deserialize)]
 struct WriteArgs {
     path: String,
@@ -61,7 +95,7 @@ impl Tool for WriteTool {
                 return ToolResult::err(format!("Failed to write {path}: {e}"));
             }
 
-            let line_count = content.lines().count();
+            let line_count = count_lines_any_ending(&content);
             ToolResult::ok(format!("Written {line_count} lines to {path}"))
         })
     }
@@ -115,6 +149,37 @@ mod tests {
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(path.exists(), "file not created in nested dirs");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep\n");
+    }
+
+    #[tokio::test]
+    async fn write_preserves_crlf_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("windows.txt");
+        let tool = WriteTool;
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "a\r\nb\r\n"
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nb\r\n");
+    }
+
+    #[tokio::test]
+    async fn write_reports_line_count_for_cr_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("classic-mac.txt");
+        let tool = WriteTool;
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "a\rb\r"
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert_eq!(
+            result.content,
+            format!("Written 2 lines to {}", path.to_str().unwrap())
+        );
     }
 
     #[tokio::test]
