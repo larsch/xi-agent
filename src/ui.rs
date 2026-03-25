@@ -306,11 +306,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             f.render_widget(Paragraph::new(popup_lines), completion_area);
         } else if resume_hint_visible {
             let hint = Line::from(vec![
-                Span::styled("  hint: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "  hint: ",
+                    Style::default().add_modifier(ratatui::style::Modifier::DIM),
+                ),
                 Span::styled("Ctrl+R", Style::default().fg(Color::Yellow)),
                 Span::styled(
                     " resumes the latest session for this folder • /resume opens session picker",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().add_modifier(ratatui::style::Modifier::DIM),
                 ),
             ]);
             f.render_widget(Paragraph::new(vec![hint]), completion_area);
@@ -348,7 +351,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             ),
             Span::styled(
                 hints.to_string(),
-                Style::default().fg(Color::DarkGray).bg(SELECTION_HEADER_BG),
+                Style::default()
+                    .bg(SELECTION_HEADER_BG)
+                    .add_modifier(ratatui::style::Modifier::DIM),
             ),
         ]);
         f.render_widget(Paragraph::new(vec![header_line]), sel_header_area);
@@ -368,9 +373,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     Span::styled(
                         "no matches",
                         Style::default()
-                            .fg(Color::DarkGray)
                             .bg(SELECTION_BG)
-                            .add_modifier(ratatui::style::Modifier::ITALIC),
+                            .add_modifier(
+                                ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
+                            ),
                     ),
                 ])]
             } else {
@@ -419,7 +425,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             Span::styled(" ".repeat(gap), Style::default().bg(LOGIN_HEADER_BG)),
             Span::styled(
                 LOGIN_HINTS,
-                Style::default().fg(Color::DarkGray).bg(LOGIN_HEADER_BG),
+                Style::default()
+                    .bg(LOGIN_HEADER_BG)
+                    .add_modifier(ratatui::style::Modifier::DIM),
             ),
         ]);
         f.render_widget(Paragraph::new(vec![header_line]), login_hdr_area);
@@ -627,11 +635,7 @@ fn build_completion_lines(
                 // Non-interactive status row — dim italic for loading, red for errors.
                 let fill =
                     " ".repeat(terminal_width.saturating_sub(INDENT.len() + item.label.len()));
-                let fg = if item.error {
-                    Color::Red
-                } else {
-                    Color::DarkGray
-                };
+                let fg = if item.error { Color::Red } else { Color::Reset };
                 return Line::from(vec![
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(
@@ -639,7 +643,9 @@ fn build_completion_lines(
                         Style::default()
                             .fg(fg)
                             .bg(bg)
-                            .add_modifier(ratatui::style::Modifier::ITALIC),
+                            .add_modifier(
+                                ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
+                            ),
                     ),
                     Span::styled(fill, Style::default().bg(bg)),
                 ]);
@@ -665,7 +671,12 @@ fn build_completion_lines(
                 Line::from(vec![
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(label_padded, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
-                    Span::styled(SEP, Style::default().fg(Color::DarkGray).bg(bg)),
+                    Span::styled(
+                        SEP,
+                        Style::default()
+                            .bg(bg)
+                            .add_modifier(ratatui::style::Modifier::DIM),
+                    ),
                     Span::styled(
                         item.detail.clone(),
                         Style::default().fg(COMPLETION_DESC_FG).bg(bg),
@@ -704,11 +715,7 @@ fn build_selection_lines(
             if item.loading {
                 let fill =
                     " ".repeat(terminal_width.saturating_sub(INDENT.len() + item.label.width()));
-                let fg = if item.error {
-                    Color::Red
-                } else {
-                    Color::DarkGray
-                };
+                let fg = if item.error { Color::Red } else { Color::Reset };
                 return Line::from(vec![
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(
@@ -716,7 +723,9 @@ fn build_selection_lines(
                         Style::default()
                             .fg(fg)
                             .bg(bg)
-                            .add_modifier(ratatui::style::Modifier::ITALIC),
+                            .add_modifier(
+                                ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
+                            ),
                     ),
                     Span::styled(fill, Style::default().bg(bg)),
                 ]);
@@ -935,14 +944,14 @@ fn append_tool_result_block(
 }
 
 /// Append pre-wrapped dim (thinking) lines for one block.
-/// Same wrapping logic as `append_message` but renders in `DarkGray`.
+/// Same wrapping logic as `append_message` but renders using `DIM` on default fg.
 fn append_message_dim(
     out: &mut Vec<Line<'static>>,
     content: &str,
     suffix: &'static str,
     width: usize,
 ) {
-    let dim_style = Style::default().fg(Color::DarkGray);
+    let dim_style = Style::default().add_modifier(ratatui::style::Modifier::DIM);
 
     let segments: Vec<&str> = if content.is_empty() {
         vec![""]
@@ -982,7 +991,10 @@ fn append_message_dim(
 
             let mut spans: Vec<Span<'static>> = vec![Span::styled(chunk.clone(), dim_style)];
             if show_suffix {
-                spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    suffix,
+                    Style::default().add_modifier(ratatui::style::Modifier::DIM),
+                ));
             }
             out.push(Line::from(spans));
         }
