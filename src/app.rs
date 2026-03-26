@@ -1545,8 +1545,7 @@ impl App {
         }
 
         let sanitized = text.trim().to_string();
-        let mut msg = Message::user(sanitized);
-        msg.hidden = true;
+        let msg = Message::user(sanitized);
         self.messages.push(msg);
         self.bump_log_revision();
         self.persist_messages();

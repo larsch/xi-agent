@@ -146,9 +146,9 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
         .map(|s| {
             format!(
                 "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>",
-                s.name,
-                s.description,
-                s.path.display()
+                escape_xml(&s.name),
+                escape_xml(&s.description),
+                escape_xml(&s.path.display().to_string())
             )
         })
         .collect::<Vec<_>>()
@@ -157,11 +157,19 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
     format!(
         "\n\
 \nThe following skills provide specialized instructions for specific tasks.\n\
-Use the read tool to load a skill's file when the task matches its description.\n\
+Use the read_file tool to load a skill's file when the task matches its description.\n\
 When a skill file references a relative path, resolve it against the skill directory \
 (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
 \n<available_skills>\n{entries}\n</available_skills>"
     )
+}
+
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Return the text up to and including the first `.`, `!`, or `?`,
@@ -282,5 +290,23 @@ mod tests {
         assert!(prompt.contains("<name>plan</name>"));
         assert!(prompt.contains("<description>Create an implementation plan</description>"));
         assert!(prompt.contains("<location>/tmp/skills/plan/SKILL.md</location>"));
+        assert!(prompt.contains("Use the read_file tool to load a skill's file"));
+    }
+
+    #[test]
+    fn build_system_prompt_escapes_skill_xml_entities() {
+        let tools = registry(&[]);
+        let skills = vec![SkillMeta {
+            name: "a&b".to_string(),
+            description: "x < y \"quoted\"".to_string(),
+            path: Path::new("/tmp/skills/a&b/SKILL.md").to_path_buf(),
+            base_dir: PathBuf::from("/tmp/skills/a&b"),
+        }];
+
+        let prompt = build_system_prompt(&tools, "/tmp", &skills);
+
+        assert!(prompt.contains("<name>a&amp;b</name>"));
+        assert!(prompt.contains("<description>x &lt; y &quot;quoted&quot;</description>"));
+        assert!(prompt.contains("<location>/tmp/skills/a&amp;b/SKILL.md</location>"));
     }
 }
