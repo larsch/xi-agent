@@ -959,17 +959,54 @@ impl App {
         self.reset_textarea();
     }
 
-    /// Read the textarea as an Ollama endpoint URL, validate it lightly, and
-    /// return `Some(url)` if it looks valid, `None` otherwise.
-    pub fn take_ollama_endpoint_input(&mut self) -> Option<String> {
-        let url = self.textarea.lines().join("").trim().to_string();
-        if url.starts_with("http://") || url.starts_with("https://") {
-            self.ollama_endpoint_input_mode = false;
-            self.reset_textarea();
-            Some(url)
-        } else {
-            None
+    /// Normalize a user-entered Ollama endpoint.
+    ///
+    /// Accepted shorthand forms:
+    /// - `host`               → `http://host:11434`
+    /// - `host:1234`          → `http://host:1234`
+    /// - `http://host`        → `http://host:11434`
+    /// - `https://host`       → `https://host:11434`
+    /// - `http://host:1234`   → unchanged
+    /// - `https://host:1234`  → unchanged
+    ///
+    /// Returns `None` for empty input or values that still do not parse as an
+    /// absolute HTTP(S) URL after normalization.
+    fn normalize_ollama_endpoint(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
         }
+
+        let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            format!("http://{trimmed}")
+        };
+
+        let mut url = reqwest::Url::parse(&with_scheme).ok()?;
+
+        match url.scheme() {
+            "http" | "https" => {}
+            _ => return None,
+        }
+
+        url.host_str()?;
+
+        if url.port().is_none() {
+            url.set_port(Some(11434)).ok()?;
+        }
+
+        Some(url.to_string().trim_end_matches('/').to_string())
+    }
+
+    /// Read the textarea as an Ollama endpoint URL, normalize shorthand
+    /// forms, and return `Some(url)` if it looks valid, `None` otherwise.
+    pub fn take_ollama_endpoint_input(&mut self) -> Option<String> {
+        let raw = self.textarea.lines().join("");
+        let url = Self::normalize_ollama_endpoint(&raw)?;
+        self.ollama_endpoint_input_mode = false;
+        self.reset_textarea();
+        Some(url)
     }
 
     /// Open provider picker for `/login` command.
@@ -1829,7 +1866,7 @@ impl App {
                     && self.trigger_auth_refresh(RetryTarget::AgentTurn)
                 {
                     log::debug!(
-                        "received 401, refresh triggered: provider={} remaining_budget={}",
+                        "received 401, refresh triggered: provider={} remaining_budget= {}",
                         self.current_provider,
                         self.auth_retry_budget
                     );
@@ -1861,5 +1898,47 @@ impl App {
         while let Ok(ev) = self.event_rx.try_recv() {
             self.apply_event(ev);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    #[test]
+    fn normalize_ollama_endpoint_adds_default_scheme_and_port() {
+        assert_eq!(
+            App::normalize_ollama_endpoint("gpu-box"),
+            Some("http://gpu-box:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_endpoint_adds_default_scheme_only_when_port_present() {
+        assert_eq!(
+            App::normalize_ollama_endpoint("gpu-box:8080"),
+            Some("http://gpu-box:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_endpoint_adds_default_port_when_scheme_present() {
+        assert_eq!(
+            App::normalize_ollama_endpoint("https://gpu-box"),
+            Some("https://gpu-box:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_endpoint_keeps_existing_scheme_and_port() {
+        assert_eq!(
+            App::normalize_ollama_endpoint("http://gpu-box:8080"),
+            Some("http://gpu-box:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_endpoint_rejects_empty_input() {
+        assert_eq!(App::normalize_ollama_endpoint("   "), None);
     }
 }
