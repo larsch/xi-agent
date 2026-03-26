@@ -50,6 +50,12 @@ pub static COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "reload",
+        usage: "/reload",
+        description: "Reload AGENTS.md context and available skills",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "quit",
         usage: "/quit",
         description: "Quit the application",
@@ -274,6 +280,7 @@ pub fn completions_for(
 pub enum CommandAction {
     New,
     Quit,
+    Reload,
     /// Switch model to the given name.
     Model(String),
     /// `/model` typed with no argument — show interactive selection menu.
@@ -324,6 +331,7 @@ pub fn parse(input: &str) -> Option<CommandAction> {
     match name {
         "new" => Some(CommandAction::New),
         "quit" => Some(CommandAction::Quit),
+        "reload" => Some(CommandAction::Reload),
         "model" if !arg.is_empty() => Some(CommandAction::Model(arg.to_string())),
         "model" => Some(CommandAction::ModelNoArg),
         "provider" if !arg.is_empty() => Some(CommandAction::Provider(arg.to_string())),
@@ -358,6 +366,7 @@ mod tests {
     fn parse_recognizes_builtins_and_args() {
         assert!(matches!(parse("/new"), Some(CommandAction::New)));
         assert!(matches!(parse("/quit"), Some(CommandAction::Quit)));
+        assert!(matches!(parse("/reload"), Some(CommandAction::Reload)));
         assert!(matches!(parse("/model"), Some(CommandAction::ModelNoArg)));
         assert!(matches!(
             parse("/model gpt-4o"),

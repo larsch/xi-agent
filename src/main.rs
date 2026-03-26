@@ -193,6 +193,22 @@ async fn main() -> io::Result<()> {
 
             Ok(RunResult::RebuildProvider) => {}
 
+            Ok(RunResult::ReloadContext) => {
+                let loaded_skills = skills::load_skills();
+                let system_prompt =
+                    build_system_prompt(&app.agent_config.tools, &cwd, &loaded_skills);
+                let skills_count = loaded_skills.len();
+                app.system_prompt = Some(system_prompt);
+                app.loaded_skills = loaded_skills;
+                app.messages.push(Message::assistant(format!(
+                    "[reloaded context: {} skill{}]",
+                    skills_count,
+                    if skills_count == 1 { "" } else { "s" }
+                )));
+                app.mark_log_dirty();
+                app.available_models = None;
+            }
+
             Ok(RunResult::ChangeModel {
                 name,
                 prompt_thinking_selection,
@@ -290,6 +306,7 @@ async fn main() -> io::Result<()> {
 enum RunResult {
     Quit,
     RebuildProvider,
+    ReloadContext,
     ChangeModel {
         name: String,
         prompt_thinking_selection: bool,
@@ -556,6 +573,9 @@ async fn run(
                                     match commands::parse(&input) {
                                         Some(CommandAction::New) => {
                                             app.new_conversation();
+                                        }
+                                        Some(CommandAction::Reload) => {
+                                            return Ok(RunResult::ReloadContext);
                                         }
                                         Some(CommandAction::Quit) => {
                                             return Ok(RunResult::Quit);
