@@ -172,7 +172,7 @@ The agent has built-in tools out of the box:
 | Tool          | Emoji | Description                                       |
 |---------------|-------|---------------------------------------------------|
 | `read_file`   | 👀    | Read a file (with optional offset/limit)          |
-| `write_file`  | ✍️    | Write or overwrite a file                         |
+| `write_file`  | ✏️    | Write or overwrite a file                         |
 | `edit_file`   | 📝    | Replace exact text in a file                      |
 | `find_files`  | 🔍    | Search files by name glob or content pattern      |
 | `ask_user`    | ❓    | Ask the user a question and wait for an answer    |

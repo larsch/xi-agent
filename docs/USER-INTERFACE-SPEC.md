@@ -9,6 +9,18 @@
 
 - Render a scrollable, paginated view of the session history, with the most recent command at the bottom.
 - Tool invocations are rendered as "<icon> <args>", where <icon> is a visual representation of the tool (e.g. a terminal icon for `bash`, a pencil for `edit`, etc.).
+  - `👀` read_file
+  - `✏️` write_file
+  - `📝` edit_file
+  - `🔍` find_files
+  - `💻` shell tools (`bash` / `cmd` / `powershell`)
+  - `❓` ask_user
+- System message/status icons:
+  - `ℹ️` system/info (neutral system message)
+  - `⚙️` system/state (configuration/environment change)
+  - `⚠️` system/warning (non-fatal issue)
+  - `❌` system/error (failure)
+  - `✅` system/success (completed successfully)
 - Assistant output uses phase-aware icons:
   - `🧠` for model thinking tokens
   - `💭` for provisional assistant output (tool intent/tool-calling turn)

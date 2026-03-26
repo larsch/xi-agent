@@ -559,10 +559,13 @@ mod tests {
     #[test]
     fn normalize_tool_name_maps_emoji_aliases_and_passthrough() {
         assert_eq!(normalize_tool_name("👀"), "read_file");
+        assert_eq!(normalize_tool_name("✏️"), "write_file");
         assert_eq!(normalize_tool_name("✍️"), "write_file");
         assert_eq!(normalize_tool_name("📝"), "edit_file");
         assert_eq!(normalize_tool_name("💻"), "bash");
         assert_eq!(normalize_tool_name("🔍"), "find_files");
+        assert_eq!(normalize_tool_name("🧑"), "ask_user");
+        assert_eq!(normalize_tool_name("❓"), "ask_user");
         assert_eq!(normalize_tool_name("custom_tool"), "custom_tool");
     }
 

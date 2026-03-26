@@ -25,10 +25,11 @@ pub fn infer_initiator(messages: &[Message]) -> &'static str {
 pub fn normalize_tool_name(name: &str) -> &str {
     match name {
         "👀" => "read_file",
-        "✍️" => "write_file",
+        "✏️" | "✍️" => "write_file",
         "📝" => "edit_file",
         "💻" => "bash",
         "🔍" => "find_files",
+        "🧑" | "❓" => "ask_user",
         other => other,
     }
 }
@@ -201,10 +202,13 @@ mod tests {
     #[test]
     fn normalize_tool_name_emoji_aliases() {
         assert_eq!(normalize_tool_name("👀"), "read_file");
+        assert_eq!(normalize_tool_name("✏️"), "write_file");
         assert_eq!(normalize_tool_name("✍️"), "write_file");
         assert_eq!(normalize_tool_name("📝"), "edit_file");
         assert_eq!(normalize_tool_name("💻"), "bash");
         assert_eq!(normalize_tool_name("🔍"), "find_files");
+        assert_eq!(normalize_tool_name("🧑"), "ask_user");
+        assert_eq!(normalize_tool_name("❓"), "ask_user");
     }
 
     #[test]

@@ -29,7 +29,7 @@ src/
       mod.rs           — register_builtin_tools()
       bash.rs          — BashTool  (💻 run shell command)
       read.rs          — ReadFileTool (👀 read file with offset/limit)
-      write.rs         — WriteTool (✍️ write/overwrite file)
+      write.rs         — WriteTool (✏️ write/overwrite file)
       edit.rs          — EditTool  (📝 replace exact text in file)
       find.rs          — FindTool  (🔍 search by name glob or content pattern)
   llm/

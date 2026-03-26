@@ -4,7 +4,7 @@ use serde_json::Value;
 pub fn tool_emoji(name: &str) -> &'static str {
     match name {
         "read" | "read_file" => "👀",
-        "write" | "write_file" => "✍️",
+        "write" | "write_file" => "✏️",
         "edit" | "edit_file" => "📝",
         "bash" | "cmd" | "powershell" => "💻",
         "find" | "find_files" => "🔍",
