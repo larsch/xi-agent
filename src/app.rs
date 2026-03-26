@@ -21,6 +21,8 @@ use crate::{
     thinking::ThinkingLevel,
 };
 
+use crate::export;
+
 // ── Selection result ──────────────────────────────────────────────────────────
 
 /// Value returned when the user confirms a choice in the selection menu.
@@ -1437,6 +1439,33 @@ impl App {
             log::debug!("failed to persist session {}: {}", session_id, e);
         }
         self.refresh_resume_availability();
+    }
+
+    /// Export the current visible session to a standalone HTML file.
+    pub fn export_session_html(&mut self, requested_path: Option<&str>) {
+        let path = export::resolve_export_path(&self.current_cwd, requested_path);
+        let html = export::build_session_export_html(
+            &self.messages,
+            &self.current_cwd,
+            &self.current_provider,
+            &self.current_model,
+            self.current_session_id.as_deref(),
+        );
+
+        match export::write_export_file(&path, &html) {
+            Ok(()) => {
+                self.messages.push(Message::assistant(format!(
+                    "[session exported to {}]",
+                    path.display()
+                )));
+            }
+            Err(e) => {
+                self.messages
+                    .push(Message::assistant(format!("[export failed: {e}]")));
+            }
+        }
+        self.bump_log_revision();
+        self.persist_messages();
     }
 
     /// Clear the conversation history and reset the input area.

@@ -21,6 +21,7 @@ mod commands;
 mod config;
 mod debug_log;
 mod dirs;
+mod export;
 mod llm;
 mod provider;
 mod session;
@@ -573,6 +574,9 @@ async fn run(
                                     match commands::parse(&input) {
                                         Some(CommandAction::New) => {
                                             app.new_conversation();
+                                        }
+                                        Some(CommandAction::Export(path)) => {
+                                            app.export_session_html(path.as_deref());
                                         }
                                         Some(CommandAction::Reload) => {
                                             return Ok(RunResult::ReloadContext);

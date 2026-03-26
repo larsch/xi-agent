@@ -20,6 +20,12 @@ pub static COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "export",
+        usage: "/export [path]",
+        description: "Export this session to a self-contained HTML file",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "model",
         usage: "/model <name>",
         description: "Switch to a different model",
@@ -281,6 +287,8 @@ pub enum CommandAction {
     New,
     Quit,
     Reload,
+    /// Export current session transcript to HTML.
+    Export(Option<String>),
     /// Switch model to the given name.
     Model(String),
     /// `/model` typed with no argument — show interactive selection menu.
@@ -332,6 +340,8 @@ pub fn parse(input: &str) -> Option<CommandAction> {
         "new" => Some(CommandAction::New),
         "quit" => Some(CommandAction::Quit),
         "reload" => Some(CommandAction::Reload),
+        "export" if !arg.is_empty() => Some(CommandAction::Export(Some(arg.to_string()))),
+        "export" => Some(CommandAction::Export(None)),
         "model" if !arg.is_empty() => Some(CommandAction::Model(arg.to_string())),
         "model" => Some(CommandAction::ModelNoArg),
         "provider" if !arg.is_empty() => Some(CommandAction::Provider(arg.to_string())),
@@ -367,6 +377,14 @@ mod tests {
         assert!(matches!(parse("/new"), Some(CommandAction::New)));
         assert!(matches!(parse("/quit"), Some(CommandAction::Quit)));
         assert!(matches!(parse("/reload"), Some(CommandAction::Reload)));
+        assert!(matches!(
+            parse("/export"),
+            Some(CommandAction::Export(None))
+        ));
+        assert!(matches!(
+            parse("/export transcript.html"),
+            Some(CommandAction::Export(Some(path))) if path == "transcript.html"
+        ));
         assert!(matches!(parse("/model"), Some(CommandAction::ModelNoArg)));
         assert!(matches!(
             parse("/model gpt-4o"),
