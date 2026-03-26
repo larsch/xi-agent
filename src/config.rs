@@ -37,6 +37,38 @@ pub struct CopilotConfig {
 pub struct OllamaConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
+    /// Recently used Ollama endpoints, most-recent first.  Capped at
+    /// [`OllamaConfig::MAX_RECENT_ENDPOINTS`] entries.
+    #[serde(default)]
+    pub recent_endpoints: Vec<String>,
+}
+
+impl OllamaConfig {
+    /// Maximum number of recent endpoints to remember.
+    pub const MAX_RECENT_ENDPOINTS: usize = 5;
+
+    /// Default endpoint used when nothing else is configured.
+    pub const DEFAULT_ENDPOINT: &'static str = "http://localhost:11434";
+
+    /// Push `url` to the front of `recent_endpoints`, dedup, and cap the list.
+    /// Also sets `base_url` to `url`.
+    pub fn record_endpoint(&mut self, url: String) {
+        self.base_url = Some(url.clone());
+        self.recent_endpoints.retain(|e| e != &url);
+        self.recent_endpoints.insert(0, url);
+        self.recent_endpoints.truncate(Self::MAX_RECENT_ENDPOINTS);
+    }
+
+    /// Return the list of recent endpoints, always including the default as a
+    /// fallback at the end when it isn't already present.
+    pub fn effective_recent_endpoints(&self) -> Vec<String> {
+        let mut list = self.recent_endpoints.clone();
+        let default = Self::DEFAULT_ENDPOINT.to_string();
+        if !list.contains(&default) {
+            list.push(default);
+        }
+        list
+    }
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
@@ -94,7 +126,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::TauConfig;
+    use super::{OllamaConfig, TauConfig};
 
     #[test]
     fn parses_full_config_toml() {
@@ -125,6 +157,7 @@ model = "gemini-2.5-pro"
 [ollama]
 base_url = "http://localhost:11434"
 model = "llama3.1"
+recent_endpoints = ["http://localhost:11434", "http://gpu-box:11434"]
 "#;
 
         let cfg = TauConfig::from_toml_str(raw).expect("config parses");
@@ -161,5 +194,51 @@ model = "llama3.1"
             Some("http://localhost:11434")
         );
         assert_eq!(cfg.ollama.model.as_deref(), Some("llama3.1"));
+        assert_eq!(
+            cfg.ollama.recent_endpoints,
+            vec!["http://localhost:11434", "http://gpu-box:11434"]
+        );
+    }
+
+    #[test]
+    fn ollama_record_endpoint_prepends_and_deduplicates() {
+        let mut cfg = OllamaConfig::default();
+        cfg.record_endpoint("http://localhost:11434".into());
+        cfg.record_endpoint("http://gpu-box:11434".into());
+        cfg.record_endpoint("http://localhost:11434".into()); // duplicate → moved to front
+        assert_eq!(
+            cfg.recent_endpoints,
+            vec!["http://localhost:11434", "http://gpu-box:11434"]
+        );
+        assert_eq!(cfg.base_url.as_deref(), Some("http://localhost:11434"));
+    }
+
+    #[test]
+    fn ollama_record_endpoint_caps_at_max() {
+        let mut cfg = OllamaConfig::default();
+        for i in 0..=OllamaConfig::MAX_RECENT_ENDPOINTS {
+            cfg.record_endpoint(format!("http://host-{i}:11434"));
+        }
+        assert_eq!(cfg.recent_endpoints.len(), OllamaConfig::MAX_RECENT_ENDPOINTS);
+    }
+
+    #[test]
+    fn ollama_effective_recent_endpoints_always_includes_default() {
+        let cfg = OllamaConfig::default();
+        let list = cfg.effective_recent_endpoints();
+        assert!(list.contains(&OllamaConfig::DEFAULT_ENDPOINT.to_string()));
+    }
+
+    #[test]
+    fn ollama_effective_recent_endpoints_does_not_duplicate_default() {
+        let mut cfg = OllamaConfig::default();
+        cfg.record_endpoint(OllamaConfig::DEFAULT_ENDPOINT.into());
+        let list = cfg.effective_recent_endpoints();
+        assert_eq!(
+            list.iter()
+                .filter(|e| e.as_str() == OllamaConfig::DEFAULT_ENDPOINT)
+                .count(),
+            1
+        );
     }
 }

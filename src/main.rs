@@ -189,7 +189,7 @@ async fn main() -> io::Result<()> {
             app.start_model_fetch(&provider);
         }
 
-        match run(&mut terminal, &mut app, &provider).await {
+        match run(&mut terminal, &mut app, &provider, &config).await {
             Ok(RunResult::Quit) | Err(_) => break,
 
             Ok(RunResult::RebuildProvider) => {}
@@ -284,6 +284,30 @@ async fn main() -> io::Result<()> {
                     current_thinking,
                 );
             }
+
+            Ok(RunResult::ChangeOllamaEndpoint(url)) => {
+                config.ollama.record_endpoint(url);
+                if let Err(e) = config.save() {
+                    log::debug!("failed to persist ollama endpoint: {e}");
+                    app.messages.push(Message::assistant(format!(
+                        "[failed to persist config.toml: {e}]"
+                    )));
+                    app.mark_log_dirty();
+                }
+                // Switch to (or stay on) Ollama.
+                current_kind = ProviderKind::Ollama;
+                current_model = resolve_model(None, &current_kind, &config);
+                app.current_model = current_model.clone();
+                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                app.current_thinking = current_thinking;
+                app.current_provider = current_kind.name().to_string();
+                app.available_models = None;
+                app.messages.push(Message::assistant(format!(
+                    "[ollama endpoint set to {}]",
+                    config.ollama.base_url.as_deref().unwrap_or("?")
+                )));
+                app.mark_log_dirty();
+            }
         }
     }
 
@@ -314,6 +338,8 @@ enum RunResult {
     },
     ChangeProvider(String),
     ChangeThinking(ThinkingLevel),
+    /// Switch to (or stay on) Ollama with a new base URL.
+    ChangeOllamaEndpoint(String),
 }
 
 fn normalize_paste_text(text: &str) -> String {
@@ -351,6 +377,7 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     provider: &Arc<dyn LlmProvider + Send + Sync>,
+    config: &TauConfig,
 ) -> io::Result<RunResult> {
     let mut crossterm_events = EventStream::new();
 
@@ -464,7 +491,12 @@ async fn run(
                                             return Ok(RunResult::ChangeThinking(level));
                                         }
                                         Some(SelectionResult::Provider(p)) => {
-                                            return Ok(RunResult::ChangeProvider(p));
+                                            if p == "ollama" {
+                                                let recent = config.ollama.effective_recent_endpoints();
+                                                app.enter_ollama_endpoint_selection_mode(recent);
+                                            } else {
+                                                return Ok(RunResult::ChangeProvider(p));
+                                            }
                                         }
                                         Some(SelectionResult::LoginProvider(p)) => {
                                             app.start_login(&p);
@@ -480,6 +512,12 @@ async fn run(
                                         }
                                         Some(SelectionResult::LoginAction(action)) => {
                                             app.apply_login_action(action);
+                                        }
+                                        Some(SelectionResult::OllamaEndpoint(url)) => {
+                                            return Ok(RunResult::ChangeOllamaEndpoint(url));
+                                        }
+                                        Some(SelectionResult::OllamaEndpointFreeform) => {
+                                            app.enter_ollama_endpoint_freeform_mode();
                                         }
                                         None => {}
                                     }
@@ -509,6 +547,8 @@ async fn run(
                                 app.abort_agent_loop();
                             } else if app.has_pending_ask() {
                                 app.cancel_pending_ask();
+                            } else if app.ollama_endpoint_input_mode {
+                                app.cancel_ollama_endpoint_input();
                             } else if app.login_active {
                                 app.cancel_login();
                             } else if app.in_slash_mode() {
@@ -564,7 +604,12 @@ async fn run(
                             }
 
                             KeyCode::Enter if key.modifiers.is_empty() => {
-                                if app.has_pending_ask() {
+                                if app.ollama_endpoint_input_mode {
+                                    if let Some(url) = app.take_ollama_endpoint_input() {
+                                        return Ok(RunResult::ChangeOllamaEndpoint(url));
+                                    }
+                                    // Invalid URL: stay in input mode (user can correct it).
+                                } else if app.has_pending_ask() {
                                     app.submit_pending_ask_answer();
                                 } else if app.in_slash_mode() {
                                     let input = app.textarea.lines().first().cloned().unwrap_or_default();
@@ -597,7 +642,12 @@ async fn run(
                                             }
                                         }
                                         Some(CommandAction::Provider(name)) => {
-                                            return Ok(RunResult::ChangeProvider(name));
+                                            if name == "ollama" {
+                                                let recent = config.ollama.effective_recent_endpoints();
+                                                app.enter_ollama_endpoint_selection_mode(recent);
+                                            } else {
+                                                return Ok(RunResult::ChangeProvider(name));
+                                            }
                                         }
                                         Some(CommandAction::ProviderNoArg) => {
                                             app.enter_provider_selection_mode();

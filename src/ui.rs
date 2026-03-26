@@ -526,6 +526,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 prefix,
                 (app.available_shells.len() > 1).then_some("Ctrl+S switch".to_string()),
             )
+        } else if app.ollama_endpoint_input_mode {
+            (
+                app.textarea.lines().to_vec(),
+                app.textarea.cursor(),
+                "ollama endpoint: ".to_string(),
+                Some("http://host:11434   Enter confirm   Esc cancel".to_string()),
+            )
         } else {
             (
                 app.textarea.lines().to_vec(),

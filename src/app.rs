@@ -36,6 +36,10 @@ pub enum SelectionResult {
     AskFreeform,
     /// A login-panel action was selected.
     LoginAction(LoginActionKind),
+    /// An Ollama endpoint URL was confirmed (either picked from history or typed).
+    OllamaEndpoint(String),
+    /// The user chose to type a custom Ollama endpoint URL.
+    OllamaEndpointFreeform,
 }
 
 /// Actions available in the login action menu.
@@ -73,6 +77,7 @@ enum SelectionKind {
     ResumeSession,
     AskUser,
     LoginAction,
+    OllamaEndpoint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +198,11 @@ pub struct App {
     pending_ask: Option<PendingAsk>,
     ask_reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
 
+    // ── Ollama endpoint input mode ────────────────────────────────────────────
+    /// When true the textarea is used to type a custom Ollama endpoint URL
+    /// rather than a regular chat message.
+    pub ollama_endpoint_input_mode: bool,
+
     // ── Async channels ────────────────────────────────────────────────────────
     /// Receives AgentEvents forwarded from the active agent loop task.
     pub(crate) event_rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
@@ -294,6 +304,7 @@ impl App {
             resume_available_for_cwd: false,
             pending_ask: None,
             ask_reply: None,
+            ollama_endpoint_input_mode: false,
             event_rx,
             event_tx,
             steering_tx: None,
@@ -787,6 +798,7 @@ impl App {
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
             | Some(SelectionKind::LoginAction)
+            | Some(SelectionKind::OllamaEndpoint)
             | None => None,
         };
 
@@ -898,6 +910,66 @@ impl App {
             .collect();
         self.set_selection_items(items);
         self.select_current_default();
+    }
+
+    /// Open the Ollama endpoint picker showing recent endpoints and a
+    /// "Enter URL…" sentinel at the bottom.
+    pub fn enter_ollama_endpoint_selection_mode(&mut self, recent: Vec<String>) {
+        self.reset_textarea();
+        self.selection_mode = true;
+        self.selection_kind = Some(SelectionKind::OllamaEndpoint);
+        self.selection_title = "  Ollama endpoint  ";
+        self.selection_query.clear();
+
+        let mut items: Vec<CompletionItem> = recent
+            .into_iter()
+            .map(|url| CompletionItem {
+                label: url.clone(),
+                detail: String::new(),
+                complete_to: format!("/ollama_endpoint {url}"),
+                loading: false,
+                error: false,
+            })
+            .collect();
+
+        // Sentinel item at the bottom to let the user type a custom URL.
+        items.push(CompletionItem {
+            label: "Enter URL…".to_string(),
+            detail: String::new(),
+            complete_to: "/ollama_endpoint_freeform".to_string(),
+            loading: false,
+            error: false,
+        });
+
+        self.set_selection_items(items);
+    }
+
+    /// Switch the textarea into Ollama endpoint freeform input mode.
+    /// The UI will render a `ollama endpoint: ` prefix and submit the text
+    /// as a new endpoint URL when Enter is pressed.
+    pub fn enter_ollama_endpoint_freeform_mode(&mut self) {
+        self.exit_selection_mode();
+        self.reset_textarea();
+        self.ollama_endpoint_input_mode = true;
+    }
+
+    /// Cancel Ollama endpoint freeform input and return to normal mode.
+    pub fn cancel_ollama_endpoint_input(&mut self) {
+        self.ollama_endpoint_input_mode = false;
+        self.reset_textarea();
+    }
+
+    /// Read the textarea as an Ollama endpoint URL, validate it lightly, and
+    /// return `Some(url)` if it looks valid, `None` otherwise.
+    pub fn take_ollama_endpoint_input(&mut self) -> Option<String> {
+        let url = self.textarea.lines().join("").trim().to_string();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            self.ollama_endpoint_input_mode = false;
+            self.reset_textarea();
+            Some(url)
+        } else {
+            None
+        }
     }
 
     /// Open provider picker for `/login` command.
@@ -1042,6 +1114,15 @@ impl App {
                 }
                 _ => None,
             },
+            Some(SelectionKind::OllamaEndpoint) => {
+                if item.complete_to == "/ollama_endpoint_freeform" {
+                    Some(SelectionResult::OllamaEndpointFreeform)
+                } else {
+                    item.complete_to
+                        .strip_prefix("/ollama_endpoint ")
+                        .map(|url| SelectionResult::OllamaEndpoint(url.to_string()))
+                }
+            }
             None => None,
         }?;
 
