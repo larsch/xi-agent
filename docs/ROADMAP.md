@@ -4,6 +4,21 @@ Items are grouped by priority.
 
 ---
 
+## ✅ Completed
+
+- Text-based UI with input box and streaming output
+- Core agent loop (streaming, tools, thinking output)
+- Multiple providers (Copilot, OpenAI, Codex, Gemini, Ollama)
+- Interactive authentication
+- Basic tools (file read/write/edit, find files, ask user, shell commands)
+- Bash on Unix, PowerShell and cmd.exe on Windows
+- SKILL.md support
+- AGENTS.md support
+- Session persistence (resume conversations)
+- Steering (type messages while agent loop is running)
+
+---
+
 ## 🟡 Medium priority
 
 ### Platform credential storage
