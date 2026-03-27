@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 
-use crate::agent::types::{ToolRegistry, ToolResult};
+use crate::agent::types::{Tool, ToolRegistry, ToolResult};
 
 /// Deserialize a JSON `args` object into a typed struct, returning a
 /// `ToolResult::err` on failure.  Used by every built-in tool to replace
@@ -17,6 +17,7 @@ pub mod ask_user;
 pub mod bash;
 #[cfg(target_os = "windows")]
 pub mod cmd;
+pub mod custom;
 pub mod edit;
 pub mod find;
 #[cfg(target_os = "windows")]
@@ -39,7 +40,13 @@ use write::WriteTool;
 use crate::agent::types::AskRequestTx;
 
 /// Instantiate the built-in tools and return a populated `ToolRegistry`.
-pub fn register_builtin_tools(ask_tx: Option<AskRequestTx>) -> ToolRegistry {
+///
+/// `custom` tools are appended after built-ins; any custom tool whose name
+/// collides with a built-in is silently dropped (logged at debug).
+pub fn register_builtin_tools(
+    ask_tx: Option<AskRequestTx>,
+    custom: Vec<custom::CustomTool>,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
     let mut tools: Vec<Arc<dyn crate::agent::types::Tool>> = vec![
@@ -63,6 +70,18 @@ pub fn register_builtin_tools(ask_tx: Option<AskRequestTx>) -> ToolRegistry {
 
     for tool in tools {
         registry.insert(tool.name().to_string(), tool);
+    }
+
+    // Register custom tools; skip any whose name is already taken by a built-in.
+    for tool in custom {
+        if registry.contains_key(tool.name()) {
+            log::debug!(
+                "custom tool '{}' skipped: name conflicts with a built-in tool",
+                tool.name()
+            );
+        } else {
+            registry.insert(tool.name().to_string(), Arc::new(tool));
+        }
     }
 
     registry

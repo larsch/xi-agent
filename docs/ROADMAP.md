@@ -35,6 +35,3 @@ Render assistant output as Markdown instead of raw text.
 
 ### Safety guardrails
 Tool use remains unrestricted.
-
-### Additional built-in tools beyond the current set
-No expansion of built-in tools is planned for now.

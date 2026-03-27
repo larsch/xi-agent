@@ -45,6 +45,29 @@ pub fn print_dirs() {
             "tau-debug-*  — debug logs (enabled by TAU_DEBUG=1)",
             &|| dirs.cache_dir().to_path_buf(),
         ),
+        (
+            "tools (1)",
+            "~/.tau/tools/  — user-defined tools (home)",
+            &|| {
+                std::env::var_os("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".tau").join("tools"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("~/.tau/tools"))
+            },
+        ),
+        (
+            "tools (2)",
+            ".tau/tools/    — user-defined tools (project-local)",
+            &|| {
+                std::env::current_dir()
+                    .map(|d| d.join(".tau").join("tools"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".tau/tools"))
+            },
+        ),
+        (
+            "tools (3)",
+            "tools/         — user-defined tools (XDG config dir)",
+            &|| dirs.config_dir().join("tools"),
+        ),
     ];
 
     let label_width = rows.iter().map(|(k, _, _)| k.len()).max().unwrap_or(0);

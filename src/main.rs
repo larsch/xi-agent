@@ -31,7 +31,11 @@ mod thinking;
 mod tool_presentation;
 mod ui;
 
-use agent::{AgentEvent, AgentLoopConfig, build_system_prompt, tools::register_builtin_tools};
+use agent::{
+    AgentEvent, AgentLoopConfig, build_system_prompt,
+    tools::{custom::load_custom_tools, register_builtin_tools},
+};
+use agent::tools::custom::custom_tool_dirs;
 use app::{App, InputMode, SelectionResult};
 use commands::CommandAction;
 use config::TauConfig;
@@ -147,7 +151,8 @@ async fn main() -> io::Result<()> {
         },
     );
 
-    let tools = register_builtin_tools(Some(app.ask_request_tx()));
+    let custom_tools = load_custom_tools(&custom_tool_dirs());
+    let tools = register_builtin_tools(Some(app.ask_request_tx()), custom_tools);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -195,16 +200,21 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::RebuildProvider) => {}
 
             Ok(RunResult::ReloadContext) => {
+                let custom_tools = load_custom_tools(&custom_tool_dirs());
+                let custom_count = custom_tools.len();
+                let tools = register_builtin_tools(Some(app.ask_request_tx()), custom_tools);
                 let loaded_skills = skills::load_skills();
-                let system_prompt =
-                    build_system_prompt(&app.agent_config.tools, &cwd, &loaded_skills);
+                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
                 let skills_count = loaded_skills.len();
+                app.agent_config.tools = tools;
                 app.system_prompt = Some(system_prompt);
                 app.loaded_skills = loaded_skills;
                 app.messages.push(Message::assistant(format!(
-                    "[reloaded context: {} skill{}]",
+                    "[reloaded context: {} skill{}, {} custom tool{}]",
                     skills_count,
-                    if skills_count == 1 { "" } else { "s" }
+                    if skills_count == 1 { "" } else { "s" },
+                    custom_count,
+                    if custom_count == 1 { "" } else { "s" },
                 )));
                 app.mark_log_dirty();
                 app.available_models = None;
@@ -896,7 +906,8 @@ async fn run_print_mode(
     let provider = build_provider(&current_kind, &current_model, current_thinking, config)
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
 
-    let tools = register_builtin_tools(None);
+    let custom_tools = load_custom_tools(&custom_tool_dirs());
+    let tools = register_builtin_tools(None, custom_tools);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());

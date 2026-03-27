@@ -26,12 +26,13 @@ src/
     types.rs           — Tool trait, ToolRegistry, AgentEvent, AgentLoopConfig
     system_prompt.rs   — build_system_prompt: dynamic system prompt
     tools/
-      mod.rs           — register_builtin_tools()
+      mod.rs           — register_builtin_tools() (built-ins + custom tools)
       bash.rs          — BashTool  (💻 run shell command)
       read.rs          — ReadFileTool (👀 read file with offset/limit)
       write.rs         — WriteTool (✏️ write/overwrite file)
       edit.rs          — EditTool  (📝 replace exact text in file)
       find.rs          — FindTool  (🔍 search by name glob or content pattern)
+      custom.rs        — CustomTool, load_custom_tools, custom_tool_dirs
   llm/
     mod.rs             — LlmProvider trait, Message/Role/LlmEvent/ToolDefinition types
     error.rs           — ProviderError, ProviderErrorKind (typed HTTP/network failures)
@@ -207,6 +208,16 @@ High/XHigh) is resolved at request time from `config.thinking_by_model`
 command cycles levels at runtime and updates the active model's entry.
 Providers that support thinking (Copilot/OpenAI with `o*` models, Anthropic)
 translate the level to their respective API parameter; others ignore it.
+
+**Custom user tools** — at startup (and on `/reload`), `load_custom_tools`
+scans three directories in order: `~/.tau/tools/`, `./.tau/tools/` (project-
+local), and `ProjectDirs::config_dir()/tools/`. Each executable that responds
+to `--describe` with a valid JSON descriptor (`name`, `description`,
+`parameters_schema`) is registered as a `CustomTool`. At invocation, JSON
+args are written to the process stdin; stdout is the result string; non-zero
+exit becomes `ToolResult::err`. Built-in tool names take precedence — a
+custom tool whose name collides with a built-in is silently dropped (logged
+at debug). All three tool directories are shown in `tau --print-dirs`.
 
 ## What Is Not Here Yet
 
