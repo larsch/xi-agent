@@ -55,10 +55,15 @@ fn skill_dirs() -> Vec<PathBuf> {
 
 fn load_skills_from_dirs(dirs: Vec<PathBuf>) -> Vec<SkillMeta> {
     let mut seen_files: HashSet<PathBuf> = HashSet::new();
+    let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
     let mut skills: Vec<SkillMeta> = Vec::new();
 
     for dir in dirs {
-        skills.extend(load_skills_from_dir(&dir, &mut seen_files));
+        skills.extend(load_skills_from_dir(
+            &dir,
+            &mut seen_files,
+            &mut visited_dirs,
+        ));
     }
 
     // Deterministic order.
@@ -66,7 +71,11 @@ fn load_skills_from_dirs(dirs: Vec<PathBuf>) -> Vec<SkillMeta> {
     skills
 }
 
-fn load_skills_from_dir(dir: &Path, seen_files: &mut HashSet<PathBuf>) -> Vec<SkillMeta> {
+fn load_skills_from_dir(
+    dir: &Path,
+    seen_files: &mut HashSet<PathBuf>,
+    visited_dirs: &mut HashSet<PathBuf>,
+) -> Vec<SkillMeta> {
     if !dir.exists() {
         return vec![];
     }
@@ -75,24 +84,50 @@ fn load_skills_from_dir(dir: &Path, seen_files: &mut HashSet<PathBuf>) -> Vec<Sk
         return vec![];
     };
 
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_dir() {
-                return None;
-            }
+    let mut skills = Vec::new();
 
-            let skill_file = path.join("SKILL.md");
-            let canonical = skill_file.canonicalize().unwrap_or(skill_file.clone());
-            if !seen_files.insert(canonical) {
-                return None;
-            }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            load_skills_recursive(&path, seen_files, visited_dirs, &mut skills);
+        }
+    }
 
-            let content = fs::read_to_string(&skill_file).ok()?;
-            parse_skill_meta(&content, skill_file)
-        })
-        .collect()
+    skills
+}
+
+fn load_skills_recursive(
+    dir: &Path,
+    seen_files: &mut HashSet<PathBuf>,
+    visited_dirs: &mut HashSet<PathBuf>,
+    skills: &mut Vec<SkillMeta>,
+) {
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if !visited_dirs.insert(canonical_dir) {
+        return;
+    }
+
+    let skill_file = dir.join("SKILL.md");
+    if skill_file.is_file() {
+        let canonical = skill_file.canonicalize().unwrap_or(skill_file.clone());
+        if seen_files.insert(canonical)
+            && let Ok(content) = fs::read_to_string(&skill_file)
+            && let Some(meta) = parse_skill_meta(&content, skill_file)
+        {
+            skills.push(meta);
+        }
+    }
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            load_skills_recursive(&path, seen_files, visited_dirs, skills);
+        }
+    }
 }
 
 /// Parse `name` and `description` from the YAML frontmatter block (`---` … `---`)
@@ -330,5 +365,67 @@ description: guides most non-trivial coding work.
         assert_eq!(skills.len(), 2);
         assert!(skills.iter().any(|s| s.name == "skill-a"));
         assert!(skills.iter().any(|s| s.name == "skill-b"));
+    }
+
+    #[test]
+    fn load_skills_discovers_nested_skill_dirs() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let nested = root.join("group").join("skill-nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let skill = nested.join("SKILL.md");
+        let mut file = std::fs::File::create(&skill).unwrap();
+        writeln!(file, "---\nname: nested\ndescription: nested skill\n---\n").unwrap();
+
+        let skills = load_skills_from_dirs(vec![root]);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "nested");
+    }
+
+    #[test]
+    fn load_skills_ignores_root_markdown_files() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut root_md = std::fs::File::create(root.join("foo.md")).unwrap();
+        writeln!(
+            root_md,
+            "---\nname: bad\ndescription: should be ignored\n---"
+        )
+        .unwrap();
+
+        let skills = load_skills_from_dirs(vec![root]);
+        assert!(skills.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_skills_handles_symlink_loops() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let skill_dir = root.join("skill-loop");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let mut skill_file = std::fs::File::create(skill_dir.join("SKILL.md")).unwrap();
+        writeln!(
+            skill_file,
+            "---\nname: loop-safe\ndescription: loop-safe discovery\n---\n"
+        )
+        .unwrap();
+
+        symlink(&root, skill_dir.join("back-to-root")).unwrap();
+
+        let skills = load_skills_from_dirs(vec![root]);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "loop-safe");
     }
 }
