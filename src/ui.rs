@@ -196,17 +196,18 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
     }
 }
 
-fn build_log_lines_cached(app: &mut App, width: usize) -> Vec<Line<'static>> {
-    if let Some((rev, cached_width, lines)) = &app.cached_log_lines
-        && *rev == app.log_revision
-        && *cached_width == width
+fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
+    if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        return lines.clone();
+        let lines = build_log_lines(
+            &app.messages,
+            app.streaming,
+            &app.queued_steering,
+            width,
+        );
+        app.cached_log_lines = Some((app.log_revision, width, lines));
     }
-
-    let lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, width);
-    app.cached_log_lines = Some((app.log_revision, width, lines.clone()));
-    lines
+    &app.cached_log_lines.as_ref().unwrap().2
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -279,21 +280,25 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         assumed_log_width -= 1;
     }
 
-    let mut lines = build_log_lines_cached(app, assumed_log_width);
-
-    let mut has_scrollbar = lines.len() > inner_height;
+    // Use the cached lines by reference — no clone of the full Vec.
+    // We determine the line count and scroll position first, then copy only
+    // the visible slice (~terminal height lines) into ratatui.
+    let assumed_line_count = build_log_lines_cached(app, assumed_log_width).len();
+    let mut has_scrollbar = assumed_line_count > inner_height;
 
     // If our width assumption was wrong, rebuild once with the correct width.
-    if has_scrollbar != app.log_had_scrollbar {
+    let final_log_width = if has_scrollbar != app.log_had_scrollbar {
         let rewrap_width = if has_scrollbar {
             split_scrollbar_column(log_area).0.width as usize
         } else {
             log_area.width as usize
         };
-
-        lines = build_log_lines_cached(app, rewrap_width);
-        has_scrollbar = lines.len() > inner_height;
-    }
+        let rewrap_count = build_log_lines_cached(app, rewrap_width).len();
+        has_scrollbar = rewrap_count > inner_height;
+        rewrap_width
+    } else {
+        assumed_log_width
+    };
 
     // Final geometry after potential re-wrap.
     let (log_content_area, log_scrollbar_area) = if has_scrollbar {
@@ -308,15 +313,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // Store log height for use as page size in the event loop.
     app.last_log_height = inner_height;
 
-    // Pad the top with empty lines so content is anchored to the bottom.
-    if lines.len() < inner_height {
-        let padding = inner_height - lines.len();
-        let mut padded = vec![Line::default(); padding];
-        padded.append(&mut lines);
-        lines = padded;
-    }
-
-    let total_lines = lines.len();
+    // Determine scroll position from the full line count, then extract only
+    // the visible slice.  This means we clone at most `inner_height` (~40)
+    // Lines regardless of how long the session is.
+    let total_lines = build_log_lines_cached(app, final_log_width).len();
     let max_scroll = total_lines.saturating_sub(inner_height);
 
     if app.auto_scroll {
@@ -328,9 +328,29 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         }
     }
 
-    let log_paragraph = Paragraph::new(Text::from(lines))
-        .block(Block::default().borders(Borders::NONE))
-        .scroll((app.log_scroll as u16, 0));
+    // Build the visible slice.  Pad with empty lines at the top when the
+    // content is shorter than the pane so it is anchored to the bottom.
+    // We clone at most `inner_height` lines, never the full session.
+    let log_scroll = app.log_scroll;
+    let visible_lines: Vec<Line<'static>> = {
+        let all = build_log_lines_cached(app, final_log_width);
+        if total_lines <= inner_height {
+            // Short log: pad top, then clone the whole (small) thing.
+            let padding = inner_height - total_lines;
+            let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
+            v.extend(all.iter().cloned());
+            v
+        } else {
+            // Long log: clone only the visible window.
+            let start = log_scroll;
+            let end = (start + inner_height).min(total_lines);
+            all[start..end].to_vec()
+        }
+    };
+
+    // No `.scroll()` needed — we already sliced to the visible window.
+    let log_paragraph = Paragraph::new(Text::from(visible_lines))
+        .block(Block::default().borders(Borders::NONE));
 
     f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_content_area);
@@ -1060,10 +1080,29 @@ fn build_log_lines(
                 };
                 // Sanitize for display: strip trailing whitespace per line,
                 // leading/trailing newlines, and collapse excess blank lines.
-                let content_for_display = sanitize_for_display(&content_for_display);
+                // Pre-truncate to a generous limit before sanitizing so we
+                // don't pay O(n) cost on 91 KB tool results when only 200
+                // display chars will ever be shown.
+                const DISPLAY_CHARS: usize = 200;
+                const SANITIZE_LIMIT: usize = DISPLAY_CHARS * 5;
+                // Record whether the original content exceeds the display cap
+                // *before* we slice it, so the ellipsis is shown correctly.
+                let original_overflows = content_for_display.chars().nth(DISPLAY_CHARS).is_some();
+                let sanitize_input = if original_overflows {
+                    // Find the byte boundary for SANITIZE_LIMIT chars.
+                    let byte_end = content_for_display
+                        .char_indices()
+                        .nth(SANITIZE_LIMIT)
+                        .map(|(b, _)| b)
+                        .unwrap_or(content_for_display.len());
+                    &content_for_display[..byte_end]
+                } else {
+                    &content_for_display
+                };
+                let content_for_display = sanitize_for_display(sanitize_input);
 
-                let preview: String = content_for_display.chars().take(200).collect();
-                let truncated = content_for_display.len() > 200;
+                let preview: String = content_for_display.chars().take(DISPLAY_CHARS).collect();
+                let truncated = original_overflows || content_for_display.len() > DISPLAY_CHARS;
                 let display = if truncated {
                     format!("{preview}…")
                 } else {
