@@ -153,7 +153,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn make_tool() -> ReadFileTool {
-        ReadFileTool::new(Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new())))
+        ReadFileTool::new(Arc::new(Mutex::new(
+            crate::agent::file_tracker::FileTracker::new(),
+        )))
     }
     use std::io::Write;
 

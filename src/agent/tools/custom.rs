@@ -1,10 +1,4 @@
-use std::{
-    collections::HashSet,
-    env,
-    path::PathBuf,
-    pin::Pin,
-    process::Stdio,
-};
+use std::{collections::HashSet, env, path::PathBuf, pin::Pin, process::Stdio};
 
 use serde_json::Value;
 
@@ -56,10 +50,7 @@ impl Tool for CustomTool {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    return ToolResult::err(format!(
-                        "Failed to spawn tool '{}': {e}",
-                        self.name
-                    ))
+                    return ToolResult::err(format!("Failed to spawn tool '{}': {e}", self.name));
                 }
             };
 
@@ -81,7 +72,7 @@ impl Tool for CustomTool {
                     return ToolResult::err(format!(
                         "Failed to wait for tool '{}': {e}",
                         self.name
-                    ))
+                    ));
                 }
             };
 

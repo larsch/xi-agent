@@ -123,7 +123,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn make_tool() -> WriteTool {
-        WriteTool::new(Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new())))
+        WriteTool::new(Arc::new(Mutex::new(
+            crate::agent::file_tracker::FileTracker::new(),
+        )))
     }
 
     #[tokio::test]

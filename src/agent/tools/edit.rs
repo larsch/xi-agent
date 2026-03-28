@@ -160,7 +160,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn make_tool() -> EditTool {
-        EditTool::new(Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new())))
+        EditTool::new(Arc::new(Mutex::new(
+            crate::agent::file_tracker::FileTracker::new(),
+        )))
     }
 
     fn write_temp(content: &str) -> tempfile::NamedTempFile {

@@ -14,9 +14,9 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub use file_tracker::FileTracker;
 pub use system_prompt::build_system_prompt;
 pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
-pub use file_tracker::FileTracker;
 
 fn drain_steering_messages(
     steering_rx: &mut UnboundedReceiver<String>,
@@ -56,17 +56,15 @@ pub async fn run_agent_loop(
 
     loop {
         // ── Check for external file modifications ─────────────────────────────
-        let changes = config
-            .file_tracker
-            .lock()
-            .unwrap()
-            .check_modified();
+        let changes = config.file_tracker.lock().unwrap().check_modified();
         if !changes.is_empty() {
-            let paths: Vec<std::path::PathBuf> =
-                changes.iter().map(|c| c.path.clone()).collect();
+            let paths: Vec<std::path::PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
             let notification = build_notification(&changes);
             messages.push(Message::user(notification.clone()));
-            let _ = tx.send(AgentEvent::ExternalFileChange { paths, notification });
+            let _ = tx.send(AgentEvent::ExternalFileChange {
+                paths,
+                notification,
+            });
         }
 
         // Insert queued steering messages before the next assistant turn.

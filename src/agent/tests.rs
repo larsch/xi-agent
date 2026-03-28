@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use futures_util::stream;
 use tokio::sync::mpsc;
 
-use crate::agent::types::{AgentEvent, AskUserResponse, Tool};
 use crate::agent::tools::ask_user::AskUserTool;
+use crate::agent::types::{AgentEvent, AskUserResponse, Tool};
 use crate::agent::{AgentLoopConfig, run_agent_loop};
 use crate::llm::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition,
@@ -525,9 +525,9 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
         events.last()
     );
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextToken { text, .. } if text == "Nice to meet you!")),
+        events.iter().any(
+            |e| matches!(e, AgentEvent::TextToken { text, .. } if text == "Nice to meet you!")
+        ),
         "expected final text token after ask_user answer"
     );
 }

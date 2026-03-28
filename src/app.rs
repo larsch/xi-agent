@@ -2116,7 +2116,11 @@ mod tests {
 
         app.strip_orphaned_tool_calls();
 
-        assert_eq!(app.messages.len(), original_len, "messages should be unchanged");
+        assert_eq!(
+            app.messages.len(),
+            original_len,
+            "messages should be unchanged"
+        );
     }
 
     #[test]
@@ -2173,7 +2177,10 @@ mod tests {
             reply: reply_tx,
         });
 
-        assert!(!app.selection_mode, "selection mode should NOT be active for no-options");
+        assert!(
+            !app.selection_mode,
+            "selection mode should NOT be active for no-options"
+        );
         assert!(app.ask_user_freeform_mode, "freeform mode should be active");
         assert_eq!(
             app.ask_user_question.as_deref(),
@@ -2193,8 +2200,14 @@ mod tests {
             question: "Pick one".to_string(),
             context: None,
             options: vec![
-                AskUserOption { title: "Alpha".to_string(), description: None },
-                AskUserOption { title: "Beta".to_string(), description: None },
+                AskUserOption {
+                    title: "Alpha".to_string(),
+                    description: None,
+                },
+                AskUserOption {
+                    title: "Beta".to_string(),
+                    description: None,
+                },
             ],
             allow_multiple: false,
             allow_freeform: true,
@@ -2216,8 +2229,14 @@ mod tests {
             question: "Pick one".to_string(),
             context: None,
             options: vec![
-                AskUserOption { title: "Alpha".to_string(), description: None },
-                AskUserOption { title: "Beta".to_string(), description: None },
+                AskUserOption {
+                    title: "Alpha".to_string(),
+                    description: None,
+                },
+                AskUserOption {
+                    title: "Beta".to_string(),
+                    description: None,
+                },
             ],
             allow_multiple: false,
             allow_freeform: false,
@@ -2226,7 +2245,11 @@ mod tests {
 
         assert!(app.selection_mode);
         assert_eq!(app.selection_items.len(), 2); // only the 2 options
-        assert!(app.selection_items.iter().all(|i| i.complete_to != "/ask_user_freeform"));
+        assert!(
+            app.selection_items
+                .iter()
+                .all(|i| i.complete_to != "/ask_user_freeform")
+        );
     }
 
     #[test]
@@ -2258,8 +2281,7 @@ mod tests {
                 "slash input should be cleared"
             );
             assert!(
-                !app
-                    .messages
+                !app.messages
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "ESC slash cancel should not append an abort notice"
@@ -2293,8 +2315,7 @@ mod tests {
                 "agent task should be removed when stream is aborted"
             );
             assert!(
-                app
-                    .messages
+                app.messages
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "abort should append user-visible abort notice"

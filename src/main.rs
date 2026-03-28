@@ -12,7 +12,11 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::{io, io::ErrorKind, sync::{Arc, Mutex}};
+use std::{
+    io,
+    io::ErrorKind,
+    sync::{Arc, Mutex},
+};
 
 mod agent;
 mod app;
@@ -31,11 +35,11 @@ mod thinking;
 mod tool_presentation;
 mod ui;
 
+use agent::tools::custom::custom_tool_dirs;
 use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
-use agent::tools::custom::custom_tool_dirs;
 use app::{App, InputMode, SelectionResult};
 use commands::CommandAction;
 use config::TauConfig;
@@ -155,7 +159,11 @@ async fn main() -> io::Result<()> {
     );
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let tools = register_builtin_tools(Some(app.ask_request_tx()), Arc::clone(&file_tracker), custom_tools);
+    let tools = register_builtin_tools(
+        Some(app.ask_request_tx()),
+        Arc::clone(&file_tracker),
+        custom_tools,
+    );
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -205,7 +213,11 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::ReloadContext) => {
                 let custom_tools = load_custom_tools(&custom_tool_dirs());
                 let custom_count = custom_tools.len();
-                let tools = register_builtin_tools(Some(app.ask_request_tx()), Arc::clone(&file_tracker), custom_tools);
+                let tools = register_builtin_tools(
+                    Some(app.ask_request_tx()),
+                    Arc::clone(&file_tracker),
+                    custom_tools,
+                );
                 let loaded_skills = skills::load_skills();
                 let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
                 let skills_count = loaded_skills.len();

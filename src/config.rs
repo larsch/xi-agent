@@ -219,7 +219,10 @@ recent_endpoints = ["http://localhost:11434", "http://gpu-box:11434"]
         for i in 0..=OllamaConfig::MAX_RECENT_ENDPOINTS {
             cfg.record_endpoint(format!("http://host-{i}:11434"));
         }
-        assert_eq!(cfg.recent_endpoints.len(), OllamaConfig::MAX_RECENT_ENDPOINTS);
+        assert_eq!(
+            cfg.recent_endpoints.len(),
+            OllamaConfig::MAX_RECENT_ENDPOINTS
+        );
     }
 
     #[test]

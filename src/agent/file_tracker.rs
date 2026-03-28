@@ -69,10 +69,7 @@ impl FileTracker {
             let meta = match std::fs::metadata(path) {
                 Ok(m) => m,
                 Err(e) => {
-                    log::debug!(
-                        "file_tracker: could not stat {}: {e}",
-                        path.display()
-                    );
+                    log::debug!("file_tracker: could not stat {}: {e}", path.display());
                     continue;
                 }
             };
@@ -90,10 +87,7 @@ impl FileTracker {
             let new_content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(e) => {
-                    log::debug!(
-                        "file_tracker: could not read {}: {e}",
-                        path.display()
-                    );
+                    log::debug!("file_tracker: could not read {}: {e}", path.display());
                     continue;
                 }
             };

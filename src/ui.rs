@@ -199,12 +199,7 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        let lines = build_log_lines(
-            &app.messages,
-            app.streaming,
-            &app.queued_steering,
-            width,
-        );
+        let lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, width);
         app.cached_log_lines = Some((app.log_revision, width, lines));
     }
     &app.cached_log_lines.as_ref().unwrap().2
@@ -349,8 +344,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     };
 
     // No `.scroll()` needed — we already sliced to the visible window.
-    let log_paragraph = Paragraph::new(Text::from(visible_lines))
-        .block(Block::default().borders(Borders::NONE));
+    let log_paragraph =
+        Paragraph::new(Text::from(visible_lines)).block(Block::default().borders(Borders::NONE));
 
     f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_content_area);
@@ -822,36 +817,35 @@ fn build_completion_lines(
             let fill = " ".repeat(terminal_width.saturating_sub(used));
 
             // Build label spans, splitting at the match range if present.
-            let label_spans: Vec<Span<'static>> =
-                if let Some((mstart, mend)) = item.match_range {
-                    // Clamp to valid byte boundaries.
-                    let mstart = mstart.min(item.label.len());
-                    let mend = mend.min(item.label.len());
-                    let before = item.label[..mstart].to_string();
-                    let matched = item.label[mstart..mend].to_string();
-                    let after_raw = &item.label[mend..];
-                    // Pad the trailing portion to fill label_col.
-                    let after = format!(
-                        "{after_raw:<pad$}",
-                        pad = label_col.saturating_sub(mstart + matched.len())
-                    );
-                    vec![
-                        Span::styled(before, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
-                        Span::styled(
-                            matched,
-                            Style::default()
-                                .fg(COMPLETION_MATCH_FG)
-                                .bg(bg)
-                                .add_modifier(ratatui::style::Modifier::BOLD),
-                        ),
-                        Span::styled(after, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
-                    ]
-                } else {
-                    vec![Span::styled(
-                        label_padded,
-                        Style::default().fg(COMPLETION_CMD_FG).bg(bg),
-                    )]
-                };
+            let label_spans: Vec<Span<'static>> = if let Some((mstart, mend)) = item.match_range {
+                // Clamp to valid byte boundaries.
+                let mstart = mstart.min(item.label.len());
+                let mend = mend.min(item.label.len());
+                let before = item.label[..mstart].to_string();
+                let matched = item.label[mstart..mend].to_string();
+                let after_raw = &item.label[mend..];
+                // Pad the trailing portion to fill label_col.
+                let after = format!(
+                    "{after_raw:<pad$}",
+                    pad = label_col.saturating_sub(mstart + matched.len())
+                );
+                vec![
+                    Span::styled(before, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
+                    Span::styled(
+                        matched,
+                        Style::default()
+                            .fg(COMPLETION_MATCH_FG)
+                            .bg(bg)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    ),
+                    Span::styled(after, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
+                ]
+            } else {
+                vec![Span::styled(
+                    label_padded,
+                    Style::default().fg(COMPLETION_CMD_FG).bg(bg),
+                )]
+            };
 
             if item.detail.is_empty() {
                 let mut spans = vec![Span::styled(INDENT, Style::default().bg(bg))];
