@@ -654,6 +654,28 @@ impl App {
         lines.len() == 1 && lines[0].trim_start().starts_with('/')
     }
 
+    /// Handle `Esc` in normal chat-input mode (outside shell/selection).
+    ///
+    /// Priority order is intentional:
+    /// 1) cancel pending ask
+    /// 2) cancel slash-command input/completion
+    /// 3) cancel Ollama endpoint input
+    /// 4) cancel login flow
+    /// 5) abort streaming agent loop
+    pub fn handle_escape_in_chat_mode(&mut self) {
+        if self.has_pending_ask() {
+            self.cancel_pending_ask();
+        } else if self.in_slash_mode() {
+            self.reset_textarea();
+        } else if self.ollama_endpoint_input_mode {
+            self.cancel_ollama_endpoint_input();
+        } else if self.login_active {
+            self.cancel_login();
+        } else if self.streaming {
+            self.abort_agent_loop();
+        }
+    }
+
     // ── Completion helpers ────────────────────────────────────────────────────
 
     /// Recompute the completion list from the current textarea content and
@@ -2205,5 +2227,78 @@ mod tests {
         assert!(app.selection_mode);
         assert_eq!(app.selection_items.len(), 2); // only the 2 options
         assert!(app.selection_items.iter().all(|i| i.complete_to != "/ask_user_freeform"));
+    }
+
+    #[test]
+    fn handle_escape_in_chat_mode_prefers_slash_cancel_over_stream_abort() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.streaming = true;
+            app.agent_task = Some(tokio::spawn(async {
+                std::future::pending::<()>().await;
+            }));
+            app.textarea.insert_str("/model gpt");
+
+            app.handle_escape_in_chat_mode();
+
+            assert!(
+                app.streaming,
+                "streaming should remain active when ESC cancels slash input"
+            );
+            assert!(
+                app.agent_task.is_some(),
+                "agent task should not be aborted when ESC cancels slash input"
+            );
+            assert!(
+                app.textarea
+                    .lines()
+                    .iter()
+                    .all(|line| line.trim().is_empty()),
+                "slash input should be cleared"
+            );
+            assert!(
+                !app
+                    .messages
+                    .iter()
+                    .any(|m| m.content == "[agent loop aborted]"),
+                "ESC slash cancel should not append an abort notice"
+            );
+
+            if let Some(handle) = app.agent_task.take() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
+    fn handle_escape_in_chat_mode_aborts_stream_when_not_in_slash_mode() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.streaming = true;
+            app.agent_task = Some(tokio::spawn(async {
+                std::future::pending::<()>().await;
+            }));
+            app.textarea.insert_str("hello");
+
+            app.handle_escape_in_chat_mode();
+
+            assert!(
+                !app.streaming,
+                "streaming should stop when ESC is used outside slash mode"
+            );
+            assert!(
+                app.agent_task.is_none(),
+                "agent task should be removed when stream is aborted"
+            );
+            assert!(
+                app
+                    .messages
+                    .iter()
+                    .any(|m| m.content == "[agent loop aborted]"),
+                "abort should append user-visible abort notice"
+            );
+        });
     }
 }
