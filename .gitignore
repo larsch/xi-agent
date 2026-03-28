@@ -22,3 +22,4 @@ perf.data
 perf.data.old
 flamegraph.svg
 log
+.agents/skills/gitea-issue-status
