@@ -85,12 +85,17 @@ impl Tool for SlowTool {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+fn make_tracker() -> Arc<Mutex<crate::agent::file_tracker::FileTracker>> {
+    Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new()))
+}
+
 /// Run the agent loop with the given provider and collect all emitted events.
 async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     let config = AgentLoopConfig {
         tools: HashMap::new(),
+        file_tracker: make_tracker(),
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -261,6 +266,7 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
 
     let config = AgentLoopConfig {
         tools,
+        file_tracker: make_tracker(),
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -340,6 +346,7 @@ async fn agent_loop_before_hook_blocks_tool() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let config = AgentLoopConfig {
         tools: HashMap::new(),
+        file_tracker: make_tracker(),
         before_tool_call: Some(Box::new(|_name, _args| false)), // block everything
         after_tool_call: None,
     };

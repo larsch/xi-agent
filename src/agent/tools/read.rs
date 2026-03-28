@@ -1,10 +1,20 @@
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::agent::file_tracker::FileTracker;
 use crate::agent::types::{Tool, ToolResult};
 
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl ReadFileTool {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 fn split_lines_preserving_endings(content: &str) -> Vec<&str> {
     if content.is_empty() {
@@ -124,6 +134,13 @@ impl Tool for ReadFileTool {
             }
             result.push_str(&selected.concat());
 
+            // Record the full file snapshot (always the whole file, regardless
+            // of offset/limit, so we can diff correctly later).
+            self.tracker
+                .lock()
+                .unwrap()
+                .record(std::path::Path::new(&path));
+
             ToolResult::ok(result)
         })
     }
@@ -133,6 +150,11 @@ impl Tool for ReadFileTool {
 mod tests {
     use super::*;
     use crate::agent::types::Tool;
+    use std::sync::{Arc, Mutex};
+
+    fn make_tool() -> ReadFileTool {
+        ReadFileTool::new(Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new())))
+    }
     use std::io::Write;
 
     fn write_temp(content: &str) -> tempfile::NamedTempFile {
@@ -144,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn read_full_file() {
         let f = write_temp("line1\nline2\nline3\n");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": f.path().to_str().unwrap()});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
@@ -155,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn read_with_offset_and_limit() {
         let f = write_temp("a\nb\nc\nd\ne\n");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "offset": 2,
@@ -189,7 +211,7 @@ mod tests {
     #[tokio::test]
     async fn read_preserves_crlf_line_endings() {
         let f = write_temp("a\r\nb\r\n");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": f.path().to_str().unwrap()});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
@@ -199,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn read_preserves_cr_only_line_endings() {
         let f = write_temp("a\rb\r");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": f.path().to_str().unwrap()});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
@@ -209,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn read_offset_with_crlf_keeps_original_endings() {
         let f = write_temp("a\r\nb\r\nc\r\n");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "offset": 2,
@@ -223,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn read_offset_beyond_eof_returns_empty() {
         let f = write_temp("only one line\n");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "offset": 100
@@ -240,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_missing_file_is_error() {
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": "/nonexistent/path/to/file.txt"});
         let result = tool.execute(args).await;
         assert!(result.is_error, "expected error for missing file");
@@ -248,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_wrong_type_for_path_is_error() {
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": 42});
         let result = tool.execute(args).await;
         assert!(result.is_error);
@@ -262,7 +284,7 @@ mod tests {
     #[tokio::test]
     async fn read_extra_fields_are_ignored() {
         let f = write_temp("hello\n");
-        let tool = ReadFileTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": f.path().to_str().unwrap(), "unknown": true});
         let result = tool.execute(args).await;
         assert!(!result.is_error);

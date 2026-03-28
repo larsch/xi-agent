@@ -4,7 +4,9 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition};
+use file_tracker::build_notification;
 
+pub mod file_tracker;
 pub mod system_prompt;
 pub mod tools;
 pub mod types;
@@ -14,6 +16,7 @@ mod tests;
 
 pub use system_prompt::build_system_prompt;
 pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
+pub use file_tracker::FileTracker;
 
 fn drain_steering_messages(
     steering_rx: &mut UnboundedReceiver<String>,
@@ -52,6 +55,20 @@ pub async fn run_agent_loop(
         .collect();
 
     loop {
+        // ── Check for external file modifications ─────────────────────────────
+        let changes = config
+            .file_tracker
+            .lock()
+            .unwrap()
+            .check_modified();
+        if !changes.is_empty() {
+            let paths: Vec<std::path::PathBuf> =
+                changes.iter().map(|c| c.path.clone()).collect();
+            let notification = build_notification(&changes);
+            messages.push(Message::user(notification.clone()));
+            let _ = tx.send(AgentEvent::ExternalFileChange { paths, notification });
+        }
+
         // Insert queued steering messages before the next assistant turn.
         let _ = drain_steering_messages(&mut steering_rx, &mut messages, &tx);
 

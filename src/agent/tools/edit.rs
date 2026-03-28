@@ -1,10 +1,20 @@
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::agent::file_tracker::FileTracker;
 use crate::agent::types::{Tool, ToolResult};
 
-pub struct EditTool;
+pub struct EditTool {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl EditTool {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 fn strip_utf8_bom(s: &str) -> (&str, &str) {
     if let Some(stripped) = s.strip_prefix('\u{FEFF}') {
@@ -132,6 +142,11 @@ impl Tool for EditTool {
                 return ToolResult::err(format!("Failed to write {path}: {e}"));
             }
 
+            self.tracker
+                .lock()
+                .unwrap()
+                .record(std::path::Path::new(&path));
+
             ToolResult::ok(format!("Successfully edited {path}"))
         })
     }
@@ -142,6 +157,11 @@ mod tests {
     use super::*;
     use crate::agent::types::Tool;
     use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    fn make_tool() -> EditTool {
+        EditTool::new(Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new())))
+    }
 
     fn write_temp(content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -153,7 +173,7 @@ mod tests {
     async fn edit_replaces_exact_match() {
         let f = write_temp("hello world\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path,
             "old_text": "hello",
@@ -169,7 +189,7 @@ mod tests {
     async fn edit_matches_lf_against_crlf_file_and_preserves_crlf() {
         let f = write_temp("a\r\nb\r\nc\r\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path,
             "old_text": "b\n",
@@ -185,7 +205,7 @@ mod tests {
     async fn edit_preserves_utf8_bom() {
         let f = write_temp("\u{FEFF}hello\r\nworld\r\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path,
             "old_text": "hello\n",
@@ -202,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn edit_no_match_is_error() {
         let f = write_temp("hello world\n");
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": "not found",
@@ -215,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn edit_multiple_matches_is_error() {
         let f = write_temp("foo foo foo\n");
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": "foo",
@@ -233,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn edit_wrong_type_for_old_text_is_error() {
         let f = write_temp("hello world\n");
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": false,
@@ -252,7 +272,7 @@ mod tests {
     async fn edit_extra_fields_are_ignored() {
         let f = write_temp("hello world\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = EditTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path,
             "old_text": "hello",

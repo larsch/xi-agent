@@ -25,6 +25,7 @@ src/
     mod.rs             — run_agent_loop: the multi-turn agentic loop
     types.rs           — Tool trait, ToolRegistry, AgentEvent, AgentLoopConfig
     system_prompt.rs   — build_system_prompt: dynamic system prompt
+    file_tracker.rs    — FileTracker: mtime+hash snapshot, external-change detection, diff generation
     tools/
       mod.rs           — register_builtin_tools() (built-ins + custom tools)
       bash.rs          — BashTool  (💻 run shell command)
@@ -52,6 +53,9 @@ User keystroke → App::submit
   └─ spawns tokio task: run_agent_loop(messages, config, provider, tx, steering_rx)
        └─ drain steering_rx → insert queued user messages before each turn
           for each turn:
+            check FileTracker for externally modified files
+              └─ if any: inject ⚠️ user message with unified diff (or warn-only if large)
+                         send AgentEvent::ExternalFileChange
             provider.stream_chat_with_tools(messages, tool_defs)
               └─ yields LlmEvent::{Token{..}, ThinkingToken, Usage,
                                    ToolIntentStart, ToolCall, Done, Error}
@@ -61,6 +65,7 @@ User keystroke → App::submit
             sends AgentEvent::{TextToken{..}, ThinkingToken, Usage,
                                ToolIntentStart, SteeringConsumed,
                                ToolCallStart, ToolCallEnd,
+                               ExternalFileChange,
                                TurnEnd, Done, Error} on tx
 
 User keystroke (while streaming) → App::enqueue_steering_from_input
@@ -141,6 +146,7 @@ pub enum AgentEvent {
 
 pub struct AgentLoopConfig {
     pub tools: ToolRegistry,
+    pub file_tracker: Arc<Mutex<FileTracker>>,
     pub before_tool_call: Option<Box<dyn Fn(&str, &Value) -> bool + Send + Sync>>,
     pub after_tool_call:  Option<Box<dyn Fn(&str, &ToolResult) -> Option<ToolResult> + Send + Sync>>,
 }
@@ -218,6 +224,22 @@ args are written to the process stdin; stdout is the result string; non-zero
 exit becomes `ToolResult::err`. Built-in tool names take precedence — a
 custom tool whose name collides with a built-in is silently dropped (logged
 at debug). All three tool directories are shown in `tau --print-dirs`.
+
+**External file change detection** — `FileTracker` (`agent/file_tracker.rs`)
+records a snapshot (mtime + SHA-256 + content) for every file successfully
+touched by `read_file`, `write_file`, or `edit_file`. At the start of each
+LLM turn, `check_modified()` stats every tracked path; if mtime is unchanged
+the file is skipped cheaply. On mtime change, the file is re-read and
+rehashed; content-identical saves (no-op writes) are suppressed. Truly
+changed files produce a `ChangedFile { path, old_content, new_content }`.
+The agent loop composes a single ⚠️ user message: diffs with ≤
+`DIFF_INLINE_MAX_LINES` (50) changed lines are inlined as unified diffs
+(via `similar`); larger diffs get a warn-only note. The message is injected
+into the conversation history and mirrored to the UI via
+`AgentEvent::ExternalFileChange { paths, notification }`. Binary files
+(non-UTF-8) are silently skipped. The tracker is held as
+`Arc<Mutex<FileTracker>>` shared between `AgentLoopConfig` and the three
+file tools.
 
 ## What Is Not Here Yet
 

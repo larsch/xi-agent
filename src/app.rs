@@ -1604,6 +1604,7 @@ impl App {
     fn start_agent_task(&mut self, llm_messages: Vec<Message>, provider: &DynProvider) {
         let config = AgentLoopConfig {
             tools: self.agent_config.tools.clone(),
+            file_tracker: Arc::clone(&self.agent_config.file_tracker),
             before_tool_call: None,
             after_tool_call: None,
         };
@@ -1886,6 +1887,15 @@ impl App {
                 }
                 self.bump_log_revision();
             }
+            AgentEvent::ExternalFileChange {
+                paths: _,
+                notification,
+            } => {
+                // Mirror the notification into the UI message log so it appears
+                // in the conversation display, just as a user message would.
+                self.messages.push(Message::user(notification));
+                self.bump_log_revision();
+            }
             AgentEvent::TurnEnd => {
                 self.persist_messages();
             }
@@ -1962,6 +1972,9 @@ mod tests {
             ThinkingLevel::Off,
             AgentLoopConfig {
                 tools: Default::default(),
+                file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::agent::FileTracker::new(),
+                )),
                 before_tool_call: None,
                 after_tool_call: None,
             },

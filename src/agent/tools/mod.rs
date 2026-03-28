@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
 
+use crate::agent::file_tracker::FileTracker;
 use crate::agent::types::{Tool, ToolRegistry, ToolResult};
 
 /// Deserialize a JSON `args` object into a typed struct, returning a
@@ -45,14 +46,15 @@ use crate::agent::types::AskRequestTx;
 /// collides with a built-in is silently dropped (logged at debug).
 pub fn register_builtin_tools(
     ask_tx: Option<AskRequestTx>,
+    file_tracker: Arc<Mutex<FileTracker>>,
     custom: Vec<custom::CustomTool>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
     let mut tools: Vec<Arc<dyn crate::agent::types::Tool>> = vec![
-        Arc::new(ReadFileTool),
-        Arc::new(WriteTool),
-        Arc::new(EditTool),
+        Arc::new(ReadFileTool::new(Arc::clone(&file_tracker))),
+        Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
+        Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
         Arc::new(AskUserTool::new(ask_tx)),
     ];

@@ -12,7 +12,7 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::{io, io::ErrorKind, sync::Arc};
+use std::{io, io::ErrorKind, sync::{Arc, Mutex}};
 
 mod agent;
 mod app;
@@ -32,7 +32,7 @@ mod tool_presentation;
 mod ui;
 
 use agent::{
-    AgentEvent, AgentLoopConfig, build_system_prompt,
+    AgentEvent, AgentLoopConfig, FileTracker, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
 use agent::tools::custom::custom_tool_dirs;
@@ -140,19 +140,22 @@ async fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let file_tracker = Arc::new(Mutex::new(FileTracker::new()));
+
     let mut app = App::new(
         &current_model,
         &current_kind,
         current_thinking,
         AgentLoopConfig {
             tools: std::collections::HashMap::new(),
+            file_tracker: Arc::clone(&file_tracker),
             before_tool_call: None,
             after_tool_call: None,
         },
     );
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let tools = register_builtin_tools(Some(app.ask_request_tx()), custom_tools);
+    let tools = register_builtin_tools(Some(app.ask_request_tx()), Arc::clone(&file_tracker), custom_tools);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -202,7 +205,7 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::ReloadContext) => {
                 let custom_tools = load_custom_tools(&custom_tool_dirs());
                 let custom_count = custom_tools.len();
-                let tools = register_builtin_tools(Some(app.ask_request_tx()), custom_tools);
+                let tools = register_builtin_tools(Some(app.ask_request_tx()), Arc::clone(&file_tracker), custom_tools);
                 let loaded_skills = skills::load_skills();
                 let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
                 let skills_count = loaded_skills.len();
@@ -907,7 +910,8 @@ async fn run_print_mode(
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let tools = register_builtin_tools(None, custom_tools);
+    let headless_tracker = Arc::new(Mutex::new(FileTracker::new()));
+    let tools = register_builtin_tools(None, Arc::clone(&headless_tracker), custom_tools);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -918,6 +922,7 @@ async fn run_print_mode(
 
     let config = AgentLoopConfig {
         tools,
+        file_tracker: headless_tracker,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -961,6 +966,12 @@ async fn run_print_mode(
                 }
             }
             AgentEvent::TurnEnd => {}
+            AgentEvent::ExternalFileChange { paths, .. } => {
+                // Print the file change notification to stderr in headless mode.
+                for path in &paths {
+                    eprintln!("⚠️  {} was modified externally", path.display());
+                }
+            }
             AgentEvent::Done => {
                 println!(); // final newline after streamed output
                 break;

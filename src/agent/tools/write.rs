@@ -1,10 +1,20 @@
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::agent::file_tracker::FileTracker;
 use crate::agent::types::{Tool, ToolResult};
 
-pub struct WriteTool;
+pub struct WriteTool {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl WriteTool {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 fn count_lines_any_ending(content: &str) -> usize {
     if content.is_empty() {
@@ -95,6 +105,11 @@ impl Tool for WriteTool {
                 return ToolResult::err(format!("Failed to write {path}: {e}"));
             }
 
+            self.tracker
+                .lock()
+                .unwrap()
+                .record(std::path::Path::new(&path));
+
             let line_count = count_lines_any_ending(&content);
             ToolResult::ok(format!("Written {line_count} lines to {path}"))
         })
@@ -105,12 +120,17 @@ impl Tool for WriteTool {
 mod tests {
     use super::*;
     use crate::agent::types::Tool;
+    use std::sync::{Arc, Mutex};
+
+    fn make_tool() -> WriteTool {
+        WriteTool::new(Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new())))
+    }
 
     #[tokio::test]
     async fn write_creates_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new_file.txt");
-        let tool = WriteTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path.to_str().unwrap(),
             "content": "hello\n"
@@ -126,7 +146,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "old content\n").unwrap();
-        let tool = WriteTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path.to_str().unwrap(),
             "content": "new content\n"
@@ -140,7 +160,7 @@ mod tests {
     async fn write_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a").join("b").join("c").join("file.txt");
-        let tool = WriteTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path.to_str().unwrap(),
             "content": "deep\n"
@@ -155,7 +175,7 @@ mod tests {
     async fn write_preserves_crlf_content() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("windows.txt");
-        let tool = WriteTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path.to_str().unwrap(),
             "content": "a\r\nb\r\n"
@@ -169,7 +189,7 @@ mod tests {
     async fn write_reports_line_count_for_cr_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("classic-mac.txt");
-        let tool = WriteTool;
+        let tool = make_tool();
         let args = serde_json::json!({
             "path": path.to_str().unwrap(),
             "content": "a\rb\r"
@@ -186,7 +206,7 @@ mod tests {
     async fn write_wrong_type_for_content_is_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
-        let tool = WriteTool;
+        let tool = make_tool();
         let args = serde_json::json!({"path": path.to_str().unwrap(), "content": 99});
         let result = tool.execute(args).await;
         assert!(result.is_error);
@@ -201,7 +221,7 @@ mod tests {
     async fn write_extra_fields_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
-        let tool = WriteTool;
+        let tool = make_tool();
         let args =
             serde_json::json!({"path": path.to_str().unwrap(), "content": "hi\n", "mode": "644"});
         let result = tool.execute(args).await;

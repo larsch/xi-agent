@@ -1068,6 +1068,17 @@ fn append_tool_result_block(
     let marker_style = Style::default().fg(color);
     let text_style = Style::default().fg(color);
 
+    if content.is_empty() {
+        let no_output_style = Style::default()
+            .fg(Color::Rgb(100, 100, 120))
+            .add_modifier(ratatui::style::Modifier::ITALIC);
+        out.push(Line::from(vec![
+            Span::styled("│", marker_style),
+            Span::styled("(no output)", no_output_style),
+        ]));
+        return;
+    }
+
     if width == 0 {
         out.push(Line::from(vec![Span::styled(
             "│".to_string(),
@@ -1077,28 +1088,20 @@ fn append_tool_result_block(
     }
 
     let content_width = width.saturating_sub(1).max(1);
-    let segments: Vec<&str> = if content.is_empty() {
-        vec![""]
-    } else {
-        content.split('\n').collect()
-    };
+    let segments: Vec<&str> = content.split('\n').collect();
 
-    let visible: Vec<usize> = if content.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
-                }
-            })
-            .collect()
-    };
+    let visible: Vec<usize> = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, seg)| {
+            let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
+            if seg.is_empty() && !has_nonempty_after {
+                None
+            } else {
+                Some(idx)
+            }
+        })
+        .collect();
 
     for seg_idx in visible {
         let segment = segments[seg_idx];
@@ -1668,6 +1671,9 @@ mod tests {
             ThinkingLevel::Medium,
             AgentLoopConfig {
                 tools: HashMap::new(),
+                file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::agent::FileTracker::new(),
+                )),
                 before_tool_call: None,
                 after_tool_call: None,
             },

@@ -109,6 +109,13 @@ pub enum AgentEvent {
         result: ToolResult,
     },
     // ── Loop lifecycle ─────────────────────────────────────────────────────────
+    /// One or more tracked files were modified externally before this turn.
+    /// `notification` is the pre-formatted user message text that was injected
+    /// into the conversation history; `paths` lists the affected files.
+    ExternalFileChange {
+        paths: Vec<std::path::PathBuf>,
+        notification: String,
+    },
     /// One LLM turn (assistant response + any tool calls) is complete.
     TurnEnd,
     /// The agent loop finished successfully.
@@ -129,6 +136,9 @@ pub type AfterToolCall = Box<dyn Fn(&str, &ToolResult) -> Option<ToolResult> + S
 pub struct AgentLoopConfig {
     /// Tools available to the model.
     pub tools: ToolRegistry,
+    /// Tracker for files touched by built-in file tools; used to detect
+    /// external modifications before each LLM turn.
+    pub file_tracker: std::sync::Arc<std::sync::Mutex<crate::agent::file_tracker::FileTracker>>,
     /// Optional hook called before each tool execution.
     /// Return `false` to block the tool call (an error result is returned instead).
     pub before_tool_call: Option<BeforeToolCall>,
