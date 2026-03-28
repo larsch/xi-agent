@@ -536,6 +536,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 "ollama endpoint: ".to_string(),
                 Some("http://host:11434   Enter confirm   Esc cancel".to_string()),
             )
+        } else if app.ask_user_freeform_mode {
+            let question = app
+                .ask_user_question
+                .as_deref()
+                .unwrap_or("Answer")
+                .to_string();
+            (
+                app.textarea.lines().to_vec(),
+                app.textarea.cursor(),
+                "❓ ".to_string(),
+                Some(format!("{question}   Enter submit   Esc cancel")),
+            )
         } else {
             (
                 app.textarea.lines().to_vec(),

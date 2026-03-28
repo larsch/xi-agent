@@ -197,6 +197,12 @@ pub struct App {
     // ── ask_user overlay state ───────────────────────────────────────────────
     pending_ask: Option<PendingAsk>,
     ask_reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
+    /// When true the textarea is used to type a freeform answer to an
+    /// ask_user question that has no predefined options.  The question text
+    /// is stored in `ask_user_question` and displayed as a hint in the UI.
+    pub ask_user_freeform_mode: bool,
+    /// The question text to display when `ask_user_freeform_mode` is active.
+    pub ask_user_question: Option<String>,
 
     // ── Ollama endpoint input mode ────────────────────────────────────────────
     /// When true the textarea is used to type a custom Ollama endpoint URL
@@ -304,6 +310,8 @@ impl App {
             resume_available_for_cwd: false,
             pending_ask: None,
             ask_reply: None,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             ollama_endpoint_input_mode: false,
             event_rx,
             event_tx,
@@ -1180,7 +1188,7 @@ impl App {
 
     pub fn receive_ask_request(&mut self, req: AskRequest) {
         let AskRequest {
-            question: _question,
+            question,
             context: _context,
             options,
             allow_multiple: _allow_multiple,
@@ -1200,6 +1208,11 @@ impl App {
         // the tool_use / tool_result pairing expected by the Anthropic API.
 
         if options.is_empty() {
+            // No options: go straight to freeform input so the user can type
+            // their answer without an intermediate selection-menu step.
+            // Store the question for display in the input area.
+            self.ask_user_freeform_mode = true;
+            self.ask_user_question = Some(question);
             self.exit_selection_mode();
             self.reset_textarea();
             return;
@@ -1223,9 +1236,10 @@ impl App {
             })
             .collect();
 
+        // Include freeform sentinel when options are present but allow_freeform is true.
         if allow_freeform {
             items.push(CompletionItem {
-                label: "Type a custom response…".to_string(),
+                label: "Type your response…".to_string(),
                 detail: String::new(),
                 complete_to: "/ask_user_freeform".to_string(),
                 loading: false,
@@ -1282,6 +1296,8 @@ impl App {
             let _ = reply.send(answer);
         }
         self.pending_ask = None;
+        self.ask_user_freeform_mode = false;
+        self.ask_user_question = None;
         self.exit_selection_mode();
         self.reset_textarea();
     }
@@ -1969,7 +1985,10 @@ impl App {
 mod tests {
     use super::App;
     use crate::{
-        agent::AgentLoopConfig,
+        agent::{
+            AgentLoopConfig,
+            types::{AskRequest, AskUserOption, AskUserResponse},
+        },
         llm::{AssistantPhase, Message, Role},
         provider::ProviderKind,
         thinking::ThinkingLevel,
@@ -2113,5 +2132,78 @@ mod tests {
     #[test]
     fn normalize_ollama_endpoint_rejects_empty_input() {
         assert_eq!(App::normalize_ollama_endpoint("   "), None);
+    }
+
+    // ── receive_ask_request ───────────────────────────────────────────────────
+
+    /// When ask_user has no options, receive_ask_request must go directly into
+    /// freeform mode (not selection mode) and store the question for display.
+    #[test]
+    fn receive_ask_request_no_options_enters_freeform_mode() {
+        let mut app = make_app();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "What is your name?".to_string(),
+            context: None,
+            options: vec![],
+            allow_multiple: false,
+            allow_freeform: true,
+            reply: reply_tx,
+        });
+
+        assert!(!app.selection_mode, "selection mode should NOT be active for no-options");
+        assert!(app.ask_user_freeform_mode, "freeform mode should be active");
+        assert_eq!(
+            app.ask_user_question.as_deref(),
+            Some("What is your name?"),
+            "question should be stored for display"
+        );
+        assert!(app.has_pending_ask(), "pending ask should be set");
+    }
+
+    /// When ask_user has options and allow_freeform is true, the freeform
+    /// sentinel should appear after the option items.
+    #[test]
+    fn receive_ask_request_with_options_and_freeform_includes_sentinel() {
+        let mut app = make_app();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "Pick one".to_string(),
+            context: None,
+            options: vec![
+                AskUserOption { title: "Alpha".to_string(), description: None },
+                AskUserOption { title: "Beta".to_string(), description: None },
+            ],
+            allow_multiple: false,
+            allow_freeform: true,
+            reply: reply_tx,
+        });
+
+        assert!(app.selection_mode);
+        assert_eq!(app.selection_items.len(), 3); // 2 options + freeform sentinel
+        assert_eq!(app.selection_items[2].complete_to, "/ask_user_freeform");
+    }
+
+    /// When ask_user has options and allow_freeform is false, the freeform
+    /// sentinel should NOT appear.
+    #[test]
+    fn receive_ask_request_with_options_no_freeform_omits_sentinel() {
+        let mut app = make_app();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "Pick one".to_string(),
+            context: None,
+            options: vec![
+                AskUserOption { title: "Alpha".to_string(), description: None },
+                AskUserOption { title: "Beta".to_string(), description: None },
+            ],
+            allow_multiple: false,
+            allow_freeform: false,
+            reply: reply_tx,
+        });
+
+        assert!(app.selection_mode);
+        assert_eq!(app.selection_items.len(), 2); // only the 2 options
+        assert!(app.selection_items.iter().all(|i| i.complete_to != "/ask_user_freeform"));
     }
 }

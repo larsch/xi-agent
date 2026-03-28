@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use futures_util::stream;
 use tokio::sync::mpsc;
 
-use crate::agent::types::{AgentEvent, Tool};
+use crate::agent::types::{AgentEvent, AskUserResponse, Tool};
+use crate::agent::tools::ask_user::AskUserTool;
 use crate::agent::{AgentLoopConfig, run_agent_loop};
 use crate::llm::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition,
@@ -443,4 +444,90 @@ fn test_read_agents_md_from_nested_cwd_includes_parent_chain_in_order() {
 
     temp_home.close().unwrap();
     root.close().unwrap();
+}
+
+// ── ask_user integration tests ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn agent_loop_ask_user_no_options_completes_loop() {
+    use crate::agent::types::AskRequest;
+    use tokio::sync::mpsc as tmspc;
+
+    let (ask_tx, mut ask_rx) = tmspc::unbounded_channel::<AskRequest>();
+
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert(
+        "ask_user".to_string(),
+        Arc::new(AskUserTool::new(Some(ask_tx))),
+    );
+
+    // Turn 1: LLM asks a freeform question (no options).
+    // Turn 2: LLM gives the final answer after receiving the user's reply.
+    let provider = MockProvider::new(vec![
+        vec![
+            LlmEvent::ToolCall {
+                id: "call_1".to_string(),
+                name: "ask_user".to_string(),
+                args: serde_json::json!({ "question": "What is your name?" }),
+            },
+            LlmEvent::Done,
+        ],
+        vec![
+            LlmEvent::Token {
+                text: "Nice to meet you!".to_string(),
+                phase: AssistantPhase::Final,
+            },
+            LlmEvent::Done,
+        ],
+    ]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let config = AgentLoopConfig {
+        tools,
+        file_tracker: make_tracker(),
+        before_tool_call: None,
+        after_tool_call: None,
+    };
+
+    let handle = tokio::spawn(async move {
+        run_agent_loop(
+            vec![Message::user("hi")],
+            config,
+            Arc::new(provider),
+            tx,
+            steering_rx,
+        )
+        .await;
+    });
+
+    // Simulate the UI: receive the ask request and reply with a freeform answer.
+    let req = ask_rx
+        .recv()
+        .await
+        .expect("agent should send an ask_user request");
+    assert_eq!(req.question, "What is your name?");
+    assert!(req.options.is_empty(), "expected no options");
+    req.reply
+        .send(AskUserResponse::Answer("Alice".to_string()))
+        .expect("reply channel should be open");
+
+    handle.await.expect("agent loop task should complete");
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+
+    assert!(
+        matches!(events.last(), Some(AgentEvent::Done)),
+        "expected Done as last event, got: {:?}",
+        events.last()
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextToken { text, .. } if text == "Nice to meet you!")),
+        "expected final text token after ask_user answer"
+    );
 }
