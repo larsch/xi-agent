@@ -85,6 +85,10 @@ pub struct CompletionItem {
     pub loading: bool,
     /// When true the item represents a fetch error and should be rendered in red.
     pub error: bool,
+    /// Byte range within `label` that matches the user's typed query, used for
+    /// visual highlighting. `None` means no highlight (e.g. prefix match where
+    /// the match is implied, or non-interactive rows).
+    pub match_range: Option<(usize, usize)>,
 }
 
 impl CompletionItem {
@@ -99,6 +103,7 @@ impl CompletionItem {
             },
             loading: false,
             error: false,
+            match_range: None,
         }
     }
 
@@ -109,6 +114,7 @@ impl CompletionItem {
             complete_to: format!("/model {}", name),
             loading: false,
             error: false,
+            match_range: None,
         }
     }
 
@@ -119,6 +125,7 @@ impl CompletionItem {
             complete_to: format!("/provider {}", name),
             loading: false,
             error: false,
+            match_range: None,
         }
     }
 
@@ -130,6 +137,7 @@ impl CompletionItem {
             complete_to: format!("/skill:{} ", skill.name),
             loading: false,
             error: false,
+            match_range: None,
         }
     }
 
@@ -140,6 +148,7 @@ impl CompletionItem {
             complete_to: String::new(),
             loading: true,
             error: false,
+            match_range: None,
         }
     }
 
@@ -150,6 +159,7 @@ impl CompletionItem {
             complete_to: String::new(),
             loading: true,
             error: true,
+            match_range: None,
         }
     }
 }
@@ -220,6 +230,7 @@ pub fn completions_for(
                         complete_to: format!("/login {p}"),
                         loading: false,
                         error: false,
+                        match_range: None,
                     })
                     .collect(),
                 "thinking" if thinking_enabled => ThinkingLevel::all()
@@ -232,6 +243,7 @@ pub fn completions_for(
                         complete_to: format!("/thinking {lvl}"),
                         loading: false,
                         error: false,
+                        match_range: None,
                     })
                     .collect(),
                 "thinking" => vec![],
@@ -249,31 +261,84 @@ pub fn completions_for(
                     .collect()
             } else {
                 // General command name filtering: built-in commands + skills.
-                let mut items: Vec<CompletionItem> = COMMANDS
-                    .iter()
-                    .filter(|c| c.name.starts_with(rest))
-                    .filter(|c| thinking_enabled || c.name != "thinking")
-                    .map(CompletionItem::from_command)
-                    .collect();
+                // Phase 1a — prefix matches (no highlight needed).
+                // Phase 1b — mid-string matches (highlight the matched portion).
+                // Prefix matches are listed first; within each tier the original
+                // declaration order is preserved.
 
-                // Include skills whose `/skill:<name>` form matches the prefix.
-                // e.g. typing `/s` or `/sk` shows skill entries alongside commands.
-                let full_prefix = format!("skill:{}", rest);
-                // Alternatively check if `skill:` starts with `rest` (partial match).
-                if "skill:".starts_with(rest) || rest.starts_with("skill:") {
-                    for skill in skills {
-                        items.push(CompletionItem::from_skill(skill));
+                let mut prefix_items: Vec<CompletionItem> = Vec::new();
+                let mut substr_items: Vec<CompletionItem> = Vec::new();
+
+                for cmd in COMMANDS {
+                    if !thinking_enabled && cmd.name == "thinking" {
+                        continue;
                     }
-                } else {
-                    // Check each skill name with the full prefix
-                    for skill in skills {
-                        if format!("skill:{}", skill.name).starts_with(rest) {
-                            items.push(CompletionItem::from_skill(skill));
+                    if cmd.name.starts_with(rest) {
+                        // Prefix match: the typed text lands right after the
+                        // leading slash in the label, so match_range covers
+                        // the leading "/" plus the typed text.
+                        let start = 1; // skip the leading "/"
+                        let end = start + rest.len();
+                        let mut item = CompletionItem::from_command(cmd);
+                        if !rest.is_empty() {
+                            item.match_range = Some((start, end));
                         }
+                        prefix_items.push(item);
+                    } else if let Some(pos) = cmd.name.find(rest) {
+                        // Mid-string match: offset by 1 for the leading "/".
+                        let start = 1 + pos;
+                        let end = start + rest.len();
+                        let mut item = CompletionItem::from_command(cmd);
+                        item.match_range = Some((start, end));
+                        substr_items.push(item);
                     }
-                    let _ = full_prefix; // already handled above
                 }
 
+                let mut items: Vec<CompletionItem> =
+                    prefix_items.into_iter().chain(substr_items).collect();
+
+                // Include skills whose `/skill:<name>` form matches (prefix or
+                // substring). Skills are also split into prefix-first / substr-second
+                // tiers and appended after built-in command matches.
+                //
+                // The label for a skill is "/skill:<name>", so offsets into the
+                // label are: '/' = 0, 's' = 1 … ':' = 6, name starts at 7.
+                const SKILL_NAME_OFFSET: usize = "/skill:".len(); // 7
+
+                let mut skill_prefix_items: Vec<CompletionItem> = Vec::new();
+                let mut skill_substr_items: Vec<CompletionItem> = Vec::new();
+
+                if "skill:".starts_with(rest) || rest.starts_with("skill:") {
+                    // User is typing the "skill:" prefix itself — show all skills,
+                    // no per-name highlight needed.
+                    for skill in skills {
+                        skill_prefix_items.push(CompletionItem::from_skill(skill));
+                    }
+                } else {
+                    for skill in skills {
+                        let full = format!("skill:{}", skill.name); // no leading "/"
+                        if full.starts_with(rest) {
+                            // Prefix match on "skill:<name>" — highlight from "/".
+                            let start = 1; // after the "/"
+                            let end = start + rest.len();
+                            let mut item = CompletionItem::from_skill(skill);
+                            if !rest.is_empty() {
+                                item.match_range = Some((start, end));
+                            }
+                            skill_prefix_items.push(item);
+                        } else if let Some(pos) = skill.name.find(rest) {
+                            // Substring match inside the skill name.
+                            let start = SKILL_NAME_OFFSET + pos;
+                            let end = start + rest.len();
+                            let mut item = CompletionItem::from_skill(skill);
+                            item.match_range = Some((start, end));
+                            skill_substr_items.push(item);
+                        }
+                    }
+                }
+
+                items.extend(skill_prefix_items);
+                items.extend(skill_substr_items);
                 items
             }
         }
@@ -499,5 +564,97 @@ mod tests {
         let no_arg_completion =
             completions_for("/skill:plan anything", None, false, None, &skills, true);
         assert!(no_arg_completion.is_empty());
+    }
+
+    #[test]
+    fn skill_substring_match_finds_skill_by_name_fragment() {
+        let skills = vec![
+            skill("brainstorm", "Brainstorm ideas"),
+            skill("plan", "Planning"),
+        ];
+
+        // "/brainstorm" should match "/skill:brainstorm" as a substring of the skill name.
+        let items = completions_for("/brainstorm", None, false, None, &skills, true);
+        let complete_to: Vec<String> = items.iter().map(|i| i.complete_to.clone()).collect();
+        assert!(
+            complete_to.contains(&"/skill:brainstorm ".to_string()),
+            "expected /skill:brainstorm  in results, got: {complete_to:?}"
+        );
+
+        // The match range should point to "brainstorm" within "/skill:brainstorm"
+        // "/skill:" is 7 bytes, so "brainstorm" starts at offset 7.
+        let item = items
+            .iter()
+            .find(|i| i.complete_to == "/skill:brainstorm ")
+            .unwrap();
+        assert_eq!(item.match_range, Some((7, 17))); // "brainstorm" = 10 chars
+
+        // "/plan" should match "/skill:plan" similarly (offset 7, len 4).
+        let items2 = completions_for("/plan", None, false, None, &skills, true);
+        let plan_item = items2
+            .iter()
+            .find(|i| i.complete_to == "/skill:plan ")
+            .unwrap();
+        assert_eq!(plan_item.match_range, Some((7, 11)));
+    }
+
+    #[test]
+    fn substring_match_includes_mid_string_commands() {
+        // "/load" should match "/reload" (substring) in addition to prefix matches.
+        let items = completions_for("/load", None, false, None, &[], true);
+        let complete_to: Vec<String> = items.iter().map(|i| i.complete_to.clone()).collect();
+        assert!(
+            complete_to.contains(&"/reload".to_string()),
+            "expected /reload in results, got: {complete_to:?}"
+        );
+    }
+
+    #[test]
+    fn prefix_matches_come_before_substring_matches() {
+        // "/re" is a prefix of "/reload" and "/resume" but a substring of nothing else
+        // with that prefix. Verify ordering: prefix matches first.
+        let items = completions_for("/load", None, false, None, &[], true);
+        // There are no commands whose name *starts with* "load", so all results
+        // are substring matches. "/reload" should be present.
+        let names: Vec<&str> = items.iter().map(|i| i.complete_to.as_str()).collect();
+        assert!(names.contains(&"/reload"), "expected /reload: {names:?}");
+
+        // "/re" is a prefix of /reload and /resume; both should appear before any
+        // purely mid-string hits.
+        let re_items = completions_for("/re", None, false, None, &[], true);
+        let re_names: Vec<&str> = re_items.iter().map(|i| i.complete_to.as_str()).collect();
+        // Check /reload and /resume are present
+        assert!(re_names.contains(&"/reload"), "{re_names:?}");
+        assert!(re_names.contains(&"/resume"), "{re_names:?}");
+        // Both are prefix matches; they should appear before any substring-only match.
+        let reload_pos = re_names.iter().position(|&n| n == "/reload").unwrap();
+        let resume_pos = re_names.iter().position(|&n| n == "/resume").unwrap();
+        // Any item NOT starting with "re" in its name would be a substring match.
+        for (pos, name) in re_names.iter().enumerate() {
+            let cmd_name = name.trim_start_matches('/');
+            if !cmd_name.starts_with("re") {
+                assert!(
+                    pos > reload_pos && pos > resume_pos,
+                    "substring match {name} should come after prefix matches"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn match_range_is_set_for_highlighted_commands() {
+        // Prefix match: "/re" -> /reload — match_range should cover "re" at offset 1.
+        let items = completions_for("/re", None, false, None, &[], true);
+        let reload = items.iter().find(|i| i.complete_to == "/reload").unwrap();
+        // label is "/reload", "re" starts at byte 1
+        assert_eq!(reload.match_range, Some((1, 3)));
+
+        // Substring (mid-string) match: "/load" -> /reload — "load" is at offset 3 in "/reload"
+        let items2 = completions_for("/load", None, false, None, &[], true);
+        let reload2 = items2.iter().find(|i| i.complete_to == "/reload").unwrap();
+        // "/reload": 'r'=0, 'e'=1, 'l'=2 — wait, label is "/reload"
+        // byte offsets: '/'=0, 'r'=1, 'e'=2, 'l'=3, 'o'=4, 'a'=5, 'd'=6
+        // "load" starts at byte 3, ends at byte 7
+        assert_eq!(reload2.match_range, Some((3, 7)));
     }
 }

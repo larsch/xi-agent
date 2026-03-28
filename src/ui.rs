@@ -36,6 +36,9 @@ const COMPLETION_CMD_FG: Color = Color::Rgb(120, 200, 255);
 /// Foreground colour for the description column in the popup.
 const COMPLETION_DESC_FG: Color = Color::Rgb(140, 140, 160);
 
+/// Foreground colour for the highlighted (matched) portion of a completion label.
+const COMPLETION_MATCH_FG: Color = Color::Rgb(255, 220, 80);
+
 /// Background colour of the selection menu header.
 const SELECTION_HEADER_BG: Color = Color::Rgb(20, 45, 20);
 
@@ -786,28 +789,58 @@ fn build_completion_lines(
                 };
             let fill = " ".repeat(terminal_width.saturating_sub(used));
 
+            // Build label spans, splitting at the match range if present.
+            let label_spans: Vec<Span<'static>> =
+                if let Some((mstart, mend)) = item.match_range {
+                    // Clamp to valid byte boundaries.
+                    let mstart = mstart.min(item.label.len());
+                    let mend = mend.min(item.label.len());
+                    let before = item.label[..mstart].to_string();
+                    let matched = item.label[mstart..mend].to_string();
+                    let after_raw = &item.label[mend..];
+                    // Pad the trailing portion to fill label_col.
+                    let after = format!(
+                        "{after_raw:<pad$}",
+                        pad = label_col.saturating_sub(mstart + matched.len())
+                    );
+                    vec![
+                        Span::styled(before, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
+                        Span::styled(
+                            matched,
+                            Style::default()
+                                .fg(COMPLETION_MATCH_FG)
+                                .bg(bg)
+                                .add_modifier(ratatui::style::Modifier::BOLD),
+                        ),
+                        Span::styled(after, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
+                    ]
+                } else {
+                    vec![Span::styled(
+                        label_padded,
+                        Style::default().fg(COMPLETION_CMD_FG).bg(bg),
+                    )]
+                };
+
             if item.detail.is_empty() {
-                Line::from(vec![
-                    Span::styled(INDENT, Style::default().bg(bg)),
-                    Span::styled(label_padded, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
-                    Span::styled(fill, Style::default().bg(bg)),
-                ])
+                let mut spans = vec![Span::styled(INDENT, Style::default().bg(bg))];
+                spans.extend(label_spans);
+                spans.push(Span::styled(fill, Style::default().bg(bg)));
+                Line::from(spans)
             } else {
-                Line::from(vec![
-                    Span::styled(INDENT, Style::default().bg(bg)),
-                    Span::styled(label_padded, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
-                    Span::styled(
-                        SEP,
-                        Style::default()
-                            .bg(bg)
-                            .add_modifier(ratatui::style::Modifier::DIM),
-                    ),
-                    Span::styled(
-                        item.detail.clone(),
-                        Style::default().fg(COMPLETION_DESC_FG).bg(bg),
-                    ),
-                    Span::styled(fill, Style::default().bg(bg)),
-                ])
+                let mut spans = vec![Span::styled(INDENT, Style::default().bg(bg))];
+                spans.extend(label_spans);
+                spans.push(Span::styled(
+                    SEP,
+                    Style::default()
+                        .bg(bg)
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                ));
+                spans.push(Span::styled(
+                    item.detail.clone(),
+                    Style::default().fg(COMPLETION_DESC_FG).bg(bg),
+                ));
+                spans.push(Span::styled(fill, Style::default().bg(bg)));
+                Line::from(spans)
             }
         })
         .collect()
@@ -1952,6 +1985,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                match_range: None,
             },
             CompletionItem {
                 label: "beta".to_string(),
@@ -1959,6 +1993,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                match_range: None,
             },
         ];
 
@@ -2040,6 +2075,7 @@ mod tests {
             complete_to: "/model gpt-4o".to_string(),
             loading: false,
             error: false,
+            match_range: None,
         }];
         let lines = build_completion_lines(&items, 0, 80);
         assert!(!line_text(&lines[0]).contains('—'));
@@ -2053,6 +2089,7 @@ mod tests {
             complete_to: String::new(),
             loading: true,
             error: false,
+            match_range: None,
         }];
         let lines = build_completion_lines(&items, 0, 80);
         let row = line_text(&lines[0]);
@@ -2069,6 +2106,7 @@ mod tests {
                 complete_to: "/m".to_string(),
                 loading: false,
                 error: false,
+                match_range: None,
             },
             CompletionItem {
                 label: "/very-long-command".to_string(),
@@ -2076,6 +2114,7 @@ mod tests {
                 complete_to: "/very-long-command".to_string(),
                 loading: false,
                 error: false,
+                match_range: None,
             },
         ];
 
@@ -2094,6 +2133,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
 
@@ -2112,6 +2152,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
 
@@ -2128,6 +2169,7 @@ mod tests {
             complete_to: String::new(),
             loading: true,
             error: false,
+            match_range: None,
         }];
 
         let lines = build_selection_lines(&items, 0, 0, 80);
@@ -2397,6 +2439,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
 

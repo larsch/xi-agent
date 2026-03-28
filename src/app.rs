@@ -407,6 +407,7 @@ impl App {
                 complete_to: String::new(),
                 loading: true,
                 error: false,
+                match_range: None,
             }]);
             return;
         };
@@ -427,6 +428,7 @@ impl App {
                 complete_to: String::new(),
                 loading: true,
                 error: false,
+                match_range: None,
             }]);
             return;
         }
@@ -447,6 +449,7 @@ impl App {
                     complete_to: format!("/resume_session {}", meta.id),
                     loading: false,
                     error: false,
+                    match_range: None,
                 }
             })
             .collect();
@@ -892,6 +895,7 @@ impl App {
                 complete_to: format!("/thinking {}", lvl.as_str()),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
         self.set_selection_items(items);
@@ -929,6 +933,7 @@ impl App {
                 complete_to: format!("/ollama_endpoint {url}"),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
 
@@ -939,6 +944,7 @@ impl App {
             complete_to: "/ollama_endpoint_freeform".to_string(),
             loading: false,
             error: false,
+            match_range: None,
         });
 
         self.set_selection_items(items);
@@ -1024,6 +1030,7 @@ impl App {
                 complete_to: format!("/login {p}"),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
         self.set_selection_items(items);
@@ -1212,6 +1219,7 @@ impl App {
                 complete_to: format!("/ask_user_option {}", opt.title),
                 loading: false,
                 error: false,
+                match_range: None,
             })
             .collect();
 
@@ -1222,6 +1230,7 @@ impl App {
                 complete_to: "/ask_user_freeform".to_string(),
                 loading: false,
                 error: false,
+                match_range: None,
             });
         }
 
@@ -1293,6 +1302,7 @@ impl App {
             complete_to: token.to_string(),
             loading: false,
             error: false,
+            match_range: None,
         }
     }
 
