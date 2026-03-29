@@ -95,6 +95,9 @@ pub enum AgentEvent {
     ToolIntentStart,
     /// A queued steering message was consumed and inserted into loop history.
     SteeringConsumed { text: String },
+    /// A transient status message from the provider (e.g. "Rate limited, retrying in 7s…").
+    /// Should be shown to the user but is not part of the conversation history.
+    StatusUpdate(String),
     // ── Tool lifecycle ─────────────────────────────────────────────────────────
     /// The model requested a tool call; execution is about to begin.
     ToolCallStart {

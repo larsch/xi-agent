@@ -953,6 +953,9 @@ async fn run_print_mode(
             AgentEvent::SteeringConsumed { .. } => {
                 // No-op in print mode.
             }
+            AgentEvent::StatusUpdate(msg) => {
+                eprintln!("{msg}");
+            }
             AgentEvent::ToolCallStart { name, args, .. } => {
                 eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
             }

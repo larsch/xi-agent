@@ -194,6 +194,9 @@ pub enum LlmEvent {
         name: String,
         args: serde_json::Value,
     },
+    /// A transient status message from the provider (e.g. "Rate limited, retrying in 7s…").
+    /// Should be shown to the user but is not part of the conversation history.
+    StatusUpdate(String),
     /// The stream finished successfully.
     Done,
     /// The request failed.

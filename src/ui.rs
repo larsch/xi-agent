@@ -199,7 +199,14 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        let lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, width);
+        let status = app.provider_status.clone();
+        let lines = build_log_lines(
+            &app.messages,
+            app.streaming,
+            &app.queued_steering,
+            status.as_deref(),
+            width,
+        );
         app.cached_log_lines = Some((app.log_revision, width, lines));
     }
     &app.cached_log_lines.as_ref().unwrap().2
@@ -935,6 +942,7 @@ fn build_log_lines(
     messages: &[crate::llm::Message],
     streaming: bool,
     queued_steering: &[String],
+    provider_status: Option<&str>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1120,6 +1128,16 @@ fn build_log_lines(
 
     for queued in queued_steering {
         append_message(&mut lines, &format!("🕹️ {queued}"), "", width, false);
+    }
+
+    if let Some(status) = provider_status {
+        let style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(ratatui::style::Modifier::ITALIC);
+        let chunks = wrap_str(&normalize_terminal_segment(status, 0), width);
+        for chunk in chunks {
+            lines.push(Line::from(vec![Span::styled(chunk, style)]));
+        }
     }
 
     lines
@@ -2227,14 +2245,14 @@ mod tests {
     fn hidden_user_messages_are_not_rendered() {
         let mut hidden = Message::user("secret");
         hidden.hidden = true;
-        let lines = build_log_lines(&[hidden, Message::assistant("shown")], false, &[], 80);
+        let lines = build_log_lines(&[hidden, Message::assistant("shown")], false, &[], None, 80);
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "💬 shown");
     }
 
     #[test]
     fn streaming_empty_assistant_message_shows_cursor() {
-        let lines = build_log_lines(&[Message::assistant("")], true, &[], 80);
+        let lines = build_log_lines(&[Message::assistant("")], true, &[], None, 80);
         assert_eq!(line_text(&lines[0]), "💭 ▋");
     }
 
@@ -2244,6 +2262,7 @@ mod tests {
             &[Message::assistant("abcdefghijklmnopqrstuvwxyz")],
             true,
             &[],
+            None,
             8,
         );
         let rows_with_cursor: Vec<usize> = lines
@@ -2258,7 +2277,7 @@ mod tests {
 
     #[test]
     fn user_message_renders_block_edges() {
-        let lines = build_log_lines(&[Message::user("hi")], false, &[], 10);
+        let lines = build_log_lines(&[Message::user("hi")], false, &[], None, 10);
         assert_eq!(line_text(&lines[0]), "▄▄▄▄▄▄▄▄▄▄");
         assert_eq!(line_text(&lines[1]), "hi        ");
         assert_eq!(line_text(&lines[2]), "▀▀▀▀▀▀▀▀▀▀");
@@ -2271,7 +2290,7 @@ mod tests {
             Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], 120);
+        let lines = build_log_lines(&messages, false, &[], None, 120);
         assert!(line_text(&lines[0]).contains("[10-20/300]"));
     }
 
@@ -2282,7 +2301,7 @@ mod tests {
             Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], 120);
+        let lines = build_log_lines(&messages, false, &[], None, 120);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(!rendered.contains("[lines 10-20 of 300]"));
         assert!(rendered.contains("│alpha"));
@@ -2295,7 +2314,7 @@ mod tests {
             Message::tool_result("1", "a".repeat(250), false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], 300);
+        let lines = build_log_lines(&messages, false, &[], None, 300);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains('…'));
     }
@@ -2303,7 +2322,7 @@ mod tests {
     #[test]
     fn assistant_lines_are_prefixed_with_speech_bubble() {
         let messages = vec![Message::assistant("hello")];
-        let lines = build_log_lines(&messages, false, &[], 80);
+        let lines = build_log_lines(&messages, false, &[], None, 80);
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
 
@@ -2311,7 +2330,7 @@ mod tests {
     fn assistant_provisional_phase_uses_thought_bubble() {
         let mut msg = Message::assistant("working");
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let lines = build_log_lines(&[msg], false, &[], 80);
+        let lines = build_log_lines(&[msg], false, &[], None, 80);
         assert_eq!(line_text(&lines[0]), "💭 working");
     }
 
@@ -2319,7 +2338,7 @@ mod tests {
     fn assistant_unknown_phase_streaming_uses_thought_bubble() {
         let mut msg = Message::assistant("streaming");
         msg.assistant_phase = Some(AssistantPhase::Unknown);
-        let lines = build_log_lines(&[msg], true, &[], 80);
+        let lines = build_log_lines(&[msg], true, &[], None, 80);
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
     }
 
@@ -2328,7 +2347,7 @@ mod tests {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some("planning".to_string());
         let messages = vec![msg];
-        let lines = build_log_lines(&messages, false, &[], 80);
+        let lines = build_log_lines(&messages, false, &[], None, 80);
         assert_eq!(line_text(&lines[0]), "🧠 planning");
         assert_eq!(line_text(&lines[2]), "💬 answer");
     }
@@ -2337,7 +2356,7 @@ mod tests {
     fn queued_steering_renders_with_joystick_at_bottom() {
         let messages = vec![Message::assistant("done")];
         let queued = vec!["wait, do this first".to_string()];
-        let lines = build_log_lines(&messages, false, &queued, 80);
+        let lines = build_log_lines(&messages, false, &queued, None, 80);
         assert_eq!(
             line_text(lines.last().expect("expected line")),
             "🕹️ wait, do this first"
@@ -2603,7 +2622,7 @@ mod tests {
             Message::tool_result("1", "\n\n  output line  \n\n", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], 80);
+        let lines = build_log_lines(&messages, false, &[], None, 80);
         // Leading/trailing newlines are stripped; leading spaces (indentation)
         // on the first content line are preserved.
         let result_lines: Vec<_> = lines
@@ -2626,7 +2645,7 @@ mod tests {
             Message::tool_result("1", "    indented output", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], 80);
+        let lines = build_log_lines(&messages, false, &[], None, 80);
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
@@ -2647,7 +2666,7 @@ mod tests {
             Message::tool_result("1", "load: 1.0\n", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], 80);
+        let lines = build_log_lines(&messages, false, &[], None, 80);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("│load: 1.0"), "{rendered}");
         // No extra blank line after the content.

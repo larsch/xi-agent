@@ -110,6 +110,9 @@ pub struct App {
     /// full log re-wrap work on every draw.
     pub log_had_scrollbar: bool,
     pub streaming: bool,
+    /// Transient status message from the active provider (e.g. "Rate limited, retrying in 7s…").
+    /// Shown in the chat log while streaming; cleared on turn end / error.
+    pub provider_status: Option<String>,
     /// Optional system prompt prepended to every request.
     pub system_prompt: Option<String>,
     /// Currently active model name (mirrors the provider; updated on `/model`).
@@ -270,6 +273,7 @@ impl App {
             last_log_height: 0,
             log_had_scrollbar: false,
             streaming: false,
+            provider_status: None,
             system_prompt: None,
             current_model: initial_model.into(),
             current_provider: initial_provider.name().to_string(),
@@ -1913,6 +1917,10 @@ impl App {
                 }
                 self.bump_log_revision();
             }
+            AgentEvent::StatusUpdate(msg) => {
+                self.provider_status = if msg.is_empty() { None } else { Some(msg) };
+                self.bump_log_revision();
+            }
             AgentEvent::ToolCallStart { id, name, args } => {
                 self.messages.push(Message::tool_call(id, name, args));
                 self.bump_log_revision();
@@ -1945,10 +1953,12 @@ impl App {
                 self.bump_log_revision();
             }
             AgentEvent::TurnEnd => {
+                self.provider_status = None;
                 self.persist_messages();
             }
             AgentEvent::Done => {
                 self.streaming = false;
+                self.provider_status = None;
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
@@ -1956,6 +1966,7 @@ impl App {
                 self.persist_messages();
             }
             AgentEvent::Error(e) => {
+                self.provider_status = None;
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();

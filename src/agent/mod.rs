@@ -115,6 +115,9 @@ pub async fn run_agent_loop(
                     stream_error = Some(e);
                     break;
                 }
+                LlmEvent::StatusUpdate(msg) => {
+                    let _ = tx.send(AgentEvent::StatusUpdate(msg));
+                }
             }
         }
 
