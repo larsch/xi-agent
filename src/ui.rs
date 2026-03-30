@@ -121,6 +121,8 @@ struct PanelInputs<'a> {
     selection_items_len: usize,
     completions_len: usize,
     resume_hint_visible: bool,
+    ask_user_freeform_mode: bool,
+    ask_user_question: Option<&'a str>,
     login_url: Option<&'a str>,
     has_login_code: bool,
 }
@@ -149,6 +151,10 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 
     let completion_height = if input.login_active || input.selection_mode {
         0
+    } else if input.ask_user_freeform_mode {
+        let question = input.ask_user_question.unwrap_or("Answer");
+        let prompt = format!("{question}   Enter submit   Esc cancel");
+        wrap_str(&prompt, input.width.max(1)).len() as u16
     } else if input.completions_len > 0 {
         input.completions_len as u16
     } else if input.resume_hint_visible {
@@ -237,6 +243,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         selection_items_len: app.selection_items.len(),
         completions_len: app.completions.len(),
         resume_hint_visible,
+        ask_user_freeform_mode: app.ask_user_freeform_mode,
+        ask_user_question: app.ask_user_question.as_deref(),
         login_url: app.login_url.as_deref(),
         has_login_code: app.login_code.is_some(),
     });
@@ -368,7 +376,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Completion popup / resume hint ───────────────────────────────────────
     if layout.completion_height > 0 {
-        if !app.completions.is_empty() {
+        if app.ask_user_freeform_mode {
+            let question = app.ask_user_question.as_deref().unwrap_or("Answer");
+            let prompt = format!("{question}   Enter submit   Esc cancel");
+            let hint_style = Style::default()
+                .fg(Color::Rgb(120, 140, 140))
+                .add_modifier(ratatui::style::Modifier::DIM);
+            let lines: Vec<Line<'static>> = wrap_str(&prompt, width.max(1))
+                .into_iter()
+                .map(|chunk| Line::from(Span::styled(chunk, hint_style)))
+                .collect();
+            f.render_widget(Paragraph::new(lines), completion_area);
+        } else if !app.completions.is_empty() {
             let popup_lines =
                 build_completion_lines(&app.completions, app.completion_selected, width);
             f.render_widget(Paragraph::new(popup_lines), completion_area);
@@ -559,16 +578,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 Some("http://host:11434   Enter confirm   Esc cancel".to_string()),
             )
         } else if app.ask_user_freeform_mode {
-            let question = app
-                .ask_user_question
-                .as_deref()
-                .unwrap_or("Answer")
-                .to_string();
             (
                 app.textarea.lines().to_vec(),
                 app.textarea.cursor(),
                 "❓ ".to_string(),
-                Some(format!("{question}   Enter submit   Esc cancel")),
+                None,
             )
         } else {
             (
@@ -1844,6 +1858,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1863,6 +1879,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 3,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1885,6 +1903,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 5,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1898,6 +1918,8 @@ mod tests {
             selection_items_len: 4,
             completions_len: 5,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1918,10 +1940,50 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: true,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
         assert_eq!(heights.completion_height, 1);
+    }
+
+    #[test]
+    fn layout_ask_user_freeform_wraps_question_across_rows() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 30,
+            width: 24,
+            input_line_count: 1,
+            show_info: false,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            ask_user_freeform_mode: true,
+            ask_user_question: Some(
+                "Please provide a detailed response with enough words to force wrapping",
+            ),
+            login_url: None,
+            has_login_code: false,
+        });
+
+        assert!(heights.completion_height > 1, "{heights:?}");
+    }
+
+    #[test]
+    fn draw_ask_user_freeform_renders_full_question() {
+        let mut app = make_app();
+        app.ask_user_freeform_mode = true;
+        app.ask_user_question = Some(
+            "Please provide a detailed response with enough words to force wrapping".to_string(),
+        );
+
+        let lines = render_to_plain_lines(&mut app, 24, 12);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Please provide"), "{joined}");
+        assert!(joined.contains("wrapping"), "{joined}");
+        assert!(joined.contains("Esc cancel"), "{joined}");
     }
 
     #[test]
@@ -1936,6 +1998,8 @@ mod tests {
             selection_items_len: MAX_SELECTION_VISIBLE + 10,
             completions_len: 0,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1959,6 +2023,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1978,6 +2044,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -1991,6 +2059,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: None,
             has_login_code: false,
         });
@@ -2011,6 +2081,8 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: true,
+            ask_user_freeform_mode: false,
+            ask_user_question: None,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
         });

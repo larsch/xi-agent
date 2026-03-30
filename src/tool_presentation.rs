@@ -16,7 +16,15 @@ pub fn tool_emoji(name: &str) -> &'static str {
 /// Extract a short, human-readable tool argument summary.
 ///
 /// Preference order matches the most meaningful fields shown to users.
-pub fn tool_detail(args: &Value) -> String {
+pub fn tool_detail(name: &str, args: &Value) -> String {
+    // ask_user questions must be shown in full (wrapped by the UI), never
+    // truncated with an ellipsis.
+    if name == "ask_user"
+        && let Some(question) = args.get("question").and_then(|v| v.as_str())
+    {
+        return one_line(question);
+    }
+
     for key in ["command", "pattern", "path", "question", "prompt"] {
         if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
             return compact(s);
@@ -36,7 +44,7 @@ pub fn tool_detail(args: &Value) -> String {
 
 /// Build the user-facing one-line tool invocation label.
 pub fn tool_invocation_label(name: &str, args: &Value) -> String {
-    let detail = tool_detail(args);
+    let detail = tool_detail(name, args);
     if detail.is_empty() {
         format!("{} {name}", tool_emoji(name))
     } else {
@@ -44,9 +52,13 @@ pub fn tool_invocation_label(name: &str, args: &Value) -> String {
     }
 }
 
+fn one_line(input: &str) -> String {
+    input.replace('\n', " ").trim().to_string()
+}
+
 fn compact(input: &str) -> String {
     const MAX_CHARS: usize = 120;
-    let one_line = input.replace('\n', " ").trim().to_string();
+    let one_line = one_line(input);
     if one_line.chars().count() <= MAX_CHARS {
         return one_line;
     }
@@ -71,6 +83,14 @@ mod tests {
             &json!({"pattern": "src/**/*.rs", "path": "."}),
         );
         assert_eq!(label, "🔍 src/**/*.rs");
+    }
+
+    #[test]
+    fn ask_user_label_shows_full_question_without_ellipsis() {
+        let question = "How do you want to run this triage session? Please choose Quick pass or Full pass, and optionally specify: item limit, include blocked items, and owner filter.";
+        let label = tool_invocation_label("ask_user", &json!({"question": question}));
+        assert_eq!(label, format!("❓ {question}"));
+        assert!(!label.contains('…'));
     }
 
     #[test]
