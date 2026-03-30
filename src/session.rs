@@ -173,9 +173,10 @@ impl SessionStore {
     }
 
     pub fn latest_for_cwd(&self, cwd: &str) -> Option<SessionMeta> {
+        let needle = normalize_cwd_for_match(cwd);
         self.list_sessions()
             .into_iter()
-            .filter(|s| s.cwd == cwd && s.message_count > 0)
+            .filter(|s| normalize_cwd_for_match(&s.cwd) == needle && s.message_count > 0)
             .max_by_key(|s| (s.updated_at_ms, s.created_at_ms, s.id.clone()))
     }
 
@@ -372,6 +373,22 @@ fn cwd_key(cwd: &str) -> String {
     urlencoding::encode(cwd).into_owned()
 }
 
+fn normalize_cwd_for_match(cwd: &str) -> String {
+    #[cfg(windows)]
+    {
+        let mut out = cwd.replace('/', "\\").to_ascii_lowercase();
+        while out.ends_with('\\') && out.len() > 3 {
+            out.pop();
+        }
+        out
+    }
+
+    #[cfg(not(windows))]
+    {
+        cwd.to_string()
+    }
+}
+
 fn decode_cwd_key(key: &str) -> Option<String> {
     urlencoding::decode(key).ok().map(|s| s.into_owned())
 }
@@ -455,6 +472,27 @@ mod tests {
         let latest = store.latest_for_cwd(cwd_a).expect("latest for cwd a");
         assert_eq!(latest.id, "20260328T120200-cccccccc");
         assert_eq!(latest.cwd, cwd_a);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn latest_for_cwd_matches_case_and_separator_variants_on_windows() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+
+        store
+            .save_messages(
+                "20260328T120000-aaaaaaaa",
+                "D:\\today",
+                &[Message::user("hello")],
+            )
+            .expect("save");
+
+        let latest = store
+            .latest_for_cwd("d:/today/")
+            .expect("latest for normalized cwd");
+        assert_eq!(latest.id, "20260328T120000-aaaaaaaa");
+        assert_eq!(latest.cwd, "D:\\today");
     }
 
     #[test]
