@@ -54,6 +54,30 @@ impl FileTracker {
         }
     }
 
+    /// Re-snapshot all currently tracked paths without reporting any changes.
+    ///
+    /// Call this whenever the agent pauses for user input (end of agent run,
+    /// or just before awaiting an `ask_user` reply).  This resets the baseline
+    /// so that only changes made *during the subsequent user-input window* are
+    /// reported by the next [`check_modified`] call — changes the agent itself
+    /// caused during the previous run are silently absorbed.
+    pub fn refresh_baselines(&mut self) {
+        let paths: Vec<std::path::PathBuf> = self.files.keys().cloned().collect();
+        for path in paths {
+            match snapshot(&path) {
+                Ok(snap) => {
+                    self.files.insert(path, snap);
+                }
+                Err(e) => {
+                    log::debug!(
+                        "file_tracker: could not refresh baseline for {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
     /// Check all tracked paths for external modifications.
     ///
     /// A file is considered externally modified when its mtime has changed
@@ -250,6 +274,49 @@ mod tests {
         // Second call — snapshot was updated, should not report again.
         let second = tracker.check_modified();
         assert!(second.is_empty(), "should not report the same change twice");
+    }
+
+    #[test]
+    fn refresh_baselines_absorbs_agent_changes() {
+        // Simulate: agent reads a file, modifies it, then refreshes baselines.
+        // After refresh, check_modified() should NOT report the change.
+        let f = write_temp("original\n");
+        let mut tracker = FileTracker::new();
+        tracker.record(f.path());
+
+        // Agent modifies the file.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(f.path(), "agent-changed\n").unwrap();
+
+        // Agent pauses and refreshes baselines (simulating end of agent run).
+        tracker.refresh_baselines();
+
+        // check_modified() should see no change since the baseline was reset.
+        let changed = tracker.check_modified();
+        assert!(
+            changed.is_empty(),
+            "agent-caused changes should be absorbed by refresh_baselines"
+        );
+    }
+
+    #[test]
+    fn refresh_baselines_then_user_edit_is_reported() {
+        // Simulate: agent runs, refreshes baselines, then user edits a file.
+        // check_modified() should report the user's change.
+        let f = write_temp("original\n");
+        let mut tracker = FileTracker::new();
+        tracker.record(f.path());
+
+        // Agent finishes, refreshes baselines.
+        tracker.refresh_baselines();
+
+        // User edits the file after the agent paused.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(f.path(), "user-changed\n").unwrap();
+
+        let changed = tracker.check_modified();
+        assert_eq!(changed.len(), 1, "user edit after refresh should be reported");
+        assert_eq!(changed[0].new_content, "user-changed\n");
     }
 
     #[test]

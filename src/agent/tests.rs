@@ -458,7 +458,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
     tools.insert(
         "ask_user".to_string(),
-        Arc::new(AskUserTool::new(Some(ask_tx))),
+        Arc::new(AskUserTool::new(Some(ask_tx), None)),
     );
 
     // Turn 1: LLM asks a freeform question (no options).

@@ -56,7 +56,7 @@ pub fn register_builtin_tools(
         Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
-        Arc::new(AskUserTool::new(ask_tx)),
+        Arc::new(AskUserTool::new(ask_tx, Some(Arc::clone(&file_tracker)))),
     ];
 
     #[cfg(target_os = "windows")]

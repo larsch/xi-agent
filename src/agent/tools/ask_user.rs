@@ -1,19 +1,22 @@
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::sync::oneshot;
 
+use crate::agent::file_tracker::FileTracker;
 use crate::agent::types::{
     AskRequest, AskRequestTx, AskUserOption, AskUserResponse, Tool, ToolResult,
 };
 
 pub struct AskUserTool {
     tx: Option<AskRequestTx>,
+    file_tracker: Option<Arc<Mutex<FileTracker>>>,
 }
 
 impl AskUserTool {
-    pub fn new(tx: Option<AskRequestTx>) -> Self {
-        Self { tx }
+    pub fn new(tx: Option<AskRequestTx>, file_tracker: Option<Arc<Mutex<FileTracker>>>) -> Self {
+        Self { tx, file_tracker }
     }
 }
 
@@ -132,6 +135,14 @@ impl Tool for AskUserTool {
 
             if tx.send(request).is_err() {
                 return ToolResult::err("ask_user failed: UI channel closed");
+            }
+
+            // Refresh baselines before blocking on user input.  While the
+            // agent is paused waiting for an answer the user may edit files,
+            // and we want to detect those changes — but we do NOT want to
+            // report changes the agent itself caused before calling ask_user.
+            if let Some(tracker) = &self.file_tracker {
+                tracker.lock().unwrap().refresh_baselines();
             }
 
             match reply_rx.await {

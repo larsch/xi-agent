@@ -140,6 +140,11 @@ pub async fn run_agent_loop(
 
         // ── No tool calls → final answer ──────────────────────────────────────
         if pending_tool_calls.is_empty() {
+            // Refresh baselines before returning to user input so that any
+            // file changes the agent made during this run are absorbed.
+            // Only changes made during the subsequent user-input window will
+            // be reported by the next check_modified() call.
+            config.file_tracker.lock().unwrap().refresh_baselines();
             let _ = tx.send(AgentEvent::TurnEnd);
             let _ = tx.send(AgentEvent::Done);
             return;
