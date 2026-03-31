@@ -78,9 +78,7 @@ enum SelectionKind {
     AskUser,
     LoginAction,
     OllamaEndpoint,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+}#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
     Chat,
     Shell,
@@ -212,6 +210,14 @@ pub struct App {
     /// rather than a regular chat message.
     pub ollama_endpoint_input_mode: bool,
 
+    // ── Open WebUI setup input modes ──────────────────────────────────────────
+    /// When true the textarea is used to type the Open WebUI base URL.
+    pub open_webui_url_input_mode: bool,
+    /// When true the textarea is used to type the Open WebUI API key/token.
+    pub open_webui_token_input_mode: bool,
+    /// URL entered during Open WebUI setup (held while the user types the token).
+    pub open_webui_pending_url: Option<String>,
+
     // ── Async channels ────────────────────────────────────────────────────────
     /// Receives AgentEvents forwarded from the active agent loop task.
     pub(crate) event_rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
@@ -317,6 +323,9 @@ impl App {
             ask_user_freeform_mode: false,
             ask_user_question: None,
             ollama_endpoint_input_mode: false,
+            open_webui_url_input_mode: false,
+            open_webui_token_input_mode: false,
+            open_webui_pending_url: None,
             event_rx,
             event_tx,
             steering_tx: None,
@@ -664,8 +673,9 @@ impl App {
     /// 1) cancel pending ask
     /// 2) cancel slash-command input/completion
     /// 3) cancel Ollama endpoint input
-    /// 4) cancel login flow
-    /// 5) abort streaming agent loop
+    /// 4) cancel Open WebUI setup input
+    /// 5) cancel login flow
+    /// 6) abort streaming agent loop
     pub fn handle_escape_in_chat_mode(&mut self) {
         if self.has_pending_ask() {
             self.cancel_pending_ask();
@@ -673,6 +683,10 @@ impl App {
             self.reset_textarea();
         } else if self.ollama_endpoint_input_mode {
             self.cancel_ollama_endpoint_input();
+        } else if self.open_webui_url_input_mode {
+            self.cancel_open_webui_url_input();
+        } else if self.open_webui_token_input_mode {
+            self.cancel_open_webui_token_input();
         } else if self.login_active {
             self.cancel_login();
         } else if self.streaming {
@@ -1047,6 +1061,72 @@ impl App {
         self.ollama_endpoint_input_mode = false;
         self.reset_textarea();
         Some(url)
+    }
+
+    // ── Open WebUI interactive setup ──────────────────────────────────────────
+
+    /// Enter URL input mode for Open WebUI setup.
+    pub fn enter_open_webui_url_input_mode(&mut self) {
+        self.exit_selection_mode();
+        self.reset_textarea();
+        self.open_webui_url_input_mode = true;
+    }
+
+    /// Cancel Open WebUI URL input mode.
+    pub fn cancel_open_webui_url_input(&mut self) {
+        self.open_webui_url_input_mode = false;
+        self.open_webui_pending_url = None;
+        self.reset_textarea();
+    }
+
+    /// Normalize a user-entered Open WebUI URL (must be http/https, no default port).
+    pub fn normalize_open_webui_url(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            format!("https://{trimmed}")
+        };
+        // Basic parse check — just ensure host is present.
+        let url = reqwest::Url::parse(&with_scheme).ok()?;
+        url.host_str()?;
+        Some(with_scheme.trim_end_matches('/').to_string())
+    }
+
+    /// Submit the URL typed in Open WebUI URL input mode.
+    /// Returns the normalised URL if valid, and transitions to token input mode.
+    pub fn submit_open_webui_url_input(&mut self) -> Option<String> {
+        let raw = self.textarea.lines().join("");
+        let url = Self::normalize_open_webui_url(&raw)?;
+        self.open_webui_url_input_mode = false;
+        self.open_webui_pending_url = Some(url.clone());
+        self.reset_textarea();
+        // Immediately transition to token input mode.
+        self.open_webui_token_input_mode = true;
+        Some(url)
+    }
+
+    /// Cancel Open WebUI token input mode.
+    pub fn cancel_open_webui_token_input(&mut self) {
+        self.open_webui_token_input_mode = false;
+        self.open_webui_pending_url = None;
+        self.reset_textarea();
+    }
+
+    /// Submit the token typed in Open WebUI token input mode.
+    /// Returns `Some((url, token))` if a pending URL exists and the token is non-empty.
+    pub fn take_open_webui_token_input(&mut self) -> Option<(String, String)> {
+        let token = self.textarea.lines().join("").trim().to_string();
+        if token.is_empty() {
+            return None;
+        }
+        let url = self.open_webui_pending_url.take()?;
+        self.open_webui_token_input_mode = false;
+        self.reset_textarea();
+        Some((url, token))
     }
 
     /// Open provider picker for `/login` command.

@@ -19,6 +19,8 @@ pub struct TauConfig {
     pub codex: CodexConfig,
     #[serde(default)]
     pub gemini: GeminiConfig,
+    #[serde(default)]
+    pub open_webui: OpenWebUiConfig,
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
@@ -81,6 +83,32 @@ pub struct CodexConfig {
 pub struct GeminiConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OpenWebUiConfig {
+    /// Base URL of the Open WebUI instance (e.g. `https://my-webui.example.com`).
+    pub base_url: Option<String>,
+    /// API token used as `Authorization: Bearer <api_key>`.
+    pub api_key: Option<String>,
+    /// Last-selected model.
+    pub model: Option<String>,
+    /// Recently used Open WebUI endpoints, most-recent first.
+    #[serde(default)]
+    pub recent_endpoints: Vec<String>,
+}
+
+impl OpenWebUiConfig {
+    pub const MAX_RECENT_ENDPOINTS: usize = 5;
+
+    /// Push `url` to the front of `recent_endpoints`, dedup, and cap the list.
+    /// Also sets `base_url` to `url`.
+    pub fn record_endpoint(&mut self, url: String) {
+        self.base_url = Some(url.clone());
+        self.recent_endpoints.retain(|e| e != &url);
+        self.recent_endpoints.insert(0, url);
+        self.recent_endpoints.truncate(Self::MAX_RECENT_ENDPOINTS);
+    }
 }
 
 impl TauConfig {

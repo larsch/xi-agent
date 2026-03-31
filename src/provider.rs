@@ -24,6 +24,7 @@ pub enum ProviderKind {
     Codex,
     Gemini,
     Ollama,
+    OpenWebUi,
 }
 
 impl ProviderKind {
@@ -34,6 +35,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
+            Self::OpenWebUi => "open-webui",
         }
     }
 
@@ -44,6 +46,7 @@ impl ProviderKind {
             Self::Codex => "OpenAI Codex (chatgpt.com)",
             Self::Gemini => "Google Gemini CLI (Cloud Code Assist)",
             Self::Ollama => "Ollama (local)",
+            Self::OpenWebUi => "Open WebUI",
         }
     }
 
@@ -54,6 +57,7 @@ impl ProviderKind {
             Self::Codex,
             Self::Gemini,
             Self::Ollama,
+            Self::OpenWebUi,
         ]
     }
 
@@ -64,6 +68,7 @@ impl ProviderKind {
             "codex" => Some(Self::Codex),
             "gemini" | "google-gemini" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
+            "open-webui" | "openwebui" => Some(Self::OpenWebUi),
             _ => None,
         }
     }
@@ -76,6 +81,7 @@ impl ProviderKind {
             Self::Codex => "gpt-5.4",
             Self::Gemini => "gemini-2.5-pro",
             Self::Ollama => "llama3.1",
+            Self::OpenWebUi => "llama3.1",
         }
     }
 }
@@ -210,6 +216,9 @@ pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport
         ProviderKind::Ollama => {
             ThinkingSupport::Ignored("ollama provider does not support mapped thinking levels")
         }
+        ProviderKind::OpenWebUi => {
+            ThinkingSupport::Ignored("open-webui provider does not support mapped thinking levels")
+        }
     }
 }
 
@@ -297,6 +306,20 @@ pub fn build_provider(
                 .clone()
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             Ok(Arc::new(OllamaProvider::new(base, model.to_string())))
+        }
+        ProviderKind::OpenWebUi => {
+            let base = config.open_webui.base_url.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No Open WebUI URL configured. Run /provider open-webui to set it up."
+                )
+            })?;
+            // Append the Ollama proxy sub-path.
+            let ollama_base = format!("{}/ollama", base.trim_end_matches('/'));
+            let mut provider = OllamaProvider::new(ollama_base, model.to_string());
+            if let Some(key) = &config.open_webui.api_key {
+                provider = provider.with_api_key(key.clone());
+            }
+            Ok(Arc::new(provider))
         }
     }
 }

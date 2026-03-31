@@ -333,6 +333,30 @@ async fn main() -> io::Result<()> {
                 )));
                 app.mark_log_dirty();
             }
+
+            Ok(RunResult::ChangeOpenWebUi { url, api_key }) => {
+                config.open_webui.record_endpoint(url.clone());
+                config.open_webui.api_key = Some(api_key);
+                config.provider = Some(ProviderKind::OpenWebUi.name().to_string());
+                if let Err(e) = config.save() {
+                    log::debug!("failed to persist open-webui config: {e}");
+                    app.messages.push(Message::assistant(format!(
+                        "[failed to persist config.toml: {e}]"
+                    )));
+                    app.mark_log_dirty();
+                }
+                current_kind = ProviderKind::OpenWebUi;
+                current_model = resolve_model(None, &current_kind, &config);
+                app.current_model = current_model.clone();
+                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                app.current_thinking = current_thinking;
+                app.current_provider = current_kind.name().to_string();
+                app.available_models = None;
+                app.messages.push(Message::assistant(format!(
+                    "[open-webui endpoint set to {url}]"
+                )));
+                app.mark_log_dirty();
+            }
         }
     }
 
@@ -365,6 +389,8 @@ enum RunResult {
     ChangeThinking(ThinkingLevel),
     /// Switch to (or stay on) Ollama with a new base URL.
     ChangeOllamaEndpoint(String),
+    /// Switch to Open WebUI with a new base URL and API key.
+    ChangeOpenWebUi { url: String, api_key: String },
 }
 
 fn normalize_paste_text(text: &str) -> String {
@@ -519,6 +545,8 @@ async fn run(
                                             if p == "ollama" {
                                                 let recent = config.ollama.effective_recent_endpoints();
                                                 app.enter_ollama_endpoint_selection_mode(recent);
+                                            } else if p == "open-webui" {
+                                                app.enter_open_webui_url_input_mode();
                                             } else {
                                                 return Ok(RunResult::ChangeProvider(p));
                                             }
@@ -620,6 +648,15 @@ async fn run(
                                         return Ok(RunResult::ChangeOllamaEndpoint(url));
                                     }
                                     // Invalid URL: stay in input mode (user can correct it).
+                                } else if app.open_webui_url_input_mode {
+                                    // submit_open_webui_url_input transitions to token mode internally.
+                                    app.submit_open_webui_url_input();
+                                    // Invalid URL: stay in input mode.
+                                } else if app.open_webui_token_input_mode {
+                                    if let Some((url, token)) = app.take_open_webui_token_input() {
+                                        return Ok(RunResult::ChangeOpenWebUi { url, api_key: token });
+                                    }
+                                    // Empty token: stay in input mode.
                                 } else if app.has_pending_ask() {
                                     app.submit_pending_ask_answer();
                                 } else if app.in_slash_mode() {
@@ -656,6 +693,8 @@ async fn run(
                                             if name == "ollama" {
                                                 let recent = config.ollama.effective_recent_endpoints();
                                                 app.enter_ollama_endpoint_selection_mode(recent);
+                                            } else if name == "open-webui" {
+                                                app.enter_open_webui_url_input_mode();
                                             } else {
                                                 return Ok(RunResult::ChangeProvider(name));
                                             }
@@ -828,6 +867,7 @@ fn resolve_model(cli_override: Option<&str>, kind: &ProviderKind, config: &TauCo
             ProviderKind::Codex => config.codex.model.clone(),
             ProviderKind::Gemini => config.gemini.model.clone(),
             ProviderKind::Ollama => config.ollama.model.clone(),
+            ProviderKind::OpenWebUi => config.open_webui.model.clone(),
         })
         .unwrap_or_else(|| kind.default_model().to_string())
 }
@@ -850,6 +890,7 @@ fn persist_provider_model_selection(
         ProviderKind::Codex => config.codex.model = Some(model.to_string()),
         ProviderKind::Gemini => config.gemini.model = Some(model.to_string()),
         ProviderKind::Ollama => config.ollama.model = Some(model.to_string()),
+        ProviderKind::OpenWebUi => config.open_webui.model = Some(model.to_string()),
     }
 
     if let Err(e) = config.save() {

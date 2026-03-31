@@ -577,6 +577,20 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 "ollama endpoint: ".to_string(),
                 Some("http://host:11434   Enter confirm   Esc cancel".to_string()),
             )
+        } else if app.open_webui_url_input_mode {
+            (
+                app.textarea.lines().to_vec(),
+                app.textarea.cursor(),
+                "open-webui URL: ".to_string(),
+                Some("https://my-webui.example.com   Enter confirm   Esc cancel".to_string()),
+            )
+        } else if app.open_webui_token_input_mode {
+            (
+                app.textarea.lines().to_vec(),
+                app.textarea.cursor(),
+                "open-webui token: ".to_string(),
+                Some("sk-…   Enter confirm   Esc cancel".to_string()),
+            )
         } else if app.ask_user_freeform_mode {
             (
                 app.textarea.lines().to_vec(),

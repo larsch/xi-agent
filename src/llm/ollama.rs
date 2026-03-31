@@ -3,12 +3,15 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
-    Role, ToolDefinition, UsageStats, common::send_streaming_request,
+    Role, ToolDefinition, UsageStats, common::{send_streaming_request, build_http_client},
 };
 
 pub struct OllamaProvider {
     pub base_url: String,
     pub model: String,
+    /// Optional Bearer token injected as `Authorization: Bearer <api_key>`.
+    /// Used when connecting to an authenticated proxy such as Open WebUI.
+    pub api_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -17,8 +20,15 @@ impl OllamaProvider {
         Self {
             base_url: base_url.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            api_key: None,
+            client: build_http_client(),
         }
+    }
+
+    /// Add a Bearer token to all outgoing requests (e.g. for Open WebUI).
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
     }
 }
 
@@ -246,6 +256,7 @@ impl LlmProvider for OllamaProvider {
         let url = format!("{}/api/chat", self.base_url);
         let model = self.model.clone();
         let client = self.client.clone();
+        let api_key = self.api_key.clone();
 
         Box::pin(async_stream::stream! {
             let body = ChatRequest {
@@ -258,10 +269,10 @@ impl LlmProvider for OllamaProvider {
                 log::debug!("[TAU_DEBUG] → ollama request:\n{json}");
             }
 
-            let response = match send_streaming_request(
-                client.post(&url).json(&body),
-                "Ollama",
-            ).await {
+            let mut req = client.post(&url).json(&body);
+            if let Some(key) = &api_key { req = req.bearer_auth(key); }
+
+            let response = match send_streaming_request(req, "Ollama").await {
                 Ok(r) => r,
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
@@ -301,6 +312,7 @@ impl LlmProvider for OllamaProvider {
         let url = format!("{}/api/chat", self.base_url);
         let model = self.model.clone();
         let client = self.client.clone();
+        let api_key = self.api_key.clone();
 
         Box::pin(async_stream::stream! {
             let ollama_tools: Vec<OllamaToolDef> = tools
@@ -326,10 +338,10 @@ impl LlmProvider for OllamaProvider {
                 log::debug!("[TAU_DEBUG] → ollama request:\n{json}");
             }
 
-            let response = match send_streaming_request(
-                client.post(&url).json(&body),
-                "Ollama",
-            ).await {
+            let mut req = client.post(&url).json(&body);
+            if let Some(key) = &api_key { req = req.bearer_auth(key); }
+
+            let response = match send_streaming_request(req, "Ollama").await {
                 Ok(r) => r,
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
@@ -363,11 +375,14 @@ impl LlmProvider for OllamaProvider {
     fn list_models(&self) -> ModelListFuture {
         let url = format!("{}/api/tags", self.base_url);
         let client = self.client.clone();
+        let api_key = self.api_key.clone();
         Box::pin(async move {
             use super::common::map_http_error;
 
             log::debug!("→ GET {url}");
-            let response = match client.get(&url).send().await {
+            let mut req = client.get(&url);
+            if let Some(key) = &api_key { req = req.bearer_auth(key); }
+            let response = match req.send().await {
                 Ok(r) => r,
                 Err(e) => {
                     log::warn!("ollama list_models error: {e}");
