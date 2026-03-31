@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::SseLineDecoder,
+    common::{SseLineDecoder, build_http_client},
 };
 
 const MAX_RETRIES: u32 = 3;
@@ -194,7 +194,7 @@ impl GeminiProvider {
             access_token: access_token.into(),
             project_id: project_id.into(),
             thinking_level: None,
-            client: reqwest::Client::new(),
+            client: build_http_client(),
         }
     }
 

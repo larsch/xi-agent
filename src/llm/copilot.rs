@@ -7,6 +7,7 @@ use super::anthropic::AnthropicProvider;
 use super::codex::CodexProvider;
 use super::openai::OpenAiProvider;
 use super::{LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition};
+use super::common::build_http_client;
 
 // ── Model metadata cache ──────────────────────────────────────────────────────
 
@@ -92,7 +93,7 @@ async fn fetch_and_cache_models(
     use super::common::map_http_error;
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     let mut req = client.get(&url).bearer_auth(&access_token);
     for (k, v) in &extra_headers {
         req = req.header(k.as_str(), v.as_str());

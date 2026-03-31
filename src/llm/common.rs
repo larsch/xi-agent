@@ -4,7 +4,29 @@
 //! tool-name normalisation, initiator inference) in every provider module, this
 //! module provides a single authoritative implementation of each.
 
+use std::time::Duration;
+
 use super::{Message, Role};
+
+// ── HTTP client factory ───────────────────────────────────────────────────────
+
+/// The maximum time allowed for the TCP connection to be established.
+///
+/// Once connected, long-running streaming responses are not affected — only
+/// the initial handshake is bounded.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build a shared [`reqwest::Client`] with a sensible connect timeout.
+///
+/// All LLM providers should use this instead of [`reqwest::Client::new()`] so
+/// that a stalled or unreachable endpoint surfaces as an error rather than
+/// hanging silently forever.
+pub fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 // ── Initiator inference ───────────────────────────────────────────────────────
 

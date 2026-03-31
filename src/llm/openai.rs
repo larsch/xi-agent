@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{SseLineDecoder, infer_initiator, normalize_tool_name, send_streaming_request},
+    common::{SseLineDecoder, build_http_client, infer_initiator, normalize_tool_name, send_streaming_request},
 };
 
 pub struct OpenAiProvider {
@@ -39,7 +39,7 @@ impl OpenAiProvider {
             model: model.into(),
             api_key: api_key.into(),
             extra_headers,
-            client: reqwest::Client::new(),
+            client: build_http_client(),
         }
     }
 

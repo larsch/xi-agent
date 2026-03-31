@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{SseLineDecoder, infer_initiator, send_streaming_request},
+    common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
@@ -47,7 +47,7 @@ impl CodexProvider {
             api_key: api_key.into(),
             extra_headers,
             reasoning_effort: None,
-            client: reqwest::Client::new(),
+            client: build_http_client(),
         }
     }
 
