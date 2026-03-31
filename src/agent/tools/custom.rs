@@ -2,10 +2,8 @@ use std::{collections::HashSet, env, path::PathBuf, pin::Pin, process::Stdio};
 
 use serde_json::Value;
 
+use super::truncate::truncate_tail;
 use crate::agent::types::{Tool, ToolResult};
-
-/// Maximum bytes captured from stdout before truncation.
-const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB
 
 // ── CustomTool ────────────────────────────────────────────────────────────────
 
@@ -33,6 +31,10 @@ impl Tool for CustomTool {
 
     fn parameters_schema(&self) -> Value {
         self.schema.clone()
+    }
+
+    fn saves_output(&self) -> bool {
+        true
     }
 
     fn execute(
@@ -77,12 +79,17 @@ impl Tool for CustomTool {
             };
 
             let exit_code = output.status.code().unwrap_or(-1);
-            let stdout = truncate_bytes(&output.stdout, MAX_OUTPUT_BYTES);
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
 
             if exit_code == 0 {
-                ToolResult::ok(stdout)
+                let tr = truncate_tail(&stdout);
+                if tr.truncated {
+                    ToolResult::ok_truncated(tr, stdout, String::new())
+                } else {
+                    ToolResult::ok(tr)
+                }
             } else {
-                let stderr = truncate_bytes(&output.stderr, MAX_OUTPUT_BYTES);
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let detail = if stdout.is_empty() { stderr } else { stdout };
                 ToolResult::err(format!("exit {exit_code}\n{detail}"))
             }
@@ -240,19 +247,6 @@ fn is_executable(path: &std::path::Path) -> bool {
     // On Windows, rely on the OS to decide via file extension (.exe, .cmd, etc.)
     // We include all regular files and let Command::spawn fail gracefully.
     path.exists()
-}
-
-fn truncate_bytes(bytes: &[u8], max_bytes: usize) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    if bytes.len() <= max_bytes {
-        String::from_utf8_lossy(bytes).into_owned()
-    } else {
-        let mut s = String::from_utf8_lossy(&bytes[..max_bytes]).into_owned();
-        s.push_str("\n[truncated]");
-        s
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

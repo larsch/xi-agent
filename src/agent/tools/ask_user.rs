@@ -106,7 +106,7 @@ impl Tool for AskUserTool {
                 allow_freeform,
             } = match super::parse_args(args) {
                 Ok(a) => a,
-                Err(e) => return e,
+                Err(e) => return *e,
             };
 
             let question = question.trim().to_string();
@@ -146,7 +146,7 @@ impl Tool for AskUserTool {
             }
 
             match reply_rx.await {
-                Ok(AskUserResponse::Answer(answer)) => ToolResult::ok(answer),
+                Ok(AskUserResponse::Answer(answer)) => ToolResult::ok_str(answer),
                 Ok(AskUserResponse::Cancelled) => ToolResult::err("ask_user cancelled by user"),
                 Err(_) => ToolResult::err("ask_user failed: reply channel closed"),
             }

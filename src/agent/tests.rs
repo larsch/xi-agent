@@ -79,7 +79,7 @@ impl Tool for SlowTool {
             .to_string();
         Box::pin(async move {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            crate::agent::ToolResult::ok(format!("slow:{value}"))
+            crate::agent::ToolResult::ok_str(format!("slow:{value}"))
         })
     }
 }
@@ -90,6 +90,12 @@ fn make_tracker() -> Arc<Mutex<crate::agent::file_tracker::FileTracker>> {
     Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new()))
 }
 
+fn make_log() -> Arc<Mutex<crate::agent::tool_output_log::ToolOutputLog>> {
+    Arc::new(Mutex::new(
+        crate::agent::tool_output_log::ToolOutputLog::new("test"),
+    ))
+}
+
 /// Run the agent loop with the given provider and collect all emitted events.
 async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -97,6 +103,7 @@ async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
     let config = AgentLoopConfig {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
+        tool_output_log: make_log(),
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -268,6 +275,7 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
     let config = AgentLoopConfig {
         tools,
         file_tracker: make_tracker(),
+        tool_output_log: make_log(),
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -348,6 +356,7 @@ async fn agent_loop_before_hook_blocks_tool() {
     let config = AgentLoopConfig {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
+        tool_output_log: make_log(),
         before_tool_call: Some(Box::new(|_name, _args| false)), // block everything
         after_tool_call: None,
     };
@@ -486,6 +495,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
     let config = AgentLoopConfig {
         tools,
         file_tracker: make_tracker(),
+        tool_output_log: make_log(),
         before_tool_call: None,
         after_tool_call: None,
     };

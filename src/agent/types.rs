@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
+use crate::agent::tools::truncate::TruncationResult;
 use crate::llm::{AssistantPhase, UsageStats};
 
 // ── Tool result ───────────────────────────────────────────────────────────────
@@ -9,17 +10,40 @@ use crate::llm::{AssistantPhase, UsageStats};
 /// The output produced by a tool execution.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
-    /// Text content returned to the model.
+    /// Text content returned to the model (may be truncated).
     pub content: String,
     /// True when the tool encountered an error.
     pub is_error: bool,
+    /// True when the content was truncated and the full output is longer.
+    pub is_truncated: bool,
+    /// Truncation metadata when `is_truncated` is true.
+    pub truncation: Option<TruncationResult>,
+    /// Full pre-truncation stdout, set when `saves_output` is true.
+    pub raw_stdout: Option<String>,
+    /// Full pre-truncation stderr, set when `saves_output` is true.
+    pub raw_stderr: Option<String>,
 }
 
 impl ToolResult {
-    pub fn ok(content: impl Into<String>) -> Self {
+    pub fn ok(tr: TruncationResult) -> Self {
         Self {
-            content: content.into(),
+            content: tr.content,
             is_error: false,
+            is_truncated: false,
+            truncation: None,
+            raw_stdout: None,
+            raw_stderr: None,
+        }
+    }
+
+    pub fn ok_truncated(tr: TruncationResult, raw_stdout: String, raw_stderr: String) -> Self {
+        Self {
+            content: tr.content.clone(),
+            is_error: false,
+            is_truncated: true,
+            truncation: Some(tr),
+            raw_stdout: Some(raw_stdout),
+            raw_stderr: Some(raw_stderr),
         }
     }
 
@@ -27,6 +51,22 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: true,
+            is_truncated: false,
+            truncation: None,
+            raw_stdout: None,
+            raw_stderr: None,
+        }
+    }
+
+    /// Convenience constructor for plain (non-truncated) ok results.
+    pub fn ok_str(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            is_truncated: false,
+            truncation: None,
+            raw_stdout: None,
+            raw_stderr: None,
         }
     }
 }
@@ -44,6 +84,12 @@ pub trait Tool: Send + Sync {
         &self,
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
+    /// Whether the agent loop should save this tool's full output to a log
+    /// file and append the path to the result.  Defaults to `false`; shell
+    /// and custom tools override this to `true`.
+    fn saves_output(&self) -> bool {
+        false
+    }
 }
 
 /// A registry mapping tool names to their implementations.
@@ -142,6 +188,8 @@ pub struct AgentLoopConfig {
     /// Tracker for files touched by built-in file tools; used to detect
     /// external modifications before each LLM turn.
     pub file_tracker: std::sync::Arc<std::sync::Mutex<crate::agent::file_tracker::FileTracker>>,
+    /// Log that persists full tool output to temp files for the session.
+    pub tool_output_log: std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
     /// Optional hook called before each tool execution.
     /// Return `false` to block the tool call (an error result is returned instead).
     pub before_tool_call: Option<BeforeToolCall>,

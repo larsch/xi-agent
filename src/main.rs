@@ -37,7 +37,7 @@ mod ui;
 
 use agent::tools::custom::custom_tool_dirs;
 use agent::{
-    AgentEvent, AgentLoopConfig, FileTracker, build_system_prompt,
+    AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
 use app::{App, InputMode, SelectionResult};
@@ -145,6 +145,7 @@ async fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let file_tracker = Arc::new(Mutex::new(FileTracker::new()));
+    let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
 
     let mut app = App::new(
         &current_model,
@@ -153,6 +154,7 @@ async fn main() -> io::Result<()> {
         AgentLoopConfig {
             tools: std::collections::HashMap::new(),
             file_tracker: Arc::clone(&file_tracker),
+            tool_output_log: Arc::clone(&tool_output_log),
             before_tool_call: None,
             after_tool_call: None,
         },
@@ -954,6 +956,7 @@ async fn run_print_mode(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
     let loaded_skills = skills::load_skills();
+    let headless_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless")));
     let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
 
     let messages: Vec<Message> = vec![Message::system(&system_prompt), Message::user(&prompt)];
@@ -961,6 +964,7 @@ async fn run_print_mode(
     let config = AgentLoopConfig {
         tools,
         file_tracker: headless_tracker,
+        tool_output_log: headless_log,
         before_tool_call: None,
         after_tool_call: None,
     };

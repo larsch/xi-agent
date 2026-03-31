@@ -8,6 +8,7 @@ use file_tracker::build_notification;
 
 pub mod file_tracker;
 pub mod system_prompt;
+pub mod tool_output_log;
 pub mod tools;
 pub mod types;
 
@@ -16,6 +17,7 @@ mod tests;
 
 pub use file_tracker::FileTracker;
 pub use system_prompt::build_system_prompt;
+pub use tool_output_log::ToolOutputLog;
 pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
 
 fn drain_steering_messages(
@@ -170,7 +172,83 @@ pub async fn run_agent_loop(
                 ToolResult::err(format!("Tool call '{name}' was blocked"))
             } else {
                 match config.tools.get(&name) {
-                    Some(tool) => tool.execute(args.clone()).await,
+                    Some(tool) => {
+                        let r = tool.execute(args.clone()).await;
+                        // Save full streams to log files when the tool opts in.
+                        // Capture returned paths directly — used for the notice below.
+                        let log_paths = if tool.saves_output() {
+                            let stdout = r.raw_stdout.as_deref().unwrap_or("");
+                            let stderr = r.raw_stderr.as_deref().unwrap_or("");
+                            let (out, err) = config
+                                .tool_output_log
+                                .lock()
+                                .unwrap()
+                                .record_streams(&id, stdout, stderr);
+                            (out, err)
+                        } else {
+                            (None, None)
+                        };
+                        // When output was truncated, append a compact notice
+                        // listing whichever stream files were written.
+                        if r.is_truncated {
+                            let mut parts: Vec<String> = Vec::new();
+                            if let Some(ref p) = log_paths.0 {
+                                parts.push(p.display().to_string());
+                            }
+                            if let Some(ref p) = log_paths.1 {
+                                parts.push(p.display().to_string());
+                            }
+
+                            // Include the command in the notice so the model
+                            // can associate the file with what produced it.
+                            let cmd_summary = args
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .map(|s| format!(" of `{s}`"))
+                                .unwrap_or_default();
+
+                            let notice = if parts.is_empty() {
+                                String::new()
+                            } else {
+                                let files = parts.join(" and ");
+                                if let Some(ref tr) = r.truncation {
+                                    let start = tr.first_kept_line;
+                                    let end = tr.first_kept_line + tr.output_lines - 1;
+                                    format!(
+                                        "[Showing lines {start}-{end} of {total}. \
+                                         Full output{cmd_summary} in {files}]",
+                                        total = tr.total_lines,
+                                    )
+                                } else {
+                                    format!(
+                                        "[Output truncated. Full output{cmd_summary} in {files}]"
+                                    )
+                                }
+                            };
+
+                            if !notice.is_empty() {
+                                let mut content = r.content.clone();
+                                // Ensure the notice is separated by a blank line.
+                                if !content.ends_with('\n') {
+                                    content.push('\n');
+                                }
+                                content.push('\n');
+                                content.push_str(&notice);
+                                ToolResult {
+                                    content,
+                                    is_error: r.is_error,
+                                    is_truncated: true,
+                                    truncation: r.truncation.clone(),
+                                    raw_stdout: None,
+                                    raw_stderr: None,
+                                }
+                            } else {
+                                r
+                            }
+                        } else {
+                            r
+                        }
+                    }
                     None => ToolResult::err(format!("Unknown tool: '{name}'")),
                 }
             };

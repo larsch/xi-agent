@@ -90,7 +90,7 @@ impl Tool for WriteTool {
         Box::pin(async move {
             let WriteArgs { path, content } = match super::parse_args(args) {
                 Ok(a) => a,
-                Err(e) => return e,
+                Err(e) => return *e,
             };
 
             // Create parent directories if needed.
@@ -111,7 +111,7 @@ impl Tool for WriteTool {
                 .record(std::path::Path::new(&path));
 
             let line_count = count_lines_any_ending(&content);
-            ToolResult::ok(format!("Written {line_count} lines to {path}"))
+            ToolResult::ok_str(format!("Written {line_count} lines to {path}"))
         })
     }
 }

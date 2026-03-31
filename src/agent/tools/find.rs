@@ -62,7 +62,7 @@ impl Tool for FindTool {
                 limit,
             } = match super::parse_args(args) {
                 Ok(a) => a,
-                Err(e) => return e,
+                Err(e) => return *e,
             };
             let search_dir = path.unwrap_or_else(|| ".".to_string());
             let limit = limit.unwrap_or(DEFAULT_LIMIT);
@@ -136,7 +136,7 @@ impl Tool for FindTool {
             }
 
             if matches.is_empty() {
-                return ToolResult::ok("No files found matching pattern");
+                return ToolResult::ok_str("No files found matching pattern");
             }
 
             let mut output = matches.join("\n");
@@ -147,7 +147,7 @@ impl Tool for FindTool {
                 ));
             }
 
-            ToolResult::ok(output)
+            ToolResult::ok_str(output)
         })
     }
 }

@@ -8,7 +8,7 @@ use tui_textarea::{CursorMove, TextArea};
 
 use crate::{
     agent::{
-        AgentLoopConfig, run_agent_loop,
+        AgentLoopConfig, ToolOutputLog, run_agent_loop,
         types::{AgentEvent, AskRequest, AskRequestTx, AskUserOption, AskUserResponse},
     },
     auth::{self, AuthFlow, LoginEvent},
@@ -1691,6 +1691,26 @@ impl App {
             .is_some();
     }
 
+    /// Return the current session ID, creating a new session if one does not
+    /// yet exist.  Falls back to `"unknown"` if persistence is unavailable.
+    fn ensure_session_id(&mut self) -> String {
+        if let Some(ref id) = self.current_session_id {
+            return id.clone();
+        }
+        if let Some(ref mut store) = self.session_store {
+            match store.create_session(&self.current_cwd) {
+                Ok(id) => {
+                    self.current_session_id = Some(id.clone());
+                    return id;
+                }
+                Err(e) => {
+                    log::debug!("failed to create session for tool output log: {e}");
+                }
+            }
+        }
+        "unknown".to_string()
+    }
+
     fn persist_messages(&mut self) {
         let Some(store) = self.session_store.as_mut() else {
             return;
@@ -1759,9 +1779,18 @@ impl App {
     // ── LLM submission ────────────────────────────────────────────────────────
 
     fn start_agent_task(&mut self, llm_messages: Vec<Message>, provider: &DynProvider) {
+        // Ensure the session ID is assigned before creating the log so the
+        // output directory uses the real session key, not the "init" placeholder.
+        let session_id = self.ensure_session_id();
+        // Replace the agent_config log with one keyed to the real session ID.
+        // Keeping it in agent_config ensures it outlives the task and the files
+        // remain accessible after the agent loop completes.
+        self.agent_config.tool_output_log =
+            Arc::new(std::sync::Mutex::new(ToolOutputLog::new(&session_id)));
         let config = AgentLoopConfig {
             tools: self.agent_config.tools.clone(),
             file_tracker: Arc::clone(&self.agent_config.file_tracker),
+            tool_output_log: Arc::clone(&self.agent_config.tool_output_log),
             before_tool_call: None,
             after_tool_call: None,
         };
@@ -2141,6 +2170,9 @@ mod tests {
                 tools: Default::default(),
                 file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
                     crate::agent::FileTracker::new(),
+                )),
+                tool_output_log: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::agent::ToolOutputLog::new("test-session"),
                 )),
                 before_tool_call: None,
                 after_tool_call: None,

@@ -105,7 +105,7 @@ impl Tool for ReadFileTool {
                 limit,
             } = match super::parse_args(args) {
                 Ok(a) => a,
-                Err(e) => return e,
+                Err(e) => return *e,
             };
 
             let content = match tokio::fs::read_to_string(&path).await {
@@ -141,7 +141,7 @@ impl Tool for ReadFileTool {
                 .unwrap()
                 .record(std::path::Path::new(&path));
 
-            ToolResult::ok(result)
+            ToolResult::ok_str(result)
         })
     }
 }

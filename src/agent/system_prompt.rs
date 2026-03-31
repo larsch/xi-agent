@@ -47,7 +47,11 @@ pub fn read_agents_md(cwd: &str, test_home: Option<&Path>) -> String {
 ///
 /// Structure mirrors pi-mono's `buildSystemPrompt`: identity, tool list,
 /// tool-aware guidelines, project context (AGENTS.md), skills, then date/cwd.
-pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]) -> String {
+pub fn build_system_prompt(
+    tools: &ToolRegistry,
+    cwd: &str,
+    skills: &[SkillMeta],
+) -> String {
     let date = Local::now().format("%Y-%m-%d").to_string();
 
     // Build tool list sorted by name for deterministic output.
@@ -71,34 +75,34 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
 
     // Build guidelines conditioned on which tools are present.
     let has = |name: &str| tool_names.contains(&name);
-    let mut guidelines: Vec<&str> = Vec::new();
+    let mut guidelines: Vec<String> = Vec::new();
 
     // File exploration: prefer dedicated tools over bash when both are available.
     if has("bash") && !has("find_files") {
-        guidelines.push("Use bash for file operations like ls, find, grep.");
+        guidelines.push("Use bash for file operations like ls, find, grep.".to_string());
     } else if has("bash") && has("find_files") {
-        guidelines.push("Prefer find_files over bash for filesystem exploration.");
+        guidelines.push("Prefer find_files over bash for filesystem exploration.".to_string());
     }
 
     if has("read_file") && has("edit_file") {
-        guidelines.push("Use read_file to examine files before editing. You must use this tool instead of cat or sed.");
+        guidelines.push("Use read_file to examine files before editing. You must use this tool instead of cat or sed.".to_string());
     }
     if has("edit_file") {
-        guidelines.push("Use edit_file for precise changes — old_text must match exactly.");
+        guidelines.push("Use edit_file for precise changes — old_text must match exactly.".to_string());
     }
     if has("write_file") {
-        guidelines.push("Use write_file only for new files or complete rewrites.");
+        guidelines.push("Use write_file only for new files or complete rewrites.".to_string());
     }
     if has("edit_file") || has("write_file") {
-        guidelines.push("When summarizing your actions, output plain text directly — do NOT use bash or cat to display what you did.");
+        guidelines.push("When summarizing your actions, output plain text directly — do NOT use bash or cat to display what you did.".to_string());
     }
     if has("ask_user") {
-        guidelines.push("Use ask_user only when the task requires a user decision or information you cannot infer.");
-        guidelines.push("Before calling ask_user, gather relevant context with your other tools and include a short summary in the context field.");
+        guidelines.push("Use ask_user only when the task requires a user decision or information you cannot infer.".to_string());
+        guidelines.push("Before calling ask_user, gather relevant context with your other tools and include a short summary in the context field.".to_string());
     }
-    guidelines.push("Never describe a change as done or claim to have implemented something unless you have called the appropriate tools in this response to make that change. If you intend to make edits, call the tools now.");
-    guidelines.push("Be concise in your responses.");
-    guidelines.push("Show file paths clearly when working with files.");
+    guidelines.push("Never describe a change as done or claim to have implemented something unless you have called the appropriate tools in this response to make that change. If you intend to make edits, call the tools now.".to_string());
+    guidelines.push("Be concise in your responses.".to_string());
+    guidelines.push("Show file paths clearly when working with files.".to_string());
 
     let guidelines_text = guidelines
         .iter()
@@ -221,7 +225,7 @@ mod tests {
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = crate::agent::types::ToolResult> + Send + '_>,
         > {
-            Box::pin(async { crate::agent::types::ToolResult::ok("ok") })
+            Box::pin(async { crate::agent::types::ToolResult::ok_str("ok") })
         }
     }
 

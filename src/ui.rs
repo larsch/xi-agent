@@ -1798,6 +1798,9 @@ mod tests {
                 file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
                     crate::agent::FileTracker::new(),
                 )),
+                tool_output_log: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::agent::ToolOutputLog::new("test"),
+                )),
                 before_tool_call: None,
                 after_tool_call: None,
             },

@@ -8,9 +8,9 @@ use crate::agent::types::{Tool, ToolRegistry, ToolResult};
 /// Deserialize a JSON `args` object into a typed struct, returning a
 /// `ToolResult::err` on failure.  Used by every built-in tool to replace
 /// the repetitive `args.get("x").and_then(|v| v.as_str())` pattern.
-pub(super) fn parse_args<T: DeserializeOwned>(args: serde_json::Value) -> Result<T, ToolResult> {
+pub(super) fn parse_args<T: DeserializeOwned>(args: serde_json::Value) -> Result<T, Box<ToolResult>> {
     serde_json::from_value::<T>(args)
-        .map_err(|e| ToolResult::err(format!("Invalid arguments: {e}")))
+        .map_err(|e| Box::new(ToolResult::err(format!("Invalid arguments: {e}"))))
 }
 
 pub mod ask_user;
@@ -24,6 +24,7 @@ pub mod find;
 #[cfg(target_os = "windows")]
 pub mod powershell;
 pub mod read;
+pub mod truncate;
 pub mod write;
 
 use ask_user::AskUserTool;

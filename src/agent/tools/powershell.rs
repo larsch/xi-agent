@@ -2,10 +2,8 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
+use super::truncate::truncate_tail;
 use crate::agent::types::{Tool, ToolResult};
-
-/// Maximum bytes captured from stdout or stderr before truncation.
-const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB
 
 pub struct PowerShellTool;
 
@@ -21,9 +19,11 @@ impl Tool for PowerShellTool {
 
     fn description(&self) -> &str {
         "Run a command via `powershell.exe -NoProfile -Command` and return compact output. \
-         Stdout/stderr are emitted directly without section headings, and a \
-         non-zero exit code is appended as `exit N`. \
-         Both stdout and stderr are truncated to 8 KiB each. \
+         Stdout and stderr are captured separately and merged in the response; \
+         a non-zero exit code is appended as `exit N`. \
+         Output is truncated to the last 2000 lines or 50 KiB (whichever is hit first); \
+         if truncated, full stdout/stderr are saved to temp files and a notice with the \
+         paths is appended. \
          Pass a raw PowerShell command string; do not wrap the whole command in extra quotes. \
          For arguments with spaces, use normal PowerShell quoting like \"C:\\Program Files\" or 'C:\\Program Files'. \
          Avoid literal \\\" sequences in the final command string; PowerShell treats them as backslash+quote characters."
@@ -42,6 +42,10 @@ impl Tool for PowerShellTool {
         })
     }
 
+    fn saves_output(&self) -> bool {
+        true
+    }
+
     fn execute(
         &self,
         args: Value,
@@ -49,7 +53,7 @@ impl Tool for PowerShellTool {
         Box::pin(async move {
             let PowerShellArgs { command } = match super::parse_args(args) {
                 Ok(a) => a,
-                Err(e) => return e,
+                Err(e) => return *e,
             };
 
             let output = match tokio::process::Command::new("powershell.exe")
@@ -64,45 +68,46 @@ impl Tool for PowerShellTool {
             };
 
             let exit_code = output.status.code().unwrap_or(-1);
-            let stdout = truncate_bytes(&output.stdout, MAX_OUTPUT_BYTES);
-            let stderr = truncate_bytes(&output.stderr, MAX_OUTPUT_BYTES);
 
-            let mut result = String::new();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
+            let mut merged = String::new();
             if !stdout.is_empty() {
-                result.push_str(&stdout);
-                if !stdout.ends_with('\n') {
-                    result.push('\n');
-                }
+                merged.push_str(&stdout);
             }
-
             if !stderr.is_empty() {
-                result.push_str(&stderr);
-                if !stderr.ends_with('\n') {
-                    result.push('\n');
-                }
+                merged.push_str(&stderr);
             }
-
             if exit_code != 0 {
-                result.push_str(&format!("exit {exit_code}\n"));
+                if !merged.ends_with('\n') && !merged.is_empty() {
+                    merged.push('\n');
+                }
+                merged.push_str(&format!("exit {exit_code}\n"));
             }
 
-            ToolResult::ok(result)
+            let tr = truncate_tail(&merged);
+            if tr.truncated {
+                ToolResult::ok_truncated(tr, stdout, stderr)
+            } else {
+                ToolResult::ok(tr)
+            }
         })
     }
 }
 
-fn truncate_bytes(bytes: &[u8], max_bytes: usize) -> String {
+/// Convert raw bytes to a UTF-8 string, truncating to `max_bytes` if needed.
+/// Returns the (possibly truncated) string and whether truncation occurred.
+fn truncate_bytes(bytes: &[u8], max_bytes: usize) -> (String, bool) {
     if bytes.is_empty() {
-        return String::new();
+        return (String::new(), false);
     }
 
     if bytes.len() <= max_bytes {
-        String::from_utf8_lossy(bytes).into_owned()
+        (String::from_utf8_lossy(bytes).into_owned(), false)
     } else {
-        let mut s = String::from_utf8_lossy(&bytes[..max_bytes]).into_owned();
-        s.push_str("\n[truncated]");
-        s
+        let s = String::from_utf8_lossy(&bytes[..max_bytes]).into_owned();
+        (s, true)
     }
 }
 

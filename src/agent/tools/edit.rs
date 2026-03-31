@@ -97,7 +97,7 @@ impl Tool for EditTool {
                 new_text,
             } = match super::parse_args(args) {
                 Ok(a) => a,
-                Err(e) => return e,
+                Err(e) => return *e,
             };
 
             let raw_content = match tokio::fs::read_to_string(&path).await {
@@ -147,7 +147,7 @@ impl Tool for EditTool {
                 .unwrap()
                 .record(std::path::Path::new(&path));
 
-            ToolResult::ok(format!("Successfully edited {path}"))
+            ToolResult::ok_str(format!("Successfully edited {path}"))
         })
     }
 }
