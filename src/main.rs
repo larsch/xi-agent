@@ -660,8 +660,7 @@ async fn run(
                                 } else if app.has_pending_ask() {
                                     app.submit_pending_ask_answer();
                                 } else if app.in_slash_mode() {
-                                    let input = app.textarea.lines().first().cloned().unwrap_or_default();
-                                    let input = input.trim().to_string();
+                                    let input = app.slash_submit_text().unwrap_or_default();
                                     app.reset_textarea();
 
                                     match commands::parse(&input) {

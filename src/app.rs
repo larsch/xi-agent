@@ -667,6 +667,31 @@ impl App {
         lines.len() == 1 && lines[0].trim_start().starts_with('/')
     }
 
+    /// Resolve which slash-command text should execute when Enter is pressed.
+    ///
+    /// If a completion row is highlighted, prefer its `complete_to` text so
+    /// partial inputs like `/mo` execute the selected command immediately.
+    pub fn slash_submit_text(&self) -> Option<String> {
+        let lines = self.textarea.lines();
+        if lines.len() != 1 {
+            return None;
+        }
+
+        let raw = lines[0].trim().to_string();
+        if !raw.starts_with('/') {
+            return None;
+        }
+
+        if let Some(item) = self.completions.get(self.completion_selected)
+            && !item.loading
+            && !item.complete_to.is_empty()
+        {
+            return Some(item.complete_to.trim_end().to_string());
+        }
+
+        Some(raw)
+    }
+
     /// Handle `Esc` in normal chat-input mode (outside shell/selection).
     ///
     /// Priority order is intentional:
@@ -2341,6 +2366,30 @@ mod tests {
                 .iter()
                 .all(|i| i.complete_to != "/ask_user_freeform")
         );
+    }
+
+    #[test]
+    fn slash_submit_text_prefers_highlighted_completion() {
+        let mut app = make_app();
+        app.textarea.insert_str("/mo");
+        app.update_completions();
+
+        let selected = app
+            .completions
+            .get(app.completion_selected)
+            .expect("expected at least one completion");
+        assert_eq!(selected.complete_to, "/model ");
+        assert_eq!(app.slash_submit_text().as_deref(), Some("/model"));
+    }
+
+    #[test]
+    fn slash_submit_text_falls_back_to_raw_input_when_no_completion() {
+        let mut app = make_app();
+        app.textarea.insert_str("/unknown");
+        app.update_completions();
+        assert!(app.completions.is_empty());
+
+        assert_eq!(app.slash_submit_text().as_deref(), Some("/unknown"));
     }
 
     #[test]
