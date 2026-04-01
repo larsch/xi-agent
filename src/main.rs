@@ -16,7 +16,6 @@ use std::{
     io,
     io::ErrorKind,
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
 mod agent;
