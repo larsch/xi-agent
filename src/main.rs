@@ -16,6 +16,7 @@ use std::{
     io,
     io::ErrorKind,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 mod agent;
@@ -399,6 +400,20 @@ fn normalize_paste_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Read text from the system clipboard, or return `None` on error.
+///
+/// On Windows, terminals that do not support bracketed paste (e.g. conhost)
+/// deliver paste events as individual key records — including `VK_RETURN` for
+/// every newline — so `Event::Paste` is never emitted and newlines in pasted
+/// text inadvertently submit the input.  Reading the clipboard directly and
+/// calling `insert_str` sidesteps the Win32 console input path entirely.
+#[cfg(windows)]
+fn read_clipboard_text() -> Option<String> {
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_text().ok())
+}
+
 struct UnavailableProvider {
     message: String,
 }
@@ -426,6 +441,19 @@ impl LlmProvider for UnavailableProvider {
 
 // ── Inner event loop ──────────────────────────────────────────────────────────
 
+/// Timing threshold (milliseconds) used to distinguish paste-injected Enter
+/// events from real Enter keypresses on Windows terminals that don't support
+/// bracketed paste.  Paste events arrive in sub-millisecond bursts while human
+/// typing always has gaps >20 ms.
+///
+/// Set to `Some(10)` to enable the heuristic, or `None` to disable it.
+/// `ENABLE_VIRTUAL_TERMINAL_INPUT` has no effect on crossterm's Windows event
+/// source because it uses `ReadConsoleInputW` (raw INPUT_RECORDs), not
+/// `ReadFile`/`ReadConsole` (VT sequences).  The timing heuristic is therefore
+/// the correct fallback for terminals that deliver paste as individual key events.
+#[cfg(windows)]
+const PASTE_ENTER_THRESHOLD_MS: Option<u128> = Some(10);
+
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -433,6 +461,11 @@ async fn run(
     config: &TauConfig,
 ) -> io::Result<RunResult> {
     let mut crossterm_events = EventStream::new();
+
+    // Timestamp of the most recent key Press event other than Enter itself.
+    // Used on Windows to detect paste-injected Enter events (see above).
+    #[cfg(windows)]
+    let mut last_key_at: Option<Instant> = None;
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -447,6 +480,13 @@ async fn run(
                         // Ignore Release so one shortcut maps to one action.
                         if key.kind == KeyEventKind::Release {
                             continue;
+                        }
+
+                        // Record the time of every non-Enter key press so we
+                        // can detect paste-injected Enter events below.
+                        #[cfg(windows)]
+                        if key.code != KeyCode::Enter {
+                            last_key_at = Some(Instant::now());
                         }
 
                         if key.code == KeyCode::Char('c')
@@ -494,6 +534,43 @@ async fn run(
                             continue;
                         }
 
+                        // ── Ctrl+V paste (Windows conhost fallback) ───────────
+                        // On Windows terminals that do not support bracketed
+                        // paste (e.g. conhost), pasting via Ctrl+V delivers the
+                        // clipboard content as individual KEY_EVENTs.  Every
+                        // newline in the clipboard arrives as VK_RETURN →
+                        // KeyCode::Enter, which the normal handler would treat
+                        // as a form submit.
+                        //
+                        // We intercept Ctrl+V here and read the clipboard text
+                        // directly, bypassing the Win32 console input path.
+                        // This is safe because on VT-capable terminals (Windows
+                        // Terminal with bracketed paste enabled) Ctrl+V is
+                        // converted to an Event::Paste and the key event is
+                        // suppressed, so we will never reach this branch there.
+                        #[cfg(windows)]
+                        if key.code == KeyCode::Char('v')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !app.login_active
+                        {
+                            if let Some(text) = read_clipboard_text() {
+                                let normalized = normalize_paste_text(&text);
+                                if app.selection_mode {
+                                    app.exit_selection_mode();
+                                }
+                                if app.input_mode == InputMode::Shell {
+                                    app.shell_textarea.insert_str(normalized);
+                                } else {
+                                    app.textarea.insert_str(normalized);
+                                    app.update_completions();
+                                    if app.should_fetch_models() {
+                                        app.start_model_fetch(provider);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         // ── Shell input mode ─────────────────────────────────
                         if app.input_mode == InputMode::Shell {
                             if key.code == KeyCode::Char('s')
@@ -511,6 +588,15 @@ async fn run(
                                     app.exit_shell_mode();
                                 }
                                 KeyCode::Enter if key.modifiers.is_empty() => {
+                                    #[cfg(windows)]
+                                    if let (Some(threshold), Some(t)) =
+                                        (PASTE_ENTER_THRESHOLD_MS, last_key_at)
+                                    {
+                                        if t.elapsed().as_millis() < threshold {
+                                            app.shell_textarea.insert_newline();
+                                            continue;
+                                        }
+                                    }
                                     app.submit_shell_command();
                                 }
                                 _ => {
@@ -645,6 +731,24 @@ async fn run(
                             }
 
                             KeyCode::Enter if key.modifiers.is_empty() => {
+                                // On Windows without bracketed-paste support,
+                                // every newline in pasted text arrives as a
+                                // bare Enter.  If this Enter arrived within
+                                // PASTE_ENTER_THRESHOLD_MS of the previous
+                                // key event it is almost certainly part of a
+                                // paste burst — insert a newline instead of
+                                // submitting.
+                                #[cfg(windows)]
+                                if let (Some(threshold), Some(t)) =
+                                    (PASTE_ENTER_THRESHOLD_MS, last_key_at)
+                                {
+                                    if t.elapsed().as_millis() < threshold {
+                                        app.textarea.insert_newline();
+                                        app.update_completions();
+                                        continue;
+                                    }
+                                }
+
                                 if app.ollama_endpoint_input_mode {
                                     if let Some(url) = app.take_ollama_endpoint_input() {
                                         return Ok(RunResult::ChangeOllamaEndpoint(url));

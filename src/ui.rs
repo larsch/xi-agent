@@ -544,7 +544,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         let is_shell = app.input_mode == InputMode::Shell;
         let panel_bg = if is_shell { SHELL_INPUT_BG } else { INPUT_BG };
 
-        // tui-textarea scrolls horizontally for long single lines.
+        // ratatui-textarea scrolls horizontally for long single lines.
         // For chat-style input we want visual hard-wrapping instead.
         let input_width = input_area.width as usize;
 

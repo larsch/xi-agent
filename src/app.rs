@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::task::JoinHandle;
-use tui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::{
     agent::{
