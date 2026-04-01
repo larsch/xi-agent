@@ -110,10 +110,10 @@ pub struct App {
     pub streaming: bool,
     /// Throbber animation frame index, advanced on every UI tick while streaming.
     pub throbber_tick: u8,
-    /// Instant of the last received text/thinking token; used to suppress the
-    /// throbber while tokens are actively streaming and re-show it after 1 s of
-    /// idle time.
-    pub last_token_at: Option<std::time::Instant>,
+    /// Instant of the last visible agent output (text/thinking tokens, tool
+    /// calls, tool results, etc.); used to suppress the throbber while output
+    /// is actively arriving and re-show it after 1 s of idle time.
+    pub last_output_at: Option<std::time::Instant>,
     /// Transient status message from the active provider (e.g. "Rate limited, retrying in 7s…").
     /// Shown in the chat log while streaming; cleared on turn end / error.
     pub provider_status: Option<String>,
@@ -286,7 +286,7 @@ impl App {
             log_had_scrollbar: false,
             streaming: false,
             throbber_tick: 0,
-            last_token_at: None,
+            last_output_at: None,
             provider_status: None,
             system_prompt: None,
             current_model: initial_model.into(),
@@ -357,16 +357,24 @@ impl App {
 
     /// Returns true when the throbber should be visible.
     ///
-    /// The throbber is shown whenever the agent is streaming but no token has
-    /// arrived in the last second (i.e. the model is "thinking" / between tool
-    /// calls).  It is hidden while tokens are actively flowing.
+    /// Three-state model:
+    /// - Machine waiting for **user** (`has_pending_ask` / `ask_user_freeform_mode`):
+    ///   throbber hidden — the ball is in the user's court.
+    /// - Machine producing **output** (visible content added within the last second):
+    ///   throbber hidden — something is actively appearing on screen.
+    /// - Machine working **silently** (streaming, no output for ≥ 1 s):
+    ///   throbber visible — signals that work is in progress.
     pub fn throbber_visible(&self) -> bool {
         if !self.streaming {
             return false;
         }
-        match self.last_token_at {
+        // The agent loop is paused waiting for user input — don't spin.
+        if self.has_pending_ask() || self.ask_user_freeform_mode {
+            return false;
+        }
+        match self.last_output_at {
             None => true,
-            Some(t) => t.elapsed() >= std::time::Duration::from_secs(1),
+            Some(t) => t.elapsed() >= std::time::Duration::from_millis(240),
         }
     }
 
@@ -2011,7 +2019,7 @@ impl App {
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
             self.streaming = false;
-            self.last_token_at = None;
+            self.last_output_at = None;
             self.steering_tx = None;
             self.queued_steering.clear();
             self.strip_orphaned_tool_calls();
@@ -2047,7 +2055,7 @@ impl App {
     pub fn apply_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::ThinkingToken(token) => {
-                self.last_token_at = Some(std::time::Instant::now());
+                self.last_output_at = Some(std::time::Instant::now());
                 self.ensure_assistant_message();
                 if let Some(last) = self.messages.last_mut() {
                     last.thinking
@@ -2060,7 +2068,7 @@ impl App {
                 self.latest_usage = Some(usage);
             }
             AgentEvent::TextToken { text, phase } => {
-                self.last_token_at = Some(std::time::Instant::now());
+                self.last_output_at = Some(std::time::Instant::now());
                 self.ensure_assistant_message();
                 if let Some(last) = self.messages.last_mut() {
                     last.content.push_str(&text);
@@ -2078,6 +2086,7 @@ impl App {
                 self.bump_log_revision();
             }
             AgentEvent::SteeringConsumed { text } => {
+                self.last_output_at = Some(std::time::Instant::now());
                 self.messages.push(Message::user(text.clone()));
                 if let Some(pos) = self.queued_steering.iter().position(|m| m == &text) {
                     self.queued_steering.remove(pos);
@@ -2085,14 +2094,17 @@ impl App {
                 self.bump_log_revision();
             }
             AgentEvent::StatusUpdate(msg) => {
+                self.last_output_at = Some(std::time::Instant::now());
                 self.provider_status = if msg.is_empty() { None } else { Some(msg) };
                 self.bump_log_revision();
             }
             AgentEvent::ToolCallStart { id, name, args } => {
+                self.last_output_at = Some(std::time::Instant::now());
                 self.messages.push(Message::tool_call(id, name, args));
                 self.bump_log_revision();
             }
             AgentEvent::ToolCallEnd { id, name, result } => {
+                self.last_output_at = Some(std::time::Instant::now());
                 self.messages.push(Message::tool_result(
                     &id,
                     result.content.clone(),
@@ -2114,6 +2126,7 @@ impl App {
                 paths: _,
                 notification,
             } => {
+                self.last_output_at = Some(std::time::Instant::now());
                 // Mirror the notification into the UI message log so it appears
                 // in the conversation display, just as a user message would.
                 self.messages.push(Message::user(notification));
@@ -2125,7 +2138,7 @@ impl App {
             }
             AgentEvent::Done => {
                 self.streaming = false;
-                self.last_token_at = None;
+                self.last_output_at = None;
                 self.provider_status = None;
                 self.agent_task = None;
                 self.steering_tx = None;
@@ -2135,7 +2148,7 @@ impl App {
             }
             AgentEvent::Error(e) => {
                 self.provider_status = None;
-                self.last_token_at = None;
+                self.last_output_at = None;
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
