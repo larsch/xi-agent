@@ -96,21 +96,6 @@ impl Tool for PowerShellTool {
     }
 }
 
-/// Convert raw bytes to a UTF-8 string, truncating to `max_bytes` if needed.
-/// Returns the (possibly truncated) string and whether truncation occurred.
-fn truncate_bytes(bytes: &[u8], max_bytes: usize) -> (String, bool) {
-    if bytes.is_empty() {
-        return (String::new(), false);
-    }
-
-    if bytes.len() <= max_bytes {
-        (String::from_utf8_lossy(bytes).into_owned(), false)
-    } else {
-        let s = String::from_utf8_lossy(&bytes[..max_bytes]).into_owned();
-        (s, true)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
