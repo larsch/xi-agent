@@ -108,6 +108,12 @@ pub struct App {
     /// full log re-wrap work on every draw.
     pub log_had_scrollbar: bool,
     pub streaming: bool,
+    /// Throbber animation frame index, advanced on every UI tick while streaming.
+    pub throbber_tick: u8,
+    /// Instant of the last received text/thinking token; used to suppress the
+    /// throbber while tokens are actively streaming and re-show it after 1 s of
+    /// idle time.
+    pub last_token_at: Option<std::time::Instant>,
     /// Transient status message from the active provider (e.g. "Rate limited, retrying in 7s…").
     /// Shown in the chat log while streaming; cleared on turn end / error.
     pub provider_status: Option<String>,
@@ -279,6 +285,8 @@ impl App {
             last_log_height: 0,
             log_had_scrollbar: false,
             streaming: false,
+            throbber_tick: 0,
+            last_token_at: None,
             provider_status: None,
             system_prompt: None,
             current_model: initial_model.into(),
@@ -337,6 +345,28 @@ impl App {
             login_tx,
             ask_rx,
             ask_tx,
+        }
+    }
+
+    /// Advance the throbber animation frame.  Called on every UI tick.
+    pub fn tick(&mut self) {
+        if self.streaming {
+            self.throbber_tick = self.throbber_tick.wrapping_add(1);
+        }
+    }
+
+    /// Returns true when the throbber should be visible.
+    ///
+    /// The throbber is shown whenever the agent is streaming but no token has
+    /// arrived in the last second (i.e. the model is "thinking" / between tool
+    /// calls).  It is hidden while tokens are actively flowing.
+    pub fn throbber_visible(&self) -> bool {
+        if !self.streaming {
+            return false;
+        }
+        match self.last_token_at {
+            None => true,
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(1),
         }
     }
 
@@ -1981,6 +2011,7 @@ impl App {
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
             self.streaming = false;
+            self.last_token_at = None;
             self.steering_tx = None;
             self.queued_steering.clear();
             self.strip_orphaned_tool_calls();
@@ -2016,6 +2047,7 @@ impl App {
     pub fn apply_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::ThinkingToken(token) => {
+                self.last_token_at = Some(std::time::Instant::now());
                 self.ensure_assistant_message();
                 if let Some(last) = self.messages.last_mut() {
                     last.thinking
@@ -2028,6 +2060,7 @@ impl App {
                 self.latest_usage = Some(usage);
             }
             AgentEvent::TextToken { text, phase } => {
+                self.last_token_at = Some(std::time::Instant::now());
                 self.ensure_assistant_message();
                 if let Some(last) = self.messages.last_mut() {
                     last.content.push_str(&text);
@@ -2092,6 +2125,7 @@ impl App {
             }
             AgentEvent::Done => {
                 self.streaming = false;
+                self.last_token_at = None;
                 self.provider_status = None;
                 self.agent_task = None;
                 self.steering_tx = None;
@@ -2101,6 +2135,7 @@ impl App {
             }
             AgentEvent::Error(e) => {
                 self.provider_status = None;
+                self.last_token_at = None;
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();

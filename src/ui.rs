@@ -85,6 +85,9 @@ fn style_textarea(app: &mut App) {
 
 const TAB_WIDTH: usize = 4;
 
+/// Throbber animation frames (braille spinner).
+const THROBBER_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+
 /// Render a full-width row of halfblock characters in `color` so that a
 /// coloured panel appears to have a smooth sub-character edge against the
 /// default terminal background.
@@ -106,6 +109,7 @@ struct PanelHeights {
     login_header_height: u16,
     login_content_height: u16,
     halfblock_height: u16,
+    status_height: u16,
     input_height: u16,
     info_height: u16,
 }
@@ -125,6 +129,8 @@ struct PanelInputs<'a> {
     ask_user_question: Option<&'a str>,
     login_url: Option<&'a str>,
     has_login_code: bool,
+    streaming: bool,
+    has_provider_status: bool,
 }
 
 fn input_visual_line_count(lines: &[String], width: usize) -> usize {
@@ -189,6 +195,13 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 
     let input_height = if input.login_active { 0 } else { capped_input };
     let halfblock_height: u16 = if input.login_active { 0 } else { 1 };
+    let status_height: u16 = if !input.login_active
+        && (input.streaming || input.has_provider_status)
+    {
+        1
+    } else {
+        0
+    };
 
     PanelHeights {
         completion_height,
@@ -197,6 +210,7 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
         login_header_height,
         login_content_height,
         halfblock_height,
+        status_height,
         input_height,
         info_height,
     }
@@ -205,12 +219,10 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        let status = app.provider_status.clone();
         let lines = build_log_lines(
             &app.messages,
             app.streaming,
             &app.queued_steering,
-            status.as_deref(),
             width,
         );
         app.cached_log_lines = Some((app.log_revision, width, lines));
@@ -247,11 +259,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ask_user_question: app.ask_user_question.as_deref(),
         login_url: app.login_url.as_deref(),
         has_login_code: app.login_code.is_some(),
+        streaming: app.throbber_visible(),
+        has_provider_status: app.provider_status.is_some(),
     });
 
     // Layout: chat log | completions | sel header | sel items
     //       | login header | login content
-    //       | top halfblock | input | bottom halfblock | info bar
+    //       | status | top halfblock | input | bottom halfblock | info bar
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -261,10 +275,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             Constraint::Length(layout.selection_items_height),  // 3: selection items
             Constraint::Length(layout.login_header_height),     // 4: login header
             Constraint::Length(layout.login_content_height),    // 5: login content
-            Constraint::Length(layout.halfblock_height),        // 6: ▄ top edge
-            Constraint::Length(layout.input_height),            // 7: input textarea
-            Constraint::Length(layout.halfblock_height),        // 8: ▀ bottom edge
-            Constraint::Length(layout.info_height),             // 9: info bar
+            Constraint::Length(layout.status_height),           // 6: throbber / status bar
+            Constraint::Length(layout.halfblock_height),        // 7: ▄ top edge
+            Constraint::Length(layout.input_height),            // 8: input textarea
+            Constraint::Length(layout.halfblock_height),        // 9: ▀ bottom edge
+            Constraint::Length(layout.info_height),             // 10: info bar
         ])
         .split(f.area());
 
@@ -274,10 +289,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let sel_items_area = chunks[3];
     let login_hdr_area = chunks[4];
     let login_body_area = chunks[5];
-    let top_hb_area = chunks[6];
-    let input_area = chunks[7];
-    let bot_hb_area = chunks[8];
-    let info_area = chunks[9];
+    let status_area = chunks[6];
+    let top_hb_area = chunks[7];
+    let input_area = chunks[8];
+    let bot_hb_area = chunks[9];
+    let info_area = chunks[10];
 
     // ── Chat log ──────────────────────────────────────────────────────────────
     let inner_height = log_area.height as usize;
@@ -537,6 +553,32 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             Paragraph::new(halfblock_line(width, '▀', panel_bg)),
             bot_hb_area,
         );
+    }
+
+    // ── Status bar (throbber + provider status) ───────────────────────────────
+    if layout.status_height > 0 {
+        let throbber_style = Style::default()
+            .fg(Color::Rgb(160, 200, 255))
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        let status_text_style = Style::default()
+            .fg(Color::Rgb(160, 160, 180))
+            .add_modifier(ratatui::style::Modifier::ITALIC);
+
+        let show_throbber = app.throbber_visible();
+        let frame = THROBBER_FRAMES[(app.throbber_tick as usize) % THROBBER_FRAMES.len()];
+
+        let status_line = match (show_throbber, &app.provider_status) {
+            (true, Some(status)) => Line::from(vec![
+                Span::styled(format!("{frame}"), throbber_style),
+                Span::styled(format!(" {status}"), status_text_style),
+            ]),
+            (true, None) => Line::from(Span::styled(format!("{frame}"), throbber_style)),
+            (false, Some(status)) => {
+                Line::from(Span::styled(status.clone(), status_text_style))
+            }
+            (false, None) => Line::default(),
+        };
+        f.render_widget(Paragraph::new(status_line), status_area);
     }
 
     // ── Input box ─────────────────────────────────────────────────────────────
@@ -970,7 +1012,6 @@ fn build_log_lines(
     messages: &[crate::llm::Message],
     streaming: bool,
     queued_steering: &[String],
-    provider_status: Option<&str>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1156,16 +1197,6 @@ fn build_log_lines(
 
     for queued in queued_steering {
         append_message(&mut lines, &format!("🕹️ {queued}"), "", width, false);
-    }
-
-    if let Some(status) = provider_status {
-        let style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(ratatui::style::Modifier::ITALIC);
-        let chunks = wrap_str(&normalize_terminal_segment(status, 0), width);
-        for chunk in chunks {
-            lines.push(Line::from(vec![Span::styled(chunk, style)]));
-        }
     }
 
     lines
@@ -1879,6 +1910,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert_eq!(heights.input_height as usize, wrapped_lines);
@@ -1900,6 +1933,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert_eq!(heights.input_height, 0);
@@ -1924,6 +1959,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
         let selection = compute_panel_heights(PanelInputs {
             terminal_height: 40,
@@ -1939,6 +1976,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert_eq!(login.completion_height, 0);
@@ -1961,6 +2000,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
         assert_eq!(heights.completion_height, 1);
     }
@@ -1983,6 +2024,8 @@ mod tests {
             ),
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert!(heights.completion_height > 1, "{heights:?}");
@@ -2019,6 +2062,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert_eq!(heights.selection_header_height, 1);
@@ -2044,6 +2089,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
         assert_eq!(heights.input_height, 8);
         assert_eq!(heights.halfblock_height, 1);
@@ -2065,6 +2112,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
         let shown = compute_panel_heights(PanelInputs {
             terminal_height: 20,
@@ -2080,6 +2129,8 @@ mod tests {
             ask_user_question: None,
             login_url: None,
             has_login_code: false,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert_eq!(hidden.info_height, 0);
@@ -2102,6 +2153,8 @@ mod tests {
             ask_user_question: None,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
+            streaming: false,
+            has_provider_status: false,
         });
 
         assert!(heights.input_height <= 1);
@@ -2334,14 +2387,14 @@ mod tests {
     fn hidden_user_messages_are_not_rendered() {
         let mut hidden = Message::user("secret");
         hidden.hidden = true;
-        let lines = build_log_lines(&[hidden, Message::assistant("shown")], false, &[], None, 80);
+        let lines = build_log_lines(&[hidden, Message::assistant("shown")], false, &[], 80);
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "💬 shown");
     }
 
     #[test]
     fn streaming_empty_assistant_message_shows_cursor() {
-        let lines = build_log_lines(&[Message::assistant("")], true, &[], None, 80);
+        let lines = build_log_lines(&[Message::assistant("")], true, &[], 80);
         assert_eq!(line_text(&lines[0]), "💭 ▋");
     }
 
@@ -2351,7 +2404,6 @@ mod tests {
             &[Message::assistant("abcdefghijklmnopqrstuvwxyz")],
             true,
             &[],
-            None,
             8,
         );
         let rows_with_cursor: Vec<usize> = lines
@@ -2366,7 +2418,7 @@ mod tests {
 
     #[test]
     fn user_message_renders_block_edges() {
-        let lines = build_log_lines(&[Message::user("hi")], false, &[], None, 10);
+        let lines = build_log_lines(&[Message::user("hi")], false, &[], 10);
         assert_eq!(line_text(&lines[0]), "▄▄▄▄▄▄▄▄▄▄");
         assert_eq!(line_text(&lines[1]), "hi        ");
         assert_eq!(line_text(&lines[2]), "▀▀▀▀▀▀▀▀▀▀");
@@ -2379,7 +2431,7 @@ mod tests {
             Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], None, 120);
+        let lines = build_log_lines(&messages, false, &[], 120);
         assert!(line_text(&lines[0]).contains("[10-20/300]"));
     }
 
@@ -2390,7 +2442,7 @@ mod tests {
             Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], None, 120);
+        let lines = build_log_lines(&messages, false, &[], 120);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(!rendered.contains("[lines 10-20 of 300]"));
         assert!(rendered.contains("│alpha"));
@@ -2403,7 +2455,7 @@ mod tests {
             Message::tool_result("1", "a".repeat(250), false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], None, 300);
+        let lines = build_log_lines(&messages, false, &[], 300);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains('…'));
     }
@@ -2411,7 +2463,7 @@ mod tests {
     #[test]
     fn assistant_lines_are_prefixed_with_speech_bubble() {
         let messages = vec![Message::assistant("hello")];
-        let lines = build_log_lines(&messages, false, &[], None, 80);
+        let lines = build_log_lines(&messages, false, &[], 80);
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
 
@@ -2419,7 +2471,7 @@ mod tests {
     fn assistant_provisional_phase_uses_thought_bubble() {
         let mut msg = Message::assistant("working");
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let lines = build_log_lines(&[msg], false, &[], None, 80);
+        let lines = build_log_lines(&[msg], false, &[], 80);
         assert_eq!(line_text(&lines[0]), "💭 working");
     }
 
@@ -2427,7 +2479,7 @@ mod tests {
     fn assistant_unknown_phase_streaming_uses_thought_bubble() {
         let mut msg = Message::assistant("streaming");
         msg.assistant_phase = Some(AssistantPhase::Unknown);
-        let lines = build_log_lines(&[msg], true, &[], None, 80);
+        let lines = build_log_lines(&[msg], true, &[], 80);
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
     }
 
@@ -2436,7 +2488,7 @@ mod tests {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some("planning".to_string());
         let messages = vec![msg];
-        let lines = build_log_lines(&messages, false, &[], None, 80);
+        let lines = build_log_lines(&messages, false, &[], 80);
         assert_eq!(line_text(&lines[0]), "🧠 planning");
         assert_eq!(line_text(&lines[2]), "💬 answer");
     }
@@ -2445,7 +2497,7 @@ mod tests {
     fn queued_steering_renders_with_joystick_at_bottom() {
         let messages = vec![Message::assistant("done")];
         let queued = vec!["wait, do this first".to_string()];
-        let lines = build_log_lines(&messages, false, &queued, None, 80);
+        let lines = build_log_lines(&messages, false, &queued, 80);
         assert_eq!(
             line_text(lines.last().expect("expected line")),
             "🕹️ wait, do this first"
@@ -2711,7 +2763,7 @@ mod tests {
             Message::tool_result("1", "\n\n  output line  \n\n", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], None, 80);
+        let lines = build_log_lines(&messages, false, &[], 80);
         // Leading/trailing newlines are stripped; leading spaces (indentation)
         // on the first content line are preserved.
         let result_lines: Vec<_> = lines
@@ -2734,7 +2786,7 @@ mod tests {
             Message::tool_result("1", "    indented output", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], None, 80);
+        let lines = build_log_lines(&messages, false, &[], 80);
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
@@ -2755,7 +2807,7 @@ mod tests {
             Message::tool_result("1", "load: 1.0\n", false),
         ];
 
-        let lines = build_log_lines(&messages, false, &[], None, 80);
+        let lines = build_log_lines(&messages, false, &[], 80);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("│load: 1.0"), "{rendered}");
         // No extra blank line after the content.

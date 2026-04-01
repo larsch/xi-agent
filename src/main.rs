@@ -461,6 +461,8 @@ async fn run(
     config: &TauConfig,
 ) -> io::Result<RunResult> {
     let mut crossterm_events = EventStream::new();
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(320));
+    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Timestamp of the most recent key Press event other than Enter itself.
     // Used on Windows to detect paste-injected Enter events (see above).
@@ -951,6 +953,11 @@ async fn run(
             // ── ask_user tool requests ─────────────────────────────────────────
             Some(req) = app.ask_rx.recv() => {
                 app.receive_ask_request(req);
+            }
+
+            // ── Throbber animation tick ───────────────────────────────────────
+            _ = tick_interval.tick() => {
+                app.tick();
             }
         }
     }

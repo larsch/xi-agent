@@ -23,3 +23,9 @@ perf.data.old
 flamegraph.svg
 log
 .agents/skills/gitea-issue-status
+
+# Session exports
+tau-session-*.html
+
+# Todo / scratch files
+.todo
