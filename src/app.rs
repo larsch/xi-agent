@@ -1458,6 +1458,7 @@ impl App {
             return;
         }
         self.finish_pending_ask(AskUserResponse::Cancelled);
+        self.abort_agent_loop();
     }
 
     fn finish_pending_ask(&mut self, answer: AskUserResponse) {
