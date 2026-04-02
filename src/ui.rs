@@ -1202,14 +1202,40 @@ fn build_log_lines(
     lines
 }
 
-/// Append pre-wrapped colored lines for a single-line tool label.
-/// Wraps if the label is wider than `width`, renders in the given `color`.
+/// Append pre-wrapped colored lines for a tool label.
+/// Preserves explicit newlines in `content`, wrapping each segment as needed.
 fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: usize, color: Color) {
     let style = Style::default().fg(color);
-    let normalized = normalize_terminal_segment(content, 0);
-    let chunks = wrap_str(&normalized, width);
-    for chunk in chunks {
-        out.push(Line::from(vec![Span::styled(chunk, style)]));
+
+    let segments: Vec<&str> = if content.is_empty() {
+        vec![""]
+    } else {
+        content.split('\n').collect()
+    };
+
+    let visible: Vec<usize> = if content.is_empty() {
+        vec![0]
+    } else {
+        segments
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, seg)| {
+                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
+                if seg.is_empty() && !has_nonempty_after {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .collect()
+    };
+
+    for seg_idx in visible {
+        let normalized = normalize_terminal_segment(segments[seg_idx], 0);
+        let chunks = wrap_str(&normalized, width);
+        for chunk in chunks {
+            out.push(Line::from(vec![Span::styled(chunk, style)]));
+        }
     }
 }
 
@@ -2458,6 +2484,34 @@ mod tests {
         let lines = build_log_lines(&messages, false, &[], 300);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains('…'));
+    }
+
+    #[test]
+    fn shell_tool_call_preserves_multiline_command_display() {
+        let messages = vec![Message::tool_call(
+            "1",
+            "bash",
+            json!({"command": "echo one\necho two\necho three"}),
+        )];
+
+        let lines = build_log_lines(&messages, false, &[], 120);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("💻 echo one\necho two\necho three"), "{rendered}");
+    }
+
+    #[test]
+    fn shell_tool_call_truncates_above_five_lines_with_ellipsis_on_its_own_line() {
+        let messages = vec![Message::tool_call(
+            "1",
+            "bash",
+            json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
+        )];
+
+        let lines = build_log_lines(&messages, false, &[], 120);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n…"), "{rendered}");
+        assert!(!rendered.contains("\n\n…"), "{rendered}");
+        assert!(!rendered.contains("l6"), "{rendered}");
     }
 
     #[test]

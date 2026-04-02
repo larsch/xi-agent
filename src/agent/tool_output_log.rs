@@ -66,12 +66,6 @@ impl ToolOutputLog {
         Some(path)
     }
 
-    /// Return the directory used by this log.
-    #[cfg(test)]
-    pub fn base_dir(&self) -> &std::path::Path {
-        &self.dir
-    }
-
     /// Return the directory used by this log (primarily for tests).
     #[cfg(test)]
     pub fn dir(&self) -> &std::path::Path {

@@ -9,6 +9,7 @@
 
 - Render a scrollable, paginated view of the session history, with the most recent command at the bottom.
 - Tool invocations are rendered as "<icon> <args>", where <icon> is a visual representation of the tool (e.g. a terminal icon for `bash`, a pencil for `edit`, etc.).
+  - Shell tool calls (`bash` / `cmd` / `powershell`) show the command with embedded newlines preserved, up to 5 lines. When truncated, the display shows `…` on its own line.
   - `👀` read_file
   - `✏️` write_file
   - `📝` edit_file
