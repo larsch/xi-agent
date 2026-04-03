@@ -378,42 +378,15 @@ impl LlmProvider for OllamaProvider {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         Box::pin(async move {
-            use super::common::map_http_error;
-
-            log::debug!("→ GET {url}");
-            let mut req = client.get(&url);
-            if let Some(key) = &api_key {
-                req = req.bearer_auth(key);
-            }
-            let response = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    log::warn!("ollama list_models error: {e}");
-                    return Err(ProviderError::network(
-                        "Ollama",
-                        format!("request failed: {e}"),
-                    ));
-                }
-            };
-            let status = response.status();
-            log::debug!("← HTTP {status} from ollama list_models");
-            if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(500).collect();
-                log::warn!("ollama list_models failed: status={status} body={preview}");
-                return Err(map_http_error("Ollama", status, text));
-            }
-            let tags: TagsResponse = match response.json().await {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("ollama list_models parse error: {e}");
-                    return Err(ProviderError::other(
-                        "Ollama",
-                        format!("failed to parse response: {e}"),
-                    ));
-                }
-            };
-            Ok(tags.models.into_iter().map(|m| m.name).collect())
+            super::common::fetch_model_list::<TagsResponse, _>(
+                &client,
+                &url,
+                "Ollama",
+                api_key.as_deref(),
+                &[],
+                |r| r.models.into_iter().map(|m| m.name).collect(),
+            )
+            .await
         })
     }
 }

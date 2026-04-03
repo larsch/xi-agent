@@ -512,44 +512,15 @@ impl LlmProvider for OpenAiProvider {
         let extra_headers = self.extra_headers.clone();
         let client = self.client.clone();
         Box::pin(async move {
-            use super::common::map_http_error;
-
-            let mut req = client.get(&url).bearer_auth(&api_key);
-            for (k, v) in &extra_headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            log::debug!("→ GET {url}");
-            let response = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    log::warn!("openai list_models error: {e}");
-                    return Err(ProviderError::network(
-                        "OpenAI",
-                        format!("request failed: {e}"),
-                    ));
-                }
-            };
-            let status = response.status();
-            log::debug!("← HTTP {status} from openai list_models");
-            if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(500).collect();
-                log::warn!("openai list_models failed: status={status} body={preview}");
-                return Err(map_http_error("OpenAI", status, text));
-            }
-            let models: ModelsResponse = match response.json().await {
-                Ok(m) => m,
-                Err(e) => {
-                    log::warn!("openai list_models parse error: {e}");
-                    return Err(ProviderError::other(
-                        "OpenAI",
-                        format!("failed to parse response: {e}"),
-                    ));
-                }
-            };
-            let mut ids: Vec<String> = models.data.into_iter().map(|m| m.id).collect();
-            ids.sort();
-            Ok(ids)
+            super::common::fetch_model_list::<ModelsResponse, _>(
+                &client,
+                &url,
+                "OpenAI",
+                Some(&api_key),
+                &extra_headers,
+                |r| r.data.into_iter().map(|m| m.id).collect(),
+            )
+            .await
         })
     }
 }

@@ -190,6 +190,89 @@ pub async fn send_streaming_request(
     Ok(response)
 }
 
+// ── Model-list fetch helper ───────────────────────────────────────────────────
+
+/// Fetch a JSON endpoint that lists available models, parse the response with
+/// `extract`, sort the resulting names, and return them.
+///
+/// Handles: request construction, optional bearer auth, extra headers,
+/// `send()` error, non-2xx status (via [`map_http_error`]), JSON parse
+/// error, debug/warn logging.  The caller supplies a closure that turns the
+/// parsed response body into a `Vec<String>` of model names.
+///
+/// # Example
+///
+/// ```ignore
+/// fetch_model_list::<ModelsResponse, _>(
+///     &self.client,
+///     &url,
+///     "OpenAI",
+///     Some(&self.api_key),
+///     &self.extra_headers,
+///     |r| r.data.into_iter().map(|m| m.id).collect(),
+/// ).await
+/// ```
+pub async fn fetch_model_list<T, F>(
+    client: &reqwest::Client,
+    url: &str,
+    provider_name: &str,
+    bearer_token: Option<&str>,
+    extra_headers: &[(String, String)],
+    extract: F,
+) -> Result<Vec<String>, super::ProviderError>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce(T) -> Vec<String>,
+{
+    use super::ProviderError;
+
+    let mut req = client.get(url);
+    if let Some(token) = bearer_token {
+        req = req.bearer_auth(token);
+    }
+    for (k, v) in extra_headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    log::debug!("→ GET {url}");
+
+    let response = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("{provider_name} list_models error: {e}");
+            return Err(ProviderError::network(
+                provider_name,
+                format!("request failed: {e}"),
+            ));
+        }
+    };
+
+    let status = response.status();
+    log::debug!("← HTTP {status} from {provider_name} list_models");
+
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        let preview: String = text.chars().take(500).collect();
+        log::warn!("{provider_name} list_models failed: status={status} body={preview}");
+        return Err(map_http_error(provider_name, status, text));
+    }
+
+    let parsed: T = match response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("{provider_name} list_models parse error: {e}");
+            return Err(ProviderError::other(
+                provider_name,
+                format!("failed to parse response: {e}"),
+            ));
+        }
+    };
+
+    let mut ids = extract(parsed);
+    ids.sort();
+    Ok(ids)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

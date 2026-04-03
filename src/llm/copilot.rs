@@ -90,61 +90,36 @@ async fn fetch_and_cache_models(
     access_token: String,
     extra_headers: Vec<(String, String)>,
 ) -> Result<Vec<String>, super::ProviderError> {
-    use super::common::map_http_error;
-
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let client = build_http_client();
-    let mut req = client.get(&url).bearer_auth(&access_token);
-    for (k, v) in &extra_headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-    log::debug!("→ GET {url}");
-    let response = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("copilot list_models error: {e}");
-            return Err(super::ProviderError::network(
-                "Copilot",
-                format!("request failed: {e}"),
-            ));
-        }
-    };
-    let status = response.status();
-    log::debug!("← HTTP {status} from copilot list_models");
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        let preview: String = text.chars().take(500).collect();
-        log::warn!("copilot list_models failed: status={status} body={preview}");
-        return Err(map_http_error("Copilot", status, text));
-    }
-    let parsed: ApiModelsResponse = match response.json().await {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("copilot list_models parse error: {e}");
-            return Err(super::ProviderError::other(
-                "Copilot",
-                format!("failed to parse response: {e}"),
-            ));
-        }
-    };
 
-    // Populate cache with vendor and context-window metadata.
-    if let Ok(mut map) = cache().write() {
-        for entry in &parsed.data {
-            map.insert(
-                entry.id.clone(),
-                CopilotModelMeta {
-                    vendor: entry.vendor.clone(),
-                    max_context_window_tokens: entry.capabilities.limits.max_context_window_tokens,
-                },
-            );
-        }
-        log::debug!("copilot model cache populated: {} entries", map.len());
-    }
-
-    let mut ids: Vec<String> = parsed.data.into_iter().map(|e| e.id).collect();
-    ids.sort();
-    Ok(ids)
+    super::common::fetch_model_list::<ApiModelsResponse, _>(
+        &client,
+        &url,
+        "Copilot",
+        Some(&access_token),
+        &extra_headers,
+        |parsed| {
+            // Populate the metadata cache as a side-effect of parsing.
+            if let Ok(mut map) = cache().write() {
+                for entry in &parsed.data {
+                    map.insert(
+                        entry.id.clone(),
+                        CopilotModelMeta {
+                            vendor: entry.vendor.clone(),
+                            max_context_window_tokens: entry
+                                .capabilities
+                                .limits
+                                .max_context_window_tokens,
+                        },
+                    );
+                }
+                log::debug!("copilot model cache populated: {} entries", map.len());
+            }
+            parsed.data.into_iter().map(|e| e.id).collect()
+        },
+    )
+    .await
 }
 
 // ── Route enum ────────────────────────────────────────────────────────────────
