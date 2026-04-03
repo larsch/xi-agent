@@ -69,6 +69,74 @@ impl ToolResult {
             raw_stderr: None,
         }
     }
+
+    /// If this result is truncated, write `raw_stdout`/`raw_stderr` to `log`,
+    /// build a `[Showing lines X-Y of Z. Full output in …]` notice, append it
+    /// to `content`, and return the updated result.  Returns `self` unchanged
+    /// when `!self.is_truncated` or when no log paths are produced.
+    ///
+    /// `tool_id` is the opaque call identifier used as the log-file key.
+    /// `cmd_summary` is an optional human-readable command label that appears
+    /// in the notice (e.g. `" of \`ls -la\`"`).
+    pub fn with_log_notice(
+        self,
+        tool_id: &str,
+        cmd_summary: Option<&str>,
+        log: &mut crate::agent::tool_output_log::ToolOutputLog,
+    ) -> Self {
+        if !self.is_truncated {
+            return self;
+        }
+
+        let stdout = self.raw_stdout.as_deref().unwrap_or("");
+        let stderr = self.raw_stderr.as_deref().unwrap_or("");
+        let (out_path, err_path) = log.record_streams(tool_id, stdout, stderr);
+
+        let mut file_parts: Vec<String> = Vec::new();
+        if let Some(ref p) = out_path {
+            file_parts.push(p.display().to_string());
+        }
+        if let Some(ref p) = err_path {
+            file_parts.push(p.display().to_string());
+        }
+
+        if file_parts.is_empty() {
+            return self;
+        }
+
+        let cmd_label = cmd_summary
+            .map(|s| format!(" of `{s}`"))
+            .unwrap_or_default();
+        let files = file_parts.join(" and ");
+
+        let notice = if let Some(ref tr) = self.truncation {
+            let start = tr.first_kept_line;
+            let end = tr.first_kept_line + tr.output_lines - 1;
+            format!(
+                "[Showing lines {start}-{end} of {total}. \
+                 Full output{cmd_label} in {files}]",
+                total = tr.total_lines,
+            )
+        } else {
+            format!("[Output truncated. Full output{cmd_label} in {files}]")
+        };
+
+        let mut content = self.content.clone();
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push('\n');
+        content.push_str(&notice);
+
+        Self {
+            content,
+            is_error: self.is_error,
+            is_truncated: true,
+            truncation: self.truncation,
+            raw_stdout: None,
+            raw_stderr: None,
+        }
+    }
 }
 
 // ── Tool trait ────────────────────────────────────────────────────────────────
@@ -197,4 +265,75 @@ pub struct AgentLoopConfig {
     /// Optional hook called after each tool execution.
     /// Return `Some(result)` to override the tool's result.
     pub after_tool_call: Option<AfterToolCall>,
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::ToolResult;
+    use crate::agent::tool_output_log::ToolOutputLog;
+    use crate::agent::tools::truncate::TruncationResult;
+
+    fn truncated_result() -> ToolResult {
+        ToolResult {
+            content: "line1\nline2".to_string(),
+            is_error: false,
+            is_truncated: true,
+            truncation: Some(TruncationResult {
+                content: "line1\nline2".to_string(),
+                truncated: true,
+                total_lines: 100,
+                total_bytes: 5000,
+                output_lines: 2,
+                first_kept_line: 99,
+            }),
+            raw_stdout: Some("line1\nline2".to_string()),
+            raw_stderr: Some(String::new()),
+        }
+    }
+
+    #[test]
+    fn with_log_notice_noop_when_not_truncated() {
+        let mut log = ToolOutputLog::new("test-noop");
+        let r = ToolResult::ok_str("hello");
+        let out = r.with_log_notice("call-1", None, &mut log);
+        assert!(!out.is_truncated);
+        assert_eq!(out.content, "hello");
+    }
+
+    #[test]
+    fn with_log_notice_appends_notice_when_truncated() {
+        let mut log = ToolOutputLog::new("test-notice");
+        let r = truncated_result();
+        let out = r.with_log_notice("call-2", None, &mut log);
+        // Notice should be appended after a blank line.
+        assert!(
+            out.content.contains("[Showing lines"),
+            "notice should contain line range: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("99"),
+            "notice should reference first kept line: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("100"),
+            "notice should reference total lines: {}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn with_log_notice_includes_cmd_summary_when_provided() {
+        let mut log = ToolOutputLog::new("test-cmd");
+        let r = truncated_result();
+        let out = r.with_log_notice("call-3", Some("ls -la"), &mut log);
+        assert!(
+            out.content.contains("of `ls -la`"),
+            "notice should include command summary: {}",
+            out.content
+        );
+    }
 }
