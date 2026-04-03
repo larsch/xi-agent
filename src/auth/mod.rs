@@ -166,50 +166,54 @@ pub async fn login_provider(
     let _ = tx.send(LoginEvent::Finished);
 }
 
-pub async fn refresh_provider(provider: &str, tx: UnboundedSender<LoginEvent>) {
-    log::debug!("refresh_provider called: provider={provider}");
-    let result: anyhow::Result<()> = match provider {
+/// Refresh the stored OAuth token for `provider` and persist the result.
+///
+/// This is the single implementation of token renewal. It performs the HTTP
+/// refresh, updates the auth store on disk, and returns `Ok(())` on success.
+///
+/// Supported providers: `"copilot"`, `"codex"`, `"gemini"`.
+pub async fn refresh_token(provider: &str) -> anyhow::Result<()> {
+    log::debug!("refresh_token called: provider={provider}");
+    match provider {
         "copilot" => {
-            async {
-                let mut store = AuthStore::load_default()?;
-                let creds = store
-                    .get_copilot()
-                    .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
-                let refreshed = copilot::refresh(&creds.refresh_token).await?;
-                store.set_copilot(refreshed);
-                store.save()
-            }
-            .await
+            let mut store = AuthStore::load_default()?;
+            let creds = store
+                .get_copilot()
+                .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
+            let refreshed = copilot::refresh(&creds.refresh_token).await?;
+            store.set_copilot(refreshed);
+            store.save()
         }
         "codex" => {
-            async {
-                let mut store = AuthStore::load_default()?;
-                let creds = store
-                    .get_codex()
-                    .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
-                let refreshed = codex::refresh(&creds.refresh_token).await?;
-                store.set_codex(refreshed);
-                store.save()
-            }
-            .await
+            let mut store = AuthStore::load_default()?;
+            let creds = store
+                .get_codex()
+                .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
+            let refreshed = codex::refresh(&creds.refresh_token).await?;
+            store.set_codex(refreshed);
+            store.save()
         }
         "gemini" => {
-            async {
-                let mut store = AuthStore::load_default()?;
-                let creds = store
-                    .get_gemini()
-                    .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
-                let refreshed = gemini::refresh(&creds.refresh_token, &creds.project_id).await?;
-                store.set_gemini(refreshed);
-                store.save()
-            }
-            .await
+            let mut store = AuthStore::load_default()?;
+            let creds = store
+                .get_gemini()
+                .ok_or_else(|| anyhow::anyhow!("No stored credentials"))?;
+            let refreshed = gemini::refresh(&creds.refresh_token, &creds.project_id).await?;
+            store.set_gemini(refreshed);
+            store.save()
         }
         _ => Err(anyhow::anyhow!(
             "Refresh not supported for provider {provider}"
         )),
-    };
+    }
+}
 
+/// Refresh the stored token for `provider` and report the outcome on `tx`.
+///
+/// This is a thin wrapper around [`refresh_token`] for use by the interactive
+/// TUI, which communicates refresh results via a [`LoginEvent`] channel.
+pub async fn refresh_provider(provider: &str, tx: UnboundedSender<LoginEvent>) {
+    let result = refresh_token(provider).await;
     match result {
         Ok(()) => {
             let _ = tx.send(LoginEvent::RefreshResult {

@@ -1044,8 +1044,62 @@ fn maybe_warn_thinking_unsupported(
 
 // ── Non-interactive helpers ───────────────────────────────────────────────────
 
+/// Parameters needed to rebuild a provider after a reactive token refresh.
+struct PrintModeProviderCtx<'a> {
+    kind: &'a ProviderKind,
+    model: &'a str,
+    thinking: ThinkingLevel,
+    tau_config: &'a TauConfig,
+    name: &'a str,
+}
+
 /// Non-interactive mode: run the agent loop for `prompt`, stream output to
 /// stdout, and exit when the loop finishes.
+/// Returns `true` if `provider` is one of the three OAuth providers that
+/// support token refresh (copilot, codex, gemini).
+fn provider_supports_token_refresh(provider: &str) -> bool {
+    matches!(provider, "copilot" | "codex" | "gemini")
+}
+
+/// Proactively refresh the token for `provider` if it is expired or expiring
+/// soon. Does nothing (and returns `false`) for providers that do not support
+/// refresh. Returns `true` when a refresh was performed successfully.
+async fn preflight_token_refresh(provider: &str) -> bool {
+    if !provider_supports_token_refresh(provider) {
+        return false;
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let state = match auth::token_state(provider, now_secs, auth::AUTH_REFRESH_LEEWAY_SECS) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("preflight token check failed: {e}");
+            return false;
+        }
+    };
+
+    match state {
+        auth::AuthTokenState::Expired | auth::AuthTokenState::ExpiringSoon => {
+            log::debug!("preflight: token {state:?}, refreshing before request");
+            match auth::refresh_token(provider).await {
+                Ok(()) => {
+                    log::debug!("preflight: token refreshed successfully");
+                    true
+                }
+                Err(e) => {
+                    log::warn!("preflight: token refresh failed: {e}");
+                    false
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
 async fn run_print_mode(
     prompt: String,
     provider_override: Option<&str>,
@@ -1055,6 +1109,11 @@ async fn run_print_mode(
     let current_kind = resolve_provider_kind(provider_override, config);
     let current_model = resolve_model(model_override, &current_kind, config);
     let current_thinking = resolve_thinking_level_for_model(config, &current_model);
+    let provider_name = current_kind.name().to_string();
+
+    // Proactive preflight: refresh the token before building the provider so
+    // that build_provider reads fresh credentials from the auth store.
+    preflight_token_refresh(&provider_name).await;
 
     let provider = build_provider(&current_kind, &current_model, current_thinking, config)
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
@@ -1071,7 +1130,7 @@ async fn run_print_mode(
 
     let messages: Vec<Message> = vec![Message::system(&system_prompt), Message::user(&prompt)];
 
-    let config = AgentLoopConfig {
+    let loop_config = AgentLoopConfig {
         tools,
         file_tracker: headless_tracker,
         tool_output_log: headless_log,
@@ -1079,14 +1138,36 @@ async fn run_print_mode(
         after_tool_call: None,
     };
 
+    let provider_ctx = PrintModeProviderCtx {
+        kind: &current_kind,
+        model: &current_model,
+        thinking: current_thinking,
+        tau_config: config,
+        name: &provider_name,
+    };
+
+    let exit_code = run_print_mode_loop(messages, loop_config, provider, &provider_ctx).await;
+
+    std::process::exit(exit_code);
+}
+
+/// Drive the agent event loop for `--print` mode, handling one reactive token
+/// refresh + retry on a 401 Unauthorized error. Returns the process exit code.
+async fn run_print_mode_loop(
+    messages: Vec<Message>,
+    config: AgentLoopConfig,
+    provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
+    ctx: &PrintModeProviderCtx<'_>,
+) -> i32 {
+    // Keep a clone of messages so we can retry the agent loop once on 401.
+    let messages_for_retry = messages.clone();
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     tokio::spawn(async move {
         agent::run_agent_loop(messages, config, provider, tx, steering_rx).await;
     });
-
-    let mut exit_code = 0i32;
 
     while let Some(ev) = rx.recv().await {
         match ev {
@@ -1129,17 +1210,124 @@ async fn run_print_mode(
             }
             AgentEvent::Done => {
                 println!(); // final newline after streamed output
-                break;
+                return 0;
             }
             AgentEvent::Error(e) => {
+                // Reactive 401 handling: refresh the token once and retry.
+                if e.kind == llm::ProviderErrorKind::Unauthorized
+                    && provider_supports_token_refresh(ctx.name)
+                {
+                    log::debug!("received 401 in print mode, attempting token refresh");
+                    match auth::refresh_token(ctx.name).await {
+                        Ok(()) => {
+                            log::debug!("reactive refresh succeeded, rebuilding provider and retrying");
+                            match build_provider(
+                                ctx.kind,
+                                ctx.model,
+                                ctx.thinking,
+                                ctx.tau_config,
+                            ) {
+                                Ok(new_provider) => {
+                                    // Run the loop a second time with the refreshed provider.
+                                    // `retried = true` prevents further recursive retries.
+                                    return run_print_mode_loop_inner(
+                                        messages_for_retry,
+                                        new_provider,
+                                    )
+                                    .await;
+                                }
+                                Err(build_err) => {
+                                    eprintln!("error: token refreshed but failed to rebuild provider: {build_err}");
+                                    return 1;
+                                }
+                            }
+                        }
+                        Err(refresh_err) => {
+                            log::warn!("reactive refresh failed: {refresh_err}");
+                            eprintln!("error: {e} (token refresh also failed: {refresh_err})");
+                            return 1;
+                        }
+                    }
+                }
+
                 eprintln!("error: {e}");
-                exit_code = 1;
-                break;
+                return 1;
             }
         }
     }
 
-    std::process::exit(exit_code);
+    0
+}
+
+/// Inner agent loop used for the single retry after a reactive token refresh.
+/// Identical event handling to `run_print_mode_loop` but without a further
+/// retry on 401 (budget is exhausted after one attempt).
+async fn run_print_mode_loop_inner(
+    messages: Vec<Message>,
+    provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
+) -> i32 {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // AgentLoopConfig is not Clone; rebuild a minimal headless one for the retry.
+    let retry_tracker = Arc::new(Mutex::new(FileTracker::new()));
+    let retry_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless-retry")));
+    let custom_tools = load_custom_tools(&custom_tool_dirs());
+    let retry_tools = register_builtin_tools(None, Arc::clone(&retry_tracker), custom_tools);
+    let retry_config = AgentLoopConfig {
+        tools: retry_tools,
+        file_tracker: retry_tracker,
+        tool_output_log: retry_log,
+        before_tool_call: None,
+        after_tool_call: None,
+    };
+
+    tokio::spawn(async move {
+        agent::run_agent_loop(messages, retry_config, provider, tx, steering_rx).await;
+    });
+
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::TextToken { text, .. } => {
+                print!("{text}");
+                use std::io::Write;
+                let _ = io::stdout().flush();
+            }
+            AgentEvent::ThinkingToken(_)
+            | AgentEvent::Usage(_)
+            | AgentEvent::ToolIntentStart
+            | AgentEvent::SteeringConsumed { .. }
+            | AgentEvent::TurnEnd => {}
+            AgentEvent::StatusUpdate(msg) => {
+                eprintln!("{msg}");
+            }
+            AgentEvent::ToolCallStart { name, args, .. } => {
+                eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
+            }
+            AgentEvent::ToolCallEnd {
+                name: _, result, ..
+            } => {
+                if result.is_error {
+                    eprintln!("  ✗ {}", result.content.lines().next().unwrap_or("error"));
+                }
+            }
+            AgentEvent::ExternalFileChange { paths, .. } => {
+                for path in &paths {
+                    eprintln!("⚠️  {} was modified externally", path.display());
+                }
+            }
+            AgentEvent::Done => {
+                println!();
+                return 0;
+            }
+            AgentEvent::Error(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        }
+    }
+
+    0
 }
 
 #[cfg(test)]
