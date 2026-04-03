@@ -116,7 +116,11 @@ fn parse_duration_after(text: &str, prefix: &str) -> Option<u64> {
     }
 
     let total = hours * 3_600_000.0 + mins * 60_000.0 + secs * 1000.0;
-    if total > 0.0 { Some(total.ceil() as u64) } else { None }
+    if total > 0.0 {
+        Some(total.ceil() as u64)
+    } else {
+        None
+    }
 }
 
 /// Parse a value like `"5s"` or `"500ms"` from the start of `text`, ignoring

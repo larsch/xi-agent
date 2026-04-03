@@ -72,7 +72,11 @@ fn compact(input: &str) -> String {
     if one_line.chars().count() <= MAX_ONE_LINE_CHARS {
         return one_line;
     }
-    one_line.chars().take(MAX_ONE_LINE_CHARS).collect::<String>() + "…"
+    one_line
+        .chars()
+        .take(MAX_ONE_LINE_CHARS)
+        .collect::<String>()
+        + "…"
 }
 
 fn multiline_shell_command(input: &str) -> String {
@@ -116,10 +120,7 @@ mod tests {
 
     #[test]
     fn shell_label_truncates_after_five_lines_with_standalone_ellipsis() {
-        let label = tool_invocation_label(
-            "bash",
-            &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
-        );
+        let label = tool_invocation_label("bash", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
         assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n…");
     }
 

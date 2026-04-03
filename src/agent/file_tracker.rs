@@ -315,7 +315,11 @@ mod tests {
         std::fs::write(f.path(), "user-changed\n").unwrap();
 
         let changed = tracker.check_modified();
-        assert_eq!(changed.len(), 1, "user edit after refresh should be reported");
+        assert_eq!(
+            changed.len(),
+            1,
+            "user edit after refresh should be reported"
+        );
         assert_eq!(changed[0].new_content, "user-changed\n");
     }
 

@@ -189,7 +189,8 @@ pub struct AgentLoopConfig {
     /// external modifications before each LLM turn.
     pub file_tracker: std::sync::Arc<std::sync::Mutex<crate::agent::file_tracker::FileTracker>>,
     /// Log that persists full tool output to temp files for the session.
-    pub tool_output_log: std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+    pub tool_output_log:
+        std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
     /// Optional hook called before each tool execution.
     /// Return `false` to block the tool call (an error result is returned instead).
     pub before_tool_call: Option<BeforeToolCall>,

@@ -392,7 +392,10 @@ enum RunResult {
     /// Switch to (or stay on) Ollama with a new base URL.
     ChangeOllamaEndpoint(String),
     /// Switch to Open WebUI with a new base URL and API key.
-    ChangeOpenWebUi { url: String, api_key: String },
+    ChangeOpenWebUi {
+        url: String,
+        api_key: String,
+    },
 }
 
 fn normalize_paste_text(text: &str) -> String {
@@ -1220,13 +1223,11 @@ async fn run_print_mode_loop(
                     log::debug!("received 401 in print mode, attempting token refresh");
                     match auth::refresh_token(ctx.name).await {
                         Ok(()) => {
-                            log::debug!("reactive refresh succeeded, rebuilding provider and retrying");
-                            match build_provider(
-                                ctx.kind,
-                                ctx.model,
-                                ctx.thinking,
-                                ctx.tau_config,
-                            ) {
+                            log::debug!(
+                                "reactive refresh succeeded, rebuilding provider and retrying"
+                            );
+                            match build_provider(ctx.kind, ctx.model, ctx.thinking, ctx.tau_config)
+                            {
                                 Ok(new_provider) => {
                                     // Run the loop a second time with the refreshed provider.
                                     // `retried = true` prevents further recursive retries.
@@ -1237,7 +1238,9 @@ async fn run_print_mode_loop(
                                     .await;
                                 }
                                 Err(build_err) => {
-                                    eprintln!("error: token refreshed but failed to rebuild provider: {build_err}");
+                                    eprintln!(
+                                        "error: token refreshed but failed to rebuild provider: {build_err}"
+                                    );
                                     return 1;
                                 }
                             }

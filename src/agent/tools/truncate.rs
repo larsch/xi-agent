@@ -35,7 +35,11 @@ pub fn truncate_tail(content: &str) -> TruncationResult {
 
 pub const SINGLE_LINE_MAX_BYTES: usize = 240;
 
-pub fn truncate_tail_with_limits(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
+pub fn truncate_tail_with_limits(
+    content: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> TruncationResult {
     let total_bytes = content.len();
 
     // Strip a single trailing newline before splitting so it doesn't produce
@@ -138,7 +142,11 @@ pub fn truncate_head(content: &str) -> TruncationResult {
 }
 
 #[allow(dead_code)]
-pub fn truncate_head_with_limits(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
+pub fn truncate_head_with_limits(
+    content: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> TruncationResult {
     let total_bytes = content.len();
     let lines: Vec<&str> = content.split('\n').collect();
     let total_lines = lines.len();

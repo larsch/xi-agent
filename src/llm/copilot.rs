@@ -5,9 +5,9 @@ use serde::Deserialize;
 
 use super::anthropic::AnthropicProvider;
 use super::codex::CodexProvider;
+use super::common::build_http_client;
 use super::openai::OpenAiProvider;
 use super::{LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition};
-use super::common::build_http_client;
 
 // ── Model metadata cache ──────────────────────────────────────────────────────
 

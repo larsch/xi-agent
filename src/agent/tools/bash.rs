@@ -165,18 +165,14 @@ mod tests {
     async fn bash_truncates_large_output() {
         let tool = BashTool;
         // Generate output larger than 50 KiB.
-        let args =
-            serde_json::json!({"command": "head -c 102400 /dev/urandom | base64"});
+        let args = serde_json::json!({"command": "head -c 102400 /dev/urandom | base64"});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
             result.is_truncated,
             "expected is_truncated for large output"
         );
-        assert!(
-            result.truncation.is_some(),
-            "expected truncation metadata"
-        );
+        assert!(result.truncation.is_some(), "expected truncation metadata");
     }
 
     #[tokio::test]

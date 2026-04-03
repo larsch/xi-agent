@@ -1,10 +1,10 @@
 use ratatui::text::Line;
+use ratatui_textarea::{CursorMove, TextArea};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use tokio::task::JoinHandle;
-use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::{
     agent::{
@@ -78,7 +78,8 @@ enum SelectionKind {
     AskUser,
     LoginAction,
     OllamaEndpoint,
-}#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
     Chat,
     Shell,

@@ -47,11 +47,7 @@ pub fn read_agents_md(cwd: &str, test_home: Option<&Path>) -> String {
 ///
 /// Structure mirrors pi-mono's `buildSystemPrompt`: identity, tool list,
 /// tool-aware guidelines, project context (AGENTS.md), skills, then date/cwd.
-pub fn build_system_prompt(
-    tools: &ToolRegistry,
-    cwd: &str,
-    skills: &[SkillMeta],
-) -> String {
+pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]) -> String {
     let date = Local::now().format("%Y-%m-%d").to_string();
 
     // Build tool list sorted by name for deterministic output.
@@ -88,7 +84,8 @@ pub fn build_system_prompt(
         guidelines.push("Use read_file to examine files before editing. You must use this tool instead of cat or sed.".to_string());
     }
     if has("edit_file") {
-        guidelines.push("Use edit_file for precise changes — old_text must match exactly.".to_string());
+        guidelines
+            .push("Use edit_file for precise changes — old_text must match exactly.".to_string());
     }
     if has("write_file") {
         guidelines.push("Use write_file only for new files or complete rewrites.".to_string());

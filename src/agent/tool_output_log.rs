@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 /// Per-session store for full tool output files.
 ///
@@ -57,10 +54,7 @@ impl ToolOutputLog {
     fn write_file(&self, filename: &str, content: &str) -> Option<PathBuf> {
         let path = self.dir.join(filename);
         if let Err(e) = fs::write(&path, content) {
-            log::debug!(
-                "tool_output_log: failed to write {}: {e}",
-                path.display()
-            );
+            log::debug!("tool_output_log: failed to write {}: {e}", path.display());
             return None;
         }
         Some(path)

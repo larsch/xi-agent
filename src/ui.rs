@@ -195,13 +195,12 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 
     let input_height = if input.login_active { 0 } else { capped_input };
     let halfblock_height: u16 = if input.login_active { 0 } else { 1 };
-    let status_height: u16 = if !input.login_active
-        && (input.streaming || input.has_provider_status)
-    {
-        1
-    } else {
-        0
-    };
+    let status_height: u16 =
+        if !input.login_active && (input.streaming || input.has_provider_status) {
+            1
+        } else {
+            0
+        };
 
     PanelHeights {
         completion_height,
@@ -219,12 +218,7 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        let lines = build_log_lines(
-            &app.messages,
-            app.streaming,
-            &app.queued_steering,
-            width,
-        );
+        let lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, width);
         app.cached_log_lines = Some((app.log_revision, width, lines));
     }
     &app.cached_log_lines.as_ref().unwrap().2
@@ -573,9 +567,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 Span::styled(format!(" {status}"), status_text_style),
             ]),
             (true, None) => Line::from(Span::styled(format!("{frame}"), throbber_style)),
-            (false, Some(status)) => {
-                Line::from(Span::styled(status.clone(), status_text_style))
-            }
+            (false, Some(status)) => Line::from(Span::styled(status.clone(), status_text_style)),
             (false, None) => Line::default(),
         };
         f.render_widget(Paragraph::new(status_line), status_area);
@@ -2496,7 +2488,10 @@ mod tests {
 
         let lines = build_log_lines(&messages, false, &[], 120);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("💻 echo one\necho two\necho three"), "{rendered}");
+        assert!(
+            rendered.contains("💻 echo one\necho two\necho three"),
+            "{rendered}"
+        );
     }
 
     #[test]

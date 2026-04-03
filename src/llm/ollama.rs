@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
-    Role, ToolDefinition, UsageStats, common::{send_streaming_request, build_http_client},
+    Role, ToolDefinition, UsageStats,
+    common::{build_http_client, send_streaming_request},
 };
 
 pub struct OllamaProvider {
@@ -381,7 +382,9 @@ impl LlmProvider for OllamaProvider {
 
             log::debug!("→ GET {url}");
             let mut req = client.get(&url);
-            if let Some(key) = &api_key { req = req.bearer_auth(key); }
+            if let Some(key) = &api_key {
+                req = req.bearer_auth(key);
+            }
             let response = match req.send().await {
                 Ok(r) => r,
                 Err(e) => {

@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{SseLineDecoder, build_http_client, infer_initiator, normalize_tool_name, send_streaming_request},
+    common::{
+        SseLineDecoder, build_http_client, infer_initiator, normalize_tool_name,
+        send_streaming_request,
+    },
 };
 
 pub struct AnthropicProvider {
