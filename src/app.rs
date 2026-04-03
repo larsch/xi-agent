@@ -1846,6 +1846,45 @@ impl App {
         }));
     }
 
+    /// Build the message list to send to the LLM from the current history.
+    ///
+    /// Prepends the system prompt (if set), filters out messages where
+    /// `include_in_llm` is false, and removes a trailing empty provisional
+    /// assistant message that may be left over from an interrupted turn.
+    fn prepare_llm_messages(&self) -> Vec<Message> {
+        let mut msgs: Vec<Message> = self
+            .system_prompt
+            .iter()
+            .map(Message::system)
+            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
+            .collect();
+
+        // Drop a trailing empty assistant message that was added only to hold
+        // the ToolIntentStart phase marker — sending it to the LLM is harmless
+        // but confusing.
+        if matches!(msgs.last().map(|m| &m.role), Some(Role::Assistant))
+            && msgs.last().map(|m| m.content.is_empty()).unwrap_or(false)
+        {
+            msgs.pop();
+        }
+
+        msgs
+    }
+
+    /// Set streaming flags and spawn the agent task using the current history.
+    ///
+    /// Call after pushing any new user message(s) and persisting state.
+    /// Does **not** perform the pre-flight token check — callers are
+    /// responsible for calling `check_token_preflight` before this.
+    fn launch_turn(&mut self, provider: &DynProvider) {
+        self.streaming = true;
+        self.auth_retry_budget = 1;
+        self.latest_usage = None;
+        self.auto_scroll = true;
+        let llm_messages = self.prepare_llm_messages();
+        self.start_agent_task(llm_messages, provider);
+    }
+
     /// Queue a user steering message while the agent loop is running.
     pub fn enqueue_steering_from_input(&mut self) {
         let lines: Vec<String> = self.textarea.lines().to_vec();
@@ -1880,8 +1919,6 @@ impl App {
         self.bump_log_revision();
         self.persist_messages();
         self.reset_textarea();
-        self.latest_usage = None;
-        self.auto_scroll = true;
 
         // Proactive token refresh check before starting the request
         if self.check_token_preflight(RetryTarget::AgentTurn) {
@@ -1889,26 +1926,7 @@ impl App {
             return;
         }
 
-        self.streaming = true;
-        self.auth_retry_budget = 1;
-
-        let mut llm_messages: Vec<Message> = self
-            .system_prompt
-            .iter()
-            .map(Message::system)
-            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
-            .collect();
-
-        if matches!(llm_messages.last().map(|m| &m.role), Some(Role::Assistant))
-            && llm_messages
-                .last()
-                .map(|m| m.content.is_empty())
-                .unwrap_or(false)
-        {
-            llm_messages.pop();
-        }
-
-        self.start_agent_task(llm_messages, provider);
+        self.launch_turn(provider);
     }
 
     /// Submit a pre-built text string directly to the agent loop, bypassing the
@@ -1918,14 +1936,10 @@ impl App {
             return;
         }
 
-        let sanitized = text.trim().to_string();
-        let msg = Message::user(sanitized);
-        self.messages.push(msg);
+        self.messages.push(Message::user(text.trim().to_string()));
         self.bump_log_revision();
         self.persist_messages();
         self.reset_textarea();
-        self.latest_usage = None;
-        self.auto_scroll = true;
 
         // Proactive token refresh check before starting the request
         if self.check_token_preflight(RetryTarget::AgentTurn) {
@@ -1933,17 +1947,7 @@ impl App {
             return;
         }
 
-        self.streaming = true;
-        self.auth_retry_budget = 1;
-
-        let llm_messages: Vec<Message> = self
-            .system_prompt
-            .iter()
-            .map(Message::system)
-            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
-            .collect();
-
-        self.start_agent_task(llm_messages, provider);
+        self.launch_turn(provider);
     }
 
     pub fn retry_last_request(&mut self, provider: &DynProvider) {
@@ -1960,18 +1964,7 @@ impl App {
             self.persist_messages();
         }
 
-        self.streaming = true;
-        self.latest_usage = None;
-        self.auto_scroll = true;
-
-        let llm_messages: Vec<Message> = self
-            .system_prompt
-            .iter()
-            .map(Message::system)
-            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
-            .collect();
-
-        self.start_agent_task(llm_messages, provider);
+        self.launch_turn(provider);
     }
 
     /// Remove any trailing `ToolCall` messages that have no paired `ToolResult`.
@@ -2543,5 +2536,43 @@ mod tests {
                 "abort should append user-visible abort notice"
             );
         });
+    }
+
+    // ── prepare_llm_messages ─────────────────────────────────────────────────
+
+    #[test]
+    fn prepare_llm_messages_prepends_system_prompt() {
+        let mut app = make_app();
+        app.system_prompt = Some("be helpful".to_string());
+        app.messages.push(Message::user("hello"));
+        let msgs = app.prepare_llm_messages();
+        assert_eq!(msgs[0].role, Role::System);
+        assert_eq!(msgs[0].content, "be helpful");
+        assert_eq!(msgs[1].role, Role::User);
+    }
+
+    #[test]
+    fn prepare_llm_messages_filters_include_in_llm_false() {
+        let mut app = make_app();
+        let mut hidden = Message::user("hidden");
+        hidden.include_in_llm = false;
+        app.messages.push(hidden);
+        app.messages.push(Message::user("visible"));
+        let msgs = app.prepare_llm_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "visible");
+    }
+
+    #[test]
+    fn prepare_llm_messages_pops_trailing_empty_assistant() {
+        use crate::llm::AssistantPhase;
+        let mut app = make_app();
+        app.messages.push(Message::user("hello"));
+        let mut asst = Message::assistant("");
+        asst.assistant_phase = Some(AssistantPhase::Provisional);
+        app.messages.push(asst);
+        let msgs = app.prepare_llm_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
     }
 }
