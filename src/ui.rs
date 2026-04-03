@@ -244,15 +244,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         width,
         input_line_count,
         show_info: app.show_info,
-        login_active: app.login_active,
-        selection_mode: app.selection_mode,
-        selection_items_len: app.selection_items.len(),
+        login_active: app.login.active,
+        selection_mode: app.selection.active,
+        selection_items_len: app.selection.items.len(),
         completions_len: app.completions.len(),
         resume_hint_visible,
         ask_user_freeform_mode: app.ask_user_freeform_mode,
         ask_user_question: app.ask_user_question.as_deref(),
-        login_url: app.login_url.as_deref(),
-        has_login_code: app.login_code.is_some(),
+        login_url: app.login.url.as_deref(),
+        has_login_code: app.login.code.is_some(),
         streaming: app.throbber_visible(),
         has_provider_status: app.provider_status.is_some(),
     });
@@ -418,18 +418,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Selection menu ────────────────────────────────────────────────────────
-    if app.selection_mode {
+    if app.selection.active {
         // Header row: title on the left, key hints on the right.
         let hints = if app.selection_filter_enabled() {
             "↑↓ navigate   type filter   Enter select   Esc cancel  "
         } else {
             "↑↓ navigate   Enter select   Esc cancel  "
         };
-        let title = app.selection_title;
-        let query = if app.selection_query.is_empty() {
+        let title = app.selection.title;
+        let query = if app.selection.query.is_empty() {
             "".to_string()
         } else {
-            format!("filter: {}", app.selection_query)
+            format!("filter: {}", app.selection.query)
         };
         let query_width = query.width();
         let gap = width.saturating_sub(title.width() + query_width + hints.width());
@@ -457,14 +457,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
         // Item rows.
         if layout.selection_items_height > 0 {
-            let selection_total = app.selection_items.len();
+            let selection_total = app.selection.items.len();
             let selection_scrollbar_needed = selection_total > MAX_SELECTION_VISIBLE;
             let (selection_content_area, selection_scrollbar_area) = if selection_scrollbar_needed {
                 split_scrollbar_column(sel_items_area)
             } else {
                 (sel_items_area, None)
             };
-            let item_lines = if app.selection_items.is_empty() {
+            let item_lines = if app.selection.items.is_empty() {
                 vec![Line::from(vec![
                     Span::styled("  ", Style::default().bg(SELECTION_BG)),
                     Span::styled(
@@ -476,9 +476,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 ])]
             } else {
                 build_selection_lines(
-                    &app.selection_items,
-                    app.selection_selected,
-                    app.selection_scroll,
+                    &app.selection.items,
+                    app.selection.selected,
+                    app.selection.scroll,
                     selection_content_area.width as usize,
                 )
             };
@@ -488,7 +488,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             if selection_scrollbar_needed {
                 let max_scroll = selection_total - MAX_SELECTION_VISIBLE;
                 let mut sb_state =
-                    ScrollbarState::new(max_scroll + 1).position(app.selection_scroll);
+                    ScrollbarState::new(max_scroll + 1).position(app.selection.scroll);
                 f.render_stateful_widget(
                     Scrollbar::new(ScrollbarOrientation::VerticalRight),
                     selection_scrollbar_area.unwrap_or(sel_items_area),
@@ -499,9 +499,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Login panel ───────────────────────────────────────────────────────────
-    if app.login_active {
+    if app.login.active {
         let provider = app
-            .login_provider
+            .login
+            .provider
             .clone()
             .unwrap_or_else(|| "provider".to_string());
 
@@ -533,7 +534,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Halfblock edges ───────────────────────────────────────────────────────
-    if !app.login_active {
+    if !app.login.active {
         let panel_bg = if app.input_mode == InputMode::Shell {
             SHELL_INPUT_BG
         } else {
@@ -574,7 +575,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Input box ─────────────────────────────────────────────────────────────
-    if !app.login_active {
+    if !app.login.active {
         let is_shell = app.input_mode == InputMode::Shell;
         let panel_bg = if is_shell { SHELL_INPUT_BG } else { INPUT_BG };
 
@@ -767,7 +768,7 @@ fn build_login_content_lines(app: &mut App, width: usize) -> Vec<Line<'static>> 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Row 0 — instruction text (flow-dependent).
-    let instruction = match app.login_auth_flow {
+    let instruction = match app.login.auth_flow {
         Some(AuthFlow::DeviceCode) => {
             "  Open the URL below, then enter the code shown into the browser."
         }
@@ -783,7 +784,7 @@ fn build_login_content_lines(app: &mut App, width: usize) -> Vec<Line<'static>> 
     ]));
 
     // Row 1 — status / progress line.
-    let info = app.login_info.clone();
+    let info = app.login.info.clone();
     let info_len = info.width();
     lines.push(Line::from(vec![
         Span::styled(format!("  {info}"), status_style),
@@ -791,7 +792,7 @@ fn build_login_content_lines(app: &mut App, width: usize) -> Vec<Line<'static>> 
     ]));
 
     // Rows 2+ — URL label + wrapped URL lines.
-    if let Some(url) = &app.login_url {
+    if let Some(url) = &app.login.url {
         let url_label = "  URL:";
         let url_label_len = url_label.width();
         lines.push(Line::from(vec![
@@ -812,7 +813,7 @@ fn build_login_content_lines(app: &mut App, width: usize) -> Vec<Line<'static>> 
     }
 
     // Final row — device code (Copilot only).
-    if let Some(code) = &app.login_code {
+    if let Some(code) = &app.login.code {
         const CODE_PREFIX: &str = "  Code: ";
         let used = CODE_PREFIX.len() + code.len();
         lines.push(Line::from(vec![
@@ -2184,9 +2185,9 @@ mod tests {
     #[test]
     fn draw_login_mode_renders_auth_header_and_hides_input_textarea() {
         let mut app = make_app();
-        app.login_active = true;
-        app.login_provider = Some("copilot".to_string());
-        app.login_info = "Waiting for browser".to_string();
+        app.login.active = true;
+        app.login.provider = Some("copilot".to_string());
+        app.login.info = "Waiting for browser".to_string();
 
         app.textarea.insert_char('x');
 
@@ -2199,9 +2200,9 @@ mod tests {
     #[test]
     fn draw_selection_mode_renders_title_and_visible_items() {
         let mut app = make_app();
-        app.selection_mode = true;
-        app.selection_title = "  Pick item  ";
-        app.selection_items = vec![
+        app.selection.active = true;
+        app.selection.title = "  Pick item  ";
+        app.selection.items = vec![
             CompletionItem {
                 label: "alpha".to_string(),
                 detail: String::new(),
@@ -2242,8 +2243,8 @@ mod tests {
     #[test]
     fn login_content_uses_device_flow_instruction() {
         let mut app = make_app();
-        app.login_auth_flow = Some(AuthFlow::DeviceCode);
-        app.login_info = "Waiting".to_string();
+        app.login.auth_flow = Some(AuthFlow::DeviceCode);
+        app.login.info = "Waiting".to_string();
 
         let lines = build_login_content_lines(&mut app, 80);
         let row0 = line_text(&lines[0]);
@@ -2253,8 +2254,8 @@ mod tests {
     #[test]
     fn login_content_uses_redirect_flow_instruction() {
         let mut app = make_app();
-        app.login_auth_flow = Some(AuthFlow::RedirectCallback);
-        app.login_info = "Waiting".to_string();
+        app.login.auth_flow = Some(AuthFlow::RedirectCallback);
+        app.login.info = "Waiting".to_string();
 
         let lines = build_login_content_lines(&mut app, 80);
         let row0 = line_text(&lines[0]);
@@ -2264,8 +2265,8 @@ mod tests {
     #[test]
     fn login_content_wraps_url_for_narrow_width() {
         let mut app = make_app();
-        app.login_info = "Waiting".to_string();
-        app.login_url = Some("https://example.com/very/long/path/that/should/wrap".to_string());
+        app.login.info = "Waiting".to_string();
+        app.login.url = Some("https://example.com/very/long/path/that/should/wrap".to_string());
 
         let lines = build_login_content_lines(&mut app, 20);
         assert!(
@@ -2279,13 +2280,13 @@ mod tests {
     #[test]
     fn login_content_shows_code_row_only_when_present() {
         let mut without_code = make_app();
-        without_code.login_info = "Waiting".to_string();
+        without_code.login.info = "Waiting".to_string();
         let lines_without = build_login_content_lines(&mut without_code, 80);
         assert!(!lines_without.iter().any(|l| line_text(l).contains("Code:")));
 
         let mut with_code = make_app();
-        with_code.login_info = "Waiting".to_string();
-        with_code.login_code = Some("ABCD-1234".to_string());
+        with_code.login.info = "Waiting".to_string();
+        with_code.login.code = Some("ABCD-1234".to_string());
         let lines_with = build_login_content_lines(&mut with_code, 80);
         assert!(lines_with.iter().any(|l| line_text(l).contains("Code:")));
     }
@@ -2685,8 +2686,8 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(30, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.selection_mode = true;
-        app.selection_items = (0..30)
+        app.selection.active = true;
+        app.selection.items = (0..30)
             .map(|i| CompletionItem {
                 label: format!("item-{i}"),
                 detail: String::new(),

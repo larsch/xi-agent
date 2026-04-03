@@ -197,13 +197,13 @@ async fn main() -> io::Result<()> {
                 }
             };
 
-        if app.retry_after_refresh {
-            app.retry_after_refresh = false;
+        if app.login.retry_after_refresh {
+            app.login.retry_after_refresh = false;
             app.retry_last_request(&provider);
         }
 
-        if app.retry_model_fetch_after_refresh {
-            app.retry_model_fetch_after_refresh = false;
+        if app.login.retry_model_fetch_after_refresh {
+            app.login.retry_model_fetch_after_refresh = false;
             app.start_model_fetch(&provider);
         }
 
@@ -555,11 +555,11 @@ async fn run(
                         #[cfg(windows)]
                         if key.code == KeyCode::Char('v')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !app.login_active
+                            && !app.login.active
                         {
                             if let Some(text) = read_clipboard_text() {
                                 let normalized = normalize_paste_text(&text);
-                                if app.selection_mode {
+                                if app.selection.active {
                                     app.exit_selection_mode();
                                 }
                                 if app.input_mode == InputMode::Shell {
@@ -611,7 +611,7 @@ async fn run(
                         }
 
                         // ── Selection menu mode ───────────────────────────────
-                        if app.selection_mode {
+                        if app.selection.active {
                             match key.code {
                                 KeyCode::Up => app.selection_select_prev(),
                                 KeyCode::Down => app.selection_select_next(),
@@ -688,7 +688,7 @@ async fn run(
                             continue;
                         }
 
-                        if app.login_active {
+                        if app.login.active {
                             if key.code == KeyCode::Enter && key.modifiers.is_empty() {
                                 app.enter_login_action_menu();
                             }
@@ -913,8 +913,8 @@ async fn run(
                         _ => {}
                     },
                     Event::Paste(text) => {
-                        if !app.login_active {
-                            if app.selection_mode {
+                        if !app.login.active {
+                            if app.selection.active {
                                 app.exit_selection_mode();
                             }
                             if app.input_mode == InputMode::Shell {
@@ -946,8 +946,8 @@ async fn run(
             // ── Login flow events ─────────────────────────────────────────────
             Some(ev) = app.login_rx.recv() => {
                 app.apply_login_event(ev);
-                if app.login_needs_rebuild {
-                    app.login_needs_rebuild = false;
+                if app.login.needs_rebuild {
+                    app.login.needs_rebuild = false;
                     return Ok(RunResult::RebuildProvider);
                 }
             }

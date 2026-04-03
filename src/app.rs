@@ -85,6 +85,93 @@ pub enum InputMode {
     Shell,
 }
 
+// ── Selection state ───────────────────────────────────────────────────────────
+
+/// All state for the full-screen selection/picker overlay.
+pub struct SelectionState {
+    /// True when the selection picker is active.
+    pub active: bool,
+    /// Header title shown in the selection menu.
+    pub title: &'static str,
+    /// Items currently visible (after filtering).
+    pub items: Vec<CompletionItem>,
+    /// Unfiltered source items for search filtering.
+    all_items: Vec<CompletionItem>,
+    /// Current free-text search query.
+    pub query: String,
+    /// Kind of selection currently being displayed.
+    kind: Option<SelectionKind>,
+    /// Index of the currently highlighted row.
+    pub selected: usize,
+    /// First visible item index (scroll offset).
+    pub scroll: usize,
+}
+
+impl SelectionState {
+    fn new() -> Self {
+        Self {
+            active: false,
+            title: "",
+            items: Vec::new(),
+            all_items: Vec::new(),
+            query: String::new(),
+            kind: None,
+            selected: 0,
+            scroll: 0,
+        }
+    }
+}
+
+// ── Login state ───────────────────────────────────────────────────────────────
+
+/// All state for the login / OAuth overlay.
+pub struct LoginState {
+    pub active: bool,
+    pub provider: Option<String>,
+    pub info: String,
+    pub url: Option<String>,
+    pub code: Option<String>,
+    /// Which OAuth flow is in use; drives the UI's instruction text and
+    /// available keyboard actions.
+    pub auth_flow: Option<AuthFlow>,
+    pub needs_rebuild: bool,
+    pub refresh_in_progress: bool,
+    pub retry_after_refresh: bool,
+    /// Set when a `list_models` call fails with a 401 so the fetch is
+    /// re-issued automatically once the token refresh completes.
+    pub retry_model_fetch_after_refresh: bool,
+    auth_retry_budget: u8,
+    cancel: Option<Arc<AtomicBool>>,
+    /// Persistent clipboard instance used during the login flow.
+    ///
+    /// On Linux the clipboard is owned by the process: dropping the
+    /// `arboard::Clipboard` instance releases ownership and the text
+    /// disappears from other applications.  We therefore keep it alive for
+    /// the entire duration of the login panel and only drop it once login
+    /// finishes.
+    clipboard: Option<arboard::Clipboard>,
+}
+
+impl LoginState {
+    fn new() -> Self {
+        Self {
+            active: false,
+            provider: None,
+            info: String::new(),
+            url: None,
+            code: None,
+            auth_flow: None,
+            needs_rebuild: false,
+            refresh_in_progress: false,
+            retry_after_refresh: false,
+            retry_model_fetch_after_refresh: false,
+            auth_retry_budget: 0,
+            cancel: None,
+            clipboard: None,
+        }
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -146,22 +233,7 @@ pub struct App {
     pub model_fetch_error: Option<String>,
 
     // ── Generic selection menu ────────────────────────────────────────────────
-    /// True when the full-screen selection picker is active.
-    pub selection_mode: bool,
-    /// Header title shown in the selection menu.
-    pub selection_title: &'static str,
-    /// Items shown in the selection menu.
-    pub selection_items: Vec<CompletionItem>,
-    /// Unfiltered source items for selection search.
-    selection_all_items: Vec<CompletionItem>,
-    /// Current search query for selection filtering.
-    pub selection_query: String,
-    /// Kind of selection currently being displayed.
-    selection_kind: Option<SelectionKind>,
-    /// Index of the currently highlighted selection row.
-    pub selection_selected: usize,
-    /// First visible item index in the selection menu (scroll offset).
-    pub selection_scroll: usize,
+    pub selection: SelectionState,
 
     // ── Info bar ──────────────────────────────────────────────────────────────
     /// When true, the info bar (provider / model / context window) is shown
@@ -171,30 +243,7 @@ pub struct App {
     pub latest_usage: Option<UsageStats>,
 
     // ── Login overlay ─────────────────────────────────────────────────────────
-    pub login_active: bool,
-    pub login_provider: Option<String>,
-    pub login_info: String,
-    pub login_url: Option<String>,
-    pub login_code: Option<String>,
-    /// Which OAuth flow is in use; drives the UI's instruction text and
-    /// available keyboard actions.
-    pub login_auth_flow: Option<AuthFlow>,
-    pub login_needs_rebuild: bool,
-    pub refresh_in_progress: bool,
-    pub retry_after_refresh: bool,
-    /// Set when a `list_models` call fails with a 401 so the fetch is
-    /// re-issued automatically once the token refresh completes.
-    pub retry_model_fetch_after_refresh: bool,
-    auth_retry_budget: u8,
-    login_cancel: Option<Arc<AtomicBool>>,
-    /// Persistent clipboard instance used during the login flow.
-    ///
-    /// On Linux the clipboard is owned by the process: dropping the
-    /// `arboard::Clipboard` instance releases ownership and the text
-    /// disappears from other applications.  We therefore keep it alive for
-    /// the entire duration of the login panel and only drop it once login
-    /// finishes.
-    clipboard: Option<arboard::Clipboard>,
+    pub login: LoginState,
 
     // ── Session persistence ───────────────────────────────────────────────────
     session_store: Option<SessionStore>,
@@ -300,29 +349,10 @@ impl App {
             available_models: None,
             models_loading: false,
             model_fetch_error: None,
-            selection_mode: false,
-            selection_title: "Select model",
-            selection_items: Vec::new(),
-            selection_all_items: Vec::new(),
-            selection_query: String::new(),
-            selection_kind: None,
-            selection_selected: 0,
-            selection_scroll: 0,
+            selection: SelectionState::new(),
             show_info: false,
             latest_usage: None,
-            login_active: false,
-            login_provider: None,
-            login_info: String::new(),
-            login_url: None,
-            login_code: None,
-            login_auth_flow: None,
-            login_needs_rebuild: false,
-            refresh_in_progress: false,
-            retry_after_refresh: false,
-            retry_model_fetch_after_refresh: false,
-            auth_retry_budget: 0,
-            login_cancel: None,
-            clipboard: None,
+            login: LoginState::new(),
             session_store: None,
             current_session_id: None,
             current_cwd: String::new(),
@@ -412,8 +442,8 @@ impl App {
     pub fn should_show_resume_hint(&self) -> bool {
         self.resume_available_for_cwd
             && self.messages.is_empty()
-            && !self.selection_mode
-            && !self.login_active
+            && !self.selection.active
+            && !self.login.active
             && !self.streaming
     }
 
@@ -455,10 +485,10 @@ impl App {
 
     pub fn enter_resume_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::ResumeSession);
-        self.selection_title = "  Resume session  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::ResumeSession);
+        self.selection.title = "  Resume session  ";
+        self.selection.query.clear();
 
         let Some(store) = self.session_store.as_ref() else {
             self.set_selection_items(vec![CompletionItem {
@@ -532,7 +562,7 @@ impl App {
     /// Returns `true` if refresh was triggered, `false` if conditions weren't met
     /// (already refreshing, provider doesn't support refresh, etc.).
     fn trigger_auth_refresh(&mut self, target: RetryTarget) -> bool {
-        if !self.provider_supports_token_refresh() || self.refresh_in_progress {
+        if !self.provider_supports_token_refresh() || self.login.refresh_in_progress {
             return false;
         }
 
@@ -542,14 +572,14 @@ impl App {
             target
         );
 
-        self.refresh_in_progress = true;
+        self.login.refresh_in_progress = true;
 
         match target {
             RetryTarget::AgentTurn => {
-                self.retry_after_refresh = true;
+                self.login.retry_after_refresh = true;
             }
             RetryTarget::ModelFetch => {
-                self.retry_model_fetch_after_refresh = true;
+                self.login.retry_model_fetch_after_refresh = true;
             }
         }
 
@@ -568,7 +598,10 @@ impl App {
     /// This prevents requests from failing mid-flight due to known token expiry.
     /// Guards: only triggers when not already streaming and not already refreshing.
     fn check_token_preflight(&mut self, target: RetryTarget) -> bool {
-        if self.streaming || self.refresh_in_progress || !self.provider_supports_token_refresh() {
+        if self.streaming
+            || self.login.refresh_in_progress
+            || !self.provider_supports_token_refresh()
+        {
             return false;
         }
 
@@ -643,7 +676,7 @@ impl App {
     pub fn submit_shell_command(&mut self) {
         let lines: Vec<String> = self.shell_textarea.lines().to_vec();
         let command = lines.join("\n").trim().to_string();
-        if command.is_empty() || self.streaming || self.login_active {
+        if command.is_empty() || self.streaming || self.login.active {
             return;
         }
 
@@ -751,7 +784,7 @@ impl App {
             self.cancel_open_webui_url_input();
         } else if self.open_webui_token_input_mode {
             self.cancel_open_webui_token_input();
-        } else if self.login_active {
+        } else if self.login.active {
             self.cancel_login();
         } else if self.streaming {
             self.abort_agent_loop();
@@ -842,7 +875,7 @@ impl App {
         }
         self.update_completions();
 
-        if self.selection_mode && self.selection_kind == Some(SelectionKind::Model) {
+        if self.selection.active && self.selection.kind == Some(SelectionKind::Model) {
             if let Some(err) = &self.model_fetch_error {
                 let items = vec![commands::CompletionItem::error_indicator(err)];
                 self.set_selection_items(items);
@@ -856,7 +889,7 @@ impl App {
                     .collect();
                 if !items.is_empty() {
                     self.set_selection_items(items);
-                    if self.selection_query.trim().is_empty() {
+                    if self.selection.query.trim().is_empty() {
                         self.select_current_default();
                     }
                 }
@@ -896,14 +929,14 @@ impl App {
     // ── Selection menu ────────────────────────────────────────────────────────
 
     fn set_selection_items(&mut self, items: Vec<CompletionItem>) {
-        self.selection_all_items = items;
-        self.selection_selected = 0;
-        self.selection_scroll = 0;
+        self.selection.all_items = items;
+        self.selection.selected = 0;
+        self.selection.scroll = 0;
         self.apply_selection_filter();
     }
 
     fn select_current_default(&mut self) {
-        let target = match self.selection_kind {
+        let target = match self.selection.kind {
             Some(SelectionKind::Model) => Some(format!("/model {}", self.current_model)),
             Some(SelectionKind::Thinking) => {
                 Some(format!("/thinking {}", self.current_thinking.as_str()))
@@ -919,23 +952,25 @@ impl App {
 
         if let Some(target) = target
             && let Some(idx) = self
-                .selection_items
+                .selection
+                .items
                 .iter()
                 .position(|item| item.complete_to == target)
         {
-            self.selection_selected = idx;
+            self.selection.selected = idx;
             self.ensure_selection_visible();
         }
     }
 
     fn apply_selection_filter(&mut self) {
-        let query = self.selection_query.trim();
+        let query = self.selection.query.trim();
         if query.is_empty() {
-            self.selection_items = self.selection_all_items.clone();
+            self.selection.items = self.selection.all_items.clone();
         } else {
             let needle = query.to_lowercase();
-            self.selection_items = self
-                .selection_all_items
+            self.selection.items = self
+                .selection
+                .all_items
                 .iter()
                 .filter(|item| {
                     item.label.to_lowercase().contains(&needle)
@@ -945,28 +980,28 @@ impl App {
                 .collect();
         }
 
-        if self.selection_items.is_empty() {
-            self.selection_selected = 0;
-            self.selection_scroll = 0;
+        if self.selection.items.is_empty() {
+            self.selection.selected = 0;
+            self.selection.scroll = 0;
             return;
         }
 
-        if self.selection_selected >= self.selection_items.len() {
-            self.selection_selected = 0;
+        if self.selection.selected >= self.selection.items.len() {
+            self.selection.selected = 0;
         }
         self.ensure_selection_visible();
     }
 
     fn ensure_selection_visible(&mut self) {
-        if self.selection_items.is_empty() {
-            self.selection_scroll = 0;
+        if self.selection.items.is_empty() {
+            self.selection.scroll = 0;
             return;
         }
-        if self.selection_selected < self.selection_scroll {
-            self.selection_scroll = self.selection_selected;
+        if self.selection.selected < self.selection.scroll {
+            self.selection.scroll = self.selection.selected;
         }
-        if self.selection_selected >= self.selection_scroll + MAX_SELECTION_VISIBLE {
-            self.selection_scroll = self.selection_selected + 1 - MAX_SELECTION_VISIBLE;
+        if self.selection.selected >= self.selection.scroll + MAX_SELECTION_VISIBLE {
+            self.selection.scroll = self.selection.selected + 1 - MAX_SELECTION_VISIBLE;
         }
     }
 
@@ -974,10 +1009,10 @@ impl App {
     /// loading indicator when the list hasn't been fetched yet.
     pub fn enter_model_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::Model);
-        self.selection_title = "  Select model  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::Model);
+        self.selection.title = "  Select model  ";
+        self.selection.query.clear();
         let items = if let Some(err) = &self.model_fetch_error {
             vec![CompletionItem::error_indicator(err)]
         } else if let Some(models) = &self.available_models {
@@ -995,10 +1030,10 @@ impl App {
     /// Open the thinking-level selection menu.
     pub fn enter_thinking_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::Thinking);
-        self.selection_title = "  Select thinking  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::Thinking);
+        self.selection.title = "  Select thinking  ";
+        self.selection.query.clear();
         let items = ThinkingLevel::all()
             .iter()
             .map(|lvl| CompletionItem {
@@ -1017,9 +1052,9 @@ impl App {
     /// Open the provider selection menu with the fixed list of known providers.
     pub fn enter_provider_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::Provider);
-        self.selection_title = "  Select provider  ";
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::Provider);
+        self.selection.title = "  Select provider  ";
         let items = ProviderKind::all()
             .iter()
             .map(|p| CompletionItem::from_provider(p.name(), p.label()))
@@ -1032,10 +1067,10 @@ impl App {
     /// "Enter URL…" sentinel at the bottom.
     pub fn enter_ollama_endpoint_selection_mode(&mut self, recent: Vec<String>) {
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::OllamaEndpoint);
-        self.selection_title = "  Ollama endpoint  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::OllamaEndpoint);
+        self.selection.title = "  Ollama endpoint  ";
+        self.selection.query.clear();
 
         let mut items: Vec<CompletionItem> = recent
             .into_iter()
@@ -1196,10 +1231,10 @@ impl App {
     /// Open provider picker for `/login` command.
     pub fn enter_login_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::LoginProvider);
-        self.selection_title = "  Login provider  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::LoginProvider);
+        self.selection.title = "  Login provider  ";
+        self.selection.query.clear();
         let items = ["copilot", "codex", "gemini"]
             .iter()
             .map(|p| CompletionItem {
@@ -1216,55 +1251,55 @@ impl App {
 
     /// Dismiss the selection menu without applying a choice.
     pub fn exit_selection_mode(&mut self) {
-        self.selection_mode = false;
-        self.selection_kind = None;
-        self.selection_items.clear();
-        self.selection_all_items.clear();
-        self.selection_query.clear();
-        self.selection_selected = 0;
-        self.selection_scroll = 0;
+        self.selection.active = false;
+        self.selection.kind = None;
+        self.selection.items.clear();
+        self.selection.all_items.clear();
+        self.selection.query.clear();
+        self.selection.selected = 0;
+        self.selection.scroll = 0;
     }
 
     /// Returns true when a model fetch should be triggered for the model
     /// selection menu (models not yet loaded, no fetch in flight).
     pub fn should_fetch_models_for_selection(&self) -> bool {
         // Only fetch if the menu shows the loading indicator (model menu).
-        self.selection_mode
-            && self.selection_kind == Some(SelectionKind::Model)
-            && self.selection_items.iter().any(|i| i.loading)
+        self.selection.active
+            && self.selection.kind == Some(SelectionKind::Model)
+            && self.selection.items.iter().any(|i| i.loading)
             && !self.models_loading
     }
 
     /// Returns true if the active selection menu supports free-text filtering.
     /// The login-action menu is a fixed short list and disables filtering.
     pub fn selection_filter_enabled(&self) -> bool {
-        self.selection_kind != Some(SelectionKind::LoginAction)
+        self.selection.kind != Some(SelectionKind::LoginAction)
     }
 
     pub fn selection_add_char(&mut self, c: char) {
         // The login action menu is a small fixed list; filtering adds no value.
-        if self.selection_kind == Some(SelectionKind::LoginAction) {
+        if self.selection.kind == Some(SelectionKind::LoginAction) {
             return;
         }
-        self.selection_query.push(c);
+        self.selection.query.push(c);
         self.apply_selection_filter();
     }
 
     pub fn selection_backspace(&mut self) {
-        if self.selection_kind == Some(SelectionKind::LoginAction) {
+        if self.selection.kind == Some(SelectionKind::LoginAction) {
             return;
         }
-        self.selection_query.pop();
+        self.selection.query.pop();
         self.apply_selection_filter();
     }
 
     /// Navigate the selection menu down (wraps around).
     pub fn selection_select_next(&mut self) {
-        let len = self.selection_items.len();
+        let len = self.selection.items.len();
         if len > 0 {
-            self.selection_selected = (self.selection_selected + 1) % len;
-            if self.selection_selected == 0 {
-                self.selection_scroll = 0;
+            self.selection.selected = (self.selection.selected + 1) % len;
+            if self.selection.selected == 0 {
+                self.selection.scroll = 0;
             } else {
                 self.ensure_selection_visible();
             }
@@ -1273,11 +1308,11 @@ impl App {
 
     /// Navigate the selection menu up (wraps around).
     pub fn selection_select_prev(&mut self) {
-        let len = self.selection_items.len();
+        let len = self.selection.items.len();
         if len > 0 {
-            self.selection_selected = (self.selection_selected + len - 1) % len;
-            if self.selection_selected == len - 1 {
-                self.selection_scroll = len.saturating_sub(MAX_SELECTION_VISIBLE);
+            self.selection.selected = (self.selection.selected + len - 1) % len;
+            if self.selection.selected == len - 1 {
+                self.selection.scroll = len.saturating_sub(MAX_SELECTION_VISIBLE);
             } else {
                 self.ensure_selection_visible();
             }
@@ -1286,12 +1321,12 @@ impl App {
 
     /// Confirm the currently highlighted selection.
     pub fn apply_selection(&mut self) -> Option<SelectionResult> {
-        let item = self.selection_items.get(self.selection_selected)?;
+        let item = self.selection.items.get(self.selection.selected)?;
         if item.loading || item.complete_to.is_empty() {
             return None;
         }
 
-        let result = match self.selection_kind {
+        let result = match self.selection.kind {
             Some(SelectionKind::Model) => item
                 .complete_to
                 .strip_prefix("/model ")
@@ -1389,10 +1424,10 @@ impl App {
         }
 
         self.reset_textarea();
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::AskUser);
-        self.selection_title = "  Ask user  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::AskUser);
+        self.selection.title = "  Ask user  ";
+        self.selection.query.clear();
 
         let mut items: Vec<CompletionItem> = options
             .iter()
@@ -1500,12 +1535,12 @@ impl App {
     /// - "Copy code" only when a device code is present (Copilot flow)
     /// - "Cancel" always
     pub fn enter_login_action_menu(&mut self) {
-        if !self.login_active {
+        if !self.login.active {
             return;
         }
 
         let mut items: Vec<CompletionItem> = Vec::new();
-        if self.login_url.is_some() {
+        if self.login.url.is_some() {
             items.push(Self::login_action_item(
                 "Open browser",
                 "Launch the authentication URL in your default browser",
@@ -1517,7 +1552,7 @@ impl App {
                 Self::LOGIN_ACTION_COPY_URL,
             ));
         }
-        if self.login_code.is_some() {
+        if self.login.code.is_some() {
             items.push(Self::login_action_item(
                 "Copy code",
                 "Copy the device code to the clipboard",
@@ -1530,10 +1565,10 @@ impl App {
             Self::LOGIN_ACTION_CANCEL,
         ));
 
-        self.selection_mode = true;
-        self.selection_kind = Some(SelectionKind::LoginAction);
-        self.selection_title = "  Login actions  ";
-        self.selection_query.clear();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::LoginAction);
+        self.selection.title = "  Login actions  ";
+        self.selection.query.clear();
         self.set_selection_items(items);
     }
 
@@ -1545,49 +1580,49 @@ impl App {
 
         match action {
             LoginActionKind::OpenBrowser => {
-                let Some(url) = self.login_url.clone() else {
+                let Some(url) = self.login.url.clone() else {
                     return;
                 };
                 match auth::open_url::open_url(&url) {
                     Ok(()) => {
                         log::debug!("login: opened browser for {url}");
-                        self.login_info = "Browser opened.".to_string();
+                        self.login.info = "Browser opened.".to_string();
                     }
                     Err(e) => {
                         log::debug!("login: failed to open browser: {e}");
-                        self.login_info =
+                        self.login.info =
                             format!("Could not open browser: {e}. Copy the URL manually.");
                     }
                 }
             }
             LoginActionKind::CopyUrl => {
-                let Some(url) = self.login_url.clone() else {
+                let Some(url) = self.login.url.clone() else {
                     return;
                 };
                 match self.clipboard_set(url) {
                     Ok(()) => {
                         log::debug!("login: copied URL to clipboard");
-                        self.login_info = "URL copied to clipboard.".to_string();
+                        self.login.info = "URL copied to clipboard.".to_string();
                     }
                     Err(e) => {
                         log::debug!("login: clipboard unavailable: {e}");
-                        self.login_info =
+                        self.login.info =
                             "Clipboard unavailable — select the URL above to copy.".to_string();
                     }
                 }
             }
             LoginActionKind::CopyCode => {
-                let Some(code) = self.login_code.clone() else {
+                let Some(code) = self.login.code.clone() else {
                     return;
                 };
                 match self.clipboard_set(code) {
                     Ok(()) => {
                         log::debug!("login: copied device code to clipboard");
-                        self.login_info = "Code copied to clipboard.".to_string();
+                        self.login.info = "Code copied to clipboard.".to_string();
                     }
                     Err(e) => {
                         log::debug!("login: clipboard unavailable: {e}");
-                        self.login_info =
+                        self.login.info =
                             "Clipboard unavailable — type the code shown above manually."
                                 .to_string();
                     }
@@ -1599,20 +1634,21 @@ impl App {
         }
     }
 
-    /// Copy `text` to the clipboard using the persistent `self.clipboard`
+    /// Copy `text` to the clipboard using the persistent `self.login.clipboard`
     /// instance. Lazily initialises it on first call. Returns an error
     /// string on failure.
     fn clipboard_set(&mut self, text: String) -> Result<(), String> {
         // Lazily open the clipboard and keep it alive for the whole login
         // session. On Linux the clipboard is owner-based: dropping the
         // Clipboard instance clears the content for other applications.
-        if self.clipboard.is_none() {
+        if self.login.clipboard.is_none() {
             match arboard::Clipboard::new() {
-                Ok(cb) => self.clipboard = Some(cb),
+                Ok(cb) => self.login.clipboard = Some(cb),
                 Err(e) => return Err(e.to_string()),
             }
         }
-        self.clipboard
+        self.login
+            .clipboard
             .as_mut()
             .unwrap()
             .set_text(text)
@@ -1620,21 +1656,21 @@ impl App {
     }
 
     pub fn start_login(&mut self, provider: &str) {
-        if self.login_active {
+        if self.login.active {
             return;
         }
 
         log::debug!("login start requested: provider={provider}");
 
-        self.login_active = true;
-        self.login_provider = Some(provider.to_string());
-        self.login_info = format!("Starting login for {provider}...");
-        self.login_url = None;
-        self.login_code = None;
-        self.login_auth_flow = None;
+        self.login.active = true;
+        self.login.provider = Some(provider.to_string());
+        self.login.info = format!("Starting login for {provider}...");
+        self.login.url = None;
+        self.login.code = None;
+        self.login.auth_flow = None;
 
         let cancel = Arc::new(AtomicBool::new(false));
-        self.login_cancel = Some(cancel.clone());
+        self.login.cancel = Some(cancel.clone());
         let tx = self.login_tx.clone();
         let provider = provider.to_string();
 
@@ -1644,7 +1680,7 @@ impl App {
     }
 
     pub fn cancel_login(&mut self) {
-        if let Some(cancel) = &self.login_cancel {
+        if let Some(cancel) = &self.login.cancel {
             log::debug!("login cancel requested");
             cancel.store(true, Ordering::Relaxed);
         }
@@ -1654,13 +1690,13 @@ impl App {
         match ev {
             LoginEvent::Info(msg) => {
                 log::debug!("login info: {msg}");
-                self.login_info = msg;
+                self.login.info = msg;
             }
             LoginEvent::AuthCode { url, code, flow } => {
                 log::debug!("login auth prompt: url={} has_code={}", url, code.is_some());
-                self.login_url = Some(url);
-                self.login_code = code;
-                self.login_auth_flow = Some(flow);
+                self.login.url = Some(url);
+                self.login.code = code;
+                self.login.auth_flow = Some(flow);
                 // Automatically open the action menu so the user can choose
                 // how to proceed without needing to know any keyboard shortcuts.
                 self.enter_login_action_menu();
@@ -1672,7 +1708,7 @@ impl App {
                 )));
                 self.bump_log_revision();
                 self.persist_messages();
-                self.login_needs_rebuild = true;
+                self.login.needs_rebuild = true;
             }
             LoginEvent::Error { provider, message } => {
                 log::debug!("login error: provider={} err={}", provider, message);
@@ -1693,13 +1729,13 @@ impl App {
                     success,
                     message
                 );
-                self.refresh_in_progress = false;
+                self.login.refresh_in_progress = false;
                 if success {
                     // Silently refresh — no message added to the chat log or
                     // LLM history; the retry will continue seamlessly.
-                    self.login_needs_rebuild = true;
+                    self.login.needs_rebuild = true;
                 } else {
-                    self.retry_after_refresh = false;
+                    self.login.retry_after_refresh = false;
                     self.messages.push(Message::assistant(format!(
                         "[token refresh failed for {provider}: {message}. Run /login {provider}]"
                     )));
@@ -1709,14 +1745,14 @@ impl App {
             }
             LoginEvent::Finished => {
                 log::debug!("login flow finished");
-                self.login_active = false;
-                self.login_provider = None;
-                self.login_cancel = None;
-                self.login_auth_flow = None;
+                self.login.active = false;
+                self.login.provider = None;
+                self.login.cancel = None;
+                self.login.auth_flow = None;
                 self.exit_selection_mode();
                 // Drop the clipboard instance; on Linux this releases clipboard
                 // ownership so the content is no longer served by this process.
-                self.clipboard = None;
+                self.login.clipboard = None;
             }
         }
     }
@@ -1878,7 +1914,7 @@ impl App {
     /// responsible for calling `check_token_preflight` before this.
     fn launch_turn(&mut self, provider: &DynProvider) {
         self.streaming = true;
-        self.auth_retry_budget = 1;
+        self.login.auth_retry_budget = 1;
         self.latest_usage = None;
         self.auto_scroll = true;
         let llm_messages = self.prepare_llm_messages();
@@ -1890,7 +1926,7 @@ impl App {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
         let trimmed = text.trim().to_string();
-        if trimmed.is_empty() || !self.streaming || self.login_active {
+        if trimmed.is_empty() || !self.streaming || self.login.active {
             return;
         }
 
@@ -1911,7 +1947,7 @@ impl App {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
         let trimmed = text.trim().to_string();
-        if trimmed.is_empty() || self.streaming || self.login_active {
+        if trimmed.is_empty() || self.streaming || self.login.active {
             return;
         }
 
@@ -1932,7 +1968,7 @@ impl App {
     /// Submit a pre-built text string directly to the agent loop, bypassing the
     /// textarea.  Used by `/skill:<name>` command expansion.
     pub fn submit_with_text(&mut self, text: String, provider: &DynProvider) {
-        if text.trim().is_empty() || self.streaming || self.login_active {
+        if text.trim().is_empty() || self.streaming || self.login.active {
             return;
         }
 
@@ -1951,7 +1987,7 @@ impl App {
     }
 
     pub fn retry_last_request(&mut self, provider: &DynProvider) {
-        if self.streaming || self.login_active {
+        if self.streaming || self.login.active {
             return;
         }
 
@@ -2152,15 +2188,15 @@ impl App {
                 let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
 
                 if is_unauthorized
-                    && self.auth_retry_budget > 0
+                    && self.login.auth_retry_budget > 0
                     && self.trigger_auth_refresh(RetryTarget::AgentTurn)
                 {
                     log::debug!(
                         "received 401, refresh triggered: provider={} remaining_budget= {}",
                         self.current_provider,
-                        self.auth_retry_budget
+                        self.login.auth_retry_budget
                     );
-                    self.auth_retry_budget -= 1;
+                    self.login.auth_retry_budget -= 1;
                     self.streaming = false;
                     // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
@@ -2369,7 +2405,7 @@ mod tests {
         });
 
         assert!(
-            !app.selection_mode,
+            !app.selection.active,
             "selection mode should NOT be active for no-options"
         );
         assert!(app.ask_user_freeform_mode, "freeform mode should be active");
@@ -2405,9 +2441,9 @@ mod tests {
             reply: reply_tx,
         });
 
-        assert!(app.selection_mode);
-        assert_eq!(app.selection_items.len(), 3); // 2 options + freeform sentinel
-        assert_eq!(app.selection_items[2].complete_to, "/ask_user_freeform");
+        assert!(app.selection.active);
+        assert_eq!(app.selection.items.len(), 3); // 2 options + freeform sentinel
+        assert_eq!(app.selection.items[2].complete_to, "/ask_user_freeform");
     }
 
     /// When ask_user has options and allow_freeform is false, the freeform
@@ -2434,10 +2470,11 @@ mod tests {
             reply: reply_tx,
         });
 
-        assert!(app.selection_mode);
-        assert_eq!(app.selection_items.len(), 2); // only the 2 options
+        assert!(app.selection.active);
+        assert_eq!(app.selection.items.len(), 2); // only the 2 options
         assert!(
-            app.selection_items
+            app.selection
+                .items
                 .iter()
                 .all(|i| i.complete_to != "/ask_user_freeform")
         );
