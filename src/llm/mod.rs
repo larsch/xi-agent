@@ -32,15 +32,31 @@ impl UsageStats {
 }
 
 /// A single message in the conversation history.
+///
+/// Not all fields are meaningful for every [`Role`].  The table below shows
+/// which fields are populated by each role's canonical constructor:
+///
+/// | Field              | User | System | Assistant | ToolCall | ToolResult |
+/// |--------------------|------|--------|-----------|----------|------------|
+/// | `content`          | ✓    | ✓      | ✓         | —        | ✓          |
+/// | `thinking`         | —    | —      | ✓         | —        | —          |
+/// | `assistant_phase`  | —    | —      | ✓         | —        | —          |
+/// | `hidden`           | ✓    | ✓      | ✓         | ✓        | ✓          |
+/// | `include_in_llm`   | ✓    | ✓      | ✓         | ✓        | ✓          |
+/// | `tool_call_id`     | —    | —      | —         | ✓        | ✓          |
+/// | `tool_name`        | —    | —      | —         | ✓        | —          |
+/// | `tool_args`        | —    | —      | —         | ✓        | —          |
+/// | `is_error`         | —    | —      | —         | —        | ✓          |
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
     /// Chain-of-thought / "thinking" content emitted before the answer.
-    /// `None` for messages that carry no thinking output.
+    /// Populated only for [`Role::Assistant`]; `None` for all other roles.
     pub thinking: Option<String>,
-    /// Optional phase classification for assistant-visible answer text.
-    /// `None` preserves compatibility for old persisted sessions.
+    /// Phase classification for assistant-visible answer text.
+    /// Populated only for [`Role::Assistant`]; `None` for all other roles.
+    /// `None` also preserves compatibility for old persisted sessions.
     #[serde(default)]
     pub assistant_phase: Option<AssistantPhase>,
     /// When true, this message is sent to the LLM and persisted in the session
@@ -53,13 +69,17 @@ pub struct Message {
     pub include_in_llm: bool,
     // ── Tool-call fields (Role::ToolCall) ─────────────────────────────────────
     /// Opaque identifier linking a tool call to its result.
+    /// Set for [`Role::ToolCall`] and [`Role::ToolResult`]; `None` otherwise.
     pub tool_call_id: Option<String>,
-    /// Name of the tool being called or that produced this result.
+    /// Name of the tool being invoked.
+    /// Set only for [`Role::ToolCall`]; `None` for all other roles.
     pub tool_name: Option<String>,
     /// Arguments passed to the tool (JSON object).
+    /// Set only for [`Role::ToolCall`]; `None` for all other roles.
     pub tool_args: Option<serde_json::Value>,
     // ── Tool-result fields (Role::ToolResult) ─────────────────────────────────
     /// True when the tool returned an error.
+    /// Meaningful only for [`Role::ToolResult`]; always `false` for other roles.
     pub is_error: bool,
 }
 
@@ -151,6 +171,16 @@ impl Message {
             tool_args: None,
             is_error,
         }
+    }
+
+    /// Returns `true` when this message carries tool-call or tool-result
+    /// content, i.e. its role is [`Role::ToolCall`] or [`Role::ToolResult`].
+    ///
+    /// Useful as a quick guard before accessing tool-specific fields such as
+    /// `tool_call_id`, `tool_name`, `tool_args`, or `is_error`.
+    #[allow(dead_code)]
+    pub fn is_tool_related(&self) -> bool {
+        matches!(self.role, Role::ToolCall | Role::ToolResult)
     }
 }
 
@@ -360,5 +390,26 @@ mod tests {
         assert_eq!(decoded.tool_call_id, original.tool_call_id);
         assert_eq!(decoded.tool_name, original.tool_name);
         assert_eq!(decoded.tool_args, original.tool_args);
+    }
+
+    // ── is_tool_related ───────────────────────────────────────────────────────
+
+    #[test]
+    fn is_tool_related_true_for_tool_call() {
+        let m = Message::tool_call("id-1", "bash", serde_json::json!({}));
+        assert!(m.is_tool_related());
+    }
+
+    #[test]
+    fn is_tool_related_true_for_tool_result() {
+        let m = Message::tool_result("id-1", "output", false);
+        assert!(m.is_tool_related());
+    }
+
+    #[test]
+    fn is_tool_related_false_for_user_assistant_system() {
+        assert!(!Message::user("hello").is_tool_related());
+        assert!(!Message::assistant("hello").is_tool_related());
+        assert!(!Message::system("rules").is_tool_related());
     }
 }
