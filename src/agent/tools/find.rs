@@ -25,8 +25,9 @@ impl Tool for FindTool {
     fn description(&self) -> &str {
         "Search for files matching a glob pattern. Returns file paths relative \
          to the search directory, one per line, sorted alphabetically. \
-         Respects .gitignore. Output is capped at `limit` results (default \
-         1000); a notice is appended when the cap is reached."
+         Excludes hidden files and paths ignored by .gitignore. Output is \
+         capped at `limit` results (default 1000); a notice is appended when \
+         the cap is reached."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -85,8 +86,8 @@ impl Tool for FindTool {
                 let mut matches: Vec<String> = Vec::new();
 
                 let walker = WalkBuilder::new(&search_dir)
-                    // Include hidden files (dotfiles); gitignore handles exclusions.
-                    .hidden(false)
+                    // Exclude hidden files/directories (dotfiles, .git, etc.).
+                    .hidden(true)
                     // Respect .gitignore, .ignore, and global gitignore.
                     .git_ignore(true)
                     .git_global(true)
