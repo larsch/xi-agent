@@ -106,6 +106,9 @@ impl AnthropicProvider {
             let mut tool_blocks: HashMap<u64, ToolBlock> = HashMap::new();
             let mut emitted_tool_intent = false;
             let mut line_num = 0usize;
+            // Input token count from the message_start event; combined with
+            // output tokens from message_delta/message_stop before emitting Usage.
+            let mut input_tokens_from_start: Option<usize> = None;
 
             while let Some(chunk) = byte_stream.next().await {
                 let bytes = match chunk {
@@ -135,6 +138,21 @@ impl AnthropicProvider {
                     };
 
                     match ev["type"].as_str() {
+                        Some("message_start") => {
+                            // Capture input_tokens emitted at the start of the
+                            // stream so they can be combined with output_tokens
+                            // that arrive later in the message_delta event.
+                            if let Some(usage) = ev
+                                .get("message")
+                                .and_then(|m| m.get("usage"))
+                            {
+                                input_tokens_from_start = usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .and_then(|n| usize::try_from(n).ok());
+                            }
+                        }
+
                         Some("content_block_start") => {
                             let index = ev["index"].as_u64().unwrap_or(0);
                             let block = &ev["content_block"];
@@ -206,13 +224,29 @@ impl AnthropicProvider {
                         }
 
                         Some("message_delta") => {
-                            if let Some(usage) = extract_usage_stats(&ev) {
+                            if let Some(mut usage) = extract_usage_stats(&ev) {
+                                // Merge input tokens from message_start into
+                                // the delta usage so the Usage event carries
+                                // both input and output counts.
+                                if usage.input_tokens.is_none() {
+                                    usage.input_tokens = input_tokens_from_start;
+                                    // Recompute total with combined counts.
+                                    if let (Some(i), Some(o)) = (usage.input_tokens, usage.output_tokens) {
+                                        usage.total_tokens = Some(i.saturating_add(o));
+                                    }
+                                }
                                 yield LlmEvent::Usage(usage);
                             }
                         }
 
                         Some("message_stop") => {
-                            if let Some(usage) = extract_usage_stats(&ev) {
+                            if let Some(mut usage) = extract_usage_stats(&ev) {
+                                if usage.input_tokens.is_none() {
+                                    usage.input_tokens = input_tokens_from_start;
+                                    if let (Some(i), Some(o)) = (usage.input_tokens, usage.output_tokens) {
+                                        usage.total_tokens = Some(i.saturating_add(o));
+                                    }
+                                }
                                 yield LlmEvent::Usage(usage);
                             }
                             yield LlmEvent::Done;
