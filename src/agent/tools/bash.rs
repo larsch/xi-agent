@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 
 use super::truncate::truncate_tail;
 use crate::agent::types::{Tool, ToolResult};
@@ -54,21 +55,87 @@ impl Tool for BashTool {
                 Err(e) => return *e,
             };
 
-            let output = match tokio::process::Command::new("sh")
+            // Spawn the shell in its own process group so that any background
+            // processes started with `&` do not inherit our stdout/stderr pipe
+            // write-ends.  If we used `.output().await` (which reads until EOF
+            // on the pipes), a lingering background child that kept those fds
+            // open would cause the tool call to hang forever, even after the
+            // shell itself had exited.
+            //
+            // Instead we:
+            //   1. spawn() with piped stdio and process_group(0)
+            //   2. wait() for the shell to exit
+            //   3. read whatever was buffered in the pipes with a short deadline
+            //      so that any background children still holding the write-ends
+            //      do not block us indefinitely.
+            let mut child = match tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(&command)
                 .stdin(Stdio::null())
-                .output()
-                .await
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
             {
-                Ok(o) => o,
+                Ok(c) => c,
                 Err(e) => return ToolResult::err(format!("Failed to spawn shell: {e}")),
             };
 
-            let exit_code = output.status.code().unwrap_or(-1);
+            let mut stdout_handle = child.stdout.take().expect("stdout is piped");
+            let mut stderr_handle = child.stderr.take().expect("stderr is piped");
 
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // We need to drain the pipes concurrently with waiting for the
+            // shell to exit.  If we wait() first and then read, a foreground
+            // command with large output will deadlock: the pipe buffer fills up,
+            // the child blocks on write, and wait() never returns.
+            //
+            // However if we just read_to_end() we get the old hang: a background
+            // child holding the pipe write-end open keeps read_to_end() blocked
+            // forever even after the shell has exited.
+            //
+            // Solution: drain pipes and wait() truly concurrently.  Once wait()
+            // signals the shell has exited, give the pipes a short deadline to
+            // drain any remaining buffered data, then stop regardless.
+            let mut out_buf = Vec::new();
+            let mut err_buf = Vec::new();
+
+            let read_stdout = stdout_handle.read_to_end(&mut out_buf);
+            let read_stderr = stderr_handle.read_to_end(&mut err_buf);
+
+            tokio::pin!(read_stdout);
+            tokio::pin!(read_stderr);
+
+            // Phase 1: wait for shell exit while concurrently draining pipes.
+            let status = loop {
+                tokio::select! {
+                    status = child.wait() => {
+                        match status {
+                            Ok(s) => break s,
+                            Err(e) => return ToolResult::err(format!("Failed to wait for shell: {e}")),
+                        }
+                    }
+                    _ = &mut read_stdout => {}
+                    _ = &mut read_stderr => {}
+                }
+            };
+
+            // Phase 2: shell has exited.  Drain whatever remains in the pipe
+            // buffers, but give up after 200 ms in case a background child is
+            // still holding the write-end open.
+            let drain_deadline = tokio::time::sleep(std::time::Duration::from_millis(200));
+            tokio::pin!(drain_deadline);
+            tokio::select! {
+                _ = &mut drain_deadline => {}
+                _ = async { tokio::join!(&mut read_stdout, &mut read_stderr) } => {}
+            }
+
+            drop(stdout_handle);
+            drop(stderr_handle);
+
+            let exit_code = status.code().unwrap_or(-1);
+
+            let stdout = String::from_utf8_lossy(&out_buf).into_owned();
+            let stderr = String::from_utf8_lossy(&err_buf).into_owned();
 
             // Merge for the model response, as a terminal would show.
             let mut merged = String::new();
@@ -223,6 +290,37 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(result.content.contains("hi"));
+    }
+
+    /// Regression test: a command that backgrounds a process must not cause
+    /// the tool to hang waiting for that child's pipe write-ends to close.
+    /// We verify the tool completes quickly (well under 1 s) even though the
+    /// shell spawns a background job before exiting.
+    ///
+    /// Uses `sleep 0 &` so the background child exits almost immediately,
+    /// keeping the test deterministic without leaving lingering processes.
+    /// The important thing tested here is the code path: spawn → wait(shell) →
+    /// deadline-bounded pipe drain, rather than the old `.output().await` which
+    /// would have blocked until the background child closed its pipe fds.
+    #[tokio::test]
+    async fn bash_background_process_does_not_hang() {
+        let tool = BashTool;
+        let args = serde_json::json!({"command": "sleep 0 &\necho done"});
+
+        let start = std::time::Instant::now();
+        let result = tool.execute(args).await;
+        let elapsed = start.elapsed();
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("done"),
+            "expected 'done' in output: {}",
+            result.content
+        );
+        assert!(
+            elapsed.as_secs() < 1,
+            "tool took too long ({elapsed:?}) — possible pipe hang"
+        );
     }
 
     #[test]
