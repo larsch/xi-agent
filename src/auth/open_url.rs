@@ -17,7 +17,10 @@ fn to_wide(s: &str) -> Vec<u16> {
 pub fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(url).spawn()?;
+        std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .spawn()?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -43,7 +46,10 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .spawn()?;
     }
     Ok(())
 }

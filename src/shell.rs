@@ -1,3 +1,5 @@
+use std::process::Stdio;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellKind {
     Bash,
@@ -68,6 +70,7 @@ pub fn run_shell_command_blocking(shell: ShellKind, cwd: &str, command: &str) ->
     };
 
     cmd.current_dir(cwd);
+    cmd.stdin(Stdio::null());
 
     match cmd.output() {
         Ok(output) => ShellRunResult {

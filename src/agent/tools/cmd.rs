@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::process::Stdio;
 
 use serde_json::Value;
 
@@ -59,6 +60,7 @@ impl Tool for CmdTool {
                 .arg("/S") // Preserve predictable quote handling with /C.
                 .arg("/C")
                 .raw_arg(&wrapped_command)
+                .stdin(Stdio::null())
                 .output()
                 .await
             {

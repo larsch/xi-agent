@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::process::Stdio;
 
 use serde_json::Value;
 
@@ -60,6 +61,7 @@ impl Tool for PowerShellTool {
                 .arg("-NoProfile")
                 .arg("-Command")
                 .arg(&command)
+                .stdin(Stdio::null())
                 .output()
                 .await
             {

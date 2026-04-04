@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::process::Stdio;
 
 use serde_json::Value;
 
@@ -56,6 +57,7 @@ impl Tool for BashTool {
             let output = match tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(&command)
+                .stdin(Stdio::null())
                 .output()
                 .await
             {
