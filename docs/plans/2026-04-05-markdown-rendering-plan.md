@@ -1,7 +1,7 @@
 # Plan: Markdown rendering in terminal UI
 
 **Date:** 2026-04-05  
-**Status:** Approved, ready to build
+**Status:** Implemented and accepted
 
 ---
 
@@ -64,6 +64,14 @@ Tables are buffered (all rows collected before rendering) since column widths re
 | No padding | Compact — matches the Python reference |
 
 Blank line appended after the table.
+
+**Table text wrapping** (added post-initial implementation):
+
+When the natural table width exceeds the available terminal width the renderer shrinks the widest column(s) iteratively until the table fits (or all columns are at minimum width 1).  Cell text wider than its allotted column is wrapped:
+
+- Word-wrap (break at whitespace) is tried first.
+- If any non-final line has < 70% fill (> 30% trailing whitespace), hard-wrap at exactly `col_width` columns is used instead.
+- All cells in a logical row are padded to the same height (blank padding lines for shorter cells).
 
 ### Streaming / partial markdown
 

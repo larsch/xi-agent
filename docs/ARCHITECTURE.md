@@ -14,6 +14,7 @@ src/
   main.rs              — tokio entry point, CLI parsing, outer provider loop
   app.rs               — App state, event handling, submission, scroll
   ui.rs                — all ratatui rendering, pre-wrapping, scroll logic
+  markdown.rs          — markdown → ratatui Lines renderer (paragraphs, headings, code, tables, lists)
   commands.rs          — slash-command registry and completion items
   config.rs            — config.toml loading (XDG + HOME fallback)
   provider.rs          — ProviderKind enum, build_provider(), context-window fallback table

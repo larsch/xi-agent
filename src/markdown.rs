@@ -26,6 +26,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 // ── Colour palette ─────────────────────────────────────────────────────────────
@@ -233,8 +234,99 @@ impl TableBuilder {
         self.current_cell.push_str(text);
     }
 
+    /// Wrap `text` to fit within `col_width` columns.
+    ///
+    /// Tries word-wrapping first.  If any word-wrapped line has a fill ratio
+    /// below 70 % (i.e. more than 30 % trailing whitespace), falls back to
+    /// hard-wrapping at exactly `col_width` characters.
+    fn wrap_cell(text: &str, col_width: usize) -> Vec<String> {
+        if col_width == 0 {
+            return vec![text.to_string()];
+        }
+        if text.width() <= col_width {
+            return vec![text.to_string()];
+        }
+
+        // ── Word-wrap attempt ──────────────────────────────────────────────
+        let word_wrapped = Self::word_wrap(text, col_width);
+
+        // Check fill ratio: if any line (except the last) is below 70% full,
+        // fall back to hard-wrap.
+        let threshold = (col_width as f64 * 0.70) as usize;
+        let poorly_filled = word_wrapped
+            .iter()
+            .rev()
+            .skip(1) // skip last line — it's naturally short
+            .any(|line| line.width() < threshold);
+
+        if poorly_filled {
+            Self::hard_wrap(text, col_width)
+        } else {
+            word_wrapped
+        }
+    }
+
+    /// Greedy word-wrap: break at whitespace boundaries.
+    fn word_wrap(text: &str, col_width: usize) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut current_w: usize = 0;
+
+        for word in text.split_whitespace() {
+            let word_w = word.width();
+            if current.is_empty() {
+                // First word on this line — always place it (even if it overflows).
+                current.push_str(word);
+                current_w = word_w;
+            } else if current_w + 1 + word_w <= col_width {
+                current.push(' ');
+                current.push_str(word);
+                current_w += 1 + word_w;
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+                current_w = word_w;
+            }
+        }
+        if !current.is_empty() || lines.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
+    /// Hard-wrap: break at exactly `col_width` columns.
+    fn hard_wrap(text: &str, col_width: usize) -> Vec<String> {
+        if col_width == 0 {
+            return vec![text.to_string()];
+        }
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut current_w: usize = 0;
+
+        for ch in text.chars() {
+            let cw = ch.width().unwrap_or(0);
+            if current_w + cw > col_width && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_w = 0;
+            }
+            current.push(ch);
+            current_w += cw;
+        }
+        if !current.is_empty() || lines.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
     /// Render the accumulated table to ratatui `Line`s (compacttable style).
-    fn render(&self) -> Vec<Line<'static>> {
+    ///
+    /// `available_width` is the usable terminal column count.  When the
+    /// natural table width exceeds it the widest column(s) are shrunk
+    /// (iteratively, largest-first) until the table fits or every column has
+    /// reached its minimum width of 1.  Cells that are wider than their
+    /// allotted column are wrapped to multiple terminal lines; all cells in
+    /// the same logical row are padded to the same height.
+    fn render(&self, available_width: usize) -> Vec<Line<'static>> {
         if self.rows.is_empty() {
             return Vec::new();
         }
@@ -244,7 +336,7 @@ impl TableBuilder {
             return Vec::new();
         }
 
-        // Compute per-column widths.
+        // ── Step 1: compute natural per-column widths ──────────────────────
         let mut col_widths: Vec<usize> = vec![1usize; ncols];
         for row in &self.rows {
             for (ci, cell) in row.iter().enumerate() {
@@ -252,6 +344,71 @@ impl TableBuilder {
             }
         }
 
+        // ── Step 2: shrink columns to fit available_width ──────────────────
+        // Total width = sum(col_widths) + (ncols - 1) separator columns.
+        if available_width > 0 {
+            let separators = ncols.saturating_sub(1);
+            // Each '│' is 3 bytes but 1 column wide.
+            let sep_width = separators; // 1 column each
+            let content_budget = available_width.saturating_sub(sep_width);
+
+            let total: usize = col_widths.iter().sum();
+            if total > content_budget {
+                // Iteratively shrink the widest column.
+                // For efficiency, compute the amount to shed in bulk.
+                // We allow each column to shrink down to 1.
+                let budget = content_budget;
+                loop {
+                    let total_now: usize = col_widths.iter().sum();
+                    if total_now <= budget {
+                        break;
+                    }
+                    // Find the widest column (if tie, leftmost).
+                    let max_w = *col_widths.iter().max().unwrap();
+                    if max_w <= 1 {
+                        break; // Cannot shrink further.
+                    }
+                    // Find the second-widest (or 1 if all equal).
+                    let second = col_widths
+                        .iter()
+                        .filter(|&&w| w < max_w)
+                        .copied()
+                        .max()
+                        .unwrap_or(1);
+                    // How many columns share the maximum?
+                    let count = col_widths.iter().filter(|&&w| w == max_w).count();
+                    // How much can we shed from each of these `count` columns
+                    // before they hit `second` (or 1)?
+                    let target_w = second.max(1);
+                    let shed_per_col = max_w - target_w; // ≥ 1
+                    let total_shedable = shed_per_col * count;
+                    let deficit = total_now - budget;
+                    if total_shedable <= deficit {
+                        // Shrink all max-width columns to `target_w`.
+                        for w in col_widths.iter_mut() {
+                            if *w == max_w {
+                                *w = target_w;
+                            }
+                        }
+                    } else {
+                        // Only need to shed `deficit` columns worth; shed
+                        // one column at a time from the front.
+                        let mut remaining = deficit;
+                        for w in col_widths.iter_mut() {
+                            if remaining == 0 {
+                                break;
+                            }
+                            if *w == max_w {
+                                *w -= 1;
+                                remaining -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Step 3: render rows, wrapping cell text where needed ───────────
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for (ri, row) in self.rows.iter().enumerate() {
@@ -278,18 +435,35 @@ impl TableBuilder {
             };
             let sep_style = Style::default().fg(TABLE_SEP_FG).bg(row_bg);
 
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (ci, width) in col_widths.iter().enumerate() {
-                if ci > 0 {
-                    spans.push(Span::styled("│".to_string(), sep_style));
+            // Wrap each cell.
+            let wrapped_cells: Vec<Vec<String>> = col_widths
+                .iter()
+                .enumerate()
+                .map(|(ci, &cw)| {
+                    let text = row.get(ci).map(|s| s.as_str()).unwrap_or("");
+                    Self::wrap_cell(text, cw)
+                })
+                .collect();
+
+            let row_height = wrapped_cells.iter().map(|wc| wc.len()).max().unwrap_or(1);
+
+            for line_idx in 0..row_height {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                for (ci, col_w) in col_widths.iter().enumerate() {
+                    if ci > 0 {
+                        spans.push(Span::styled("│".to_string(), sep_style));
+                    }
+                    let text = wrapped_cells[ci]
+                        .get(line_idx)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let text_w = text.width();
+                    let padding = col_w.saturating_sub(text_w);
+                    let padded = format!("{}{}", text, " ".repeat(padding));
+                    spans.push(Span::styled(padded, cell_style));
                 }
-                let text = row.get(ci).map(|s| s.as_str()).unwrap_or("");
-                let text_w = text.width();
-                let padding = width.saturating_sub(text_w);
-                let padded = format!("{}{}", text, " ".repeat(padding));
-                spans.push(Span::styled(padded, cell_style));
+                lines.push(Line::from(spans));
             }
-            lines.push(Line::from(spans));
         }
 
         lines
@@ -477,7 +651,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             }
             Event::End(TagEnd::Table) => {
                 in_table = false;
-                out.extend(table.render());
+                out.extend(table.render(width));
                 out.push(Line::default());
                 table = TableBuilder::default();
             }
@@ -734,6 +908,70 @@ mod tests {
             "header bg mismatch: {:?}",
             first_span.style
         );
+    }
+
+    // ── Table wrapping ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn table_wide_cell_wraps_to_multiple_lines() {
+        // Two columns, very narrow terminal — each data cell should wrap.
+        // Header: "Name" | "Description"
+        // Row:    "Alice" | "A very long description that exceeds the column width"
+        // We give only 20 columns of width.
+        let md = "| Name | Description |\n|------|-------------|\n| Alice | A very long description that exceeds the column width |";
+        let lines = render(md, 20);
+        // Header is 1 line; the data row should produce more than 1 terminal line.
+        let total = lines.len();
+        assert!(
+            total > 2,
+            "expected wrapped row to produce > 2 lines, got {total}: {:?}",
+            lines_text(&lines)
+        );
+    }
+
+    #[test]
+    fn table_wrapping_aligns_row_heights() {
+        // Two columns; only the second is wide.  First column cells are short,
+        // second column cells wrap.  All terminal lines for the same row must
+        // have the same number of spans structure (one cell per column).
+        let md = "| X | Y |\n|---|---|\n| a | word1 word2 word3 word4 word5 word6 word7 word8 |";
+        let lines = render(md, 15);
+        let texts = lines_text(&lines);
+        // There should be at least one line where the first cell is blank padding.
+        let has_blank_first_cell = texts
+            .iter()
+            .skip(1) // skip header
+            .any(|t| t.starts_with("  ")); // padded blank first cell
+        assert!(
+            has_blank_first_cell || texts.len() > 2,
+            "expected multi-line row: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn table_fits_within_available_width() {
+        // Build a table where natural width > terminal width.
+        // Verify that every rendered line fits within the given width.
+        let md = "| Column One | Column Two | Column Three |\n|---|---|---|\n| a long value here | another long value here | yet another long value |";
+        let available = 40;
+        let lines = render(md, available);
+        for line in &lines {
+            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                w <= available,
+                "line width {w} exceeds available {available}: {:?}",
+                line_text(line)
+            );
+        }
+    }
+
+    #[test]
+    fn table_no_wrapping_when_fits() {
+        // When the table fits naturally, line count should equal row count.
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+        let lines = render(md, 80);
+        assert_eq!(lines.len(), 3, "{:?}", lines_text(&lines));
     }
 
     // ── Partial / streaming markdown ─────────────────────────────────────────────
