@@ -507,6 +507,34 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     // the bullet/number prefix.
     let mut list_item_first_para_done = false;
 
+    // Compute the indentation string contributed by all ancestor list levels
+    // (i.e. everything in `list_stack` / `list_item_counters` *except* the
+    // innermost entry, which is the current item's own level).
+    //
+    // Each ancestor level contributes spaces equal to its bullet/number
+    // prefix width so that nested items align under their parent's text.
+    let list_ancestor_indent = |list_stack: &[Option<u64>], list_item_counters: &[u64]| -> String {
+        // All levels except the last are ancestors.
+        let depth = list_stack.len().saturating_sub(1);
+        let mut indent = String::new();
+        for (list_kind, &counter) in list_stack.iter().zip(list_item_counters.iter()).take(depth) {
+            let prefix_width = match list_kind {
+                None => 2usize, // "• " = 2 columns
+                Some(start) => {
+                    // counter holds the *next* item number at this level;
+                    // subtract 1 to get the current parent item number.
+                    let n = counter.saturating_sub(1).max(*start);
+                    let item_num = n - start + 1;
+                    format!("{}. ", item_num).len()
+                }
+            };
+            for _ in 0..prefix_width {
+                indent.push(' ');
+            }
+        }
+        indent
+    };
+
     // Table state.
     let mut in_table = false;
     let mut table: TableBuilder = TableBuilder::default();
@@ -538,11 +566,12 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                     // can use it for the first paragraph, and its width as indent
                     // for subsequent paragraphs.  We don't advance the counter
                     // here — that happens in End(Item).
+                    let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
                     let item_prefix = if let Some(start) = list_stack.last().and_then(|s| *s) {
                         let n = list_item_counters.last().copied().unwrap_or(1);
-                        format!("{}. ", n - start + 1)
+                        format!("{}{}. ", ancestor_indent, n - start + 1)
                     } else {
-                        "• ".to_string()
+                        format!("{}• ", ancestor_indent)
                     };
                     let p = if list_item_first_para_done {
                         " ".repeat(item_prefix.len())
@@ -605,6 +634,25 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             }
 
             Event::Start(Tag::List(start)) => {
+                // If we are currently accumulating inline content for an outer
+                // list item (tight item followed by a nested list), flush that
+                // content now before descending into the sublist.
+                if in_list_item && !inline_spans.is_empty() {
+                    let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
+                    let item_prefix = if let Some(s) = list_stack.last().and_then(|s| *s) {
+                        let n = list_item_counters.last().copied().unwrap_or(s);
+                        format!("{}{}. ", ancestor_indent, n - s + 1)
+                    } else {
+                        format!("{}• ", ancestor_indent)
+                    };
+                    let p = if list_item_first_para_done {
+                        " ".repeat(item_prefix.len())
+                    } else {
+                        item_prefix
+                    };
+                    flush_inline!(&p);
+                    list_item_first_para_done = true;
+                }
                 list_stack.push(start);
                 list_item_counters.push(start.unwrap_or(1));
             }
@@ -622,13 +670,14 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 inline_spans.clear();
             }
             Event::End(TagEnd::Item) => {
+                let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
                 let prefix = if let Some(start) = list_stack.last().and_then(|s| *s) {
                     let n = list_item_counters.last_mut().unwrap();
-                    let p = format!("{}. ", *n - start + 1);
+                    let p = format!("{}{}. ", ancestor_indent, *n - start + 1);
                     *n += 1;
                     p
                 } else {
-                    "• ".to_string()
+                    format!("{}• ", ancestor_indent)
                 };
                 // Flush any remaining inline content (tight list items never
                 // hit End(Paragraph), so this is the only flush point for them).
@@ -1025,5 +1074,42 @@ mod tests {
         assert_eq!(texts[0], "1. First paragraph.");
         assert_eq!(texts[1], "   Second paragraph.");
         assert_eq!(texts[2], "2. Item two.");
+    }
+
+    // ── Nested list indentation ─────────────────────────────────────────────────
+
+    #[test]
+    fn nested_unordered_list_indents_child_items() {
+        // Tight nested unordered list: children should be indented by the
+        // parent bullet width (2 spaces for "• ").
+        let md = "- Item 1\n  - Nested 1\n  - Nested 2\n- Item 2";
+        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        assert_eq!(texts[0], "• Item 1");
+        assert_eq!(texts[1], "  • Nested 1");
+        assert_eq!(texts[2], "  • Nested 2");
+        assert_eq!(texts[3], "• Item 2");
+    }
+
+    #[test]
+    fn nested_ordered_list_indents_child_items() {
+        // Tight nested ordered list: children should be indented by the parent
+        // number prefix width (3 spaces for "1. ").
+        let md = "1. First\n   1. Nested first\n   2. Nested second\n2. Second";
+        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        assert_eq!(texts[0], "1. First");
+        assert_eq!(texts[1], "   1. Nested first");
+        assert_eq!(texts[2], "   2. Nested second");
+        assert_eq!(texts[3], "2. Second");
+    }
+
+    #[test]
+    fn nested_mixed_list_indents_correctly() {
+        // Ordered outer, unordered inner.
+        let md = "1. Outer\n   - Inner A\n   - Inner B\n2. Outer 2";
+        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        assert_eq!(texts[0], "1. Outer");
+        assert_eq!(texts[1], "   • Inner A");
+        assert_eq!(texts[2], "   • Inner B");
+        assert_eq!(texts[3], "2. Outer 2");
     }
 }
