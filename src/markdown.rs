@@ -326,8 +326,12 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut list_stack: Vec<Option<u64>> = Vec::new(); // None = unordered, Some(n) = ordered starting at n
     // Current list item number when ordered.
     let mut list_item_counters: Vec<u64> = Vec::new();
-    // Are we collecting the content of a list item (first paragraph)?
+    // Are we collecting the content of a list item?
     let mut in_list_item = false;
+    // True after the first paragraph of a list item has been flushed,
+    // so subsequent paragraphs know to use an indent prefix instead of
+    // the bullet/number prefix.
+    let mut list_item_first_para_done = false;
 
     // Table state.
     let mut in_table = false;
@@ -355,10 +359,27 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 // Nothing to do at the start; collect inline content.
             }
             Event::End(TagEnd::Paragraph) => {
-                let prefix = if in_blockquote { "│ " } else { "" };
-                flush_inline!(prefix);
-                // Blank line after paragraph (skip inside list items).
-                if !in_list_item {
+                if in_list_item {
+                    // Compute the prefix for this item (bullet or number) so we
+                    // can use it for the first paragraph, and its width as indent
+                    // for subsequent paragraphs.  We don't advance the counter
+                    // here — that happens in End(Item).
+                    let item_prefix = if let Some(start) = list_stack.last().and_then(|s| *s) {
+                        let n = list_item_counters.last().copied().unwrap_or(1);
+                        format!("{}. ", n - start + 1)
+                    } else {
+                        "• ".to_string()
+                    };
+                    let p = if list_item_first_para_done {
+                        " ".repeat(item_prefix.len())
+                    } else {
+                        item_prefix
+                    };
+                    flush_inline!(&p);
+                    list_item_first_para_done = true;
+                } else {
+                    let prefix = if in_blockquote { "│ " } else { "" };
+                    flush_inline!(prefix);
                     out.push(Line::default());
                 }
             }
@@ -423,6 +444,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
 
             Event::Start(Tag::Item) => {
                 in_list_item = true;
+                list_item_first_para_done = false;
                 inline_spans.clear();
             }
             Event::End(TagEnd::Item) => {
@@ -434,8 +456,18 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 } else {
                     "• ".to_string()
                 };
-                flush_inline!(&prefix);
+                // Flush any remaining inline content (tight list items never
+                // hit End(Paragraph), so this is the only flush point for them).
+                if !inline_spans.is_empty() {
+                    let p = if list_item_first_para_done {
+                        " ".repeat(prefix.len())
+                    } else {
+                        prefix
+                    };
+                    flush_inline!(&p);
+                }
                 in_list_item = false;
+                list_item_first_para_done = false;
             }
 
             // ── Table tags ────────────────────────────────────────────────────
@@ -724,5 +756,36 @@ mod tests {
     fn empty_input_returns_empty() {
         let lines = render("", 80);
         assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    // ── List rendering ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn loose_ordered_list_prefixes_each_item_correctly() {
+        // Blank lines between items make this a "loose" list — pulldown-cmark
+        // wraps each item's text in a Paragraph, which must not flush before
+        // the item prefix is prepended.
+        let md = "1. First item\n\n2. Second item\n\n3. Third item";
+        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        assert_eq!(
+            texts,
+            vec!["1. First item", "2. Second item", "3. Third item"]
+        );
+    }
+
+    #[test]
+    fn loose_unordered_list_prefixes_each_item_correctly() {
+        let md = "- Alpha\n\n- Beta\n\n- Gamma";
+        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        assert_eq!(texts, vec!["• Alpha", "• Beta", "• Gamma"]);
+    }
+
+    #[test]
+    fn multi_paragraph_list_item_indents_continuation() {
+        let md = "1. First paragraph.\n\n   Second paragraph.\n\n2. Item two.";
+        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        assert_eq!(texts[0], "1. First paragraph.");
+        assert_eq!(texts[1], "   Second paragraph.");
+        assert_eq!(texts[2], "2. Item two.");
     }
 }
