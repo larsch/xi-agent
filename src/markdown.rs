@@ -31,7 +31,7 @@ use unicode_width::UnicodeWidthStr;
 // ── Colour palette ─────────────────────────────────────────────────────────────
 
 /// Foreground colour for inline code and code block text.
-const CODE_FG: Color = Color::Rgb(180, 220, 140);
+const CODE_FG: Color = Color::Rgb(210, 160, 100);
 
 /// Table header foreground.
 const TABLE_HEADER_FG: Color = Color::Rgb(200, 210, 240);
