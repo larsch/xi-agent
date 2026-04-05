@@ -14,7 +14,9 @@ This repository is a AI agent harness for the terminal, built with Rust.
 
 ## Commit preflight checks
 
-- Compiles without warnings (`cargo build --all-features`).
-- Passes all tests (`cargo test --all-features`).
-- Passes clippy checks (`cargo clippy --all-features`).
-- Passes formatting checks (`cargo fmt --all --check`).
+Run `just preflight` before every commit. It enforces:
+
+- Formatting (`cargo fmt --all -- --check`)
+- Lint with warnings as errors (`cargo clippy --all-targets --all-features -- -D warnings`)
+- Tests (`cargo test --all-features`)
+- Compilation of all targets (`cargo check --all-targets --all-features`)
