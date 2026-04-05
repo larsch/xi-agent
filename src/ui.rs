@@ -21,6 +21,9 @@ const INPUT_BG: Color = Color::Rgb(30, 30, 40);
 /// Background colour of shell input panel.
 const SHELL_INPUT_BG: Color = Color::Rgb(24, 34, 32);
 
+/// Background colour of the input panel when typing a free-form ask_user response.
+const ASK_USER_INPUT_BG: Color = Color::Rgb(50, 30, 15);
+
 /// Background colour of user message blocks in the chat log.
 const USER_BG: Color = Color::Rgb(50, 50, 60);
 
@@ -64,6 +67,8 @@ fn style_textarea(app: &mut App) {
     // Both must carry the mode background so the panel is uniform.
     let bg = if app.input_mode == InputMode::Shell {
         SHELL_INPUT_BG
+    } else if app.ask_user_freeform_mode {
+        ASK_USER_INPUT_BG
     } else {
         INPUT_BG
     };
@@ -125,8 +130,7 @@ struct PanelInputs<'a> {
     selection_items_len: usize,
     completions_len: usize,
     resume_hint_visible: bool,
-    ask_user_freeform_mode: bool,
-    ask_user_question: Option<&'a str>,
+    ask_user_selection_no_freeform: bool,
     login_url: Option<&'a str>,
     has_login_code: bool,
     streaming: bool,
@@ -157,10 +161,6 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 
     let completion_height = if input.login_active || input.selection_mode {
         0
-    } else if input.ask_user_freeform_mode {
-        let question = input.ask_user_question.unwrap_or("Answer");
-        let prompt = format!("{question}   Enter submit   Esc cancel");
-        wrap_str(&prompt, input.width.max(1)).len() as u16
     } else if input.completions_len > 0 {
         input.completions_len as u16
     } else if input.resume_hint_visible {
@@ -193,8 +193,9 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
         0
     };
 
-    let input_height = if input.login_active { 0 } else { capped_input };
-    let halfblock_height: u16 = if input.login_active { 0 } else { 1 };
+    let hide_input = input.login_active || input.ask_user_selection_no_freeform;
+    let input_height = if hide_input { 0 } else { capped_input };
+    let halfblock_height: u16 = if hide_input { 0 } else { 1 };
     let status_height: u16 =
         if !input.login_active && (input.streaming || input.has_provider_status) {
             1
@@ -249,8 +250,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         selection_items_len: app.selection.items.len(),
         completions_len: app.completions.len(),
         resume_hint_visible,
-        ask_user_freeform_mode: app.ask_user_freeform_mode,
-        ask_user_question: app.ask_user_question.as_deref(),
+        ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
         streaming: app.throbber_visible(),
@@ -386,18 +386,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Completion popup / resume hint ───────────────────────────────────────
     if layout.completion_height > 0 {
-        if app.ask_user_freeform_mode {
-            let question = app.ask_user_question.as_deref().unwrap_or("Answer");
-            let prompt = format!("{question}   Enter submit   Esc cancel");
-            let hint_style = Style::default()
-                .fg(Color::Rgb(120, 140, 140))
-                .add_modifier(ratatui::style::Modifier::DIM);
-            let lines: Vec<Line<'static>> = wrap_str(&prompt, width.max(1))
-                .into_iter()
-                .map(|chunk| Line::from(Span::styled(chunk, hint_style)))
-                .collect();
-            f.render_widget(Paragraph::new(lines), completion_area);
-        } else if !app.completions.is_empty() {
+        if !app.completions.is_empty() {
             let popup_lines =
                 build_completion_lines(&app.completions, app.completion_selected, width);
             f.render_widget(Paragraph::new(popup_lines), completion_area);
@@ -534,9 +523,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Halfblock edges ───────────────────────────────────────────────────────
-    if !app.login.active {
+    if !app.login.active && !app.ask_user_selection_no_freeform() {
         let panel_bg = if app.input_mode == InputMode::Shell {
             SHELL_INPUT_BG
+        } else if app.ask_user_freeform_mode {
+            ASK_USER_INPUT_BG
         } else {
             INPUT_BG
         };
@@ -575,9 +566,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // ── Input box ─────────────────────────────────────────────────────────────
-    if !app.login.active {
+    if !app.login.active && !app.ask_user_selection_no_freeform() {
         let is_shell = app.input_mode == InputMode::Shell;
-        let panel_bg = if is_shell { SHELL_INPUT_BG } else { INPUT_BG };
+        let panel_bg = if is_shell {
+            SHELL_INPUT_BG
+        } else if app.ask_user_freeform_mode {
+            ASK_USER_INPUT_BG
+        } else {
+            INPUT_BG
+        };
 
         // ratatui-textarea scrolls horizontally for long single lines.
         // For chat-style input we want visual hard-wrapping instead.
@@ -625,13 +622,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 app.textarea.cursor(),
                 "open-webui token: ".to_string(),
                 Some("sk-…   Enter confirm   Esc cancel".to_string()),
-            )
-        } else if app.ask_user_freeform_mode {
-            (
-                app.textarea.lines().to_vec(),
-                app.textarea.cursor(),
-                "❓ ".to_string(),
-                None,
             )
         } else {
             (
@@ -1163,6 +1153,12 @@ fn build_log_lines(
                         if prev.role == Role::ToolCall
                             && matches!(prev.tool_name.as_deref(), Some("local_shell"))
                 );
+                let prev_is_ask_user = matches!(
+                    messages.get(idx.saturating_sub(1)),
+                    Some(prev)
+                        if prev.role == Role::ToolCall
+                            && matches!(prev.tool_name.as_deref(), Some("ask_user"))
+                );
 
                 let content_for_display = if prev_is_read {
                     split_read_file_header(&msg.content)
@@ -1212,7 +1208,11 @@ fn build_log_lines(
                 } else {
                     Color::Green
                 };
-                append_tool_result_block(&mut lines, &display, width, color);
+                if prev_is_ask_user {
+                    append_ask_user_response_block(&mut lines, &display, width, ASK_USER_INPUT_BG);
+                } else {
+                    append_tool_result_block(&mut lines, &display, width, color);
+                }
             }
         }
     }
@@ -1317,6 +1317,56 @@ fn append_tool_result_block(
             ]));
         }
     }
+}
+
+/// Render a freeform ask_user answer with a solid background block, matching
+/// the visual style of user messages but using `bg` instead of `USER_BG`.
+fn append_ask_user_response_block(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    bg: Color,
+) {
+    let bg_style = Style::default().bg(bg);
+
+    let segments: Vec<&str> = if content.is_empty() {
+        vec![""]
+    } else {
+        content.split('\n').collect()
+    };
+
+    let visible: Vec<usize> = if content.is_empty() {
+        vec![0]
+    } else {
+        segments
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, seg)| {
+                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
+                if seg.is_empty() && !has_nonempty_after {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .collect()
+    };
+
+    out.push(halfblock_line(width, '▄', bg));
+
+    for seg_idx in visible {
+        let segment = segments[seg_idx];
+        let normalized = normalize_terminal_segment(segment, 0);
+        let chunks = wrap_str(&normalized, width);
+        for chunk in chunks {
+            let text_cols = chunk.as_str().width();
+            let padding = width.saturating_sub(text_cols);
+            let padded = format!("{}{}", chunk, " ".repeat(padding));
+            out.push(Line::from(Span::styled(padded, bg_style)));
+        }
+    }
+
+    out.push(halfblock_line(width, '▀', bg));
 }
 
 /// Append pre-wrapped dim (thinking) lines for one block.
@@ -1936,6 +1986,13 @@ mod tests {
         buffer_to_plain_lines(terminal.backend().buffer(), width, height)
     }
 
+    fn render_to_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw succeeds");
+        terminal.backend().buffer().clone()
+    }
+
     fn buffer_to_plain_lines(
         buf: &ratatui::buffer::Buffer,
         width: u16,
@@ -1996,8 +2053,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2019,8 +2075,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 3,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2045,8 +2100,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 5,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2062,8 +2116,7 @@ mod tests {
             selection_items_len: 4,
             completions_len: 5,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2086,54 +2139,13 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: true,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
             has_provider_status: false,
         });
         assert_eq!(heights.completion_height, 1);
-    }
-
-    #[test]
-    fn layout_ask_user_freeform_wraps_question_across_rows() {
-        let heights = compute_panel_heights(PanelInputs {
-            terminal_height: 30,
-            width: 24,
-            input_line_count: 1,
-            show_info: false,
-            login_active: false,
-            selection_mode: false,
-            selection_items_len: 0,
-            completions_len: 0,
-            resume_hint_visible: false,
-            ask_user_freeform_mode: true,
-            ask_user_question: Some(
-                "Please provide a detailed response with enough words to force wrapping",
-            ),
-            login_url: None,
-            has_login_code: false,
-            streaming: false,
-            has_provider_status: false,
-        });
-
-        assert!(heights.completion_height > 1, "{heights:?}");
-    }
-
-    #[test]
-    fn draw_ask_user_freeform_renders_full_question() {
-        let mut app = make_app();
-        app.ask_user_freeform_mode = true;
-        app.ask_user_question = Some(
-            "Please provide a detailed response with enough words to force wrapping".to_string(),
-        );
-
-        let lines = render_to_plain_lines(&mut app, 24, 12);
-        let joined = lines.join("\n");
-        assert!(joined.contains("Please provide"), "{joined}");
-        assert!(joined.contains("wrapping"), "{joined}");
-        assert!(joined.contains("Esc cancel"), "{joined}");
     }
 
     #[test]
@@ -2148,8 +2160,7 @@ mod tests {
             selection_items_len: MAX_SELECTION_VISIBLE + 10,
             completions_len: 0,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2175,8 +2186,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2198,8 +2208,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2215,8 +2224,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: false,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
             streaming: false,
@@ -2239,8 +2247,7 @@ mod tests {
             selection_items_len: 0,
             completions_len: 0,
             resume_hint_visible: true,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user_selection_no_freeform: false,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
             streaming: false,
@@ -2933,5 +2940,51 @@ mod tests {
         assert!(rendered.contains("│load: 1.0"), "{rendered}");
         // No extra blank line after the content.
         assert!(!rendered.contains("│load: 1.0\n│"), "{rendered}");
+    }
+
+    #[test]
+    fn ask_user_freeform_typing_uses_ask_user_input_bg() {
+        use crate::agent::types::{AskRequest, AskUserOption, AskUserResponse};
+        let mut app = make_app();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "Choose?".to_string(),
+            context: None,
+            options: vec![AskUserOption {
+                title: "Option A".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_freeform: true,
+            reply: reply_tx,
+        });
+
+        // Before typing: input should have INPUT_BG.
+        let buf_before = render_to_buffer(&mut app, 40, 8);
+        // After typing: input should have ASK_USER_INPUT_BG.
+        app.begin_ask_freeform_typing();
+        app.textarea.insert_char('x');
+        let buf_after = render_to_buffer(&mut app, 40, 8);
+
+        // Find the input row (row with 'x' in it).
+        let input_row = (0..8u16)
+            .find(|&y| {
+                buf_after[(0, y)].symbol() == "x"
+                    || (1..40u16).any(|x| buf_after[(x, y)].symbol() == "x")
+            })
+            .expect("should find input row");
+
+        // The cell background on the input row should be ASK_USER_INPUT_BG.
+        let bg_after = buf_after[(0, input_row)].bg;
+        let bg_before = buf_before[(0, input_row)].bg;
+        assert_eq!(
+            bg_after,
+            ratatui::style::Color::Rgb(50, 30, 15),
+            "input bg after typing should be ASK_USER_INPUT_BG, got {bg_after:?}"
+        );
+        assert_ne!(
+            bg_after, bg_before,
+            "input bg should change when freeform typing begins (before={bg_before:?}, after={bg_after:?})"
+        );
     }
 }

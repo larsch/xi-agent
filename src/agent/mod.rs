@@ -211,7 +211,6 @@ pub async fn run_agent_loop(
 
             let _ = tx.send(AgentEvent::ToolCallEnd {
                 id: id.clone(),
-                name: name.clone(),
                 result: result.clone(),
             });
 
@@ -232,7 +231,6 @@ pub async fn run_agent_loop(
                     let skipped = ToolResult::err("Skipped due to queued user message.");
                     let _ = tx.send(AgentEvent::ToolCallEnd {
                         id: skip_id.clone(),
-                        name: skip_name.clone(),
                         result: skipped.clone(),
                     });
                     messages.push(Message::tool_call(&skip_id, &skip_name, skip_args));

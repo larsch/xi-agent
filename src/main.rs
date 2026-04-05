@@ -614,14 +614,58 @@ async fn run(
                         // ── Selection menu mode ───────────────────────────────
                         if app.selection.active {
                             match key.code {
-                                KeyCode::Up => app.selection_select_prev(),
-                                KeyCode::Down => app.selection_select_next(),
-                                KeyCode::Backspace => app.selection_backspace(),
+                                KeyCode::Up => {
+                                    app.selection_select_prev();
+                                    // If navigating away from the freeform sentinel,
+                                    // cancel the in-progress typed response.
+                                    if app.ask_user_freeform_mode {
+                                        let on_sentinel = app
+                                            .selection
+                                            .items
+                                            .get(app.selection.selected)
+                                            .map(|i| i.complete_to == "/ask_user_freeform")
+                                            .unwrap_or(false);
+                                        if !on_sentinel {
+                                            app.cancel_ask_freeform_typing();
+                                        }
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    app.selection_select_next();
+                                    if app.ask_user_freeform_mode {
+                                        let on_sentinel = app
+                                            .selection
+                                            .items
+                                            .get(app.selection.selected)
+                                            .map(|i| i.complete_to == "/ask_user_freeform")
+                                            .unwrap_or(false);
+                                        if !on_sentinel {
+                                            app.cancel_ask_freeform_typing();
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if app.ask_user_freeform_mode {
+                                        // Route backspace into the textarea.
+                                        app.textarea.delete_char();
+                                        // If the textarea is now empty, cancel freeform typing.
+                                        if app.textarea.lines().iter().all(|l| l.is_empty()) {
+                                            app.cancel_ask_freeform_typing();
+                                        }
+                                    } else {
+                                        app.selection_backspace();
+                                    }
+                                }
                                 KeyCode::Char(c)
                                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                                 {
-                                    app.selection_add_char(c);
+                                    if app.pending_ask_allows_freeform() {
+                                        app.begin_ask_freeform_typing();
+                                        app.textarea.insert_char(c);
+                                    } else {
+                                        app.selection_add_char(c);
+                                    }
                                 }
                                 KeyCode::Enter if key.modifiers.is_empty() => {
                                     match app.apply_selection() {
@@ -654,7 +698,12 @@ async fn run(
                                             app.select_pending_ask_option(answer);
                                         }
                                         Some(SelectionResult::AskFreeform) => {
-                                            app.enter_ask_freeform_mode();
+                                            if app.ask_user_freeform_mode {
+                                                // Text already typed — submit it.
+                                                app.submit_pending_ask_answer();
+                                            } else {
+                                                app.enter_ask_freeform_mode();
+                                            }
                                         }
                                         Some(SelectionResult::LoginAction(action)) => {
                                             app.apply_login_action(action);
@@ -1198,9 +1247,7 @@ async fn run_print_mode_loop(
             AgentEvent::ToolCallStart { name, args, .. } => {
                 eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
             }
-            AgentEvent::ToolCallEnd {
-                name: _, result, ..
-            } => {
+            AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
                     eprintln!("  ✗ {}", result.content.lines().next().unwrap_or("error"));
                 }
@@ -1308,9 +1355,7 @@ async fn run_print_mode_loop_inner(
             AgentEvent::ToolCallStart { name, args, .. } => {
                 eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
             }
-            AgentEvent::ToolCallEnd {
-                name: _, result, ..
-            } => {
+            AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
                     eprintln!("  ✗ {}", result.content.lines().next().unwrap_or("error"));
                 }

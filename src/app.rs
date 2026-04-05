@@ -52,6 +52,7 @@ pub enum LoginActionKind {
 }
 
 struct PendingAsk {
+    question: String,
     options: Vec<AskUserOption>,
     allow_freeform: bool,
 }
@@ -1391,6 +1392,22 @@ impl App {
         self.pending_ask.is_some()
     }
 
+    /// Returns true when the current pending ask allows a free-form typed answer.
+    pub fn pending_ask_allows_freeform(&self) -> bool {
+        self.pending_ask
+            .as_ref()
+            .map(|p| p.allow_freeform)
+            .unwrap_or(false)
+    }
+
+    /// Returns true when a pending ask is showing its selection menu and does
+    /// NOT allow free-form input.
+    pub fn ask_user_selection_no_freeform(&self) -> bool {
+        self.selection.active
+            && self.selection.kind == Some(SelectionKind::AskUser)
+            && !self.pending_ask_allows_freeform()
+    }
+
     pub fn receive_ask_request(&mut self, req: AskRequest) {
         let AskRequest {
             question,
@@ -1402,6 +1419,7 @@ impl App {
         } = req;
 
         self.pending_ask = Some(PendingAsk {
+            question: question.clone(),
             options: options.clone(),
             allow_freeform,
         });
@@ -1458,6 +1476,53 @@ impl App {
 
     pub fn enter_ask_freeform_mode(&mut self) {
         self.exit_selection_mode();
+        self.reset_textarea();
+        if self.pending_ask_allows_freeform() && !self.ask_user_freeform_mode {
+            let question = self
+                .pending_ask
+                .as_ref()
+                .map(|p| p.question.clone())
+                .unwrap_or_default();
+            self.ask_user_freeform_mode = true;
+            self.ask_user_question = Some(question);
+        }
+    }
+
+    /// While the ask_user selection menu is still visible, mark the freeform
+    /// sentinel as selected and activate the brown input field so the user can
+    /// see what they are typing.  The selection menu stays open so they can
+    /// still navigate back to a predefined option.
+    pub fn begin_ask_freeform_typing(&mut self) {
+        if !self.pending_ask_allows_freeform() {
+            return;
+        }
+        // Select the freeform sentinel item in the list.
+        if let Some(idx) = self
+            .selection
+            .items
+            .iter()
+            .position(|item| item.complete_to == "/ask_user_freeform")
+        {
+            self.selection.selected = idx;
+            self.ensure_selection_visible();
+        }
+        // Activate the brown input field and show the question as a hint.
+        if !self.ask_user_freeform_mode {
+            let question = self
+                .pending_ask
+                .as_ref()
+                .map(|p| p.question.clone())
+                .unwrap_or_default();
+            self.ask_user_freeform_mode = true;
+            self.ask_user_question = Some(question);
+        }
+    }
+
+    /// Clear freeform typing state without dismissing the selection menu.
+    /// Called when the user navigates away from the freeform sentinel.
+    pub fn cancel_ask_freeform_typing(&mut self) {
+        self.ask_user_freeform_mode = false;
+        self.ask_user_question = None;
         self.reset_textarea();
     }
 
@@ -2134,23 +2199,13 @@ impl App {
                 self.messages.push(Message::tool_call(id, name, args));
                 self.bump_log_revision();
             }
-            AgentEvent::ToolCallEnd { id, name, result } => {
+            AgentEvent::ToolCallEnd { id, result } => {
                 self.last_output_at = Some(std::time::Instant::now());
                 self.messages.push(Message::tool_result(
                     &id,
                     result.content.clone(),
                     result.is_error,
                 ));
-
-                // For ask_user, also record the selected/typed answer as an
-                // explicit user message after the tool_result so the chat log
-                // and persisted history reflect what the user chose.
-                //
-                // Ordering matters: tool_result must immediately follow
-                // tool_call for Anthropic tool_use/tool_result pairing.
-                if name == "ask_user" && !result.is_error {
-                    self.messages.push(Message::user(result.content));
-                }
                 self.bump_log_revision();
             }
             AgentEvent::ExternalFileChange {

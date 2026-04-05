@@ -220,11 +220,7 @@ pub enum AgentEvent {
         args: serde_json::Value,
     },
     /// A tool call finished; contains the result.
-    ToolCallEnd {
-        id: String,
-        name: String,
-        result: ToolResult,
-    },
+    ToolCallEnd { id: String, result: ToolResult },
     // ── Loop lifecycle ─────────────────────────────────────────────────────────
     /// One or more tracked files were modified externally before this turn.
     /// `notification` is the pre-formatted user message text that was injected
