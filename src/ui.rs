@@ -304,7 +304,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // We determine the line count and scroll position first, then copy only
     // the visible slice (~terminal height lines) into ratatui.
     let assumed_line_count = build_log_lines_cached(app, assumed_log_width).len();
-    let mut has_scrollbar = assumed_line_count > inner_height;
+    // Show the scrollbar only when content overflows and the user has scrolled
+    // up (auto_scroll = false).  Hide it when pinned to the bottom.
+    let mut has_scrollbar = assumed_line_count > inner_height && !app.auto_scroll;
 
     // If our width assumption was wrong, rebuild once with the correct width.
     let final_log_width = if has_scrollbar != app.log_had_scrollbar {
@@ -314,7 +316,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             log_area.width as usize
         };
         let rewrap_count = build_log_lines_cached(app, rewrap_width).len();
-        has_scrollbar = rewrap_count > inner_height;
+        has_scrollbar = rewrap_count > inner_height && !app.auto_scroll;
         rewrap_width
     } else {
         assumed_log_width
@@ -375,11 +377,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_content_area);
 
-    if total_lines > inner_height {
+    if let Some(scrollbar_area) = log_scrollbar_area {
         let mut scrollbar_state = ScrollbarState::new(max_scroll + 1).position(app.log_scroll);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            log_scrollbar_area.unwrap_or(log_area),
+            scrollbar_area,
             &mut scrollbar_state,
         );
     }
@@ -2749,6 +2751,9 @@ mod tests {
             Message::user("three"),
             Message::user("four"),
         ];
+        // Scrolled up: scrollbar should be visible, reserving the rightmost column.
+        app.auto_scroll = false;
+        app.log_scroll = 0;
 
         terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
 
@@ -2757,6 +2762,31 @@ mod tests {
         for y in 0..8 {
             assert_ne!(buf[(rightmost_x, y)].bg, USER_BG);
         }
+    }
+
+    #[test]
+    fn scrollbar_hidden_when_at_bottom() {
+        // When auto_scroll is true (at bottom) the scrollbar column must not
+        // be reserved — content can use the full width.
+        let backend = ratatui::backend::TestBackend::new(20, 8);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mut app = make_app();
+        app.messages = vec![
+            Message::user("one"),
+            Message::user("two"),
+            Message::user("three"),
+            Message::user("four"),
+        ];
+        // Default: auto_scroll = true (pinned to bottom).
+        assert!(app.auto_scroll);
+
+        terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
+
+        // With no scrollbar column, log_had_scrollbar must be false.
+        assert!(
+            !app.log_had_scrollbar,
+            "scrollbar should be hidden at bottom"
+        );
     }
 
     #[test]
