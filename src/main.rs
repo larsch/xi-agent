@@ -27,6 +27,7 @@ mod debug_log;
 mod dirs;
 mod export;
 mod llm;
+mod markdown;
 mod provider;
 mod session;
 mod shell;

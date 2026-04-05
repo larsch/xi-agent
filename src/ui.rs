@@ -1064,17 +1064,17 @@ fn build_log_lines(
                 // Show the streaming cursor (▋) at the end of the answer area
                 // whenever this is the active streaming message.
                 if has_answer {
-                    let content = if is_streaming_last && msg.content.is_empty() {
-                        format!("{answer_icon} ▋")
+                    if is_streaming_last && msg.content.is_empty() {
+                        // Pure cursor line while waiting for first token.
+                        let content = format!("{answer_icon} ▋");
+                        append_message(&mut lines, &content, "", width, false);
                     } else {
-                        format!("{answer_icon} {}", sanitize_for_display(&msg.content))
-                    };
-                    let suffix = if is_streaming_last && !msg.content.is_empty() {
-                        "▋"
-                    } else {
-                        ""
-                    };
-                    append_message(&mut lines, &content, suffix, width, false);
+                        // Render content through the markdown renderer.
+                        let md_lines =
+                            crate::markdown::render(&msg.content, width.saturating_sub(3));
+                        let prefix = format!("{answer_icon} ");
+                        append_markdown_answer(&mut lines, md_lines, &prefix, is_streaming_last);
+                    }
                 }
             }
             Role::ToolCall => {
@@ -1346,6 +1346,48 @@ fn append_message_dim(
             out.push(Line::from(spans));
         }
     }
+}
+
+/// Append markdown-rendered answer lines to `out`, prepending `prefix` (the
+/// answer icon + space) on the very first rendered line.  When `streaming` is
+/// true a yellow `▋` cursor span is appended to the last line.
+fn append_markdown_answer(
+    out: &mut Vec<Line<'static>>,
+    mut md_lines: Vec<ratatui::text::Line<'static>>,
+    prefix: &str,
+    streaming: bool,
+) {
+    if md_lines.is_empty() {
+        // Fallback: emit prefix alone (shouldn't happen when content is non-empty).
+        let mut spans = vec![ratatui::text::Span::raw(prefix.to_string())];
+        if streaming {
+            spans.push(ratatui::text::Span::styled(
+                "▋",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+            ));
+        }
+        out.push(ratatui::text::Line::from(spans));
+        return;
+    }
+
+    // Prepend the icon/prefix to the first line.
+    if !prefix.is_empty() {
+        let first = &mut md_lines[0];
+        first
+            .spans
+            .insert(0, ratatui::text::Span::raw(prefix.to_string()));
+    }
+
+    // Append streaming cursor to the last line.
+    if streaming {
+        let last = md_lines.last_mut().unwrap();
+        last.spans.push(ratatui::text::Span::styled(
+            "▋",
+            ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+        ));
+    }
+
+    out.extend(md_lines);
 }
 
 /// Append pre-wrapped visual lines for one message to `out`.
