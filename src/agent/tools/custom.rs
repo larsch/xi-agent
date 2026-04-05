@@ -169,10 +169,25 @@ fn load_tools_from_dir(dir: &std::path::Path) -> Vec<CustomTool> {
 /// Run `executable --describe` synchronously and parse the JSON descriptor.
 /// Returns `None` (and logs at debug) if anything goes wrong.
 fn load_tool_from_executable(path: &std::path::Path) -> Option<CustomTool> {
-    let output = std::process::Command::new(path)
-        .arg("--describe")
-        .stdin(Stdio::null())
-        .output();
+    // Retry once on ETXTBSY: another thread may have a write fd open on the
+    // same inode (e.g. a NamedTempFile in a concurrent test) for a very brief
+    // window.  A short sleep is always sufficient to outlast it.
+    let output = {
+        let attempt = std::process::Command::new(path)
+            .arg("--describe")
+            .stdin(Stdio::null())
+            .output();
+        match attempt {
+            Err(ref e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::process::Command::new(path)
+                    .arg("--describe")
+                    .stdin(Stdio::null())
+                    .output()
+            }
+            other => other,
+        }
+    };
 
     let output = match output {
         Ok(o) => o,
@@ -381,6 +396,7 @@ if [ "$1" = "--describe" ]; then
   printf '{"name":"fail_on_run","description":"Always fails.","parameters_schema":{"type":"object","properties":{}}}'
   exit 0
 fi
+cat > /dev/null
 echo "something went wrong"
 exit 1
 "#,
@@ -390,8 +406,16 @@ exit 1
         assert_eq!(tools.len(), 1);
 
         let result = tools[0].execute(serde_json::json!({})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("exit 1"));
+        assert!(
+            result.is_error,
+            "expected is_error, got: {:?}",
+            result.content
+        );
+        assert!(
+            result.content.contains("exit 1"),
+            "expected 'exit 1' in content, got: {:?}",
+            result.content
+        );
     }
 
     #[test]
