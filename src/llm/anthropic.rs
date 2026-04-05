@@ -9,6 +9,7 @@ use super::{
         send_streaming_request,
     },
 };
+use crate::provider::{context_window_for_model, scaled_token_budget};
 
 pub struct AnthropicProvider {
     base_url: String,
@@ -55,10 +56,12 @@ impl AnthropicProvider {
 
             let anthropic_messages = to_anthropic_messages(&messages);
 
+            let context_window = context_window_for_model(&model).unwrap_or(200_000);
+            let max_tokens = scaled_token_budget(context_window, 8_000, 8_000);
             let mut body = serde_json::json!({
                 "model": model,
                 "messages": anthropic_messages,
-                "max_tokens": 8192,
+                "max_tokens": max_tokens,
                 "stream": true,
             });
 

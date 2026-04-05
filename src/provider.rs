@@ -143,10 +143,10 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
     if m.contains("claude-2") {
         return Some(100_000);
     }
-    // Claude 4+ and any other claude-* models not matched above
+    // Claude 4+ models have a 1M context window.
     // (e.g. claude-sonnet-4.5, claude-sonnet-4-6, claude-opus-4, …).
     if m.contains("claude-") {
-        return Some(200_000);
+        return Some(1_000_000);
     }
     if m.contains("llama3") {
         return Some(128_000);
@@ -161,6 +161,23 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
         return Some(8_192);
     }
     None
+}
+
+/// Compute a scaled token budget using a square-root curve, capped at `window / 3`.
+///
+/// `f(w) = min(w/3, floor + scale * sqrt(w / 200_000))`
+///
+/// This gives good utilisation of large context windows while keeping small
+/// models usable (the `w/3` cap kicks in below ~200k).
+///
+/// Intended uses:
+/// - `max_tokens` (output budget):   floor = 8_000, scale = 8_000
+/// - `reserve_tokens` (compaction):  floor = 16_000, scale = 16_000
+pub fn scaled_token_budget(context_window: usize, floor: usize, scale: usize) -> usize {
+    let ratio = context_window as f64 / 200_000.0_f64;
+    let value = floor as f64 + scale as f64 * ratio.sqrt();
+    let cap = context_window / 3;
+    (value as usize).min(cap).max(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +350,7 @@ pub fn build_provider(
 mod tests {
     use super::{
         CopilotApiRoute, ThinkingSupport, classify_copilot_route, context_window_for_model,
-        thinking_support_for,
+        scaled_token_budget, thinking_support_for,
     };
     use crate::llm::copilot::test_helpers;
     use crate::provider::ProviderKind;
@@ -434,5 +451,59 @@ mod tests {
         // Cache entry exists but carries no context-window value; table has no
         // match either → None.
         assert_eq!(context_window_for_model("__no_limit_model__"), None);
+    }
+
+    #[test]
+    fn context_window_claude4_returns_1m() {
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-6"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4.5"),
+            Some(1_000_000)
+        );
+        assert_eq!(context_window_for_model("claude-opus-4"), Some(1_000_000));
+    }
+
+    #[test]
+    fn context_window_claude3_unchanged() {
+        assert_eq!(context_window_for_model("claude-3-5-sonnet"), Some(200_000));
+        assert_eq!(context_window_for_model("claude-3-opus"), Some(200_000));
+    }
+
+    // ── scaled_token_budget ──────────────────────────────────────────────────
+
+    #[test]
+    fn scaled_token_budget_at_reference_window() {
+        // At 200k: floor + scale * sqrt(1.0) = floor + scale
+        assert_eq!(scaled_token_budget(200_000, 8_000, 8_000), 16_000);
+        assert_eq!(scaled_token_budget(200_000, 16_000, 16_000), 32_000);
+    }
+
+    #[test]
+    fn scaled_token_budget_at_1m() {
+        // sqrt(1_000_000 / 200_000) = sqrt(5) ≈ 2.236
+        // max_tokens: 8000 + 8000 * 2.236 = ~25_889, cap = 333_333 → ~25_889
+        let mt = scaled_token_budget(1_000_000, 8_000, 8_000);
+        assert!(mt > 24_000 && mt < 27_000, "max_tokens at 1M: {mt}");
+        // reserve: 16000 + 16000 * 2.236 = ~51_778, cap = 333_333 → ~51_778
+        let rv = scaled_token_budget(1_000_000, 16_000, 16_000);
+        assert!(rv > 50_000 && rv < 53_000, "reserve at 1M: {rv}");
+    }
+
+    #[test]
+    fn scaled_token_budget_cap_applies_on_small_window() {
+        // 8k window: formula gives floor=8000 which exceeds 8192/3=2730 → cap wins
+        let mt = scaled_token_budget(8_192, 8_000, 8_000);
+        assert_eq!(mt, 8_192 / 3);
+    }
+
+    #[test]
+    fn scaled_token_budget_at_128k() {
+        // sqrt(128_000 / 200_000) = sqrt(0.64) = 0.8
+        // max_tokens: 8000 + 8000 * 0.8 = 14_400, cap = 42_666 → 14_400
+        let mt = scaled_token_budget(128_000, 8_000, 8_000);
+        assert!(mt > 13_500 && mt < 15_000, "max_tokens at 128k: {mt}");
     }
 }
