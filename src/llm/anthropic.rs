@@ -237,6 +237,20 @@ impl AnthropicProvider {
                                 }
                                 yield LlmEvent::Usage(usage);
                             }
+                            // If the response was cut off by the token limit while a
+                            // tool_use block was still being streamed, content_block_stop
+                            // will never arrive and the tool call would be silently lost.
+                            // Emit an error instead so the agent can surface it.
+                            if ev["delta"]["stop_reason"].as_str() == Some("max_tokens")
+                                && !tool_blocks.is_empty()
+                            {
+                                yield LlmEvent::Error(ProviderError::other(
+                                    "Anthropic",
+                                    "Response truncated by token limit mid-tool-call; \
+                                     tool arguments incomplete.",
+                                ));
+                                return;
+                            }
                         }
 
                         Some("message_stop") => {

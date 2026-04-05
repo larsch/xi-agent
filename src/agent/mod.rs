@@ -81,6 +81,7 @@ pub async fn run_agent_loop(
         let mut assistant_thinking: Option<String> = None;
         let mut assistant_phase = AssistantPhase::Unknown;
         let mut pending_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, args)
+        let mut tool_intent_seen = false;
 
         let mut stream_error: Option<crate::llm::ProviderError> = None;
 
@@ -108,6 +109,7 @@ pub async fn run_agent_loop(
                 LlmEvent::ToolIntentStart => {
                     let _ = tx.send(AgentEvent::ToolIntentStart);
                     assistant_phase = AssistantPhase::Provisional;
+                    tool_intent_seen = true;
                 }
                 LlmEvent::ToolCall { id, name, args } => {
                     pending_tool_calls.push((id, name, args));
@@ -125,6 +127,17 @@ pub async fn run_agent_loop(
 
         if let Some(e) = stream_error {
             let _ = tx.send(AgentEvent::Error(e));
+            return;
+        }
+
+        // Guard: if the model signalled a tool call was coming but no complete
+        // tool call arrived (e.g. truncated by max_tokens), treat it as an
+        // error rather than silently accepting an empty assistant turn.
+        if tool_intent_seen && pending_tool_calls.is_empty() {
+            let _ = tx.send(AgentEvent::Error(crate::llm::ProviderError::other(
+                "agent",
+                "Tool call was indicated but not completed (response may have been truncated).",
+            )));
             return;
         }
 
