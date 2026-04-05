@@ -143,6 +143,11 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
     if m.contains("claude-2") {
         return Some(100_000);
     }
+    // Claude 4+ and any other claude-* models not matched above
+    // (e.g. claude-sonnet-4.5, claude-sonnet-4-6, claude-opus-4, …).
+    if m.contains("claude-") {
+        return Some(200_000);
+    }
     if m.contains("llama3") {
         return Some(128_000);
     }
