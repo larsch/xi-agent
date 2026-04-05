@@ -36,8 +36,7 @@ impl Tool for FindTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern to match file paths, \
-                                    e.g. '*.rs', '**/*.json', 'src/**/*.rs'"
+                    "description": "Glob pattern to match file names relative to the `path` argument, e.g. '*.rs', '**/*.json'"
                 },
                 "path": {
                     "type": "string",
