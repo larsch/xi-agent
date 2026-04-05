@@ -230,6 +230,12 @@ pub async fn run_agent_loop(
             }
         }
 
+        // Refresh baselines after every tool-call batch so that any files
+        // the agent modified during this turn are not reported as external
+        // changes on the next loop iteration.  (ask_user already calls this
+        // before blocking, covering the mid-loop pause case.)
+        config.file_tracker.lock().unwrap().refresh_baselines();
+
         let _ = tx.send(AgentEvent::TurnEnd);
 
         if stop_after_turn_for_steering {

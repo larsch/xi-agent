@@ -54,19 +54,32 @@ impl FileTracker {
         }
     }
 
-    /// Re-snapshot all currently tracked paths without reporting any changes.
+    /// Absorb any file changes that occurred since the last snapshot without
+    /// reporting them as external modifications.
     ///
     /// Call this whenever the agent pauses for user input (end of agent run,
-    /// or just before awaiting an `ask_user` reply).  This resets the baseline
-    /// so that only changes made *during the subsequent user-input window* are
-    /// reported by the next [`check_modified`] call — changes the agent itself
-    /// caused during the previous run are silently absorbed.
+    /// after a tool-call batch, or just before awaiting an `ask_user` reply).
+    /// Only changes made *during the subsequent user-input window* will be
+    /// reported by the next [`check_modified`] call.
+    ///
+    /// Uses an mtime fast-path identical to [`check_modified`]: files whose
+    /// mtime has not changed are skipped entirely (no read, no hash).
     pub fn refresh_baselines(&mut self) {
-        let paths: Vec<std::path::PathBuf> = self.files.keys().cloned().collect();
-        for path in paths {
-            match snapshot(&path) {
-                Ok(snap) => {
-                    self.files.insert(path, snap);
+        for (path, snap) in &mut self.files {
+            // Stat first; if mtime hasn't changed the stored snapshot is still
+            // valid and there is nothing to absorb.
+            let new_mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .unwrap_or(snap.mtime);
+
+            if new_mtime == snap.mtime {
+                continue;
+            }
+
+            // mtime changed — re-read and re-hash to update the baseline.
+            match snapshot(path) {
+                Ok(new_snap) => {
+                    *snap = new_snap;
                 }
                 Err(e) => {
                     log::debug!(
