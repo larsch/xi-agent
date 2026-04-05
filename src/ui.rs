@@ -1079,47 +1079,76 @@ fn build_log_lines(
             }
             Role::ToolCall => {
                 let name = msg.tool_name.as_deref().unwrap_or("unknown");
-                let mut label = if name == "local_shell" {
-                    let prefix = msg
-                        .tool_args
-                        .as_ref()
-                        .and_then(|a| a.get("prefix"))
+
+                // ask_user: render context (if any) then question as markdown,
+                // matching the style used for assistant responses.
+                if name == "ask_user" {
+                    let args = msg.tool_args.as_ref();
+                    let context = args
+                        .and_then(|a| a.get("context"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let question = args
+                        .and_then(|a| a.get("question"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let command = msg
-                        .tool_args
-                        .as_ref()
-                        .and_then(|a| a.get("command"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if prefix.is_empty() {
-                        format!("⚙ {command}")
-                    } else {
-                        format!("⚙ {prefix} {command}")
+
+                    if let Some(ctx) = context {
+                        let md_lines = crate::markdown::render(ctx, width.saturating_sub(3));
+                        append_markdown_answer(&mut lines, md_lines, "❓ ", false);
+                        lines.push(Line::default());
+                    }
+
+                    if !question.is_empty() {
+                        let prefix = if context.is_none() { "❓ " } else { "" };
+                        let md_lines = crate::markdown::render(question, width.saturating_sub(3));
+                        append_markdown_answer(&mut lines, md_lines, prefix, false);
                     }
                 } else {
-                    match msg.tool_args.as_ref() {
-                        Some(args) => tool_presentation::tool_invocation_label(name, args),
-                        None => {
-                            tool_presentation::tool_invocation_label(name, &serde_json::Value::Null)
+                    let mut label = if name == "local_shell" {
+                        let prefix = msg
+                            .tool_args
+                            .as_ref()
+                            .and_then(|a| a.get("prefix"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let command = msg
+                            .tool_args
+                            .as_ref()
+                            .and_then(|a| a.get("command"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if prefix.is_empty() {
+                            format!("⚙ {command}")
+                        } else {
+                            format!("⚙ {prefix} {command}")
                         }
+                    } else {
+                        match msg.tool_args.as_ref() {
+                            Some(args) => tool_presentation::tool_invocation_label(name, args),
+                            None => tool_presentation::tool_invocation_label(
+                                name,
+                                &serde_json::Value::Null,
+                            ),
+                        }
+                    };
+
+                    if matches!(name, "read" | "read_file")
+                        && let Some(next) = messages.get(idx + 1)
+                        && next.role == Role::ToolResult
+                        && let Some((start, end, total, _)) = split_read_file_header(&next.content)
+                    {
+                        label.push_str(&format!(" [{start}-{end}/{total}]"));
                     }
-                };
 
-                if matches!(name, "read" | "read_file")
-                    && let Some(next) = messages.get(idx + 1)
-                    && next.role == Role::ToolResult
-                    && let Some((start, end, total, _)) = split_read_file_header(&next.content)
-                {
-                    label.push_str(&format!(" [{start}-{end}/{total}]"));
+                    let color = if name == "local_shell" {
+                        Color::LightBlue
+                    } else {
+                        Color::Cyan
+                    };
+                    append_message_colored(&mut lines, &label, width, color);
                 }
-
-                let color = if name == "local_shell" {
-                    Color::LightBlue
-                } else {
-                    Color::Cyan
-                };
-                append_message_colored(&mut lines, &label, width, color);
             }
             Role::ToolResult => {
                 let prev_is_read = matches!(
