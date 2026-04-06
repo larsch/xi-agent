@@ -219,7 +219,7 @@ fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        let lines = build_log_lines(&app.messages, app.streaming, &app.queued_steering, width);
+        let lines = build_log_lines(&app.messages, app.streaming(), &app.queued_steering, width);
         app.cached_log_lines = Some((app.log_revision, width, lines));
     }
     &app.cached_log_lines.as_ref().unwrap().2
@@ -254,7 +254,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
         streaming: app.throbber_visible(),
-        has_provider_status: app.provider_status.is_some(),
+        has_provider_status: matches!(
+            app.streaming_status,
+            Some(crate::app::StreamingStatus::Message(_))
+        ),
     });
 
     // Layout: chat log | completions | sel header | sel items
@@ -555,13 +558,17 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         let show_throbber = app.throbber_visible();
         let frame = THROBBER_FRAMES[(app.throbber_tick as usize) % THROBBER_FRAMES.len()];
 
-        let status_line = match (show_throbber, &app.provider_status) {
+        let provider_message = match &app.streaming_status {
+            Some(crate::app::StreamingStatus::Message(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        let status_line = match (show_throbber, provider_message) {
             (true, Some(status)) => Line::from(vec![
                 Span::styled(format!("{frame}"), throbber_style),
                 Span::styled(format!(" {status}"), status_text_style),
             ]),
             (true, None) => Line::from(Span::styled(format!("{frame}"), throbber_style)),
-            (false, Some(status)) => Line::from(Span::styled(status.clone(), status_text_style)),
+            (false, Some(status)) => Line::from(Span::styled(status.to_owned(), status_text_style)),
             (false, None) => Line::default(),
         };
         f.render_widget(Paragraph::new(status_line), status_area);

@@ -23,6 +23,17 @@ use crate::{
 
 use crate::export;
 
+// ── Streaming status ──────────────────────────────────────────────────────────
+
+/// Describes what the agent/provider is currently doing while a turn is active.
+#[derive(Debug, Clone)]
+pub enum StreamingStatus {
+    /// Waiting for the first token — throbber should animate.
+    Waiting,
+    /// Provider-supplied transient message (e.g. rate-limit countdown).
+    Message(String),
+}
+
 // ── Selection result ──────────────────────────────────────────────────────────
 
 /// Value returned when the user confirms a choice in the selection menu.
@@ -196,16 +207,14 @@ pub struct App {
     /// Used by the renderer to pick the likely wrap width and avoid redundant
     /// full log re-wrap work on every draw.
     pub log_had_scrollbar: bool,
-    pub streaming: bool,
+    /// Current streaming state; `None` when no turn is active.
+    pub streaming_status: Option<StreamingStatus>,
     /// Throbber animation frame index, advanced on every UI tick while streaming.
     pub throbber_tick: u8,
     /// Instant of the last visible agent output (text/thinking tokens, tool
     /// calls, tool results, etc.); used to suppress the throbber while output
     /// is actively arriving and re-show it after 1 s of idle time.
     pub last_output_at: Option<std::time::Instant>,
-    /// Transient status message from the active provider (e.g. "Rate limited, retrying in 7s…").
-    /// Shown in the chat log while streaming; cleared on turn end / error.
-    pub provider_status: Option<String>,
     /// Optional system prompt prepended to every request.
     pub system_prompt: Option<String>,
     /// Currently active model name (mirrors the provider; updated on `/model`).
@@ -335,10 +344,9 @@ impl App {
             auto_scroll: true,
             last_log_height: 0,
             log_had_scrollbar: false,
-            streaming: false,
+            streaming_status: None,
             throbber_tick: 0,
             last_output_at: None,
-            provider_status: None,
             system_prompt: None,
             current_model: initial_model.into(),
             current_provider: initial_provider.name().to_string(),
@@ -380,9 +388,14 @@ impl App {
         }
     }
 
+    /// Returns true when an agent turn is active (streaming or waiting for first token).
+    pub fn streaming(&self) -> bool {
+        self.streaming_status.is_some()
+    }
+
     /// Advance the throbber animation frame.  Called on every UI tick.
     pub fn tick(&mut self) {
-        if self.streaming {
+        if self.streaming() {
             self.throbber_tick = self.throbber_tick.wrapping_add(1);
         }
     }
@@ -397,7 +410,7 @@ impl App {
     /// - Machine working **silently** (streaming, no output for ≥ 1 s):
     ///   throbber visible — signals that work is in progress.
     pub fn throbber_visible(&self) -> bool {
-        if !self.streaming {
+        if !self.streaming() {
             return false;
         }
         // The agent loop is paused waiting for user input — don't spin.
@@ -445,7 +458,7 @@ impl App {
             && self.messages.is_empty()
             && !self.selection.active
             && !self.login.active
-            && !self.streaming
+            && !self.streaming()
     }
 
     pub fn resume_latest_for_current_cwd(&mut self) {
@@ -599,7 +612,7 @@ impl App {
     /// This prevents requests from failing mid-flight due to known token expiry.
     /// Guards: only triggers when not already streaming and not already refreshing.
     fn check_token_preflight(&mut self, target: RetryTarget) -> bool {
-        if self.streaming
+        if self.streaming()
             || self.login.refresh_in_progress
             || !self.provider_supports_token_refresh()
         {
@@ -677,7 +690,7 @@ impl App {
     pub fn submit_shell_command(&mut self) {
         let lines: Vec<String> = self.shell_textarea.lines().to_vec();
         let command = lines.join("\n").trim().to_string();
-        if command.is_empty() || self.streaming || self.login.active {
+        if command.is_empty() || self.streaming() || self.login.active {
             return;
         }
 
@@ -787,7 +800,7 @@ impl App {
             self.cancel_open_webui_token_input();
         } else if self.login.active {
             self.cancel_login();
-        } else if self.streaming {
+        } else if self.streaming() {
             self.abort_agent_loop();
         }
     }
@@ -1978,7 +1991,7 @@ impl App {
     /// Does **not** perform the pre-flight token check — callers are
     /// responsible for calling `check_token_preflight` before this.
     fn launch_turn(&mut self, provider: &DynProvider) {
-        self.streaming = true;
+        self.streaming_status = Some(StreamingStatus::Waiting);
         self.login.auth_retry_budget = 1;
         self.latest_usage = None;
         self.auto_scroll = true;
@@ -1991,7 +2004,7 @@ impl App {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
         let trimmed = text.trim().to_string();
-        if trimmed.is_empty() || !self.streaming || self.login.active {
+        if trimmed.is_empty() || !self.streaming() || self.login.active {
             return;
         }
 
@@ -2012,7 +2025,7 @@ impl App {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
         let trimmed = text.trim().to_string();
-        if trimmed.is_empty() || self.streaming || self.login.active {
+        if trimmed.is_empty() || self.streaming() || self.login.active {
             return;
         }
 
@@ -2033,7 +2046,7 @@ impl App {
     /// Submit a pre-built text string directly to the agent loop, bypassing the
     /// textarea.  Used by `/skill:<name>` command expansion.
     pub fn submit_with_text(&mut self, text: String, provider: &DynProvider) {
-        if text.trim().is_empty() || self.streaming || self.login.active {
+        if text.trim().is_empty() || self.streaming() || self.login.active {
             return;
         }
 
@@ -2052,7 +2065,7 @@ impl App {
     }
 
     pub fn retry_last_request(&mut self, provider: &DynProvider) {
-        if self.streaming || self.login.active {
+        if self.streaming() || self.login.active {
             return;
         }
 
@@ -2114,7 +2127,7 @@ impl App {
     pub fn abort_agent_loop(&mut self) {
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
-            self.streaming = false;
+            self.streaming_status = None;
             self.last_output_at = None;
             self.steering_tx = None;
             self.queued_steering.clear();
@@ -2191,7 +2204,11 @@ impl App {
             }
             AgentEvent::StatusUpdate(msg) => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.provider_status = if msg.is_empty() { None } else { Some(msg) };
+                self.streaming_status = if msg.is_empty() {
+                    Some(StreamingStatus::Waiting)
+                } else {
+                    Some(StreamingStatus::Message(msg))
+                };
                 self.bump_log_revision();
             }
             AgentEvent::ToolCallStart { id, name, args } => {
@@ -2219,13 +2236,12 @@ impl App {
                 self.bump_log_revision();
             }
             AgentEvent::TurnEnd => {
-                self.provider_status = None;
+                self.streaming_status = Some(StreamingStatus::Waiting);
                 self.persist_messages();
             }
             AgentEvent::Done => {
-                self.streaming = false;
+                self.streaming_status = None;
                 self.last_output_at = None;
-                self.provider_status = None;
                 self.agent_task = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
@@ -2233,7 +2249,7 @@ impl App {
                 self.persist_messages();
             }
             AgentEvent::Error(e) => {
-                self.provider_status = None;
+                self.streaming_status = None;
                 self.last_output_at = None;
                 self.agent_task = None;
                 self.steering_tx = None;
@@ -2252,13 +2268,13 @@ impl App {
                         self.login.auth_retry_budget
                     );
                     self.login.auth_retry_budget -= 1;
-                    self.streaming = false;
+                    self.streaming_status = None;
                     // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
                     self.messages
                         .push(Message::assistant(format!("[Error: {e}]")));
                     self.bump_log_revision();
-                    self.streaming = false;
+                    self.streaming_status = None;
                     self.persist_messages();
                 }
             }
@@ -2284,7 +2300,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::App;
+    use super::{App, StreamingStatus};
     use crate::{
         agent::{
             AgentLoopConfig,
@@ -2564,7 +2580,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.streaming = true;
+            app.streaming_status = Some(StreamingStatus::Waiting);
             app.agent_task = Some(tokio::spawn(async {
                 std::future::pending::<()>().await;
             }));
@@ -2573,7 +2589,7 @@ mod tests {
             app.handle_escape_in_chat_mode();
 
             assert!(
-                app.streaming,
+                app.streaming(),
                 "streaming should remain active when ESC cancels slash input"
             );
             assert!(
@@ -2605,7 +2621,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.streaming = true;
+            app.streaming_status = Some(StreamingStatus::Waiting);
             app.agent_task = Some(tokio::spawn(async {
                 std::future::pending::<()>().await;
             }));
@@ -2614,7 +2630,7 @@ mod tests {
             app.handle_escape_in_chat_mode();
 
             assert!(
-                !app.streaming,
+                !app.streaming(),
                 "streaming should stop when ESC is used outside slash mode"
             );
             assert!(
