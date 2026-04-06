@@ -21,6 +21,15 @@ Run `just preflight` before every commit. It enforces:
 - Tests (`cargo test --all-features`)
 - Compilation of all targets (`cargo check --all-targets --all-features`)
 
+## Issue and plan tracking
+
+Open work items are tracked as Gitea issues at https://gitea.belunktum.dk/larsch/tau/issues.
+
+- Do not create local `docs/plans/` files for new work — create a Gitea issue instead (use the `gitea-cli` skill).
+- When planning non-trivial work, the Gitea issue body should capture scope, approach, success criteria, steps, risks, and verification approach.
+- When work is complete, close the Gitea issue with a comment summarising what was done (use the `gitea-cli` skill).
+- `docs/plans/` is kept for temporary in-progress working notes only, not as a permanent record.
+
 ## Committing and pushing
 
 - Never run `git commit` or `git push` without explicit user instruction.
