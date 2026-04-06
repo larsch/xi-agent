@@ -203,10 +203,6 @@ pub struct App {
     pub auto_scroll: bool,
     /// Height of the log pane from the last draw — used as page-size scrolling.
     pub last_log_height: usize,
-    /// Whether the log pane had a visible scrollbar on the previous frame.
-    /// Used by the renderer to pick the likely wrap width and avoid redundant
-    /// full log re-wrap work on every draw.
-    pub log_had_scrollbar: bool,
     /// Current streaming state; `None` when no turn is active.
     pub streaming_status: Option<StreamingStatus>,
     /// Throbber animation frame index, advanced on every UI tick while streaming.
@@ -346,7 +342,6 @@ impl App {
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
-            log_had_scrollbar: false,
             streaming_status: None,
             throbber_tick: 0,
             last_output_at: None,

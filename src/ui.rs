@@ -295,45 +295,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // ── Chat log ──────────────────────────────────────────────────────────────
     let inner_height = log_area.height as usize;
 
-    // Pre-wrapped lines: each Line is exactly one visual row.
-    // To avoid wrapping the full log twice on every keypress, pick the likely
-    // content width first using the previous frame's scrollbar state.
-    let mut assumed_log_width = log_area.width as usize;
-    if app.log_had_scrollbar && assumed_log_width > 1 {
-        assumed_log_width -= 1;
-    }
-
-    // Use the cached lines by reference — no clone of the full Vec.
-    // We determine the line count and scroll position first, then copy only
-    // the visible slice (~terminal height lines) into ratatui.
-    let assumed_line_count = build_log_lines_cached(app, assumed_log_width).len();
-    // Show the scrollbar only when content overflows and the user has scrolled
-    // up (auto_scroll = false).  Hide it when pinned to the bottom.
-    let mut has_scrollbar = assumed_line_count > inner_height && !app.auto_scroll;
-
-    // If our width assumption was wrong, rebuild once with the correct width.
-    let final_log_width = if has_scrollbar != app.log_had_scrollbar {
-        let rewrap_width = if has_scrollbar {
-            split_scrollbar_column(log_area).0.width as usize
-        } else {
-            log_area.width as usize
-        };
-        let rewrap_count = build_log_lines_cached(app, rewrap_width).len();
-        has_scrollbar = rewrap_count > inner_height && !app.auto_scroll;
-        rewrap_width
-    } else {
-        assumed_log_width
-    };
-
-    // Final geometry after potential re-wrap.
-    let (log_content_area, log_scrollbar_area) = if has_scrollbar {
-        let (content_area, scrollbar_area) = split_scrollbar_column(log_area);
-        (content_area, scrollbar_area)
-    } else {
-        (log_area, None)
-    };
-
-    app.log_had_scrollbar = has_scrollbar;
+    // Always reserve the rightmost column for the scrollbar so that
+    // log_content_area.width is constant regardless of whether the scrollbar
+    // is currently visible.  This prevents text from reflowing when the
+    // scrollbar appears or disappears.
+    let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
+    let log_width = log_content_area.width as usize;
 
     // Store log height for use as page size in the event loop.
     app.last_log_height = inner_height;
@@ -341,9 +308,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // Determine scroll position from the full line count, then extract only
     // the visible slice.  This means we clone at most `inner_height` (~40)
     // Lines regardless of how long the session is.
-    let total_lines = build_log_lines_cached(app, final_log_width).len();
+    let total_lines = build_log_lines_cached(app, log_width).len();
     let max_scroll = total_lines.saturating_sub(inner_height);
 
+    // Resolve scroll position and auto_scroll transition *before* deciding
+    // whether to show the scrollbar.  This ensures that a scroll-to-bottom
+    // action is reflected in the same frame (no one-frame flicker where the
+    // scrollbar stays visible for an extra frame after reaching the bottom).
     if app.auto_scroll {
         app.log_scroll = max_scroll;
     } else {
@@ -353,12 +324,16 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         }
     }
 
+    // Show the scrollbar only when content overflows and the user has scrolled
+    // up (auto_scroll = false).  Hide it when pinned to the bottom.
+    let has_scrollbar = total_lines > inner_height && !app.auto_scroll;
+
     // Build the visible slice.  Pad with empty lines at the top when the
     // content is shorter than the pane so it is anchored to the bottom.
     // We clone at most `inner_height` lines, never the full session.
     let log_scroll = app.log_scroll;
     let visible_lines: Vec<Line<'static>> = {
-        let all = build_log_lines_cached(app, final_log_width);
+        let all = build_log_lines_cached(app, log_width);
         if total_lines <= inner_height {
             // Short log: pad top, then clone the whole (small) thing.
             let padding = inner_height - total_lines;
@@ -380,7 +355,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_content_area);
 
-    if let Some(scrollbar_area) = log_scrollbar_area {
+    if has_scrollbar && let Some(scrollbar_area) = log_scrollbar_area {
         let mut scrollbar_state = ScrollbarState::new(max_scroll + 1).position(app.log_scroll);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
@@ -2751,8 +2726,9 @@ mod tests {
 
     #[test]
     fn scrollbar_hidden_when_at_bottom() {
-        // When auto_scroll is true (at bottom) the scrollbar column must not
-        // be reserved — content can use the full width.
+        // When auto_scroll is true (pinned to bottom) the scrollbar must not
+        // be rendered.  Verify by checking that no scrollbar glyph appears in
+        // the rightmost column of the log rows (rows 0..last_log_height).
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
@@ -2767,10 +2743,23 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
 
-        // With no scrollbar column, log_had_scrollbar must be false.
+        // auto_scroll should still be true — content fits, no scrollbar needed.
         assert!(
-            !app.log_had_scrollbar,
-            "scrollbar should be hidden at bottom"
+            app.auto_scroll,
+            "auto_scroll should remain true when content fits"
+        );
+
+        // Verify no scrollbar glyph in the last column of the log rows.
+        let buf = terminal.backend().buffer().clone();
+        let width = buf.area.width;
+        let log_height = app.last_log_height;
+        let scrollbar_col_has_glyph = (0..log_height as u16).any(|row| {
+            let cell = buf.cell((width - 1, row)).unwrap();
+            !cell.symbol().trim().is_empty()
+        });
+        assert!(
+            !scrollbar_col_has_glyph,
+            "scrollbar should be hidden at bottom — no glyph expected in log scrollbar column"
         );
     }
 
