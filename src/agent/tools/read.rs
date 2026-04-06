@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::agent::file_tracker::FileTracker;
+use crate::agent::tools::truncate::{TruncationResult, truncate_head_with_limits};
 use crate::agent::types::{Tool, ToolResult};
 
 pub struct ReadFileTool {
@@ -72,6 +73,10 @@ impl Tool for ReadFileTool {
          and `limit` (maximum number of lines to return). \
          When the output is truncated a header `[lines X-Y of Z]` is prepended."
     }
+    // NOTE: the description above is intentionally kept identical to the
+    // original wording so that existing sessions that reference it remain
+    // coherent.  The actual `[lines …]` header is no longer embedded in
+    // content; range information is now carried in ToolResult::truncation.
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
@@ -126,13 +131,35 @@ impl Tool for ReadFileTool {
             };
 
             let selected: Vec<&str> = all_lines[start..end].to_vec();
-            let truncated = start > 0 || end < total;
+            let window_content = selected.concat();
+            let is_windowed = start > 0 || end < total;
 
-            let mut result = String::new();
-            if truncated {
-                result.push_str(&format!("[lines {}-{} of {}]\n", start + 1, end, total));
+            // Empty window (offset beyond EOF) — return early with no metadata.
+            if start == end && is_windowed {
+                self.tracker
+                    .lock()
+                    .unwrap()
+                    .record(std::path::Path::new(&path));
+                return ToolResult::ok_str("");
             }
-            result.push_str(&selected.concat());
+
+            // Apply a size cap on the window content using truncate_head so
+            // very large files don't produce unbounded tool results.
+            let tr = truncate_head_with_limits(
+                &window_content,
+                crate::agent::tools::truncate::DEFAULT_MAX_LINES,
+                crate::agent::tools::truncate::DEFAULT_MAX_BYTES,
+            );
+
+            let truncated = is_windowed || tr.truncated;
+
+            // Compute the effective displayed line range (1-indexed, inclusive).
+            let first_line = start + 1; // start is 0-indexed
+            let last_line = if tr.truncated {
+                start + tr.output_lines
+            } else {
+                end
+            };
 
             // Record the full file snapshot (always the whole file, regardless
             // of offset/limit, so we can diff correctly later).
@@ -141,7 +168,19 @@ impl Tool for ReadFileTool {
                 .unwrap()
                 .record(std::path::Path::new(&path));
 
-            ToolResult::ok_str(result)
+            let mut result = ToolResult::ok_str(tr.content);
+            if truncated {
+                result.truncation = Some(TruncationResult {
+                    content: result.content.clone(),
+                    truncated: true,
+                    total_lines: total,
+                    total_bytes: content.len(),
+                    output_lines: last_line - first_line + 1,
+                    first_kept_line: first_line,
+                });
+                result.is_truncated = true;
+            }
+            result
         })
     }
 }
@@ -241,7 +280,12 @@ mod tests {
         });
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert_eq!(result.content, "[lines 2-2 of 3]\nb\r\n");
+        // Content must be the raw body — no in-band header anymore.
+        assert_eq!(result.content, "b\r\n");
+        // Range information must be carried in the truncation field.
+        let tr = result.truncation.expect("truncation metadata expected");
+        assert_eq!(tr.first_kept_line, 2);
+        assert_eq!(tr.total_lines, 3);
     }
 
     #[tokio::test]
@@ -254,9 +298,9 @@ mod tests {
         });
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        // No lines selected; content should be empty or just the header
+        // No lines selected; content should be empty (no in-band header anymore).
         assert!(
-            result.content.trim().is_empty() || result.content.contains("lines"),
+            result.content.trim().is_empty(),
             "unexpected content: {}",
             result.content
         );

@@ -3,6 +3,21 @@ use std::{future::Future, pin::Pin};
 pub mod error;
 pub use error::{ProviderError, ProviderErrorKind};
 
+/// Line-range metadata for a partially-shown file read result.
+///
+/// Stored on [`Message`] when the corresponding `read_file` tool call only
+/// returned a window of the file (because `offset`/`limit` were used, or
+/// because the file exceeded the output cap).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DisplayRange {
+    /// 1-indexed first line that was returned.
+    pub first_line: usize,
+    /// 1-indexed last line that was returned (inclusive).
+    pub last_line: usize,
+    /// Total number of lines in the file.
+    pub total_lines: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssistantPhase {
     Unknown,
@@ -47,6 +62,7 @@ impl UsageStats {
 /// | `tool_name`        | —    | —      | —         | ✓        | —          |
 /// | `tool_args`        | —    | —      | —         | ✓        | —          |
 /// | `is_error`         | —    | —      | —         | —        | ✓          |
+/// | `display_range`    | —    | —      | —         | —        | ✓          |
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -81,6 +97,11 @@ pub struct Message {
     /// True when the tool returned an error.
     /// Meaningful only for [`Role::ToolResult`]; always `false` for other roles.
     pub is_error: bool,
+    /// Line-range metadata for a partial `read_file` result.
+    /// Populated only for [`Role::ToolResult`] messages whose preceding tool
+    /// call was `read_file` and where only a window of the file was returned.
+    #[serde(default)]
+    pub display_range: Option<DisplayRange>,
 }
 
 fn default_true() -> bool {
@@ -100,6 +121,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             is_error: false,
+            display_range: None,
         }
     }
 
@@ -115,6 +137,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             is_error: false,
+            display_range: None,
         }
     }
 
@@ -130,6 +153,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             is_error: false,
+            display_range: None,
         }
     }
 
@@ -150,6 +174,7 @@ impl Message {
             tool_name: Some(name.into()),
             tool_args: Some(args),
             is_error: false,
+            display_range: None,
         }
     }
 
@@ -170,7 +195,14 @@ impl Message {
             tool_name: None,
             tool_args: None,
             is_error,
+            display_range: None,
         }
+    }
+
+    /// Builder: attach a [`DisplayRange`] to a tool-result message.
+    pub fn with_display_range(mut self, range: DisplayRange) -> Self {
+        self.display_range = Some(range);
+        self
     }
 
     /// Returns `true` when this message carries tool-call or tool-result

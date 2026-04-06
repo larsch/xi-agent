@@ -1136,9 +1136,12 @@ fn build_log_lines(
                     if matches!(name, "read" | "read_file")
                         && let Some(next) = messages.get(idx + 1)
                         && next.role == Role::ToolResult
-                        && let Some((start, end, total, _)) = split_read_file_header(&next.content)
+                        && let Some(ref dr) = next.display_range
                     {
-                        label.push_str(&format!(" [{start}-{end}/{total}]"));
+                        label.push_str(&format!(
+                            " [{}-{}/{}]",
+                            dr.first_line, dr.last_line, dr.total_lines
+                        ));
                     }
 
                     let color = if name == "local_shell" {
@@ -1150,12 +1153,6 @@ fn build_log_lines(
                 }
             }
             Role::ToolResult => {
-                let prev_is_read = matches!(
-                    messages.get(idx.saturating_sub(1)),
-                    Some(prev)
-                        if prev.role == Role::ToolCall
-                            && matches!(prev.tool_name.as_deref(), Some("read" | "read_file"))
-                );
                 let prev_is_local_shell = matches!(
                     messages.get(idx.saturating_sub(1)),
                     Some(prev)
@@ -1169,13 +1166,7 @@ fn build_log_lines(
                             && matches!(prev.tool_name.as_deref(), Some("ask_user"))
                 );
 
-                let content_for_display = if prev_is_read {
-                    split_read_file_header(&msg.content)
-                        .map(|(_, _, _, body)| body.to_string())
-                        .unwrap_or_else(|| msg.content.clone())
-                } else {
-                    msg.content.clone()
-                };
+                let content_for_display = msg.content.clone();
                 // Sanitize for display: strip trailing whitespace per line,
                 // leading/trailing newlines, and collapse excess blank lines.
                 // Pre-truncate to a generous limit before sanitizing so we
@@ -1598,31 +1589,6 @@ fn sanitize_for_display(text: &str) -> String {
         result.push('\n');
     }
     result
-}
-
-fn split_read_file_header(content: &str) -> Option<(usize, usize, usize, &str)> {
-    let mut lines = content.lines();
-    let first = lines.next()?;
-
-    let rest = first.strip_prefix("[lines ")?;
-    let (range, total_with_bracket) = rest.split_once(" of ")?;
-    let total = total_with_bracket
-        .strip_suffix(']')?
-        .parse::<usize>()
-        .ok()?;
-    let (start, end) = range.split_once('-')?;
-    let start = start.parse::<usize>().ok()?;
-    let end = end.parse::<usize>().ok()?;
-
-    let header_len = first.len();
-    let body = if content.len() > header_len {
-        // Skip the trailing '\n' after the header when present.
-        content.get((header_len + 1)..).unwrap_or("")
-    } else {
-        ""
-    };
-
-    Some((start, end, total, body))
 }
 
 /// Split `text` into lines of at most `width` display columns, preserving
@@ -2531,10 +2497,16 @@ mod tests {
     }
 
     #[test]
-    fn read_file_tool_call_annotates_range_from_next_result_header() {
+    fn read_file_tool_call_annotates_range_from_next_result_display_range() {
         let messages = vec![
             Message::tool_call("1", "read_file", json!({"path": "src/main.rs"})),
-            Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
+            Message::tool_result("1", "alpha\nbeta", false).with_display_range(
+                crate::llm::DisplayRange {
+                    first_line: 10,
+                    last_line: 20,
+                    total_lines: 300,
+                },
+            ),
         ];
 
         let lines = build_log_lines(&messages, false, &[], 120);
@@ -2542,10 +2514,16 @@ mod tests {
     }
 
     #[test]
-    fn read_file_result_display_omits_header_line() {
+    fn read_file_result_display_shows_content_without_header() {
         let messages = vec![
             Message::tool_call("1", "read_file", json!({"path": "src/main.rs"})),
-            Message::tool_result("1", "[lines 10-20 of 300]\nalpha\nbeta", false),
+            Message::tool_result("1", "alpha\nbeta", false).with_display_range(
+                crate::llm::DisplayRange {
+                    first_line: 10,
+                    last_line: 20,
+                    total_lines: 300,
+                },
+            ),
         ];
 
         let lines = build_log_lines(&messages, false, &[], 120);
@@ -2862,21 +2840,6 @@ mod tests {
         let text = line_text(&line);
         assert!(!text.contains("thinking"), "{text}");
     }
-    #[test]
-    fn split_read_file_header_parses_and_returns_body() {
-        let input = "[lines 10-20 of 300]\nalpha\nbeta";
-        let parsed = split_read_file_header(input).expect("expected header parse");
-        assert_eq!(parsed.0, 10);
-        assert_eq!(parsed.1, 20);
-        assert_eq!(parsed.2, 300);
-        assert_eq!(parsed.3, "alpha\nbeta");
-    }
-
-    #[test]
-    fn split_read_file_header_rejects_non_header() {
-        assert!(split_read_file_header("alpha\nbeta").is_none());
-    }
-
     #[test]
     fn sanitize_for_display_strips_trailing_whitespace_per_line() {
         assert_eq!(sanitize_for_display("hello   \nworld  "), "hello\nworld");

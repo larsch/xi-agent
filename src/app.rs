@@ -13,7 +13,7 @@ use crate::{
     },
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
-    llm::{AssistantPhase, LlmProvider, Message, Role, UsageStats},
+    llm::{AssistantPhase, DisplayRange, LlmProvider, Message, Role, UsageStats},
     provider::{ProviderKind, ThinkingSupport, thinking_support_for},
     session::SessionStore,
     shell::{self, ShellKind},
@@ -2229,11 +2229,16 @@ impl App {
             }
             AgentEvent::ToolCallEnd { id, result } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.messages.push(Message::tool_result(
-                    &id,
-                    result.content.clone(),
-                    result.is_error,
-                ));
+                let display_range = result.truncation.as_ref().map(|tr| DisplayRange {
+                    first_line: tr.first_kept_line,
+                    last_line: tr.first_kept_line + tr.output_lines - 1,
+                    total_lines: tr.total_lines,
+                });
+                let mut msg = Message::tool_result(&id, result.content.clone(), result.is_error);
+                if let Some(dr) = display_range {
+                    msg = msg.with_display_range(dr);
+                }
+                self.messages.push(msg);
                 self.bump_log_revision();
             }
             AgentEvent::ExternalFileChange {
