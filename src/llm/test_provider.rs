@@ -2,17 +2,29 @@
 //! connection.  Activated via `--provider=test` or `/provider test`.
 //! Never appears in the provider selection menu.  Never persists to config.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use async_stream::stream;
 use tokio::time::{Duration, sleep};
 
 use super::{AssistantPhase, LlmEvent, LlmStream, Message, ModelListFuture, Role, ToolDefinition};
 use crate::llm::ProviderError;
 
-pub struct TestProvider;
+pub struct TestProvider {
+    /// Tracks the current step for scripted multi-turn sequences.
+    /// 0 = idle (no sequence in progress).
+    sequence_step: Arc<AtomicU8>,
+    /// PID captured from step 1 of bash-background-job, used in steps 2–4.
+    sequence_pid: Arc<std::sync::atomic::AtomicU32>,
+}
 
 impl TestProvider {
     pub fn new() -> Self {
-        Self
+        Self {
+            sequence_step: Arc::new(AtomicU8::new(0)),
+            sequence_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
     }
 }
 
@@ -94,22 +106,23 @@ fn main() {
 
 ## Commands table
 
-| Command            | Arguments       | Description                                                                 |
-|--------------------|-----------------|-----------------------------------------------------------------------------|
-| `help`             | —               | Show a list of all available test provider commands                         |
-| `markdown`         | —               | Stream this rich markdown document in full                                  |
-| `echo <text>`      | text            | Stream the provided text back to the UI token by token without any delay    |
-| `slow <text>`      | text            | Stream the provided text word by word with a 150 ms artificial delay        |
-| `thinking <text>`  | text            | Emit a simulated chain-of-thought block followed by the provided answer     |
-| `status <msg>`     | message         | Emit a transient StatusUpdate event and then confirm with a short response  |
-| `error`            | —               | Emit a provider error to test the error-display path in the UI              |
-| `system`           | —               | Retrieve and display the full system prompt inside a fenced code block      |
-| `ask [question]`   | question        | Invoke ask_user with three named options and freeform input enabled         |
-| `ask-type [q]`     | question        | Invoke ask_user with freeform input only and no predefined option list      |
-| `ask-notype [q]`   | question        | Invoke ask_user with three options and freeform input disabled              |
-| `bash <cmd>`       | shell command   | Execute a real bash command and echo the result as a fenced code block      |
-| `powershell <cmd>` | shell command   | Execute a real powershell command and echo the result as a fenced code block |
-| `cmd <cmd>`        | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
+| Command                 | Arguments       | Description                                                                 |
+|-------------------------|-----------------|-----------------------------------------------------------------------------|
+| `help`                  | —               | Show a list of all available test provider commands                         |
+| `markdown`              | —               | Stream this rich markdown document in full                                  |
+| `echo <text>`           | text            | Stream the provided text back to the UI token by token without any delay    |
+| `slow <text>`           | text            | Stream the provided text word by word with a 150 ms artificial delay        |
+| `thinking <text>`       | text            | Emit a simulated chain-of-thought block followed by the provided answer     |
+| `status <msg>`          | message         | Emit a transient StatusUpdate event and then confirm with a short response  |
+| `error`                 | —               | Emit a provider error to test the error-display path in the UI              |
+| `system`                | —               | Retrieve and display the full system prompt inside a fenced code block      |
+| `ask [question]`        | question        | Invoke ask_user with three named options and freeform input enabled         |
+| `ask-type [q]`          | question        | Invoke ask_user with freeform input only and no predefined option list      |
+| `ask-notype [q]`        | question        | Invoke ask_user with three options and freeform input disabled              |
+| `bash <cmd>`            | shell command   | Execute a real bash command and echo the result as a fenced code block      |
+| `powershell <cmd>`      | shell command   | Execute a real powershell command and echo the result as a fenced code block |
+| `cmd <cmd>`             | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
+| `bash-background-job`   | —               | 4-step scripted loop: start sleep 60, check running, kill, confirm gone     |
 
 ## Wide data table
 
@@ -151,6 +164,9 @@ const HELP_TEXT: &str = r#"Test provider commands:
   bash <command>        Execute a bash command (real)
   powershell <command>  Execute a powershell command (real)
   cmd <command>         Execute a cmd command (real)
+
+  bash-background-job   4-step scripted loop: start sleep 60 in background,
+                        check it is running, kill it, confirm it is gone
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -226,6 +242,56 @@ fn shell_tool_stream(tool_name: String, command: String) -> LlmStream {
 
 // ── LlmProvider impl ──────────────────────────────────────────────────────────
 
+impl TestProvider {
+    /// Drive the bash-background-job scripted sequence.
+    ///
+    /// Steps (called with the tool result from the *previous* step):
+    ///   1 → start `sleep 60` in the background and print its PID
+    ///   2 → parse PID from result; check process is running with `ps -p <pid>`
+    ///   3 → kill it with `kill <pid>`
+    ///   4 → verify it is gone with `ps -p <pid>`
+    ///   5 → emit final summary text, reset to idle
+    fn advance_sequence(&self, step: u8, tool_result: &str) -> LlmStream {
+        let seq = Arc::clone(&self.sequence_step);
+        let pid_store = Arc::clone(&self.sequence_pid);
+        match step {
+            1 => {
+                seq.store(2, Ordering::SeqCst);
+                shell_tool_stream("bash".to_string(), "sleep 60 & echo $!".to_string())
+            }
+            2 => {
+                // Parse PID from the tool result (first token on first non-empty line).
+                let pid: u32 = tool_result
+                    .lines()
+                    .find_map(|l| l.split_whitespace().next()?.parse().ok())
+                    .unwrap_or(0);
+                pid_store.store(pid, Ordering::SeqCst);
+                seq.store(3, Ordering::SeqCst);
+                shell_tool_stream("bash".to_string(), format!("ps -p {pid}"))
+            }
+            3 => {
+                let pid = pid_store.load(Ordering::SeqCst);
+                seq.store(4, Ordering::SeqCst);
+                shell_tool_stream("bash".to_string(), format!("kill {pid}"))
+            }
+            4 => {
+                let pid = pid_store.load(Ordering::SeqCst);
+                seq.store(5, Ordering::SeqCst);
+                shell_tool_stream("bash".to_string(), format!("ps -p {pid}"))
+            }
+            _ => {
+                // Sequence finished — emit a summary.
+                seq.store(0, Ordering::SeqCst);
+                pid_store.store(0, Ordering::SeqCst);
+                stream_owned(
+                    "Background-job sequence complete: started sleep 60, confirmed it was running, killed it, and confirmed it was gone.\n"
+                        .to_string(),
+                )
+            }
+        }
+    }
+}
+
 impl super::LlmProvider for TestProvider {
     fn stream_chat(&self, messages: Vec<Message>) -> LlmStream {
         self.stream_chat_with_tools(messages, vec![])
@@ -236,10 +302,15 @@ impl super::LlmProvider for TestProvider {
         messages: Vec<Message>,
         _tools: Vec<ToolDefinition>,
     ) -> LlmStream {
-        // If the last message is a ToolResult, echo it back as a fenced code block.
+        // If a scripted sequence is in progress, advance it on every ToolResult.
         if let Some(last) = messages.last()
             && last.role == Role::ToolResult
         {
+            let step = self.sequence_step.load(Ordering::SeqCst);
+            if step > 0 {
+                return self.advance_sequence(step, &last.content.clone());
+            }
+            // Not in a sequence — echo the result as before.
             let content = last.content.clone();
             let response = format!("Tool result:\n\n```\n{content}\n```\n");
             return stream_owned(response);
@@ -397,6 +468,11 @@ impl super::LlmProvider for TestProvider {
                     rest
                 };
                 shell_tool_stream("cmd".to_string(), command)
+            }
+
+            "bash-background-job" => {
+                self.sequence_step.store(1, Ordering::SeqCst);
+                self.advance_sequence(1, "")
             }
 
             "" => stream_text("Type 'help' for a list of test provider commands.\n", None),
