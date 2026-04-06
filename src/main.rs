@@ -722,7 +722,7 @@ async fn run(
                                         app.cancel_pending_ask();
                                     } else if app.in_slash_mode() {
                                         app.reset_textarea();
-                                    } else if app.streaming {
+                                    } else if app.streaming() {
                                         app.abort_agent_loop();
                                     } else {
                                         app.exit_selection_mode();
@@ -937,7 +937,7 @@ async fn run(
                                         }
                                         None => {}
                                     }
-                                } else if app.streaming {
+                                } else if app.streaming() {
                                     app.enqueue_steering_from_input();
                                 } else {
                                     app.submit(provider);
