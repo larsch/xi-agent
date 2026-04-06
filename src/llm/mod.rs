@@ -289,6 +289,7 @@ pub mod copilot;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod test_provider;
 
 #[cfg(test)]
 mod tests {

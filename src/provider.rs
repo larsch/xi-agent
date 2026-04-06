@@ -12,6 +12,7 @@ use crate::{
         },
         ollama::OllamaProvider,
         openai::OpenAiProvider,
+        test_provider::TestProvider,
     },
     thinking::ThinkingLevel,
 };
@@ -25,6 +26,9 @@ pub enum ProviderKind {
     Gemini,
     Ollama,
     OpenWebUi,
+    /// Hidden test provider — exercises the UI without a real API connection.
+    /// Never appears in the provider selection menu.
+    Test,
 }
 
 impl ProviderKind {
@@ -36,6 +40,7 @@ impl ProviderKind {
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
             Self::OpenWebUi => "open-webui",
+            Self::Test => "test",
         }
     }
 
@@ -47,6 +52,7 @@ impl ProviderKind {
             Self::Gemini => "Google Gemini CLI (Cloud Code Assist)",
             Self::Ollama => "Ollama (local)",
             Self::OpenWebUi => "Open WebUI",
+            Self::Test => "Test (UI exercise)",
         }
     }
 
@@ -58,6 +64,7 @@ impl ProviderKind {
             Self::Gemini,
             Self::Ollama,
             Self::OpenWebUi,
+            // Test is intentionally omitted — it is hidden from the menu.
         ]
     }
 
@@ -69,6 +76,7 @@ impl ProviderKind {
             "gemini" | "google-gemini" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
             "open-webui" | "openwebui" => Some(Self::OpenWebUi),
+            "test" => Some(Self::Test),
             _ => None,
         }
     }
@@ -82,6 +90,7 @@ impl ProviderKind {
             Self::Gemini => "gemini-2.5-pro",
             Self::Ollama => "llama3.1",
             Self::OpenWebUi => "llama3.1",
+            Self::Test => "test",
         }
     }
 }
@@ -241,6 +250,7 @@ pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport
         ProviderKind::OpenWebUi => {
             ThinkingSupport::Ignored("open-webui provider does not support mapped thinking levels")
         }
+        ProviderKind::Test => ThinkingSupport::Ignored("test provider does not support thinking"),
     }
 }
 
@@ -343,6 +353,7 @@ pub fn build_provider(
             }
             Ok(Arc::new(provider))
         }
+        ProviderKind::Test => Ok(Arc::new(TestProvider::new())),
     }
 }
 

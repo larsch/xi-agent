@@ -1,0 +1,414 @@
+//! A hidden test provider for exercising the tau UI without a real API
+//! connection.  Activated via `--provider=test` or `/provider test`.
+//! Never appears in the provider selection menu.  Never persists to config.
+
+use async_stream::stream;
+use tokio::time::{Duration, sleep};
+
+use super::{AssistantPhase, LlmEvent, LlmStream, Message, ModelListFuture, Role, ToolDefinition};
+use crate::llm::ProviderError;
+
+pub struct TestProvider;
+
+impl TestProvider {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+// ── Pre-defined questions ─────────────────────────────────────────────────────
+
+const ASK_QUESTION: &str = "Which option do you prefer?";
+const ASK_TYPE_QUESTION: &str = "Please type your answer:";
+const ASK_NOTYPE_QUESTION: &str = "Select one of the following:";
+
+// ── Markdown fixture ──────────────────────────────────────────────────────────
+
+const MARKDOWN_FIXTURE: &str = r#"# Markdown Showcase
+
+This document exercises **every** major markdown feature rendered by tau. It is intentionally long and verbose so that scrolling, wrapping, and layout can all be verified in a single pass.
+
+## Text styles
+
+Normal text, **bold text**, *italic text*, ***bold and italic***, and `inline code`. You can also combine styles: **bold with `inline code` inside** or *italic with **nested bold** inside*.
+
+Here is a second paragraph in the same section. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+## Headings
+
+### Level 3 heading
+
+Some text under a level-3 heading. This paragraph is here to verify that the heading renders at the correct weight and that subsequent body text is clearly distinguished from it.
+
+#### Level 4 heading
+
+Some text under a level-4 heading. Headings at this depth are less common but should still render distinctly from body text.
+
+## Lists
+
+Unordered:
+
+- Alpha — the first item, with a moderately long description to check line wrapping inside a list bullet
+- Beta — the second item
+  - Nested item one
+  - Nested item two, also with a longer description to ensure indented wrapping works correctly
+  - Nested item three
+- Gamma — the third item
+- Delta — the fourth item, added to give the list more visual weight
+
+Ordered:
+
+1. First step — initialize the project and install dependencies
+2. Second step — configure the environment and set the required variables
+3. Third step — run the test suite and verify all assertions pass
+4. Fourth step — build the release artifact and publish
+
+## Code block
+
+```rust
+fn main() {
+    // This is a moderately long code block to verify that horizontal
+    // scrolling or wrapping behaves correctly inside a fenced block.
+    let message = "Hello from the test provider!";
+    let repeated: String = std::iter::repeat(message).take(3).collect::<Vec<_>>().join(", ");
+    println!("{repeated}");
+}
+```
+
+```json
+{
+  "provider": "test",
+  "model": "test",
+  "commands": ["help", "markdown", "echo", "slow", "thinking", "status", "error", "system", "ask", "bash"],
+  "persistent": false
+}
+```
+
+## Blockquote
+
+> The test provider exists so you can exercise the tau UI without burning real tokens or requiring authentication. It simulates every kind of LLM event — text tokens, thinking tokens, tool calls, status updates, and errors — through a simple command interface.
+>
+> Nested quote:
+>
+> > This is a nested blockquote. It should be indented further than the outer quote and still wrap correctly at the terminal width.
+
+## Commands table
+
+| Command            | Arguments       | Description                                                                 |
+|--------------------|-----------------|-----------------------------------------------------------------------------|
+| `help`             | —               | Show a list of all available test provider commands                         |
+| `markdown`         | —               | Stream this rich markdown document in full                                  |
+| `echo <text>`      | text            | Stream the provided text back to the UI token by token without any delay    |
+| `slow <text>`      | text            | Stream the provided text word by word with a 150 ms artificial delay        |
+| `thinking <text>`  | text            | Emit a simulated chain-of-thought block followed by the provided answer     |
+| `status <msg>`     | message         | Emit a transient StatusUpdate event and then confirm with a short response  |
+| `error`            | —               | Emit a provider error to test the error-display path in the UI              |
+| `system`           | —               | Retrieve and display the full system prompt inside a fenced code block      |
+| `ask [question]`   | question        | Invoke ask_user with three named options and freeform input enabled         |
+| `ask-type [q]`     | question        | Invoke ask_user with freeform input only and no predefined option list      |
+| `ask-notype [q]`   | question        | Invoke ask_user with three options and freeform input disabled              |
+| `bash <cmd>`       | shell command   | Execute a real bash command and echo the result as a fenced code block      |
+| `powershell <cmd>` | shell command   | Execute a real powershell command and echo the result as a fenced code block |
+| `cmd <cmd>`        | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
+
+## Wide data table
+
+This table has many columns and long cell values to stress-test column sizing and text wrapping behaviour.
+
+| ID  | Component         | Status      | Owner              | Last Updated | Notes                                                                 |
+|-----|-------------------|-------------|--------------------|--------------|-----------------------------------------------------------------------|
+| 001 | LLM provider      | ✅ Complete  | @larsch            | 2026-04-06   | Supports streaming, tool calls, thinking tokens, and status updates   |
+| 002 | Test provider     | ✅ Complete  | @larsch            | 2026-04-06   | Hidden from menu; never persists; activated via --provider=test       |
+| 003 | Markdown renderer | 🔄 Ongoing  | @larsch            | 2026-04-05   | Tables, blockquotes, and nested lists under active refinement         |
+| 004 | ask_user tool     | ✅ Complete  | @larsch            | 2026-03-20   | Supports options, freeform, and cancellation via Escape               |
+| 005 | Session export    | ✅ Complete  | @larsch            | 2026-03-15   | Exports full conversation history to an HTML file with syntax highlighting |
+| 006 | Thinking tokens   | ✅ Complete  | @larsch            | 2026-04-01   | Gemini, Codex, and Copilot Responses route all supported              |
+| 007 | Token compaction  | 🔄 Ongoing  | @larsch            | 2026-04-04   | Reserve-based strategy; square-root budget curve                      |
+| 008 | Windows support   | ⚠️ Partial  | @larsch            | 2026-03-28   | Bracketed paste heuristic in place; some edge cases remain on conhost |
+
+## Done
+
+End of markdown fixture. Scroll back up to verify that all sections rendered correctly.
+"#;
+
+// ── Help text ─────────────────────────────────────────────────────────────────
+
+const HELP_TEXT: &str = r#"Test provider commands:
+
+  help                  Show this help
+  markdown              Stream a rich markdown document
+  echo <text>           Stream text back token by token
+  slow <text>           Stream text with artificial delays
+  thinking <text>       Emit thinking tokens then a text answer
+  status <msg>          Emit a StatusUpdate event then confirm
+  error                 Emit a provider error
+  system                Show the full system prompt
+
+  ask [question]        ask_user with options + freeform
+  ask-type [question]   ask_user freeform only (no options)
+  ask-notype [question] ask_user options only (no freeform)
+
+  bash <command>        Execute a bash command (real)
+  powershell <command>  Execute a powershell command (real)
+  cmd <command>         Execute a cmd command (real)
+"#;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Stream a static string as word-sized tokens with an optional per-word delay.
+fn stream_text(text: &'static str, delay: Option<Duration>) -> LlmStream {
+    Box::pin(stream! {
+        for word in text.split_inclusive(' ') {
+            if let Some(d) = delay {
+                sleep(d).await;
+            }
+            yield LlmEvent::Token {
+                text: word.to_string(),
+                phase: AssistantPhase::Final,
+            };
+        }
+        yield LlmEvent::Done;
+    })
+}
+
+/// Stream an owned string as word-sized tokens.
+fn stream_owned(text: String) -> LlmStream {
+    Box::pin(stream! {
+        for word in text.split_inclusive(' ').map(ToOwned::to_owned).collect::<Vec<_>>() {
+            yield LlmEvent::Token {
+                text: word,
+                phase: AssistantPhase::Final,
+            };
+        }
+        yield LlmEvent::Done;
+    })
+}
+
+/// Build a tool call stream for `ask_user`.
+fn ask_user_stream(
+    question: String,
+    options: &'static [&'static str],
+    allow_freeform: bool,
+) -> LlmStream {
+    let options_json: serde_json::Value = options
+        .iter()
+        .map(|s| serde_json::Value::String(s.to_string()))
+        .collect::<Vec<_>>()
+        .into();
+
+    Box::pin(stream! {
+        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "ask_user".to_string(),
+            args: serde_json::json!({
+                "question": question,
+                "options": options_json,
+                "allowFreeform": allow_freeform,
+            }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Build a tool call stream for a shell tool (bash / powershell / cmd).
+fn shell_tool_stream(tool_name: String, command: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: tool_name,
+            args: serde_json::json!({ "command": command }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+// ── LlmProvider impl ──────────────────────────────────────────────────────────
+
+impl super::LlmProvider for TestProvider {
+    fn stream_chat(&self, messages: Vec<Message>) -> LlmStream {
+        self.stream_chat_with_tools(messages, vec![])
+    }
+
+    fn stream_chat_with_tools(
+        &self,
+        messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+    ) -> LlmStream {
+        // If the last message is a ToolResult, echo it back as a fenced code block.
+        if let Some(last) = messages.last()
+            && last.role == Role::ToolResult
+        {
+            let content = last.content.clone();
+            let response = format!("Tool result:\n\n```\n{content}\n```\n");
+            return stream_owned(response);
+        }
+
+        // Otherwise parse the last user message as a command.
+        let input = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.trim().to_string())
+            .unwrap_or_default();
+
+        let (cmd, rest) = match input.split_once(char::is_whitespace) {
+            Some((c, r)) => (c.to_ascii_lowercase(), r.trim().to_string()),
+            None => (input.to_ascii_lowercase(), String::new()),
+        };
+
+        match cmd.as_str() {
+            "help" => stream_text(HELP_TEXT, None),
+
+            "markdown" => stream_text(MARKDOWN_FIXTURE, None),
+
+            "echo" => {
+                let text = if rest.is_empty() {
+                    "(nothing to echo)".to_string()
+                } else {
+                    rest
+                };
+                stream_owned(text + "\n")
+            }
+
+            "slow" => {
+                let text = if rest.is_empty() {
+                    "(nothing to slow-stream)".to_string()
+                } else {
+                    rest
+                };
+                // stream_owned with a per-word delay
+                Box::pin(stream! {
+                    for word in text.split_inclusive(' ').map(ToOwned::to_owned).collect::<Vec<_>>() {
+                        sleep(Duration::from_millis(150)).await;
+                        yield LlmEvent::Token {
+                            text: word,
+                            phase: AssistantPhase::Final,
+                        };
+                    }
+                    yield LlmEvent::Done;
+                })
+            }
+
+            "thinking" => {
+                let answer = if rest.is_empty() {
+                    "Thinking complete.".to_string()
+                } else {
+                    rest
+                };
+                Box::pin(stream! {
+                    let thought = "Let me consider this carefully... The test provider is exercising the thinking UI path. This simulated chain-of-thought is intentionally verbose to give the UI something to render.";
+                    for chunk in thought.split_inclusive(' ') {
+                        yield LlmEvent::ThinkingToken(chunk.to_string());
+                    }
+                    for word in answer.split_inclusive(' ').map(ToOwned::to_owned).collect::<Vec<_>>() {
+                        yield LlmEvent::Token {
+                            text: word,
+                            phase: AssistantPhase::Final,
+                        };
+                    }
+                    yield LlmEvent::Done;
+                })
+            }
+
+            "status" => {
+                let msg = if rest.is_empty() {
+                    "Test status message".to_string()
+                } else {
+                    rest
+                };
+                Box::pin(stream! {
+                    yield LlmEvent::StatusUpdate(msg);
+                    let confirmation = "Status sent.\n";
+                    for word in confirmation.split_inclusive(' ') {
+                        yield LlmEvent::Token {
+                            text: word.to_string(),
+                            phase: AssistantPhase::Final,
+                        };
+                    }
+                    yield LlmEvent::Done;
+                })
+            }
+
+            "error" => Box::pin(stream! {
+                yield LlmEvent::Error(ProviderError::other("test", "test error triggered by 'error' command"));
+            }),
+
+            "system" => {
+                let system_content = messages
+                    .iter()
+                    .find(|m| m.role == Role::System)
+                    .map(|m| m.content.clone())
+                    .unwrap_or_else(|| "(no system prompt found)".to_string());
+                let response = format!("System prompt:\n\n```\n{system_content}\n```\n");
+                stream_owned(response)
+            }
+
+            "ask" => {
+                let question = if rest.is_empty() {
+                    ASK_QUESTION.to_string()
+                } else {
+                    rest
+                };
+                ask_user_stream(question, &["Option A", "Option B", "Option C"], true)
+            }
+
+            "ask-type" => {
+                let question = if rest.is_empty() {
+                    ASK_TYPE_QUESTION.to_string()
+                } else {
+                    rest
+                };
+                ask_user_stream(question, &[], true)
+            }
+
+            "ask-notype" => {
+                let question = if rest.is_empty() {
+                    ASK_NOTYPE_QUESTION.to_string()
+                } else {
+                    rest
+                };
+                ask_user_stream(question, &["Choice 1", "Choice 2", "Choice 3"], false)
+            }
+
+            "bash" => {
+                let command = if rest.is_empty() {
+                    "echo 'hello from test provider'".to_string()
+                } else {
+                    rest
+                };
+                shell_tool_stream("bash".to_string(), command)
+            }
+
+            "powershell" => {
+                let command = if rest.is_empty() {
+                    "Write-Host 'hello from test provider'".to_string()
+                } else {
+                    rest
+                };
+                shell_tool_stream("powershell".to_string(), command)
+            }
+
+            "cmd" => {
+                let command = if rest.is_empty() {
+                    "echo hello from test provider".to_string()
+                } else {
+                    rest
+                };
+                shell_tool_stream("cmd".to_string(), command)
+            }
+
+            "" => stream_text("Type 'help' for a list of test provider commands.\n", None),
+
+            _ => {
+                let msg = format!("Unknown command: '{cmd}'. Type 'help' for a list.\n");
+                stream_owned(msg)
+            }
+        }
+    }
+
+    fn list_models(&self) -> ModelListFuture {
+        Box::pin(async { Ok(vec!["test".to_string()]) })
+    }
+}

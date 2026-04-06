@@ -1032,6 +1032,7 @@ fn resolve_model(cli_override: Option<&str>, kind: &ProviderKind, config: &TauCo
             ProviderKind::Gemini => config.gemini.model.clone(),
             ProviderKind::Ollama => config.ollama.model.clone(),
             ProviderKind::OpenWebUi => config.open_webui.model.clone(),
+            ProviderKind::Test => None,
         })
         .unwrap_or_else(|| kind.default_model().to_string())
 }
@@ -1043,6 +1044,10 @@ fn persist_provider_model_selection(
     thinking: ThinkingLevel,
     app: &mut App,
 ) {
+    // Never persist the test provider — it is intentionally transient.
+    if *kind == ProviderKind::Test {
+        return;
+    }
     config.provider = Some(kind.name().to_string());
     config.thinking = Some(thinking.as_str().to_string());
     config
@@ -1055,6 +1060,7 @@ fn persist_provider_model_selection(
         ProviderKind::Gemini => config.gemini.model = Some(model.to_string()),
         ProviderKind::Ollama => config.ollama.model = Some(model.to_string()),
         ProviderKind::OpenWebUi => config.open_webui.model = Some(model.to_string()),
+        ProviderKind::Test => {} // never reached — guarded by early return above
     }
 
     if let Err(e) = config.save() {
