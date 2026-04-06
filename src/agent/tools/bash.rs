@@ -75,6 +75,7 @@ impl Tool for BashTool {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .process_group(0)
+                .kill_on_drop(true)
                 .spawn()
             {
                 Ok(c) => c,

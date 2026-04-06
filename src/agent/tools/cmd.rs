@@ -61,6 +61,7 @@ impl Tool for CmdTool {
                 .arg("/C")
                 .raw_arg(&wrapped_command)
                 .stdin(Stdio::null())
+                .kill_on_drop(true)
                 .output()
                 .await
             {

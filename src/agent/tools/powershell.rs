@@ -62,6 +62,7 @@ impl Tool for PowerShellTool {
                 .arg("-Command")
                 .arg(&command)
                 .stdin(Stdio::null())
+                .kill_on_drop(true)
                 .output()
                 .await
             {
