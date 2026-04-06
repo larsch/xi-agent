@@ -1223,9 +1223,10 @@ async fn run_print_mode_loop(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     tokio::spawn(async move {
-        agent::run_agent_loop(messages, config, provider, tx, steering_rx).await;
+        agent::run_agent_loop(messages, config, provider, tx, steering_rx, cancel_rx).await;
     });
 
     while let Some(ev) = rx.recv().await {
@@ -1325,6 +1326,7 @@ async fn run_print_mode_loop_inner(
 ) -> i32 {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     // AgentLoopConfig is not Clone; rebuild a minimal headless one for the retry.
     let retry_tracker = Arc::new(Mutex::new(FileTracker::new()));
@@ -1340,7 +1342,7 @@ async fn run_print_mode_loop_inner(
     };
 
     tokio::spawn(async move {
-        agent::run_agent_loop(messages, retry_config, provider, tx, steering_rx).await;
+        agent::run_agent_loop(messages, retry_config, provider, tx, steering_rx, cancel_rx).await;
     });
 
     while let Some(ev) = rx.recv().await {

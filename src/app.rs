@@ -294,6 +294,9 @@ pub struct App {
     pub queued_steering: Vec<String>,
     /// JoinHandle for the currently running agent loop task (if any).
     agent_task: Option<JoinHandle<()>>,
+    /// Cancellation sender for the active agent loop task.
+    /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
+    cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
     /// Receives model lists forwarded from `list_models` tasks.
     pub(crate) models_rx:
         tokio::sync::mpsc::UnboundedReceiver<Result<Vec<String>, crate::llm::ProviderError>>,
@@ -379,6 +382,7 @@ impl App {
             steering_tx: None,
             queued_steering: Vec::new(),
             agent_task: None,
+            cancel_tx: None,
             models_rx,
             models_tx,
             login_rx,
@@ -1953,10 +1957,13 @@ impl App {
         self.queued_steering.clear();
         self.bump_log_revision();
 
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        self.cancel_tx = Some(cancel_tx);
+
         let provider = Arc::clone(provider);
         let tx = self.event_tx.clone();
         self.agent_task = Some(tokio::spawn(async move {
-            run_agent_loop(llm_messages, config, provider, tx, steering_rx).await;
+            run_agent_loop(llm_messages, config, provider, tx, steering_rx, cancel_rx).await;
         }));
     }
 
@@ -2126,6 +2133,10 @@ impl App {
 
     pub fn abort_agent_loop(&mut self) {
         if let Some(handle) = self.agent_task.take() {
+            // Signal cooperative cancellation first; hard-abort as fallback.
+            if let Some(tx) = self.cancel_tx.take() {
+                let _ = tx.send(true);
+            }
             handle.abort();
             self.streaming_status = None;
             self.last_output_at = None;
@@ -2243,6 +2254,7 @@ impl App {
                 self.streaming_status = None;
                 self.last_output_at = None;
                 self.agent_task = None;
+                self.cancel_tx = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
                 self.bump_log_revision();
@@ -2252,6 +2264,7 @@ impl App {
                 self.streaming_status = None;
                 self.last_output_at = None;
                 self.agent_task = None;
+                self.cancel_tx = None;
                 self.steering_tx = None;
                 self.queued_steering.clear();
                 self.bump_log_revision();

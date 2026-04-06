@@ -100,6 +100,7 @@ fn make_log() -> Arc<Mutex<crate::agent::tool_output_log::ToolOutputLog>> {
 async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let config = AgentLoopConfig {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
@@ -108,7 +109,15 @@ async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
         after_tool_call: None,
     };
     let messages = vec![Message::user("hi")];
-    run_agent_loop(messages, config, Arc::new(provider), tx, steering_rx).await;
+    run_agent_loop(
+        messages,
+        config,
+        Arc::new(provider),
+        tx,
+        steering_rx,
+        cancel_rx,
+    )
+    .await;
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         events.push(ev);
@@ -269,6 +278,7 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
     tools.insert("slow_tool".to_string(), Arc::new(SlowTool));
 
@@ -282,7 +292,15 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
     let messages = vec![Message::user("hi")];
 
     let handle = tokio::spawn(async move {
-        run_agent_loop(messages, config, Arc::new(provider), tx, steering_rx).await;
+        run_agent_loop(
+            messages,
+            config,
+            Arc::new(provider),
+            tx,
+            steering_rx,
+            cancel_rx,
+        )
+        .await;
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -362,7 +380,16 @@ async fn agent_loop_before_hook_blocks_tool() {
     };
     let messages = vec![Message::user("hi")];
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
-    run_agent_loop(messages, config, Arc::new(provider), tx, steering_rx).await;
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    run_agent_loop(
+        messages,
+        config,
+        Arc::new(provider),
+        tx,
+        steering_rx,
+        cancel_rx,
+    )
+    .await;
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -492,6 +519,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let config = AgentLoopConfig {
         tools,
         file_tracker: make_tracker(),
@@ -507,6 +535,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
             Arc::new(provider),
             tx,
             steering_rx,
+            cancel_rx,
         )
         .await;
     });
@@ -539,5 +568,134 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
             |e| matches!(e, AgentEvent::TextToken { text, .. } if text == "Nice to meet you!")
         ),
         "expected final text token after ask_user answer"
+    );
+}
+
+// ── Cancellation tests ────────────────────────────────────────────────────────
+
+/// A loop started with cancel already set to true must return immediately
+/// without making any LLM call.
+#[tokio::test]
+async fn agent_loop_pre_cancelled_exits_immediately() {
+    // Provider would panic if called — any invocation means the test fails.
+    struct PanicProvider;
+    impl LlmProvider for PanicProvider {
+        fn stream_chat(&self, _: Vec<Message>) -> LlmStream {
+            panic!("LLM should not be called when pre-cancelled")
+        }
+        fn stream_chat_with_tools(&self, _: Vec<Message>, _: Vec<ToolDefinition>) -> LlmStream {
+            panic!("LLM should not be called when pre-cancelled")
+        }
+        fn list_models(&self) -> ModelListFuture {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    // Pre-cancel: send true before the loop even starts.
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+    drop(cancel_tx); // sender no longer needed
+
+    let config = AgentLoopConfig {
+        tools: HashMap::new(),
+        file_tracker: make_tracker(),
+        tool_output_log: make_log(),
+        before_tool_call: None,
+        after_tool_call: None,
+    };
+
+    run_agent_loop(
+        vec![Message::user("hi")],
+        config,
+        Arc::new(PanicProvider),
+        tx,
+        steering_rx,
+        cancel_rx,
+    )
+    .await;
+
+    // No events should have been emitted.
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert!(
+        events.is_empty(),
+        "expected no events for pre-cancelled loop, got: {events:?}"
+    );
+}
+
+/// Cancelling after a tool call completes stops the loop before the next LLM
+/// turn — the first tool call's result is delivered but no second turn starts.
+#[tokio::test]
+async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
+    // Turn 1: one tool call.
+    // Turn 2 (would be after tool result): plain text — must never be reached.
+    let provider = MockProvider::new(vec![
+        vec![
+            LlmEvent::ToolCall {
+                id: "call_1".to_string(),
+                name: "slow_tool".to_string(),
+                args: serde_json::json!({"value": "x"}),
+            },
+            LlmEvent::Done,
+        ],
+        vec![
+            LlmEvent::Token {
+                text: "second-turn".to_string(),
+                phase: AssistantPhase::Final,
+            },
+            LlmEvent::Done,
+        ],
+    ]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert("slow_tool".to_string(), Arc::new(SlowTool));
+
+    let config = AgentLoopConfig {
+        tools,
+        file_tracker: make_tracker(),
+        tool_output_log: make_log(),
+        before_tool_call: None,
+        // Cancel via the watch channel as soon as the tool call finishes.
+        after_tool_call: Some(Box::new(move |_name, _result| {
+            let _ = cancel_tx.send(true);
+            None
+        })),
+    };
+
+    run_agent_loop(
+        vec![Message::user("hi")],
+        config,
+        Arc::new(provider),
+        tx,
+        steering_rx,
+        cancel_rx,
+    )
+    .await;
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+
+    // The first tool call must have completed.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallEnd { id, .. } if id == "call_1")),
+        "expected ToolCallEnd for call_1"
+    );
+    // The second LLM turn must not have produced any text.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextToken { text, .. } if text == "second-turn")),
+        "second turn should not have been reached after cancellation"
     );
 }

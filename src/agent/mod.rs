@@ -44,6 +44,7 @@ pub async fn run_agent_loop(
     provider: Arc<dyn LlmProvider>,
     tx: UnboundedSender<AgentEvent>,
     mut steering_rx: UnboundedReceiver<String>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     // Build the tool definitions once from the registry.
     let tool_defs: Vec<ToolDefinition> = config
@@ -57,6 +58,11 @@ pub async fn run_agent_loop(
         .collect();
 
     loop {
+        // ── Cancellation check ────────────────────────────────────────────────
+        if *cancel_rx.borrow() {
+            return;
+        }
+
         // ── Check for external file modifications ─────────────────────────────
         let changes = config.file_tracker.lock().unwrap().check_modified();
         if !changes.is_empty() {
@@ -217,6 +223,11 @@ pub async fn run_agent_loop(
             // Append tool call + result to history for the next LLM turn.
             messages.push(Message::tool_call(&id, &name, args));
             messages.push(Message::tool_result(&id, &result.content, result.is_error));
+
+            // ── Post-tool cancellation check ──────────────────────────────────
+            if *cancel_rx.borrow() {
+                return;
+            }
 
             // If steering arrived, consume it now and skip remaining tool calls.
             if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
