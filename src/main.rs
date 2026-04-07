@@ -596,11 +596,10 @@ async fn run(
                                     #[cfg(windows)]
                                     if let (Some(threshold), Some(t)) =
                                         (PASTE_ENTER_THRESHOLD_MS, last_key_at)
+                                        && t.elapsed().as_millis() < threshold
                                     {
-                                        if t.elapsed().as_millis() < threshold {
-                                            app.shell_textarea.insert_newline();
-                                            continue;
-                                        }
+                                        app.shell_textarea.insert_newline();
+                                        continue;
                                     }
                                     app.submit_shell_command();
                                 }
@@ -795,12 +794,11 @@ async fn run(
                                 #[cfg(windows)]
                                 if let (Some(threshold), Some(t)) =
                                     (PASTE_ENTER_THRESHOLD_MS, last_key_at)
+                                    && t.elapsed().as_millis() < threshold
                                 {
-                                    if t.elapsed().as_millis() < threshold {
-                                        app.textarea.insert_newline();
-                                        app.update_completions();
-                                        continue;
-                                    }
+                                    app.textarea.insert_newline();
+                                    app.update_completions();
+                                    continue;
                                 }
 
                                 if app.ollama_endpoint_input_mode {
