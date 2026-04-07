@@ -470,7 +470,7 @@ async fn run(
     // Timestamp of the most recent key Press event other than Enter itself.
     // Used on Windows to detect paste-injected Enter events (see above).
     #[cfg(windows)]
-    let mut last_key_at: Option<Instant> = None;
+    let mut last_key_at: Option<std::time::Instant> = None;
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -491,7 +491,7 @@ async fn run(
                         // can detect paste-injected Enter events below.
                         #[cfg(windows)]
                         if key.code != KeyCode::Enter {
-                            last_key_at = Some(Instant::now());
+                            last_key_at = Some(std::time::Instant::now());
                         }
 
                         if key.code == KeyCode::Char('c')
