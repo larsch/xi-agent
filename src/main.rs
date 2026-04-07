@@ -7,7 +7,8 @@ use crossterm::{
     },
     execute,
     terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
+        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+        SetTitle, disable_raw_mode, enable_raw_mode,
     },
 };
 use futures_util::StreamExt;
@@ -473,7 +474,9 @@ async fn run(
     let mut last_key_at: Option<std::time::Instant> = None;
 
     loop {
+        execute!(io::stdout(), BeginSynchronizedUpdate)?;
         terminal.draw(|f| ui::draw(f, app))?;
+        execute!(io::stdout(), EndSynchronizedUpdate)?;
 
         tokio::select! {
             // ── Terminal input ────────────────────────────────────────────────
