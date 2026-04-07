@@ -123,6 +123,7 @@ fn main() {
 | `powershell <cmd>`      | shell command   | Execute a real powershell command and echo the result as a fenced code block |
 | `cmd <cmd>`             | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
 | `bash-background-job`   | —               | 4-step scripted loop: start sleep 60, check running, kill, confirm gone     |
+| `write`                 | —               | Issue a write_file tool call that writes a file to the system temp directory |
 
 ## Wide data table
 
@@ -167,6 +168,9 @@ const HELP_TEXT: &str = r#"Test provider commands:
 
   bash-background-job   4-step scripted loop: start sleep 60 in background,
                         check it is running, kill it, confirm it is gone
+
+  write                 Issue a write_file tool call that writes a file to
+                        the system temp directory
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -221,6 +225,26 @@ fn ask_user_stream(
                 "question": question,
                 "options": options_json,
                 "allowFreeform": allow_freeform,
+            }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Build a tool call stream for `write_file` targeting the system temp directory.
+fn write_file_stream() -> LlmStream {
+    let path = std::env::temp_dir()
+        .join("tau-test-write.txt")
+        .to_string_lossy()
+        .into_owned();
+    Box::pin(stream! {
+        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "write_file".to_string(),
+            args: serde_json::json!({
+                "path": path,
+                "content": "Hello from the tau test provider!\n",
             }),
         };
         yield LlmEvent::Done;
@@ -474,6 +498,8 @@ impl super::LlmProvider for TestProvider {
                 self.sequence_step.store(1, Ordering::SeqCst);
                 self.advance_sequence(1, "")
             }
+
+            "write" => write_file_stream(),
 
             "" => stream_text("Type 'help' for a list of test provider commands.\n", None),
 
