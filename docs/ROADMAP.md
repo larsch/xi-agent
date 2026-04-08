@@ -16,6 +16,8 @@ Items are grouped by priority.
 - AGENTS.md support
 - Session persistence (resume conversations)
 - Steering (type messages while agent loop is running)
+- Markdown rendering in assistant output
+- Open WebUI and Anthropic provider support
 
 ---
 
@@ -35,14 +37,11 @@ the model's context window. Implement a soft-limit warning and a truncation
 strategy (drop oldest non-system messages, or summarise) before the window
 fills.
 
-See [plan](plans/2026-03-14-context-management.md).
+Tracked in Gitea: [issue #11](https://gitea.belunktum.dk/larsch/tau/issues/11).
 
 ---
 
 ## 🟢 Low priority
-
-### Markdown rendering (currently just raw text)
-Render assistant output as Markdown instead of raw text.
 
 ---
 

@@ -46,6 +46,7 @@ src/
     anthropic.rs       — AnthropicProvider (Messages API transport)
     gemini.rs          — GeminiProvider (Google Cloud Code Assist streaming)
     ollama.rs          — OllamaProvider (streaming NDJSON via /api/chat)
+    test_provider.rs   — TestProvider (scripted sequences for UI exercise/testing)
 ```
 
 ## Data Flow
@@ -258,10 +259,6 @@ file tools.
   in-app `/login`, but secrets still live in `auth.json` rather than the
   platform keyring. See [ROADMAP](ROADMAP.md).
 - **Context window management** — no truncation or summarisation when
-  conversation history exceeds the model's context window. See
-  [plan](plans/2026-03-14-context-management.md).
-- **Deeper test coverage** — auth store persistence is covered; tool
-  implementations, agent loop, and provider wire format still lack tests. See
-  [plan](plans/2026-03-14-tests.md) and [auth tests plan](plans/2026-03-15-auth-tests-plan.md).
+  conversation history exceeds the model's context window. See [ROADMAP](ROADMAP.md).
 
 See [ROADMAP](ROADMAP.md) for prioritised work items.
