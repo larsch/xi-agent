@@ -226,6 +226,26 @@ pub async fn run_agent_loop(
 
             // ── Post-tool cancellation check ──────────────────────────────────
             if *cancel_rx.borrow() {
+                // Handle remaining pending tool calls as interrupted.
+                for (skip_id, skip_name, skip_args) in
+                    pending_tool_calls.iter().skip(idx + 1).cloned()
+                {
+                    let _ = tx.send(AgentEvent::ToolCallStart {
+                        id: skip_id.clone(),
+                        name: skip_name.clone(),
+                        args: skip_args.clone(),
+                    });
+                    let interrupted = ToolResult::err("Interrupted by user");
+                    let _ = tx.send(AgentEvent::ToolCallEnd {
+                        id: skip_id.clone(),
+                        result: interrupted.clone(),
+                    });
+                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args));
+                    messages.push(Message::tool_result(&skip_id, &interrupted.content, true));
+                }
+                // Refresh baselines and send TurnEnd before returning.
+                config.file_tracker.lock().unwrap().refresh_baselines();
+                let _ = tx.send(AgentEvent::TurnEnd);
                 return;
             }
 

@@ -2083,49 +2083,6 @@ impl App {
         self.launch_turn(provider);
     }
 
-    /// Remove any trailing `ToolCall` messages that have no paired `ToolResult`.
-    ///
-    /// This can happen when the agent loop is aborted after the model emits a
-    /// `ToolCall` but before the tool finishes and its `ToolResult` is appended.
-    /// Leaving orphaned `ToolCall` messages in the history causes subsequent LLM
-    /// requests to fail because every tool call must be accompanied by a result.
-    ///
-    /// The method also removes a preceding empty provisional `Assistant` message
-    /// if one was added solely to hold the tool-intent phase marker.
-    fn strip_orphaned_tool_calls(&mut self) {
-        // Collect the IDs of all tool calls that already have a result.
-        let paired_ids: std::collections::HashSet<String> = self
-            .messages
-            .iter()
-            .filter(|m| m.role == Role::ToolResult)
-            .filter_map(|m| m.tool_call_id.clone())
-            .collect();
-
-        // Remove ToolCall messages whose IDs are not in paired_ids.
-        self.messages.retain(|m| {
-            if m.role == Role::ToolCall {
-                m.tool_call_id
-                    .as_ref()
-                    .map(|id| paired_ids.contains(id))
-                    .unwrap_or(false)
-            } else {
-                true
-            }
-        });
-
-        // If the last message is now an empty provisional assistant message
-        // (written only to hold the ToolIntentStart phase), drop it too so the
-        // history ends cleanly on the last complete user/assistant exchange.
-        if let Some(last) = self.messages.last()
-            && last.role == Role::Assistant
-            && last.content.is_empty()
-            && last.thinking.is_none()
-            && last.assistant_phase == Some(AssistantPhase::Provisional)
-        {
-            self.messages.pop();
-        }
-    }
-
     pub fn abort_agent_loop(&mut self) {
         if let Some(handle) = self.agent_task.take() {
             // Signal cooperative cancellation first; hard-abort as fallback.
@@ -2137,7 +2094,6 @@ impl App {
             self.last_output_at = None;
             self.steering_tx = None;
             self.queued_steering.clear();
-            self.strip_orphaned_tool_calls();
             self.messages
                 .push(Message::assistant("[agent loop aborted]"));
             self.bump_log_revision();
@@ -2319,7 +2275,7 @@ mod tests {
             AgentLoopConfig,
             types::{AskRequest, AskUserOption, AskUserResponse},
         },
-        llm::{AssistantPhase, Message, Role},
+        llm::{Message, Role},
         provider::ProviderKind,
         thinking::ThinkingLevel,
     };
@@ -2341,97 +2297,6 @@ mod tests {
                 after_tool_call: None,
             },
         )
-    }
-
-    // ── strip_orphaned_tool_calls ──────────────────────────────────────────────
-
-    #[test]
-    fn strip_orphaned_tool_calls_removes_unpaired_tool_call() {
-        let mut app = make_app();
-        app.messages.push(Message::user("hello"));
-        app.messages.push(Message::tool_call(
-            "tc-1",
-            "bash",
-            serde_json::json!({"command": "ls"}),
-        ));
-        // No ToolResult added — simulates an interrupt mid-execution.
-
-        app.strip_orphaned_tool_calls();
-
-        // The orphaned ToolCall must be gone.
-        assert!(
-            !app.messages.iter().any(|m| m.role == Role::ToolCall),
-            "orphaned ToolCall should have been removed"
-        );
-    }
-
-    #[test]
-    fn strip_orphaned_tool_calls_keeps_paired_tool_call() {
-        let mut app = make_app();
-        app.messages.push(Message::user("hello"));
-        app.messages.push(Message::tool_call(
-            "tc-1",
-            "bash",
-            serde_json::json!({"command": "ls"}),
-        ));
-        app.messages
-            .push(Message::tool_result("tc-1", "file.txt", false));
-
-        app.strip_orphaned_tool_calls();
-
-        // Both the ToolCall and its result must remain.
-        assert!(
-            app.messages.iter().any(|m| m.role == Role::ToolCall),
-            "paired ToolCall should not be removed"
-        );
-        assert!(
-            app.messages.iter().any(|m| m.role == Role::ToolResult),
-            "ToolResult should not be removed"
-        );
-    }
-
-    #[test]
-    fn strip_orphaned_tool_calls_removes_trailing_provisional_assistant_msg() {
-        let mut app = make_app();
-        app.messages.push(Message::user("hello"));
-        // Provisional empty assistant message added when tool intent starts.
-        let mut asst = Message::assistant("");
-        asst.assistant_phase = Some(AssistantPhase::Provisional);
-        app.messages.push(asst);
-        app.messages.push(Message::tool_call(
-            "tc-1",
-            "bash",
-            serde_json::json!({"command": "ls"}),
-        ));
-
-        app.strip_orphaned_tool_calls();
-
-        // ToolCall removed; provisional assistant message also removed.
-        assert!(
-            !app.messages.iter().any(|m| m.role == Role::ToolCall),
-            "orphaned ToolCall should have been removed"
-        );
-        assert_eq!(
-            app.messages.last().map(|m| &m.role),
-            Some(&Role::User),
-            "trailing empty provisional assistant message should be removed"
-        );
-    }
-
-    #[test]
-    fn strip_orphaned_tool_calls_noop_when_no_tool_calls() {
-        let mut app = make_app();
-        app.messages.push(Message::user("hello"));
-        app.messages.push(Message::assistant("world"));
-        let original_len = app.messages.len();
-
-        app.strip_orphaned_tool_calls();
-
-        assert_eq!(
-            app.messages.len(),
-            original_len,
-            "messages should be unchanged"
-        );
     }
 
     #[test]
