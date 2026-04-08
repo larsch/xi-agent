@@ -26,6 +26,7 @@ pub mod find;
 #[cfg(target_os = "windows")]
 pub mod powershell;
 pub mod read;
+pub mod terminal;
 pub mod truncate;
 pub mod write;
 

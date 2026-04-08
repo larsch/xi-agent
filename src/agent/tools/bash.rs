@@ -4,6 +4,7 @@ use std::process::Stdio;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
+use super::terminal::apply_terminal_render;
 use super::truncate::truncate_tail;
 use crate::agent::types::{Tool, ToolResult};
 
@@ -137,6 +138,10 @@ impl Tool for BashTool {
 
             let stdout = String::from_utf8_lossy(&out_buf).into_owned();
             let stderr = String::from_utf8_lossy(&err_buf).into_owned();
+
+            // Apply terminal rendering to handle carriage returns properly
+            let stdout = apply_terminal_render(&stdout);
+            let stderr = apply_terminal_render(&stderr);
 
             // Merge for the model response, as a terminal would show.
             let mut merged = String::new();
@@ -321,6 +326,28 @@ mod tests {
         assert!(
             elapsed.as_secs() < 1,
             "tool took too long ({elapsed:?}) — possible pipe hang"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_handles_carriage_return_progress() {
+        let tool = BashTool;
+        // Simulate a progress bar that overwrites itself
+        let args = serde_json::json!({"command": "printf '[10%%]\\r[20%%]\\r[30%%]\\n'"});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        // Should only show the final state, not intermediate progress lines
+        assert!(
+            result.content.contains("[30%]"),
+            "expected final progress state in output: {}",
+            result.content
+        );
+        // The output should be cleaned, so intermediate states are removed
+        // (they would appear as separate lines before the fix)
+        assert!(
+            !result.content.contains("[10%]"),
+            "should not contain intermediate progress [10%]: {}",
+            result.content
         );
     }
 

@@ -30,6 +30,7 @@ src/
     tools/
       mod.rs           — register_builtin_tools() (built-ins + custom tools)
       bash.rs          — BashTool  (💻 run shell command)
+      terminal.rs      — apply_terminal_render: emulate terminal cursor behavior for \r
       read.rs          — ReadFileTool (👀 read file with offset/limit)
       write.rs         — WriteTool (✏️ write/overwrite file)
       edit.rs          — EditTool  (📝 replace exact text in file)
@@ -225,6 +226,15 @@ args are written to the process stdin; stdout is the result string; non-zero
 exit becomes `ToolResult::err`. Built-in tool names take precedence — a
 custom tool whose name collides with a built-in is silently dropped (logged
 at debug). All three tool directories are shown in `tau --print-dirs`.
+
+**Bash tool terminal rendering** — `apply_terminal_render()` in
+`agent/tools/terminal.rs` emulates terminal cursor behavior for carriage
+returns (`\r`). When bash commands output progress bars or spinners that use
+`\r` to overwrite the current line, the function simulates terminal rendering
+to produce clean output: characters overwrite from the cursor position (which
+is reset to 0 on `\r`), and only the final rendered state is passed to the
+model. This avoids cluttering the LLM's context with intermediate progress
+states while preserving multi-line output unchanged.
 
 **External file change detection** — `FileTracker` (`agent/file_tracker.rs`)
 records a snapshot (mtime + SHA-256 + content) for every file successfully
