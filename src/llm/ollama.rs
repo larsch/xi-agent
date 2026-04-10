@@ -39,12 +39,6 @@ impl OllamaProvider {
         }
     }
 
-    /// Add a Bearer token to all outgoing requests (e.g. for Open WebUI).
-    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
-        self.api_key = Some(key.into());
-        self
-    }
-
     /// Look up the context-window size for `model` from the cache populated by
     /// [`OllamaProvider::list_models`].  Returns `None` on cache miss.
     pub fn cached_context_window(model: &str) -> Option<usize> {

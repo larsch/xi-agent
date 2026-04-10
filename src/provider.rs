@@ -358,11 +358,7 @@ pub fn build_provider(
             // model's tokens back to the client.  The /api endpoint streams
             // correctly and supports tools via the standard OpenAI format.
             let api_base = format!("{}/api", base.trim_end_matches('/'));
-            let api_key = config
-                .open_webui
-                .api_key
-                .clone()
-                .unwrap_or_default();
+            let api_key = config.open_webui.api_key.clone().unwrap_or_default();
             Ok(Arc::new(OpenAiProvider::new(api_base, model, api_key)))
         }
         ProviderKind::Test => Ok(Arc::new(TestProvider::new())),
