@@ -398,6 +398,7 @@ impl LlmProvider for OllamaProvider {
                     if done { return; }
                 }
             }
+            yield LlmEvent::Done;
         })
     }
 

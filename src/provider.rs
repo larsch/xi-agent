@@ -351,13 +351,19 @@ pub fn build_provider(
                     "No Open WebUI URL configured. Run /provider open-webui to set it up."
                 )
             })?;
-            // Append the Ollama proxy sub-path.
-            let ollama_base = format!("{}/ollama", base.trim_end_matches('/'));
-            let mut provider = OllamaProvider::new(ollama_base, model.to_string());
-            if let Some(key) = &config.open_webui.api_key {
-                provider = provider.with_api_key(key.clone());
-            }
-            Ok(Arc::new(provider))
+            // Use Open WebUI's OpenAI-compatible API rather than the Ollama
+            // proxy path (/ollama/api/chat).  The proxy intercepts tool-call
+            // requests and runs its own internal agentic loop, returning only
+            // a bare done-chunk with empty content instead of streaming the
+            // model's tokens back to the client.  The /api endpoint streams
+            // correctly and supports tools via the standard OpenAI format.
+            let api_base = format!("{}/api", base.trim_end_matches('/'));
+            let api_key = config
+                .open_webui
+                .api_key
+                .clone()
+                .unwrap_or_default();
+            Ok(Arc::new(OpenAiProvider::new(api_base, model, api_key)))
         }
         ProviderKind::Test => Ok(Arc::new(TestProvider::new())),
     }
