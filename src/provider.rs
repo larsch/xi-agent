@@ -109,6 +109,12 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
         return Some(cw);
     }
 
+    // Secondary: live metadata fetched by the Ollama /api/show endpoint
+    // (covers both Ollama and Open WebUI providers).
+    if let Some(cw) = OllamaProvider::cached_context_window(model) {
+        return Some(cw);
+    }
+
     // Fallback: hard-coded table for all other providers and cold-start.
     // Normalise to lowercase for matching.
     let m = model.to_ascii_lowercase();

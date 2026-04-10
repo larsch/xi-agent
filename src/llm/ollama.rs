@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +9,16 @@ use super::{
     Role, ToolDefinition, UsageStats,
     common::{build_http_client, send_streaming_request},
 };
+
+// ── Model context-window cache ────────────────────────────────────────────────
+
+/// Process-global cache mapping Ollama model names to their context-window size
+/// (in tokens), populated by [`OllamaProvider::list_models`] via `/api/show`.
+static OLLAMA_CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, usize>>> = OnceLock::new();
+
+fn context_cache() -> &'static RwLock<HashMap<String, usize>> {
+    OLLAMA_CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 pub struct OllamaProvider {
     pub base_url: String,
@@ -30,6 +43,13 @@ impl OllamaProvider {
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());
         self
+    }
+
+    /// Look up the context-window size for `model` from the cache populated by
+    /// [`OllamaProvider::list_models`].  Returns `None` on cache miss.
+    pub fn cached_context_window(model: &str) -> Option<usize> {
+        let map = context_cache().read().ok()?;
+        map.get(model).copied()
     }
 }
 
@@ -147,6 +167,14 @@ struct TagsResponse {
 #[derive(Deserialize)]
 struct TagModel {
     name: String,
+}
+
+/// Response from `POST /api/show` — we only need the `model_info` map which
+/// contains architecture-specific parameters including `llama.context_length`.
+#[derive(Deserialize, Default)]
+struct ShowResponse {
+    #[serde(default)]
+    model_info: HashMap<String, serde_json::Value>,
 }
 
 // ── History serialisation ─────────────────────────────────────────────────────
@@ -374,19 +402,71 @@ impl LlmProvider for OllamaProvider {
     }
 
     fn list_models(&self) -> ModelListFuture {
-        let url = format!("{}/api/tags", self.base_url);
+        let tags_url = format!("{}/api/tags", self.base_url);
+        let show_url = format!("{}/api/show", self.base_url);
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         Box::pin(async move {
-            super::common::fetch_model_list::<TagsResponse, _>(
+            let models = super::common::fetch_model_list::<TagsResponse, _>(
                 &client,
-                &url,
+                &tags_url,
                 "Ollama",
                 api_key.as_deref(),
                 &[],
                 |r| r.models.into_iter().map(|m| m.name).collect(),
             )
-            .await
+            .await?;
+
+            // For each model, fetch /api/show to get its context window size.
+            // We do this best-effort: failures are logged and skipped.
+            for model_name in &models {
+                let mut req = client
+                    .post(&show_url)
+                    .json(&serde_json::json!({ "model": model_name, "verbose": false }));
+                if let Some(key) = &api_key {
+                    req = req.bearer_auth(key);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<ShowResponse>().await {
+                            Ok(show) => {
+                                // The context length is stored under the
+                                // architecture-prefixed key, e.g.
+                                // "llama.context_length", "gemma3.context_length", etc.
+                                // We scan for any key ending with ".context_length".
+                                let ctx = show
+                                    .model_info
+                                    .iter()
+                                    .find(|(k, _)| k.ends_with(".context_length"))
+                                    .and_then(|(_, v)| v.as_u64())
+                                    .map(|n| n as usize);
+                                if let Some(ctx_len) = ctx {
+                                    log::debug!(
+                                        "ollama model {model_name} context_length={ctx_len}"
+                                    );
+                                    if let Ok(mut map) = context_cache().write() {
+                                        map.insert(model_name.clone(), ctx_len);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::debug!("ollama /api/show parse error for {model_name}: {e}");
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        log::debug!(
+                            "ollama /api/show returned {} for {model_name}",
+                            resp.status()
+                        );
+                    }
+                    Err(e) => {
+                        log::debug!("ollama /api/show request failed for {model_name}: {e}");
+                    }
+                }
+            }
+
+            Ok(models)
         })
     }
 }
