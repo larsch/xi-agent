@@ -70,7 +70,7 @@ impl SessionStore {
         self.write_session_messages(&target, messages)?;
 
         if let Some(existing_path) = self.find_session_file_by_id(session_id)?
-            && existing_path != target
+            && !paths_are_same(&existing_path, &target)
         {
             fs::remove_file(&existing_path).with_context(|| {
                 format!(
@@ -397,6 +397,22 @@ fn session_id_from_path(path: &Path) -> Option<String> {
     path.file_stem()?.to_str().map(ToOwned::to_owned)
 }
 
+/// Return true when `a` and `b` refer to the same file-system entry.
+///
+/// On case-insensitive file systems (e.g. Windows NTFS) two `PathBuf`s that
+/// differ only in case (`D%3A%5Ctoday` vs `d%3A%5Ctoday`) point to the same
+/// file.  A plain `==` comparison on the raw path strings would incorrectly
+/// treat them as different, causing `save_messages` to delete the file it just
+/// wrote.  Canonicalising both paths resolves the true on-disk identity before
+/// comparing.  Falls back to a plain equality check if canonicalisation fails
+/// (e.g. if either path does not yet exist).
+fn paths_are_same(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
 fn is_session_jsonl_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
@@ -472,6 +488,40 @@ mod tests {
         let latest = store.latest_for_cwd(cwd_a).expect("latest for cwd a");
         assert_eq!(latest.id, "20260328T120200-cccccccc");
         assert_eq!(latest.cwd, cwd_a);
+    }
+
+    /// Regression test: saving a session whose cwd encodes to a directory name
+    /// that differs only in case from the on-disk directory must not delete the
+    /// file immediately after writing it.
+    ///
+    /// On Windows, NTFS is case-insensitive but the `PathBuf` string comparison
+    /// used by the old code was case-sensitive.  A session first saved with
+    /// `D:\today` created dir `D%3A%5Ctoday`; a subsequent save with `d:\today`
+    /// computed target path `d%3A%5Ctoday\<id>.jsonl`, wrote the file (NTFS
+    /// silently mapped it to the existing dir), then `find_session_file_by_id`
+    /// returned the on-disk path with the original casing (`D%3A%5Ctoday\…`),
+    /// which differed from the computed target string → the file was deleted.
+    #[cfg(windows)]
+    #[test]
+    fn save_messages_does_not_delete_file_on_cwd_case_mismatch() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+
+        let id = "20260328T120000-casetest";
+
+        // First save with uppercase drive letter — creates D%3A%5Ctoday dir.
+        store
+            .save_messages(id, "D:\\today", &[Message::user("first")])
+            .expect("first save");
+
+        // Second save with lowercase drive letter — must NOT delete the file.
+        store
+            .save_messages(id, "d:\\today", &[Message::user("first")])
+            .expect("second save");
+
+        // File must still exist and be loadable.
+        let loaded = store.load_messages(id).expect("load after second save");
+        assert_eq!(loaded.len(), 1, "session file was deleted after save");
     }
 
     #[cfg(windows)]

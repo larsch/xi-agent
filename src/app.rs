@@ -2083,6 +2083,35 @@ impl App {
         self.launch_turn(provider);
     }
 
+    fn append_abort_results_for_pending_tool_calls(&mut self) {
+        let mut pending_ids: Vec<String> = Vec::new();
+
+        for msg in &self.messages {
+            match msg.role {
+                Role::ToolCall => {
+                    if let Some(id) = msg.tool_call_id.as_ref()
+                        && !pending_ids.iter().any(|pending| pending == id)
+                    {
+                        pending_ids.push(id.clone());
+                    }
+                }
+                Role::ToolResult => {
+                    if let Some(id) = msg.tool_call_id.as_ref()
+                        && let Some(pos) = pending_ids.iter().position(|pending| pending == id)
+                    {
+                        pending_ids.remove(pos);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for id in pending_ids {
+            self.messages
+                .push(Message::tool_result(id, "failure: aborted by user", true));
+        }
+    }
+
     pub fn abort_agent_loop(&mut self) {
         if let Some(handle) = self.agent_task.take() {
             // Signal cooperative cancellation first; hard-abort as fallback.
@@ -2094,6 +2123,7 @@ impl App {
             self.last_output_at = None;
             self.steering_tx = None;
             self.queued_steering.clear();
+            self.append_abort_results_for_pending_tool_calls();
             self.messages
                 .push(Message::assistant("[agent loop aborted]"));
             self.bump_log_revision();
@@ -2520,6 +2550,68 @@ mod tests {
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "abort should append user-visible abort notice"
+            );
+        });
+    }
+
+    #[test]
+    fn abort_agent_loop_appends_error_result_for_pending_tool_call() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_task = Some(tokio::spawn(async {
+                std::future::pending::<()>().await;
+            }));
+            app.messages.push(Message::assistant(""));
+            app.messages.push(Message::tool_call(
+                "call_1",
+                "powershell",
+                serde_json::json!({"command": "git diff"}),
+            ));
+
+            app.abort_agent_loop();
+
+            let tool_result = app
+                .messages
+                .iter()
+                .find(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
+                .expect("expected abort tool result");
+            assert!(tool_result.is_error, "abort tool result should be an error");
+            assert_eq!(tool_result.content, "failure: aborted by user");
+        });
+    }
+
+    #[test]
+    fn abort_agent_loop_does_not_duplicate_existing_tool_result() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_task = Some(tokio::spawn(async {
+                std::future::pending::<()>().await;
+            }));
+            app.messages.push(Message::assistant(""));
+            app.messages.push(Message::tool_call(
+                "call_1",
+                "powershell",
+                serde_json::json!({"command": "git diff"}),
+            ));
+            app.messages
+                .push(Message::tool_result("call_1", "done", false));
+
+            app.abort_agent_loop();
+
+            let matching_results = app
+                .messages
+                .iter()
+                .filter(|m| {
+                    m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1")
+                })
+                .count();
+            assert_eq!(
+                matching_results, 1,
+                "should not append duplicate tool result"
             );
         });
     }
