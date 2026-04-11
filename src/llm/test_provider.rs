@@ -91,7 +91,7 @@ fn main() {
 {
   "provider": "test",
   "model": "test",
-  "commands": ["help", "markdown", "echo", "slow", "thinking", "status", "error", "system", "ask", "bash"],
+  "commands": ["help", "markdown", "echo", "slow", "thinking", "status", "error", "system", "ask", "bash", "exec"],
   "persistent": false
 }
 ```
@@ -122,6 +122,7 @@ fn main() {
 | `bash <cmd>`            | shell command   | Execute a real bash command and echo the result as a fenced code block      |
 | `powershell <cmd>`      | shell command   | Execute a real powershell command and echo the result as a fenced code block |
 | `cmd <cmd>`             | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
+| `exec <prog> [args…]`   | prog + args     | Execute a program via argv (shellword-split); no shell interpretation        |
 | `bash-background-job`   | —               | 4-step scripted loop: start sleep 60, check running, kill, confirm gone     |
 | `write`                 | —               | Issue a write_file tool call that writes a file to the system temp directory |
 
@@ -145,12 +146,40 @@ This table has many columns and long cell values to stress-test column sizing an
 End of markdown fixture. Scroll back up to verify that all sections rendered correctly.
 "#;
 
+// ── Emoji fixture ─────────────────────────────────────────────────────────────
+
+/// A fixture that lists every emoji used in tau's tool labels so that
+/// rendering alignment can be verified visually in the terminal.
+///
+/// Each line shows: the emoji (as tau would render it in a tool label),
+/// a pipe, then a descriptive name.  The pipe should be vertically aligned
+/// if all emojis advance the cursor by exactly 2 columns.
+const EMOJI_FIXTURE: &str = "\
+Emoji alignment test — the `|` column shows actual terminal cursor advance.\n\
+Alignment may vary by terminal, font, and render state.\n\
+\n\
+```\n\
+👀 | read_file  (U+1F440, wide)\n\
+✏ | write_file (U+270F, no VS16)\n\
+📝 | edit_file  (U+1F4DD, wide)\n\
+💻 | bash       (U+1F4BB, wide)\n\
+🔍 | find_files (U+1F50D, wide)\n\
+❓ | ask_user   (U+2753, wide)\n\
+⚙ | exec/other (U+2699, no VS16)\n\
+🕹 | steering   (U+1F579, no VS16)\n\
+⚠️ | warning    (U+26A0+VS16)\n\
+✅ | checkmark  (U+2705, wide)\n\
+❌ | red cross  (U+274C, wide)\n\
+```\n\
+";
+
 // ── Help text ─────────────────────────────────────────────────────────────────
 
 const HELP_TEXT: &str = r#"Test provider commands:
 
   help                  Show this help
   markdown              Stream a rich markdown document
+  emoji                 Show emoji alignment test for all tool label glyphs
   echo <text>           Stream text back token by token
   slow <text>           Stream text with artificial delays
   thinking <text>       Emit thinking tokens then a text answer
@@ -165,6 +194,7 @@ const HELP_TEXT: &str = r#"Test provider commands:
   bash <command>        Execute a bash command (real)
   powershell <command>  Execute a powershell command (real)
   cmd <command>         Execute a cmd command (real)
+  exec <prog> [args…]   Execute a program directly via argv (shellword-split, no shell)
 
   bash-background-job   4-step scripted loop: start sleep 60 in background,
                         check it is running, kill it, confirm it is gone
@@ -259,6 +289,36 @@ fn shell_tool_stream(tool_name: String, command: String) -> LlmStream {
             id: "test-1".to_string(),
             name: tool_name,
             args: serde_json::json!({ "command": command }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Build a tool call stream for the `exec` tool using an argv parsed from
+/// `invocation` via simple shellword (shlex) splitting.
+///
+/// The first token is `program`; the remainder become `args`.
+/// Returns an error stream if `invocation` is empty or unparseable.
+fn exec_tool_stream(invocation: String) -> LlmStream {
+    let tokens = match shlex::split(&invocation) {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            let msg = if invocation.trim().is_empty() {
+                "exec: no program specified\n".to_string()
+            } else {
+                format!("exec: failed to parse shellwords from: {invocation}\n")
+            };
+            return stream_owned(msg);
+        }
+    };
+    let program = tokens[0].clone();
+    let args: Vec<String> = tokens[1..].to_vec();
+    Box::pin(stream! {
+        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "exec".to_string(),
+            args: serde_json::json!({ "program": program, "args": args }),
         };
         yield LlmEvent::Done;
     })
@@ -493,6 +553,10 @@ impl super::LlmProvider for TestProvider {
                 };
                 shell_tool_stream("cmd".to_string(), command)
             }
+
+            "exec" => exec_tool_stream(rest),
+
+            "emoji" => stream_text(EMOJI_FIXTURE, None),
 
             "bash-background-job" => {
                 self.sequence_step.store(1, Ordering::SeqCst);
