@@ -28,6 +28,12 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
         return multiline_shell_command(command);
     }
 
+    // exec tool calls should display the full argv-style command rendered as a
+    // shell-quoted string for readability.
+    if name == "exec" {
+        return exec_command_detail(args);
+    }
+
     // ask_user questions must be shown in full (wrapped by the UI), never
     // truncated with an ellipsis.
     if name == "ask_user"
@@ -99,6 +105,28 @@ fn multiline_shell_command(input: &str) -> String {
     shown.join("\n")
 }
 
+fn exec_command_detail(args: &Value) -> String {
+    let Some(program) = args.get("program").and_then(|v| v.as_str()) else {
+        return String::new();
+    };
+
+    let mut words = Vec::new();
+    words.push(program);
+
+    if let Some(argv) = args.get("args").and_then(|v| v.as_array()) {
+        for arg in argv {
+            if let Some(arg) = arg.as_str() {
+                words.push(arg);
+            }
+        }
+    }
+
+    match shlex::try_join(words.iter().copied()) {
+        Ok(command) => compact(&command),
+        Err(_) => compact(&words.join(" ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +151,24 @@ mod tests {
     fn shell_label_truncates_after_five_lines_with_standalone_ellipsis() {
         let label = tool_invocation_label("bash", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
         assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n…");
+    }
+
+    #[test]
+    fn exec_label_shows_full_shell_quoted_command() {
+        let label = tool_invocation_label(
+            "exec",
+            &json!({
+                "program": "printf",
+                "args": ["%s %s", "hello world", "$PATH"]
+            }),
+        );
+        assert_eq!(label, "⚙️ printf '%s %s' 'hello world' '$PATH'");
+    }
+
+    #[test]
+    fn exec_label_uses_program_when_no_args() {
+        let label = tool_invocation_label("exec", &json!({"program": "git"}));
+        assert_eq!(label, "⚙️ git");
     }
 
     #[test]
