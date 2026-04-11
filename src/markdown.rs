@@ -3,7 +3,7 @@
 //! The public API is a single function:
 //!
 //! ```ignore
-//! pub fn render(text: &str, width: usize) -> Vec<Line<'static>>
+//! pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>>
 //! ```
 //!
 //! It converts a markdown string to terminal-styled lines using pulldown-cmark
@@ -477,7 +477,12 @@ impl TableBuilder {
 ///
 /// `width` is the usable column count for text wrapping.  Pass 0 to disable
 /// wrapping.
-pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
+///
+/// `prefix` is an icon string (e.g. `"💬 "`) that is prepended to the very
+/// first rendered line.  When the first block is a table the prefix is emitted
+/// on its own line so that table column alignment is not disturbed.  Pass `""`
+/// when no prefix is needed.
+pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -539,15 +544,33 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut in_table = false;
     let mut table: TableBuilder = TableBuilder::default();
 
+    // True until the first line of the first block has been emitted.
+    // Used to attach `prefix` to the correct output line.
+    let mut first_block = !prefix.is_empty();
+
     /// Flush accumulated inline spans as wrapped lines and clear the buffer.
-    /// The `prefix` is prepended to the first output line (subsequent wrapped
-    /// lines get `indent`-width leading spaces).
+    /// On the very first flush while `first_block` is true the answer-icon
+    /// prefix is prepended to line 0; all subsequent lines use an indent of
+    /// equal width so the text remains aligned.
     macro_rules! flush_inline {
-        ($prefix:expr) => {{
-            let prefix: &str = $prefix;
-            let indent = " ".repeat(prefix.width());
+        ($block_prefix:expr) => {{
+            let block_prefix: &str = $block_prefix;
+            // Decide the effective line-0 prefix:
+            // • If we haven't emitted anything yet AND caller-supplied `prefix`
+            //   is non-empty, prepend it (plus the block's own prefix).
+            // • Otherwise use the block's own prefix as-is.
+            let effective_prefix: std::borrow::Cow<str> = if first_block && !prefix.is_empty() {
+                first_block = false;
+                // The prefix width already accounts for the icon; the
+                // continuation indent uses spaces of the same total width.
+                let combined = format!("{}{}", prefix, block_prefix);
+                std::borrow::Cow::Owned(combined)
+            } else {
+                std::borrow::Cow::Borrowed(block_prefix)
+            };
+            let indent = " ".repeat(effective_prefix.width());
             if !inline_spans.is_empty() || in_list_item {
-                let wrapped = wrap_spans(&inline_spans, width, prefix, &indent);
+                let wrapped = wrap_spans(&inline_spans, width, &effective_prefix, &indent);
                 out.extend(wrapped);
                 inline_spans.clear();
             }
@@ -608,10 +631,15 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 let heading_style = Style::default()
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::UNDERLINED);
-                let line_spans: Vec<Span<'static>> = inline_spans
+                let mut line_spans: Vec<Span<'static>> = inline_spans
                     .drain(..)
                     .map(|(t, s)| Span::styled(t, s.patch(heading_style)))
                     .collect();
+                // Prepend icon prefix to the first line of the first block.
+                if first_block && !prefix.is_empty() {
+                    first_block = false;
+                    line_spans.insert(0, Span::raw(prefix.to_string()));
+                }
                 out.push(Line::from(line_spans));
                 out.push(Line::default());
                 style = InlineStyle::default();
@@ -700,6 +728,13 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             }
             Event::End(TagEnd::Table) => {
                 in_table = false;
+                // When the table is the first block and a prefix is set, emit
+                // the icon on its own line so the table column alignment is
+                // undisturbed.  For non-first blocks render as usual.
+                if first_block && !prefix.is_empty() {
+                    first_block = false;
+                    out.push(Line::from(Span::raw(prefix.to_string())));
+                }
                 out.extend(table.render(width));
                 out.push(Line::default());
                 table = TableBuilder::default();
@@ -762,7 +797,15 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                             continue;
                         }
                         let indented = format!("  {line}");
-                        out.push(Line::from(Span::styled(indented, code_style)));
+                        if first_block && !prefix.is_empty() {
+                            first_block = false;
+                            out.push(Line::from(vec![
+                                Span::raw(prefix.to_string()),
+                                Span::styled(indented, code_style),
+                            ]));
+                        } else {
+                            out.push(Line::from(Span::styled(indented, code_style)));
+                        }
                     }
                 } else if in_table {
                     table.push_text(&text);
@@ -798,10 +841,16 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             Event::Rule => {
                 // Horizontal rule: render as a row of dashes.
                 let rule: String = "─".repeat(width.min(80));
-                out.push(Line::from(Span::styled(
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if first_block && !prefix.is_empty() {
+                    first_block = false;
+                    spans.push(Span::raw(prefix.to_string()));
+                }
+                spans.push(Span::styled(
                     rule,
                     Style::default().add_modifier(Modifier::DIM),
-                )));
+                ));
+                out.push(Line::from(spans));
                 out.push(Line::default());
             }
 
@@ -813,7 +862,13 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     // Flush any remaining inline content (e.g. a paragraph without a closing tag
     // in partial/streaming input).
     if !inline_spans.is_empty() {
-        let wrapped = wrap_spans(&inline_spans, width, "", "");
+        let eff_prefix: std::borrow::Cow<str> = if first_block && !prefix.is_empty() {
+            std::borrow::Cow::Borrowed(prefix)
+        } else {
+            std::borrow::Cow::Borrowed("")
+        };
+        let indent = " ".repeat(eff_prefix.width());
+        let wrapped = wrap_spans(&inline_spans, width, &eff_prefix, &indent);
         out.extend(wrapped);
     }
 
@@ -843,7 +898,7 @@ mod tests {
 
     #[test]
     fn plain_text_renders_as_single_line() {
-        let lines = render("hello", 80);
+        let lines = render("hello", 80, "");
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(line_text(&lines[0]), "hello");
     }
@@ -851,7 +906,7 @@ mod tests {
     #[test]
     fn plain_text_roundtrip_no_markup() {
         // A message that contains no markdown should come back as-is.
-        let lines = render("💬 hello", 80);
+        let lines = render("💬 hello", 80, "");
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
@@ -860,7 +915,7 @@ mod tests {
 
     #[test]
     fn bold_text_has_bold_modifier() {
-        let lines = render("**bold**", 80);
+        let lines = render("**bold**", 80, "");
         assert!(!lines.is_empty());
         let spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let bold_span = spans.iter().find(|s| s.content.contains("bold")).unwrap();
@@ -869,7 +924,7 @@ mod tests {
 
     #[test]
     fn italic_text_has_italic_modifier() {
-        let lines = render("*italic*", 80);
+        let lines = render("*italic*", 80, "");
         assert!(!lines.is_empty());
         let spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let italic_span = spans.iter().find(|s| s.content.contains("italic")).unwrap();
@@ -878,7 +933,7 @@ mod tests {
 
     #[test]
     fn inline_code_has_code_color() {
-        let lines = render("`code`", 80);
+        let lines = render("`code`", 80, "");
         assert!(!lines.is_empty());
         let spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let code_span = spans.iter().find(|s| s.content.contains("code")).unwrap();
@@ -889,7 +944,7 @@ mod tests {
 
     #[test]
     fn heading_has_bold_and_underline() {
-        let lines = render("# Title", 80);
+        let lines = render("# Title", 80, "");
         assert!(!lines.is_empty());
         // Find a span that contains "Title"
         let spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
@@ -903,7 +958,7 @@ mod tests {
     #[test]
     fn code_block_lines_have_code_color() {
         let md = "```\nfn main() {}\n```";
-        let lines = render(md, 80);
+        let lines = render(md, 80, "");
         assert!(!lines.is_empty());
         let code_line = lines
             .iter()
@@ -920,7 +975,7 @@ mod tests {
     #[test]
     fn code_block_has_two_space_indent() {
         let md = "```\nhello\n```";
-        let lines = render(md, 80);
+        let lines = render(md, 80, "");
         let code_line = lines
             .iter()
             .find(|l| line_text(l).contains("hello"))
@@ -937,7 +992,7 @@ mod tests {
     #[test]
     fn table_produces_correct_line_count() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
-        let lines = render(md, 80);
+        let lines = render(md, 80, "");
         // Header + 2 data rows = 3 table lines.
         // The trailing blank line is stripped by the renderer's end-cleanup.
         assert_eq!(lines.len(), 3, "{:?}", lines_text(&lines));
@@ -946,7 +1001,7 @@ mod tests {
     #[test]
     fn table_header_has_correct_background_color() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
-        let lines = render(md, 80);
+        let lines = render(md, 80, "");
         // First line is the header.
         let header_line = &lines[0];
         assert!(!header_line.spans.is_empty());
@@ -968,7 +1023,7 @@ mod tests {
         // Row:    "Alice" | "A very long description that exceeds the column width"
         // We give only 20 columns of width.
         let md = "| Name | Description |\n|------|-------------|\n| Alice | A very long description that exceeds the column width |";
-        let lines = render(md, 20);
+        let lines = render(md, 20, "");
         // Header is 1 line; the data row should produce more than 1 terminal line.
         let total = lines.len();
         assert!(
@@ -984,7 +1039,7 @@ mod tests {
         // second column cells wrap.  All terminal lines for the same row must
         // have the same number of spans structure (one cell per column).
         let md = "| X | Y |\n|---|---|\n| a | word1 word2 word3 word4 word5 word6 word7 word8 |";
-        let lines = render(md, 15);
+        let lines = render(md, 15, "");
         let texts = lines_text(&lines);
         // There should be at least one line where the first cell is blank padding.
         let has_blank_first_cell = texts
@@ -1004,7 +1059,7 @@ mod tests {
         // Verify that every rendered line fits within the given width.
         let md = "| Column One | Column Two | Column Three |\n|---|---|---|\n| a long value here | another long value here | yet another long value |";
         let available = 40;
-        let lines = render(md, available);
+        let lines = render(md, available, "");
         for line in &lines {
             let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert!(
@@ -1019,7 +1074,7 @@ mod tests {
     fn table_no_wrapping_when_fits() {
         // When the table fits naturally, line count should equal row count.
         let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
-        let lines = render(md, 80);
+        let lines = render(md, 80, "");
         assert_eq!(lines.len(), 3, "{:?}", lines_text(&lines));
     }
 
@@ -1029,19 +1084,19 @@ mod tests {
     fn partial_markdown_does_not_panic() {
         // Incomplete fence — must not panic.
         let md = "```rust\nfn main() {";
-        let _lines = render(md, 80);
+        let _lines = render(md, 80, "");
     }
 
     #[test]
     fn partial_table_does_not_panic() {
         // Incomplete table row — must not panic.
         let md = "| col1 | col2";
-        let _lines = render(md, 80);
+        let _lines = render(md, 80, "");
     }
 
     #[test]
     fn empty_input_returns_empty() {
-        let lines = render("", 80);
+        let lines = render("", 80, "");
         assert!(lines.is_empty(), "{lines:?}");
     }
 
@@ -1053,7 +1108,7 @@ mod tests {
         // wraps each item's text in a Paragraph, which must not flush before
         // the item prefix is prepended.
         let md = "1. First item\n\n2. Second item\n\n3. Third item";
-        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(
             texts,
             vec!["1. First item", "2. Second item", "3. Third item"]
@@ -1063,14 +1118,14 @@ mod tests {
     #[test]
     fn loose_unordered_list_prefixes_each_item_correctly() {
         let md = "- Alpha\n\n- Beta\n\n- Gamma";
-        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(texts, vec!["• Alpha", "• Beta", "• Gamma"]);
     }
 
     #[test]
     fn multi_paragraph_list_item_indents_continuation() {
         let md = "1. First paragraph.\n\n   Second paragraph.\n\n2. Item two.";
-        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(texts[0], "1. First paragraph.");
         assert_eq!(texts[1], "   Second paragraph.");
         assert_eq!(texts[2], "2. Item two.");
@@ -1083,7 +1138,7 @@ mod tests {
         // Tight nested unordered list: children should be indented by the
         // parent bullet width (2 spaces for "• ").
         let md = "- Item 1\n  - Nested 1\n  - Nested 2\n- Item 2";
-        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(texts[0], "• Item 1");
         assert_eq!(texts[1], "  • Nested 1");
         assert_eq!(texts[2], "  • Nested 2");
@@ -1095,7 +1150,7 @@ mod tests {
         // Tight nested ordered list: children should be indented by the parent
         // number prefix width (3 spaces for "1. ").
         let md = "1. First\n   1. Nested first\n   2. Nested second\n2. Second";
-        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(texts[0], "1. First");
         assert_eq!(texts[1], "   1. Nested first");
         assert_eq!(texts[2], "   2. Nested second");
@@ -1106,7 +1161,7 @@ mod tests {
     fn nested_mixed_list_indents_correctly() {
         // Ordered outer, unordered inner.
         let md = "1. Outer\n   - Inner A\n   - Inner B\n2. Outer 2";
-        let texts: Vec<String> = render(md, 80).iter().map(line_text).collect();
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(texts[0], "1. Outer");
         assert_eq!(texts[1], "   • Inner A");
         assert_eq!(texts[2], "   • Inner B");

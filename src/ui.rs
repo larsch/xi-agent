@@ -1073,10 +1073,9 @@ fn build_log_lines(
                         append_message(&mut lines, &content, "", width, false);
                     } else {
                         // Render content through the markdown renderer.
-                        let md_lines =
-                            crate::markdown::render(&msg.content, width.saturating_sub(3));
                         let prefix = format!("{answer_icon} ");
-                        append_markdown_answer(&mut lines, md_lines, &prefix, is_streaming_last);
+                        let md_lines = crate::markdown::render(&msg.content, width, &prefix);
+                        append_markdown_answer(&mut lines, md_lines, is_streaming_last);
                     }
                 }
             }
@@ -1098,15 +1097,15 @@ fn build_log_lines(
                         .unwrap_or("");
 
                     if let Some(ctx) = context {
-                        let md_lines = crate::markdown::render(ctx, width.saturating_sub(3));
-                        append_markdown_answer(&mut lines, md_lines, "❓ ", false);
+                        let md_lines = crate::markdown::render(ctx, width, "❓ ");
+                        append_markdown_answer(&mut lines, md_lines, false);
                         lines.push(Line::default());
                     }
 
                     if !question.is_empty() {
-                        let prefix = if context.is_none() { "❓ " } else { "" };
-                        let md_lines = crate::markdown::render(question, width.saturating_sub(3));
-                        append_markdown_answer(&mut lines, md_lines, prefix, false);
+                        let q_prefix = if context.is_none() { "❓ " } else { "" };
+                        let md_lines = crate::markdown::render(question, width, q_prefix);
+                        append_markdown_answer(&mut lines, md_lines, false);
                     }
                 } else {
                     let mut label = if name == "local_shell" {
@@ -1427,34 +1426,23 @@ fn append_message_dim(
     }
 }
 
-/// Append markdown-rendered answer lines to `out`, prepending `prefix` (the
-/// answer icon + space) on the very first rendered line.  When `streaming` is
+/// Append markdown-rendered answer lines to `out`.  The answer-icon prefix is
+/// already embedded in `md_lines` by `markdown::render`.  When `streaming` is
 /// true a yellow `▋` cursor span is appended to the last line.
 fn append_markdown_answer(
     out: &mut Vec<Line<'static>>,
     mut md_lines: Vec<ratatui::text::Line<'static>>,
-    prefix: &str,
     streaming: bool,
 ) {
     if md_lines.is_empty() {
-        // Fallback: emit prefix alone (shouldn't happen when content is non-empty).
-        let mut spans = vec![ratatui::text::Span::raw(prefix.to_string())];
+        // Fallback: shouldn't happen when content is non-empty.
         if streaming {
-            spans.push(ratatui::text::Span::styled(
+            out.push(ratatui::text::Line::from(ratatui::text::Span::styled(
                 "▋",
                 ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
-            ));
+            )));
         }
-        out.push(ratatui::text::Line::from(spans));
         return;
-    }
-
-    // Prepend the icon/prefix to the first line.
-    if !prefix.is_empty() {
-        let first = &mut md_lines[0];
-        first
-            .spans
-            .insert(0, ratatui::text::Span::raw(prefix.to_string()));
     }
 
     // Append streaming cursor to the last line.
