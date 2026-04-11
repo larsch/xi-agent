@@ -139,6 +139,8 @@ pub mod bash;
 pub mod cmd;
 pub mod custom;
 pub mod edit;
+#[cfg(not(target_os = "windows"))]
+pub mod exec;
 pub mod find;
 #[cfg(target_os = "windows")]
 pub mod powershell;
@@ -154,6 +156,8 @@ use bash::BashTool;
 #[cfg(target_os = "windows")]
 use cmd::CmdTool;
 use edit::EditTool;
+#[cfg(not(target_os = "windows"))]
+use exec::ExecTool;
 use find::FindTool;
 #[cfg(target_os = "windows")]
 use powershell::PowerShellTool;
@@ -190,6 +194,7 @@ pub fn register_builtin_tools(
     #[cfg(not(target_os = "windows"))]
     {
         tools.push(Arc::new(BashTool));
+        tools.push(Arc::new(ExecTool));
     }
 
     for tool in tools {
