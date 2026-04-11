@@ -525,11 +525,10 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
         for (list_kind, &counter) in list_stack.iter().zip(list_item_counters.iter()).take(depth) {
             let prefix_width = match list_kind {
                 None => 2usize, // "• " = 2 columns
-                Some(start) => {
-                    // counter holds the *next* item number at this level;
-                    // subtract 1 to get the current parent item number.
-                    let n = counter.saturating_sub(1).max(*start);
-                    let item_num = n - start + 1;
+                Some(_) => {
+                    // counter holds the next visible item number at this
+                    // level, so subtract 1 to get the current parent number.
+                    let item_num = counter.saturating_sub(1).max(1);
                     format!("{}. ", item_num).len()
                 }
             };
@@ -539,6 +538,16 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
         }
         indent
     };
+
+    let current_ordered_item_prefix =
+        |ancestor_indent: &str, list_stack: &[Option<u64>], list_item_counters: &[u64]| -> String {
+            if list_stack.last().and_then(|s| *s).is_some() {
+                let n = list_item_counters.last().copied().unwrap_or(1);
+                format!("{}{}. ", ancestor_indent, n)
+            } else {
+                format!("{}• ", ancestor_indent)
+            }
+        };
 
     // Table state.
     let mut in_table = false;
@@ -590,12 +599,11 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                     // for subsequent paragraphs.  We don't advance the counter
                     // here — that happens in End(Item).
                     let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
-                    let item_prefix = if let Some(start) = list_stack.last().and_then(|s| *s) {
-                        let n = list_item_counters.last().copied().unwrap_or(1);
-                        format!("{}{}. ", ancestor_indent, n - start + 1)
-                    } else {
-                        format!("{}• ", ancestor_indent)
-                    };
+                    let item_prefix = current_ordered_item_prefix(
+                        &ancestor_indent,
+                        &list_stack,
+                        &list_item_counters,
+                    );
                     let p = if list_item_first_para_done {
                         " ".repeat(item_prefix.len())
                     } else {
@@ -667,12 +675,11 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                 // content now before descending into the sublist.
                 if in_list_item && !inline_spans.is_empty() {
                     let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
-                    let item_prefix = if let Some(s) = list_stack.last().and_then(|s| *s) {
-                        let n = list_item_counters.last().copied().unwrap_or(s);
-                        format!("{}{}. ", ancestor_indent, n - s + 1)
-                    } else {
-                        format!("{}• ", ancestor_indent)
-                    };
+                    let item_prefix = current_ordered_item_prefix(
+                        &ancestor_indent,
+                        &list_stack,
+                        &list_item_counters,
+                    );
                     let p = if list_item_first_para_done {
                         " ".repeat(item_prefix.len())
                     } else {
@@ -699,9 +706,9 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
             }
             Event::End(TagEnd::Item) => {
                 let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
-                let prefix = if let Some(start) = list_stack.last().and_then(|s| *s) {
+                let prefix = if list_stack.last().and_then(|s| *s).is_some() {
                     let n = list_item_counters.last_mut().unwrap();
-                    let p = format!("{}{}. ", ancestor_indent, *n - start + 1);
+                    let p = format!("{}{}. ", ancestor_indent, *n);
                     *n += 1;
                     p
                 } else {
@@ -1112,6 +1119,23 @@ mod tests {
         assert_eq!(
             texts,
             vec!["1. First item", "2. Second item", "3. Third item"]
+        );
+    }
+
+    #[test]
+    fn separated_ordered_lists_preserve_explicit_start_numbers() {
+        let md = "1. First section item\n\nSome intervening paragraph.\n\n2. Second section item\n\n3. Third section item";
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "1. First section item",
+                "",
+                "Some intervening paragraph.",
+                "",
+                "2. Second section item",
+                "3. Third section item",
+            ]
         );
     }
 
