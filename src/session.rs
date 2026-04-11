@@ -18,6 +18,8 @@ pub struct SessionMeta {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub message_count: usize,
+    /// First line of the first user prompt in this session, if any.
+    pub first_prompt: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -151,12 +153,15 @@ impl SessionStore {
                 .unwrap_or_else(|| Utc::now().timestamp_millis());
             let created_at_ms = session_created_at_ms.unwrap_or(updated_at_ms);
 
+            let first_prompt = read_first_user_prompt(&path);
+
             let meta = SessionMeta {
                 id: id.clone(),
                 cwd: cwd.unwrap_or_default(),
                 created_at_ms,
                 updated_at_ms,
                 message_count,
+                first_prompt,
             };
 
             match by_id.get(&id) {
@@ -433,6 +438,38 @@ fn count_non_empty_lines(path: &Path) -> anyhow::Result<usize> {
         }
     }
     Ok(count)
+}
+
+/// Read the first line of the first user prompt in a session file.
+fn read_first_user_prompt(path: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct MinimalMessage {
+        role: String,
+        content: String,
+    }
+
+    let file = fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<MinimalMessage>(line) else {
+            continue;
+        };
+        if msg.role.to_lowercase() != "user" {
+            continue;
+        }
+        let first_line = msg
+            .content
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string());
+        return first_line;
+    }
+    None
 }
 
 fn file_modified_at_ms(path: &Path) -> Option<i64> {

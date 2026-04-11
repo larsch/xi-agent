@@ -545,9 +545,10 @@ impl App {
                     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(meta.updated_at_ms)
                         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_else(|| "unknown time".to_string());
+                let prompt_hint = meta.first_prompt.as_deref().unwrap_or(&meta.id);
 
                 CompletionItem {
-                    label: format!("[{scope}] {when}  —  {}", meta.id),
+                    label: format!("[{scope}] {when}  —  {prompt_hint}"),
                     detail: format!("{} msgs • {}", meta.message_count, meta.cwd),
                     complete_to: format!("/resume_session {}", meta.id),
                     loading: false,
