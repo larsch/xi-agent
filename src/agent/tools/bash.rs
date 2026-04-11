@@ -7,6 +7,7 @@ use tokio::io::AsyncReadExt;
 use super::terminal::apply_terminal_render;
 use super::truncate::truncate_tail;
 use crate::agent::types::{Tool, ToolResult};
+use crate::process::DetachFromTty;
 
 pub struct BashTool;
 
@@ -75,8 +76,8 @@ impl Tool for BashTool {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .process_group(0)
                 .kill_on_drop(true)
+                .detach_from_tty()
                 .spawn()
             {
                 Ok(c) => c,
@@ -356,5 +357,35 @@ mod tests {
         use super::super::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
         assert_eq!(DEFAULT_MAX_LINES, 2000);
         assert_eq!(DEFAULT_MAX_BYTES, 50 * 1024);
+    }
+
+    /// Verify that commands run by BashTool have no controlling terminal:
+    /// stdout (fd 1) must not be a TTY, and /dev/tty must not be accessible.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_no_controlling_terminal() {
+        let tool = BashTool;
+
+        // isatty check on fd 1
+        let result = tool
+            .execute(serde_json::json!({"command": "[ -t 1 ] && echo tty || echo notty"}))
+            .await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("notty"),
+            "expected stdout to not be a tty: {}",
+            result.content
+        );
+
+        // /dev/tty should not be openable without a controlling terminal
+        let result = tool
+            .execute(serde_json::json!({"command": "if (exec 3</dev/tty) 2>/dev/null; then echo has_ctty; else echo no_ctty; fi"}))
+            .await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("no_ctty"),
+            "expected /dev/tty to be inaccessible: {}",
+            result.content
+        );
     }
 }

@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::truncate::truncate_tail;
 use crate::agent::types::{Tool, ToolResult};
+use crate::process::DetachFromTty;
 
 // ── CustomTool ────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ impl Tool for CustomTool {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .detach_from_tty()
                 .spawn()
             {
                 Ok(c) => c,

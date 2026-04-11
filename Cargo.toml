@@ -34,6 +34,9 @@ pulldown-cmark = "0.13"
 ammonia = "4.1"
 serde_path_to_error = "0.1.20"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",

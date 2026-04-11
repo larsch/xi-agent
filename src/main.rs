@@ -29,6 +29,7 @@ mod dirs;
 mod export;
 mod llm;
 mod markdown;
+mod process;
 mod provider;
 mod session;
 mod shell;
