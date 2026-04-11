@@ -14,10 +14,12 @@ use crate::{
         openai::OpenAiProvider,
         test_provider::TestProvider,
     },
+    provider_instance::{ApiType, ProviderInstance, ServiceType},
     thinking::ThinkingLevel,
 };
 
 /// All supported back-end providers, in display order.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderKind {
     Copilot,
@@ -31,6 +33,7 @@ pub enum ProviderKind {
     Test,
 }
 
+#[allow(dead_code)]
 impl ProviderKind {
     pub fn name(&self) -> &'static str {
         match self {
@@ -82,6 +85,7 @@ impl ProviderKind {
     }
 
     /// Sensible default model for this provider.
+    #[allow(dead_code)]
     pub fn default_model(&self) -> &'static str {
         match self {
             Self::Copilot => "gpt-4o",
@@ -195,6 +199,7 @@ pub fn scaled_token_budget(context_window: usize, floor: usize, scale: usize) ->
     (value as usize).min(cap).max(1)
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopilotApiRoute {
     OpenAiChatCompletions,
@@ -214,6 +219,7 @@ pub enum ThinkingSupport {
 /// primary signal.  Falls back to model-name heuristics on cold start (before
 /// `list_models()` has populated the cache) and for the OpenAI
 /// Chat-Completions vs. Responses split (not exposed in the API).
+#[allow(dead_code)]
 fn classify_copilot_route(model: &str) -> CopilotApiRoute {
     // Primary: vendor from the API metadata cache.
     if let Some(vendor) = CopilotProvider::cached_vendor(model)
@@ -234,6 +240,7 @@ fn classify_copilot_route(model: &str) -> CopilotApiRoute {
     }
 }
 
+#[allow(dead_code)]
 pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport {
     match kind {
         ProviderKind::Copilot => match classify_copilot_route(model) {
@@ -260,23 +267,51 @@ pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport
     }
 }
 
-/// Build a boxed `LlmProvider` for `kind` with the given model name.
-///
-/// Returns an error if the required credentials or configuration are missing.
-pub fn build_provider(
-    kind: &ProviderKind,
-    model: &str,
+// ── Instance-based API ────────────────────────────────────────────────────────
+
+/// Return the thinking support level for a named provider instance.
+pub fn thinking_support_for_instance(instance: &ProviderInstance, _model: &str) -> ThinkingSupport {
+    match instance.api_type {
+        ApiType::OpenAiResponses => ThinkingSupport::Applied,
+        ApiType::GeminiNative => ThinkingSupport::Applied,
+        ApiType::OpenAiCompatible => {
+            if instance.service_type == ServiceType::Copilot {
+                ThinkingSupport::Ignored(
+                    "copilot chat-completions route does not expose reasoning.effort",
+                )
+            } else {
+                ThinkingSupport::Ignored("openai-compatible provider does not map thinking levels")
+            }
+        }
+        ApiType::AnthropicCompatible => {
+            ThinkingSupport::Ignored("anthropic route has no thinking mapping yet")
+        }
+        ApiType::OllamaChatApi => {
+            ThinkingSupport::Ignored("ollama provider does not support mapped thinking levels")
+        }
+        ApiType::Test => ThinkingSupport::Ignored("test provider does not support thinking"),
+    }
+}
+
+/// Build a provider for a named [`ProviderInstance`], dispatching on its
+/// [`ApiType`].
+pub fn build_provider_for_instance(
+    instance: &ProviderInstance,
     thinking: ThinkingLevel,
-    config: &TauConfig,
+    _config: &TauConfig,
 ) -> anyhow::Result<Arc<dyn LlmProvider + Send + Sync>> {
-    match kind {
-        ProviderKind::Copilot => {
+    let model = instance.effective_model();
+
+    match instance.service_type {
+        // ── Cloud services with AuthStore credentials ─────────────────────
+        ServiceType::Copilot => {
             let store = AuthStore::load_default()?;
             let creds = store.get_copilot().ok_or_else(|| {
                 anyhow::anyhow!("Not authenticated for copilot. Run /login copilot.")
             })?;
             log::debug!(
-                "provider route selected: provider=copilot model={} base_url={}",
+                "provider route selected: instance={} model={} base_url={}",
+                instance.id,
                 model,
                 creds.base_url.as_deref().unwrap_or("<from-token>")
             );
@@ -288,27 +323,12 @@ pub fn build_provider(
             );
             Ok(Arc::new(p))
         }
-        ProviderKind::OpenAi => {
-            let base_url = config
-                .openai
-                .base_url
-                .clone()
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-
-            let api_key = config.openai.api_key.clone().ok_or_else(|| {
-                anyhow::anyhow!("Missing API key. Configure [openai].api_key in config.toml.")
-            })?;
-
-            let p = OpenAiProvider::new(base_url, model, api_key);
-            Ok(Arc::new(p))
-        }
-        ProviderKind::Codex => {
+        ServiceType::Codex => {
             let store = AuthStore::load_default()?;
             let creds = store
                 .get_codex()
                 .ok_or_else(|| anyhow::anyhow!("Not authenticated for codex. Run /login codex."))?;
-            let base_url = config
-                .codex
+            let base_url = instance
                 .base_url
                 .clone()
                 .unwrap_or_else(|| CODEX_DEFAULT_BASE_URL.to_string());
@@ -316,13 +336,12 @@ pub fn build_provider(
                 .with_reasoning_effort(thinking.to_reasoning_effort().map(ToString::to_string));
             Ok(Arc::new(p))
         }
-        ProviderKind::Gemini => {
+        ServiceType::Gemini => {
             let store = AuthStore::load_default()?;
             let creds = store.get_gemini().ok_or_else(|| {
                 anyhow::anyhow!("Not authenticated for gemini. Run /login gemini.")
             })?;
-            let base_url = config
-                .gemini
+            let base_url = instance
                 .base_url
                 .clone()
                 .unwrap_or_else(|| GEMINI_DEFAULT_BASE_URL.to_string());
@@ -337,31 +356,61 @@ pub fn build_provider(
                 .with_thinking_level(mapped_thinking);
             Ok(Arc::new(p))
         }
-        ProviderKind::Ollama => {
-            let base = config
-                .ollama
+
+        // ── OpenAI API (api_key in instance) ─────────────────────────────
+        ServiceType::OpenAi | ServiceType::OpenAiCompatible => {
+            let base_url = instance
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let api_key = instance.api_key.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing API key for provider '{}'. Set api_key in config.",
+                    instance.id
+                )
+            })?;
+            Ok(Arc::new(OpenAiProvider::new(base_url, model, api_key)))
+        }
+
+        // ── Ollama ────────────────────────────────────────────────────────
+        ServiceType::Ollama => {
+            let base = instance
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             Ok(Arc::new(OllamaProvider::new(base, model.to_string())))
         }
-        ProviderKind::OpenWebUi => {
-            let base = config.open_webui.base_url.clone().ok_or_else(|| {
+        ServiceType::OllamaCom => {
+            let base = instance
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://ollama.com".to_string());
+            Ok(Arc::new(OllamaProvider::new(base, model.to_string())))
+        }
+
+        // ── Open WebUI ────────────────────────────────────────────────────
+        ServiceType::OpenWebUi => {
+            let base = instance.base_url.clone().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "No Open WebUI URL configured. Run /provider open-webui to set it up."
+                    "No base URL for Open WebUI provider '{}'. Configure it first.",
+                    instance.id
                 )
             })?;
-            // Use Open WebUI's OpenAI-compatible API rather than the Ollama
-            // proxy path (/ollama/api/chat).  The proxy intercepts tool-call
-            // requests and runs its own internal agentic loop, returning only
-            // a bare done-chunk with empty content instead of streaming the
-            // model's tokens back to the client.  The /api endpoint streams
-            // correctly and supports tools via the standard OpenAI format.
-            let api_base = format!("{}/api", base.trim_end_matches('/'));
-            let api_key = config.open_webui.api_key.clone().unwrap_or_default();
-            Ok(Arc::new(OpenAiProvider::new(api_base, model, api_key)))
+            match instance.api_type {
+                ApiType::OllamaChatApi => {
+                    let api_base = format!("{}/ollama", base.trim_end_matches('/'));
+                    Ok(Arc::new(OllamaProvider::new(api_base, model.to_string())))
+                }
+                _ => {
+                    let api_base = format!("{}/api", base.trim_end_matches('/'));
+                    let api_key = instance.api_key.clone().unwrap_or_default();
+                    Ok(Arc::new(OpenAiProvider::new(api_base, model, api_key)))
+                }
+            }
         }
-        ProviderKind::Test => Ok(Arc::new(TestProvider::new())),
+
+        // ── Test ──────────────────────────────────────────────────────────
+        ServiceType::Test => Ok(Arc::new(TestProvider::new())),
     }
 }
 

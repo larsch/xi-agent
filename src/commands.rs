@@ -180,9 +180,8 @@ pub fn completions_for(
     model_fetch_error: Option<&str>,
     skills: &[SkillMeta],
     thinking_enabled: bool,
+    provider_instances: &[crate::provider_instance::ProviderInstance],
 ) -> Vec<CompletionItem> {
-    use crate::provider::ProviderKind;
-
     let Some(rest) = input.strip_prefix('/') else {
         return vec![];
     };
@@ -216,10 +215,10 @@ pub fn completions_for(
                         vec![]
                     }
                 }
-                "provider" => ProviderKind::all()
+                "provider" => provider_instances
                     .iter()
-                    .filter(|p| p.name().starts_with(arg))
-                    .map(|p| CompletionItem::from_provider(p.name(), p.label()))
+                    .filter(|p| p.id.starts_with(arg))
+                    .map(|p| CompletionItem::from_provider(&p.id, &p.label()))
                     .collect(),
                 "login" => ["copilot", "codex", "gemini"]
                     .iter()
@@ -493,18 +492,18 @@ mod tests {
 
     #[test]
     fn completions_non_slash_input_returns_empty() {
-        let items = completions_for("hello", None, false, None, &[], true);
+        let items = completions_for("hello", None, false, None, &[], true, &[]);
         assert!(items.is_empty());
     }
 
     #[test]
     fn model_completions_show_loading_or_error_or_matching_models() {
-        let loading = completions_for("/model ", None, true, None, &[], true);
+        let loading = completions_for("/model ", None, true, None, &[], true, &[]);
         assert_eq!(loading.len(), 1);
         assert!(loading[0].loading);
         assert!(loading[0].label.contains("fetching"));
 
-        let errored = completions_for("/model ", None, false, Some("no auth"), &[], true);
+        let errored = completions_for("/model ", None, false, Some("no auth"), &[], true, &[]);
         assert_eq!(errored.len(), 1);
         assert!(errored[0].error);
         assert!(errored[0].label.contains("no auth"));
@@ -514,21 +513,32 @@ mod tests {
             "gpt-5".to_string(),
             "claude".to_string(),
         ];
-        let items = completions_for("/model gpt", Some(&models), false, None, &[], true);
+        let items = completions_for("/model gpt", Some(&models), false, None, &[], true, &[]);
         let complete_to: Vec<String> = items.into_iter().map(|i| i.complete_to).collect();
         assert_eq!(complete_to, vec!["/model gpt-4o", "/model gpt-5"]);
     }
 
     #[test]
     fn provider_and_thinking_completions_are_filtered() {
-        let provider_items = completions_for("/provider ge", None, false, None, &[], true);
+        let providers = vec![
+            crate::provider_instance::ProviderInstance::new(
+                "gemini",
+                crate::provider_instance::ServiceType::Gemini,
+            ),
+            crate::provider_instance::ProviderInstance::new(
+                "gpu-box",
+                crate::provider_instance::ServiceType::Ollama,
+            ),
+        ];
+        let provider_items =
+            completions_for("/provider ge", None, false, None, &[], true, &providers);
         assert!(
             provider_items
                 .iter()
                 .any(|i| i.complete_to == "/provider gemini")
         );
 
-        let thinking_items = completions_for("/thinking m", None, false, None, &[], true);
+        let thinking_items = completions_for("/thinking m", None, false, None, &[], true, &[]);
         let complete_to: Vec<String> = thinking_items.into_iter().map(|i| i.complete_to).collect();
         assert!(complete_to.contains(&"/thinking minimal".to_string()));
         assert!(complete_to.contains(&"/thinking medium".to_string()));
@@ -537,10 +547,10 @@ mod tests {
 
     #[test]
     fn thinking_completions_hidden_when_thinking_disabled() {
-        let thinking_items = completions_for("/thinking m", None, false, None, &[], false);
+        let thinking_items = completions_for("/thinking m", None, false, None, &[], false, &[]);
         assert!(thinking_items.is_empty());
 
-        let cmd_items = completions_for("/t", None, false, None, &[], false);
+        let cmd_items = completions_for("/t", None, false, None, &[], false, &[]);
         assert!(
             cmd_items
                 .iter()
@@ -552,17 +562,24 @@ mod tests {
     fn command_name_completion_includes_matching_commands_and_skills() {
         let skills = vec![skill("plan", "Planning"), skill("build", "Build things")];
 
-        let items = completions_for("/s", None, false, None, &skills, true);
+        let items = completions_for("/s", None, false, None, &skills, true, &[]);
         let complete_to: Vec<String> = items.into_iter().map(|i| i.complete_to).collect();
         assert!(complete_to.iter().any(|c| c == "/skill:plan "));
         assert!(complete_to.iter().any(|c| c == "/skill:build "));
 
-        let skill_only = completions_for("/skill:pl", None, false, None, &skills, true);
+        let skill_only = completions_for("/skill:pl", None, false, None, &skills, true, &[]);
         assert_eq!(skill_only.len(), 1);
         assert_eq!(skill_only[0].complete_to, "/skill:plan ");
 
-        let no_arg_completion =
-            completions_for("/skill:plan anything", None, false, None, &skills, true);
+        let no_arg_completion = completions_for(
+            "/skill:plan anything",
+            None,
+            false,
+            None,
+            &skills,
+            true,
+            &[],
+        );
         assert!(no_arg_completion.is_empty());
     }
 
@@ -574,7 +591,7 @@ mod tests {
         ];
 
         // "/brainstorm" should match "/skill:brainstorm" as a substring of the skill name.
-        let items = completions_for("/brainstorm", None, false, None, &skills, true);
+        let items = completions_for("/brainstorm", None, false, None, &skills, true, &[]);
         let complete_to: Vec<String> = items.iter().map(|i| i.complete_to.clone()).collect();
         assert!(
             complete_to.contains(&"/skill:brainstorm ".to_string()),
@@ -590,7 +607,7 @@ mod tests {
         assert_eq!(item.match_range, Some((7, 17))); // "brainstorm" = 10 chars
 
         // "/plan" should match "/skill:plan" similarly (offset 7, len 4).
-        let items2 = completions_for("/plan", None, false, None, &skills, true);
+        let items2 = completions_for("/plan", None, false, None, &skills, true, &[]);
         let plan_item = items2
             .iter()
             .find(|i| i.complete_to == "/skill:plan ")
@@ -601,7 +618,7 @@ mod tests {
     #[test]
     fn substring_match_includes_mid_string_commands() {
         // "/load" should match "/reload" (substring) in addition to prefix matches.
-        let items = completions_for("/load", None, false, None, &[], true);
+        let items = completions_for("/load", None, false, None, &[], true, &[]);
         let complete_to: Vec<String> = items.iter().map(|i| i.complete_to.clone()).collect();
         assert!(
             complete_to.contains(&"/reload".to_string()),
@@ -613,7 +630,7 @@ mod tests {
     fn prefix_matches_come_before_substring_matches() {
         // "/re" is a prefix of "/reload" and "/resume" but a substring of nothing else
         // with that prefix. Verify ordering: prefix matches first.
-        let items = completions_for("/load", None, false, None, &[], true);
+        let items = completions_for("/load", None, false, None, &[], true, &[]);
         // There are no commands whose name *starts with* "load", so all results
         // are substring matches. "/reload" should be present.
         let names: Vec<&str> = items.iter().map(|i| i.complete_to.as_str()).collect();
@@ -621,7 +638,7 @@ mod tests {
 
         // "/re" is a prefix of /reload and /resume; both should appear before any
         // purely mid-string hits.
-        let re_items = completions_for("/re", None, false, None, &[], true);
+        let re_items = completions_for("/re", None, false, None, &[], true, &[]);
         let re_names: Vec<&str> = re_items.iter().map(|i| i.complete_to.as_str()).collect();
         // Check /reload and /resume are present
         assert!(re_names.contains(&"/reload"), "{re_names:?}");
@@ -644,13 +661,13 @@ mod tests {
     #[test]
     fn match_range_is_set_for_highlighted_commands() {
         // Prefix match: "/re" -> /reload — match_range should cover "re" at offset 1.
-        let items = completions_for("/re", None, false, None, &[], true);
+        let items = completions_for("/re", None, false, None, &[], true, &[]);
         let reload = items.iter().find(|i| i.complete_to == "/reload").unwrap();
         // label is "/reload", "re" starts at byte 1
         assert_eq!(reload.match_range, Some((1, 3)));
 
         // Substring (mid-string) match: "/load" -> /reload — "load" is at offset 3 in "/reload"
-        let items2 = completions_for("/load", None, false, None, &[], true);
+        let items2 = completions_for("/load", None, false, None, &[], true, &[]);
         let reload2 = items2.iter().find(|i| i.complete_to == "/reload").unwrap();
         // "/reload": 'r'=0, 'e'=1, 'l'=2 — wait, label is "/reload"
         // byte offsets: '/'=0, 'r'=1, 'e'=2, 'l'=3, 'o'=4, 'a'=5, 'd'=6

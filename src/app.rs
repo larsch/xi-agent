@@ -14,7 +14,7 @@ use crate::{
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     llm::{AssistantPhase, DisplayRange, LlmProvider, Message, Role, UsageStats},
-    provider::{ProviderKind, ThinkingSupport, thinking_support_for},
+    provider_instance::ProviderInstance,
     session::SessionStore,
     shell::{self, ShellKind},
     skills::SkillMeta,
@@ -219,6 +219,12 @@ pub struct App {
     pub current_provider: String,
     /// Currently active thinking / reasoning level.
     pub current_thinking: ThinkingLevel,
+    /// Whether the current provider+model combination supports thinking.
+    /// Updated by main.rs whenever provider or model changes.
+    pub thinking_supported: bool,
+    /// Snapshot of configured provider instances for completions and selection.
+    /// Updated by main.rs whenever the provider list changes.
+    pub provider_instances: Vec<crate::provider_instance::ProviderInstance>,
     /// Agent loop configuration (tools, hooks).
     pub agent_config: AgentLoopConfig,
     /// Skills loaded from all supported skill roots.
@@ -320,7 +326,7 @@ impl App {
 
     pub fn new(
         initial_model: impl Into<String>,
-        initial_provider: &ProviderKind,
+        initial_provider: &str,
         initial_thinking: ThinkingLevel,
         agent_config: AgentLoopConfig,
     ) -> Self {
@@ -347,8 +353,10 @@ impl App {
             last_output_at: None,
             system_prompt: None,
             current_model: initial_model.into(),
-            current_provider: initial_provider.name().to_string(),
+            current_provider: initial_provider.to_string(),
             current_thinking: initial_thinking,
+            thinking_supported: false, // updated by main.rs after construction
+            provider_instances: Vec::new(), // updated by main.rs after construction
             agent_config,
             loaded_skills: Vec::new(),
             completions: Vec::new(),
@@ -819,11 +827,7 @@ impl App {
         let available = self.available_models.as_deref();
         let loading = self.models_loading;
         let fetch_error = self.model_fetch_error.as_deref();
-        let thinking_enabled = ProviderKind::from_name(&self.current_provider)
-            .map(|kind| {
-                thinking_support_for(&kind, &self.current_model) == ThinkingSupport::Applied
-            })
-            .unwrap_or(false);
+        let thinking_enabled = self.thinking_supported;
         let new = commands::completions_for(
             &input,
             available,
@@ -831,6 +835,7 @@ impl App {
             fetch_error,
             &self.loaded_skills,
             thinking_enabled,
+            &self.provider_instances,
         );
 
         if new.len() != self.completions.len() {
@@ -1064,14 +1069,14 @@ impl App {
     }
 
     /// Open the provider selection menu with the fixed list of known providers.
-    pub fn enter_provider_selection_mode(&mut self) {
+    pub fn enter_provider_selection_mode(&mut self, instances: &[ProviderInstance]) {
         self.reset_textarea();
         self.selection.active = true;
         self.selection.kind = Some(SelectionKind::Provider);
         self.selection.title = "  Select provider  ";
-        let items = ProviderKind::all()
+        let items = instances
             .iter()
-            .map(|p| CompletionItem::from_provider(p.name(), p.label()))
+            .map(|p| CompletionItem::from_provider(&p.id, &p.label()))
             .collect();
         self.set_selection_items(items);
         self.select_current_default();
@@ -2307,14 +2312,13 @@ mod tests {
             types::{AskRequest, AskUserOption, AskUserResponse},
         },
         llm::{Message, Role},
-        provider::ProviderKind,
         thinking::ThinkingLevel,
     };
 
     fn make_app() -> App {
         App::new(
             "gpt-4o",
-            &ProviderKind::OpenAi,
+            "openai",
             ThinkingLevel::Off,
             AgentLoopConfig {
                 tools: Default::default(),

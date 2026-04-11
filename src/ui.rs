@@ -11,7 +11,7 @@ use crate::{
     auth::AuthFlow,
     commands::CompletionItem,
     llm::{AssistantPhase, Role},
-    provider::{ProviderKind, ThinkingSupport, context_window_for_model, thinking_support_for},
+    provider::context_window_for_model,
     tool_presentation,
 };
 
@@ -716,10 +716,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if app.show_info {
         let context_window = context_window_for_model(&app.current_model);
         let used_tokens = app.latest_usage.and_then(|u| u.used_tokens());
-        let thinking = ProviderKind::from_name(&app.current_provider).and_then(|kind| {
-            (thinking_support_for(&kind, &app.current_model) == ThinkingSupport::Applied)
-                .then_some(app.current_thinking.as_str())
-        });
+        let thinking = app
+            .thinking_supported
+            .then_some(app.current_thinking.as_str());
         let info_line = build_info_line(
             &app.current_provider,
             &app.current_model,
@@ -1910,7 +1909,6 @@ mod tests {
     use crate::{
         agent::AgentLoopConfig,
         llm::{AssistantPhase, Message},
-        provider::ProviderKind,
         thinking::ThinkingLevel,
     };
     use serde_json::json;
@@ -1925,7 +1923,7 @@ mod tests {
     fn make_app() -> App {
         App::new(
             "gpt-4o",
-            &ProviderKind::Copilot,
+            "copilot",
             ThinkingLevel::Medium,
             AgentLoopConfig {
                 tools: HashMap::new(),

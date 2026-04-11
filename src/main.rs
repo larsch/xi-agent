@@ -31,6 +31,7 @@ mod llm;
 mod markdown;
 mod process;
 mod provider;
+mod provider_instance;
 mod session;
 mod shell;
 mod skills;
@@ -47,7 +48,8 @@ use app::{App, InputMode, SelectionResult};
 use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
-use provider::{ProviderKind, ThinkingSupport, build_provider, thinking_support_for};
+use provider::{ThinkingSupport, build_provider_for_instance, thinking_support_for_instance};
+use provider_instance::ProviderInstance;
 use thinking::ThinkingLevel;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -108,12 +110,11 @@ async fn main() -> io::Result<()> {
     }
 
     // Priority: --provider flag > config.toml > default.
-    let mut current_kind = resolve_provider_kind(cli.provider.as_deref(), &config);
+    let mut current_instance = resolve_provider_instance(cli.provider.as_deref(), &config);
 
     // Priority: --model flag > config.toml > provider default.
-    let mut current_model = resolve_model(cli.model.as_deref(), &current_kind, &config);
+    let mut current_model = resolve_model_for_instance(cli.model.as_deref(), &current_instance);
     let mut current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-
     let window_folder = std::env::current_dir()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -152,7 +153,7 @@ async fn main() -> io::Result<()> {
 
     let mut app = App::new(
         &current_model,
-        &current_kind,
+        &current_instance.id,
         current_thinking,
         AgentLoopConfig {
             tools: std::collections::HashMap::new(),
@@ -178,18 +179,24 @@ async fn main() -> io::Result<()> {
     app.agent_config.tools = tools;
     app.system_prompt = Some(system_prompt);
     app.loaded_skills = loaded_skills;
-    maybe_warn_thinking_unsupported(&mut app, &current_kind, &current_model, current_thinking);
+    app.provider_instances = config.providers.clone();
+    maybe_warn_thinking_unsupported(
+        &mut app,
+        &current_instance,
+        &current_model,
+        current_thinking,
+    );
 
     loop {
-        // Build (or re-build) the provider for the current kind + model.
+        // Build (or re-build) the provider for the current instance.
         let provider =
-            match build_provider(&current_kind, &current_model, current_thinking, &config) {
+            match build_provider_for_instance(&current_instance, current_thinking, &config) {
                 Ok(p) => p,
                 Err(e) => {
                     let msg = format!("[provider unavailable: {e}]");
                     log::debug!(
                         "provider build failed: provider={} model={} err={}",
-                        current_kind.name(),
+                        current_instance.id,
                         current_model,
                         e
                     );
@@ -244,79 +251,100 @@ async fn main() -> io::Result<()> {
                 name,
                 prompt_thinking_selection,
             }) => {
+                // Update the current instance's model.
+                current_instance.model = Some(name.clone());
                 app.current_model = name.clone();
                 current_model = name;
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
                 // Invalidate cached model list so the next fetch is fresh.
                 app.available_models = None;
-                persist_provider_model_selection(
+                persist_provider_model_selection_v2(
                     &mut config,
-                    &current_kind,
+                    &current_instance,
                     &current_model,
                     current_thinking,
                     &mut app,
                 );
+                app.provider_instances = config.providers.clone();
                 maybe_warn_thinking_unsupported(
                     &mut app,
-                    &current_kind,
+                    &current_instance,
                     &current_model,
                     current_thinking,
                 );
                 if prompt_thinking_selection
-                    && thinking_support_for(&current_kind, &current_model)
+                    && thinking_support_for_instance(&current_instance, &current_model)
                         == ThinkingSupport::Applied
                 {
                     app.enter_thinking_selection_mode();
                 }
             }
 
-            Ok(RunResult::ChangeProvider(name)) => {
-                if let Some(kind) = ProviderKind::from_name(&name) {
-                    current_kind = kind;
-                    current_model = resolve_model(None, &current_kind, &config);
+            Ok(RunResult::ChangeProvider(id)) => {
+                if let Some(inst) = config.find_provider(&id).cloned() {
+                    current_instance = inst;
+                    current_model = resolve_model_for_instance(None, &current_instance);
                     app.current_model = current_model.clone();
                     current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                     app.current_thinking = current_thinking;
-                    app.current_provider = current_kind.name().to_string();
+                    app.current_provider = current_instance.id.clone();
                     app.available_models = None;
-                    persist_provider_model_selection(
+                    persist_provider_model_selection_v2(
                         &mut config,
-                        &current_kind,
+                        &current_instance,
                         &current_model,
                         current_thinking,
                         &mut app,
                     );
+                    app.provider_instances = config.providers.clone();
                     maybe_warn_thinking_unsupported(
                         &mut app,
-                        &current_kind,
+                        &current_instance,
                         &current_model,
                         current_thinking,
                     );
                 }
-                // Unknown name: silently ignore and loop (provider unchanged).
+                // Unknown id: silently ignore and loop (provider unchanged).
             }
 
             Ok(RunResult::ChangeThinking(level)) => {
                 current_thinking = level;
                 app.current_thinking = level;
-                persist_provider_model_selection(
+                persist_provider_model_selection_v2(
                     &mut config,
-                    &current_kind,
+                    &current_instance,
                     &current_model,
                     current_thinking,
                     &mut app,
                 );
+                app.provider_instances = config.providers.clone();
                 maybe_warn_thinking_unsupported(
                     &mut app,
-                    &current_kind,
+                    &current_instance,
                     &current_model,
                     current_thinking,
                 );
             }
 
             Ok(RunResult::ChangeOllamaEndpoint(url)) => {
-                config.ollama.record_endpoint(url);
+                // Upsert an Ollama instance with the new endpoint.
+                let instance_id =
+                    if current_instance.service_type == provider_instance::ServiceType::Ollama {
+                        current_instance.id.clone()
+                    } else {
+                        "ollama".to_string()
+                    };
+                let mut inst = config
+                    .find_provider(&instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ProviderInstance::new(&instance_id, provider_instance::ServiceType::Ollama)
+                    });
+                inst.base_url = Some(url.clone());
+                config.ollama.record_endpoint(url.clone()); // keep legacy in sync
+                config.upsert_provider(inst.clone());
+                config.provider = Some(instance_id.clone());
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist ollama endpoint: {e}");
                     app.messages.push(Message::assistant(format!(
@@ -324,25 +352,49 @@ async fn main() -> io::Result<()> {
                     )));
                     app.mark_log_dirty();
                 }
-                // Switch to (or stay on) Ollama.
-                current_kind = ProviderKind::Ollama;
-                current_model = resolve_model(None, &current_kind, &config);
+                current_instance = inst;
+                app.provider_instances = config.providers.clone();
+                current_model = resolve_model_for_instance(None, &current_instance);
                 app.current_model = current_model.clone();
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
-                app.current_provider = current_kind.name().to_string();
+                app.current_provider = current_instance.id.clone();
                 app.available_models = None;
+                maybe_warn_thinking_unsupported(
+                    &mut app,
+                    &current_instance,
+                    &current_model,
+                    current_thinking,
+                );
                 app.messages.push(Message::assistant(format!(
-                    "[ollama endpoint set to {}]",
-                    config.ollama.base_url.as_deref().unwrap_or("?")
+                    "[ollama endpoint set to {url}]"
                 )));
                 app.mark_log_dirty();
             }
 
             Ok(RunResult::ChangeOpenWebUi { url, api_key }) => {
-                config.open_webui.record_endpoint(url.clone());
+                // Upsert an Open WebUI instance.
+                let instance_id =
+                    if current_instance.service_type == provider_instance::ServiceType::OpenWebUi {
+                        current_instance.id.clone()
+                    } else {
+                        "open-webui".to_string()
+                    };
+                let mut inst = config
+                    .find_provider(&instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ProviderInstance::new(
+                            &instance_id,
+                            provider_instance::ServiceType::OpenWebUi,
+                        )
+                    });
+                inst.base_url = Some(url.clone());
+                inst.api_key = Some(api_key.clone());
+                config.open_webui.record_endpoint(url.clone()); // keep legacy in sync
                 config.open_webui.api_key = Some(api_key);
-                config.provider = Some(ProviderKind::OpenWebUi.name().to_string());
+                config.upsert_provider(inst.clone());
+                config.provider = Some(instance_id.clone());
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist open-webui config: {e}");
                     app.messages.push(Message::assistant(format!(
@@ -350,13 +402,20 @@ async fn main() -> io::Result<()> {
                     )));
                     app.mark_log_dirty();
                 }
-                current_kind = ProviderKind::OpenWebUi;
-                current_model = resolve_model(None, &current_kind, &config);
+                current_instance = inst;
+                app.provider_instances = config.providers.clone();
+                current_model = resolve_model_for_instance(None, &current_instance);
                 app.current_model = current_model.clone();
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
-                app.current_provider = current_kind.name().to_string();
+                app.current_provider = current_instance.id.clone();
                 app.available_models = None;
+                maybe_warn_thinking_unsupported(
+                    &mut app,
+                    &current_instance,
+                    &current_model,
+                    current_thinking,
+                );
                 app.messages.push(Message::assistant(format!(
                     "[open-webui endpoint set to {url}]"
                 )));
@@ -682,13 +741,29 @@ async fn run(
                                             return Ok(RunResult::ChangeThinking(level));
                                         }
                                         Some(SelectionResult::Provider(p)) => {
-                                            if p == "ollama" {
-                                                let recent = config.ollama.effective_recent_endpoints();
-                                                app.enter_ollama_endpoint_selection_mode(recent);
-                                            } else if p == "open-webui" {
-                                                app.enter_open_webui_url_input_mode();
-                                            } else {
-                                                return Ok(RunResult::ChangeProvider(p));
+                                            // Check the service type of the selected instance
+                                            // to decide whether to open endpoint setup flows.
+                                            let service = config.find_provider(&p)
+                                                .map(|i| i.service_type.clone());
+                                            match service {
+                                                Some(provider_instance::ServiceType::Ollama) => {
+                                                    // Reuse recent endpoints from legacy config
+                                                    // plus the current instance base_url.
+                                                    let mut recent = config.ollama.effective_recent_endpoints();
+                                                    if let Some(inst) = config.find_provider(&p)
+                                                        && let Some(ref url) = inst.base_url
+                                                        && !recent.contains(url)
+                                                    {
+                                                        recent.insert(0, url.clone());
+                                                    }
+                                                    app.enter_ollama_endpoint_selection_mode(recent);
+                                                }
+                                                Some(provider_instance::ServiceType::OpenWebUi) => {
+                                                    app.enter_open_webui_url_input_mode();
+                                                }
+                                                _ => {
+                                                    return Ok(RunResult::ChangeProvider(p));
+                                                }
                                             }
                                         }
                                         Some(SelectionResult::LoginProvider(p)) => {
@@ -861,18 +936,18 @@ async fn run(
                                             }
                                         }
                                         Some(CommandAction::ProviderNoArg) => {
-                                            app.enter_provider_selection_mode();
+                                            app.enter_provider_selection_mode(&config.providers);
                                         }
                                         Some(CommandAction::Thinking(raw)) => {
-                                            let thinking_supported =
-                                                ProviderKind::from_name(&app.current_provider)
-                                                    .map(|kind| {
-                                                        thinking_support_for(
-                                                            &kind,
-                                                            &app.current_model,
-                                                        ) == ThinkingSupport::Applied
-                                                    })
-                                                    .unwrap_or(false);
+                                            let thinking_supported = config
+                                                .find_provider(&app.current_provider)
+                                                .map(|inst| {
+                                                    thinking_support_for_instance(
+                                                        inst,
+                                                        &app.current_model,
+                                                    ) == ThinkingSupport::Applied
+                                                })
+                                                .unwrap_or(false);
                                             if !thinking_supported {
                                                 continue;
                                             }
@@ -889,15 +964,15 @@ async fn run(
                                             }
                                         }
                                         Some(CommandAction::ThinkingNoArg) => {
-                                            let thinking_supported =
-                                                ProviderKind::from_name(&app.current_provider)
-                                                    .map(|kind| {
-                                                        thinking_support_for(
-                                                            &kind,
-                                                            &app.current_model,
-                                                        ) == ThinkingSupport::Applied
-                                                    })
-                                                    .unwrap_or(false);
+                                            let thinking_supported = config
+                                                .find_provider(&app.current_provider)
+                                                .map(|inst| {
+                                                    thinking_support_for_instance(
+                                                        inst,
+                                                        &app.current_model,
+                                                    ) == ThinkingSupport::Applied
+                                                })
+                                                .unwrap_or(false);
                                             if thinking_supported {
                                                 app.enter_thinking_selection_mode();
                                             }
@@ -1017,52 +1092,63 @@ async fn run(
     }
 }
 
-fn resolve_provider_kind(cli_override: Option<&str>, config: &TauConfig) -> ProviderKind {
-    cli_override
-        .and_then(ProviderKind::from_name)
-        .or_else(|| config.provider.as_deref().and_then(ProviderKind::from_name))
-        .unwrap_or(ProviderKind::Copilot)
+/// Resolve the active [`ProviderInstance`] from the CLI override or config.
+///
+/// Resolution order:
+/// 1. CLI `--provider` flag matched against instance ids
+/// 2. `config.provider` matched against instance ids
+/// 3. First instance in `config.providers`
+/// 4. Synthetic copilot default
+fn resolve_provider_instance(cli_override: Option<&str>, config: &TauConfig) -> ProviderInstance {
+    // Try CLI override as an instance id.
+    if let Some(id) = cli_override
+        && let Some(inst) = config.find_provider(id)
+    {
+        return inst.clone();
+    }
+    // Try config.provider as an instance id.
+    if let Some(ref id) = config.provider
+        && let Some(inst) = config.find_provider(id)
+    {
+        return inst.clone();
+    }
+    // First configured instance, or a synthesised copilot default.
+    config.providers.first().cloned().unwrap_or_else(|| {
+        ProviderInstance::new("copilot", provider_instance::ServiceType::Copilot)
+    })
 }
 
-fn resolve_model(cli_override: Option<&str>, kind: &ProviderKind, config: &TauConfig) -> String {
+/// Resolve the effective model for a provider instance.
+fn resolve_model_for_instance(cli_override: Option<&str>, instance: &ProviderInstance) -> String {
     cli_override
         .map(ToString::to_string)
-        .or_else(|| match kind {
-            ProviderKind::Copilot => config.copilot.model.clone(),
-            ProviderKind::OpenAi => config.openai.model.clone(),
-            ProviderKind::Codex => config.codex.model.clone(),
-            ProviderKind::Gemini => config.gemini.model.clone(),
-            ProviderKind::Ollama => config.ollama.model.clone(),
-            ProviderKind::OpenWebUi => config.open_webui.model.clone(),
-            ProviderKind::Test => None,
-        })
-        .unwrap_or_else(|| kind.default_model().to_string())
+        .or_else(|| instance.model.clone())
+        .unwrap_or_else(|| instance.service_type.default_model().to_string())
 }
 
-fn persist_provider_model_selection(
+/// Instance-based variant of `persist_provider_model_selection`.
+///
+/// Updates the named instance's model in the providers list and persists config.
+fn persist_provider_model_selection_v2(
     config: &mut TauConfig,
-    kind: &ProviderKind,
+    instance: &ProviderInstance,
     model: &str,
     thinking: ThinkingLevel,
     app: &mut App,
 ) {
-    // Never persist the test provider — it is intentionally transient.
-    if *kind == ProviderKind::Test {
+    // Never persist the test provider.
+    if instance.service_type == provider_instance::ServiceType::Test {
         return;
     }
-    config.provider = Some(kind.name().to_string());
+    config.provider = Some(instance.id.clone());
     config.thinking = Some(thinking.as_str().to_string());
     config
         .thinking_by_model
         .insert(model.to_string(), thinking.as_str().to_string());
-    match kind {
-        ProviderKind::Copilot => config.copilot.model = Some(model.to_string()),
-        ProviderKind::OpenAi => config.openai.model = Some(model.to_string()),
-        ProviderKind::Codex => config.codex.model = Some(model.to_string()),
-        ProviderKind::Gemini => config.gemini.model = Some(model.to_string()),
-        ProviderKind::Ollama => config.ollama.model = Some(model.to_string()),
-        ProviderKind::OpenWebUi => config.open_webui.model = Some(model.to_string()),
-        ProviderKind::Test => {} // never reached — guarded by early return above
+
+    // Update the model on the stored instance.
+    if let Some(stored) = config.find_provider_mut(&instance.id) {
+        stored.model = Some(model.to_string());
     }
 
     if let Err(e) = config.save() {
@@ -1084,31 +1170,33 @@ fn resolve_thinking_level_for_model(config: &TauConfig, model: &str) -> Thinking
 }
 
 fn maybe_warn_thinking_unsupported(
-    _app: &mut App,
-    kind: &ProviderKind,
+    app: &mut App,
+    instance: &ProviderInstance,
     model: &str,
     thinking: ThinkingLevel,
 ) {
+    // Always keep app.thinking_supported in sync regardless of the level.
+    app.thinking_supported =
+        thinking_support_for_instance(instance, model) == ThinkingSupport::Applied;
+
     if thinking == ThinkingLevel::Off {
         return;
     }
-    if let ThinkingSupport::Ignored(reason) = thinking_support_for(kind, model) {
+    if let ThinkingSupport::Ignored(reason) = thinking_support_for_instance(instance, model) {
         log::debug!(
             "thinking '{}' ignored for provider={} model={}: {}",
             thinking.as_str(),
-            kind.name(),
+            instance.id,
             model,
             reason
         );
     }
 }
-
 // ── Non-interactive helpers ───────────────────────────────────────────────────
 
 /// Parameters needed to rebuild a provider after a reactive token refresh.
 struct PrintModeProviderCtx<'a> {
-    kind: &'a ProviderKind,
-    model: &'a str,
+    instance: &'a ProviderInstance,
     thinking: ThinkingLevel,
     tau_config: &'a TauConfig,
     name: &'a str,
@@ -1167,16 +1255,16 @@ async fn run_print_mode(
     model_override: Option<&str>,
     config: &TauConfig,
 ) -> io::Result<()> {
-    let current_kind = resolve_provider_kind(provider_override, config);
-    let current_model = resolve_model(model_override, &current_kind, config);
+    let current_instance = resolve_provider_instance(provider_override, config);
+    let current_model = resolve_model_for_instance(model_override, &current_instance);
     let current_thinking = resolve_thinking_level_for_model(config, &current_model);
-    let provider_name = current_kind.name().to_string();
+    let provider_name = current_instance.service_type.id().to_string();
 
     // Proactive preflight: refresh the token before building the provider so
     // that build_provider reads fresh credentials from the auth store.
     preflight_token_refresh(&provider_name).await;
 
-    let provider = build_provider(&current_kind, &current_model, current_thinking, config)
+    let provider = build_provider_for_instance(&current_instance, current_thinking, config)
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
@@ -1200,8 +1288,7 @@ async fn run_print_mode(
     };
 
     let provider_ctx = PrintModeProviderCtx {
-        kind: &current_kind,
-        model: &current_model,
+        instance: &current_instance,
         thinking: current_thinking,
         tau_config: config,
         name: &provider_name,
@@ -1283,8 +1370,11 @@ async fn run_print_mode_loop(
                             log::debug!(
                                 "reactive refresh succeeded, rebuilding provider and retrying"
                             );
-                            match build_provider(ctx.kind, ctx.model, ctx.thinking, ctx.tau_config)
-                            {
+                            match build_provider_for_instance(
+                                ctx.instance,
+                                ctx.thinking,
+                                ctx.tau_config,
+                            ) {
                                 Ok(new_provider) => {
                                     // Run the loop a second time with the refreshed provider.
                                     // `retried = true` prevents further recursive retries.
@@ -1391,8 +1481,14 @@ async fn run_print_mode_loop_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_paste_text, resolve_model, resolve_thinking_level_for_model};
-    use crate::{config::TauConfig, provider::ProviderKind, thinking::ThinkingLevel};
+    use super::{
+        normalize_paste_text, resolve_model_for_instance, resolve_thinking_level_for_model,
+    };
+    use crate::{
+        config::TauConfig,
+        provider_instance::{ProviderInstance, ServiceType},
+        thinking::ThinkingLevel,
+    };
 
     #[test]
     fn normalize_paste_text_converts_crlf_and_cr_to_lf() {
@@ -1401,48 +1497,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_prefers_cli_over_config() {
-        let cfg = TauConfig {
-            openai: crate::config::OpenAiConfig {
-                model: Some("gpt-4.1".to_string()),
-                ..Default::default()
-            },
-            ..TauConfig::default()
-        };
-
-        let model = resolve_model(Some("gpt-4.1-mini"), &ProviderKind::OpenAi, &cfg);
+    fn resolve_model_prefers_cli_over_instance() {
+        let mut inst = ProviderInstance::new("openai", ServiceType::OpenAi);
+        inst.model = Some("gpt-4.1".to_string());
+        let model = resolve_model_for_instance(Some("gpt-4.1-mini"), &inst);
         assert_eq!(model, "gpt-4.1-mini");
     }
 
     #[test]
-    fn resolve_model_uses_selected_provider_config() {
-        let cfg = TauConfig {
-            openai: crate::config::OpenAiConfig {
-                model: Some("gpt-4.1".to_string()),
-                ..Default::default()
-            },
-            copilot: crate::config::CopilotConfig {
-                model: Some("gpt-5.3-codex".to_string()),
-            },
-            ..TauConfig::default()
-        };
-
-        let model = resolve_model(None, &ProviderKind::Copilot, &cfg);
+    fn resolve_model_uses_instance_model() {
+        let mut inst = ProviderInstance::new("copilot", ServiceType::Copilot);
+        inst.model = Some("gpt-5.3-codex".to_string());
+        let model = resolve_model_for_instance(None, &inst);
         assert_eq!(model, "gpt-5.3-codex");
     }
 
     #[test]
-    fn resolve_model_falls_back_to_provider_default() {
-        let cfg = TauConfig {
-            openai: crate::config::OpenAiConfig {
-                model: Some("gpt-4.1".to_string()),
-                ..Default::default()
-            },
-            ..TauConfig::default()
-        };
-
-        let model = resolve_model(None, &ProviderKind::Copilot, &cfg);
-        assert_eq!(model, ProviderKind::Copilot.default_model());
+    fn resolve_model_falls_back_to_service_default() {
+        let inst = ProviderInstance::new("copilot", ServiceType::Copilot);
+        let model = resolve_model_for_instance(None, &inst);
+        assert_eq!(model, ServiceType::Copilot.default_model());
     }
 
     #[test]
