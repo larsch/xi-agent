@@ -160,13 +160,13 @@ Alignment may vary by terminal, font, and render state.\n\
 \n\
 ```\n\
 👀 | read_file  (U+1F440, wide)\n\
-✏ | write_file (U+270F, no VS16)\n\
+✏️ | write_file (U+270F+VS16)\n\
 📝 | edit_file  (U+1F4DD, wide)\n\
 💻 | bash       (U+1F4BB, wide)\n\
 🔍 | find_files (U+1F50D, wide)\n\
 ❓ | ask_user   (U+2753, wide)\n\
-⚙ | exec/other (U+2699, no VS16)\n\
-🕹 | steering   (U+1F579, no VS16)\n\
+⚙️ | exec/other (U+2699+VS16)\n\
+🕹️ | steering   (U+1F579+VS16)\n\
 ⚠️ | warning    (U+26A0+VS16)\n\
 ✅ | checkmark  (U+2705, wide)\n\
 ❌ | red cross  (U+274C, wide)\n\

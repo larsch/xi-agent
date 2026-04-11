@@ -55,11 +55,12 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
 
 /// Build the user-facing one-line tool invocation label.
 pub fn tool_invocation_label(name: &str, args: &Value) -> String {
+    let emoji = tool_emoji(name);
     let detail = tool_detail(name, args);
     if detail.is_empty() {
-        format!("{} {name}", tool_emoji(name))
+        format!("{emoji} {name}")
     } else {
-        format!("{} {detail}", tool_emoji(name))
+        format!("{emoji} {detail}")
     }
 }
 
