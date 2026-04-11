@@ -161,9 +161,6 @@ impl OllamaConfig {
     /// Maximum number of recent endpoints to remember.
     pub const MAX_RECENT_ENDPOINTS: usize = 5;
 
-    /// Default endpoint used when nothing else is configured.
-    pub const DEFAULT_ENDPOINT: &'static str = "http://localhost:11434";
-
     /// Push `url` to the front of `recent_endpoints`, dedup, and cap the list.
     /// Also sets `base_url` to `url`.
     pub fn record_endpoint(&mut self, url: String) {
@@ -171,17 +168,6 @@ impl OllamaConfig {
         self.recent_endpoints.retain(|e| e != &url);
         self.recent_endpoints.insert(0, url);
         self.recent_endpoints.truncate(Self::MAX_RECENT_ENDPOINTS);
-    }
-
-    /// Return the list of recent endpoints, always including the default as a
-    /// fallback at the end when it isn't already present.
-    pub fn effective_recent_endpoints(&self) -> Vec<String> {
-        let mut list = self.recent_endpoints.clone();
-        let default = Self::DEFAULT_ENDPOINT.to_string();
-        if !list.contains(&default) {
-            list.push(default);
-        }
-        list
     }
 }
 
@@ -529,22 +515,9 @@ base_url = "http://gpu-box:11434"
     }
 
     #[test]
-    fn ollama_effective_recent_endpoints_always_includes_default() {
-        let cfg = OllamaConfig::default();
-        let list = cfg.effective_recent_endpoints();
-        assert!(list.contains(&OllamaConfig::DEFAULT_ENDPOINT.to_string()));
-    }
-
-    #[test]
-    fn ollama_effective_recent_endpoints_does_not_duplicate_default() {
-        let mut cfg = OllamaConfig::default();
-        cfg.record_endpoint(OllamaConfig::DEFAULT_ENDPOINT.into());
-        let list = cfg.effective_recent_endpoints();
-        assert_eq!(
-            list.iter()
-                .filter(|e| e.as_str() == OllamaConfig::DEFAULT_ENDPOINT)
-                .count(),
-            1
-        );
+    fn ollama_record_endpoint_sets_base_url() {
+        let mut cfg = super::OllamaConfig::default();
+        cfg.record_endpoint("http://localhost:11434".to_string());
+        assert_eq!(cfg.base_url.as_deref(), Some("http://localhost:11434"));
     }
 }

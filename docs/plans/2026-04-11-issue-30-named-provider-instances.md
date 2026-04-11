@@ -107,33 +107,47 @@ service type and API type. Keep backward compatibility with existing config. Shi
 - [x] Step 3: Provider construction
 - [x] Step 4: Model resolution + persistence
 - [x] Step 5: Provider/model selection UI (selection/completions now instance-based)
-- [ ] Step 6: Add-provider / setup flows
-- [x] Step 7: Tests + cleanup for the current partial state
+- [x] Step 6: Add-provider / setup flows
+- [x] Step 7: Tests + cleanup for the current checkpoint
 
-## Current partial completion point
+## Current completion point
 
-The codebase now has a working provider-instance foundation:
+The codebase now has a working provider-instance setup flow:
 
 - `src/provider_instance.rs` defines `ServiceType`, `ApiType`, `ProviderInstance`, and the service catalog.
 - `src/config.rs` supports `[[providers]]` and migrates legacy per-provider config into instance entries.
 - `src/provider.rs` builds providers from `ProviderInstance` and routes thinking support by instance/API.
-- `src/main.rs` resolves the active provider as an instance, persists model/provider selection by instance id, and keeps `App` in sync with `config.providers`.
+- `src/main.rs` resolves the active provider as an instance, persists model/provider selection by instance id, and drives add-provider setup by service type.
 - `src/app.rs`, `src/commands.rs`, and `src/ui.rs` now use named provider instances for provider selection and `/provider` completions.
+- The add-provider flow now supports:
+  - provider name
+  - service type
+  - API type where user-visible
+  - endpoint/base URL setup where needed
+  - token/API-key setup where needed
+- Existing Ollama/Open WebUI instance selection no longer forces re-setup.
+- Setup prompt rendering is standardized through shared setup-input UI state.
 
 Verification completed for this checkpoint:
 
-- `cargo check`
 - `cargo test --all-features`
 - `cargo clippy --all-targets --all-features -- -D warnings`
+- `just preflight`
+
+## Deferred follow-up work
+
+Accepted for later follow-up rather than this checkpoint:
+
+- edit provider flow
+- delete provider flow
+- polish multiline token / setup-input textarea behavior
+- any further provider-management UX refinement
 
 ### Next resume point
 
-Resume with **Step 6: Add-provider / setup flows**.
+If continuing on issue #30, resume with follow-up provider-management UX work and documentation updates:
 
-The remaining work is to make the UX create and configure arbitrary named instances, rather than
-reusing only the legacy single-slot setup flows:
-
-- add a real "new provider" flow (name → service type → API type where applicable)
-- let Ollama/Open WebUI setup create new named instances instead of defaulting to `ollama` / `open-webui`
-- expose multiple instances cleanly in setup and selection flows
-- update docs (`docs/ARCHITECTURE.md`) once the user-facing flow is complete
+- update `docs/ARCHITECTURE.md` for the provider-instance user flow
+- consider add/edit/delete provider management actions
+- refine multiline setup-input behavior
+- reconcile any remaining deprecated internal `ProviderKind` paths if desired

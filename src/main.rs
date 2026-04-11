@@ -308,6 +308,44 @@ async fn main() -> io::Result<()> {
                 // Unknown id: silently ignore and loop (provider unchanged).
             }
 
+            Ok(RunResult::AddProvider(instance)) => {
+                app.clear_pending_provider_setup();
+                let instance_id = instance.id.clone();
+                let current_model_for_instance = resolve_model_for_instance(None, &instance);
+                config.upsert_provider(instance.clone());
+                config.provider = Some(instance_id);
+                if let Err(e) = config.save() {
+                    log::debug!("failed to persist new provider config: {e}");
+                    app.messages.push(Message::assistant(format!(
+                        "[failed to persist config.toml: {e}]"
+                    )));
+                    app.mark_log_dirty();
+                }
+                current_instance = config
+                    .find_provider(&instance.id)
+                    .cloned()
+                    .unwrap_or(instance);
+                current_model = current_model_for_instance;
+                app.current_model = current_model.clone();
+                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                app.current_thinking = current_thinking;
+                app.current_provider = current_instance.id.clone();
+                app.provider_instances = config.providers.clone();
+                app.available_models = None;
+                maybe_warn_thinking_unsupported(
+                    &mut app,
+                    &current_instance,
+                    &current_model,
+                    current_thinking,
+                );
+                app.messages.push(Message::assistant(format!(
+                    "[added provider {} ({})]",
+                    current_instance.id,
+                    current_instance.service_type.label(),
+                )));
+                app.mark_log_dirty();
+            }
+
             Ok(RunResult::ChangeThinking(level)) => {
                 current_thinking = level;
                 app.current_thinking = level;
@@ -327,24 +365,16 @@ async fn main() -> io::Result<()> {
                 );
             }
 
-            Ok(RunResult::ChangeOllamaEndpoint(url)) => {
-                // Upsert an Ollama instance with the new endpoint.
-                let instance_id =
-                    if current_instance.service_type == provider_instance::ServiceType::Ollama {
-                        current_instance.id.clone()
-                    } else {
-                        "ollama".to_string()
-                    };
+            Ok(RunResult::ChangeOllamaEndpoint { instance, url }) => {
+                app.clear_pending_provider_setup();
                 let mut inst = config
-                    .find_provider(&instance_id)
+                    .find_provider(&instance.id)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        ProviderInstance::new(&instance_id, provider_instance::ServiceType::Ollama)
-                    });
+                    .unwrap_or(instance);
                 inst.base_url = Some(url.clone());
                 config.ollama.record_endpoint(url.clone()); // keep legacy in sync
                 config.upsert_provider(inst.clone());
-                config.provider = Some(instance_id.clone());
+                config.provider = Some(inst.id.clone());
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist ollama endpoint: {e}");
                     app.messages.push(Message::assistant(format!(
@@ -367,34 +397,28 @@ async fn main() -> io::Result<()> {
                     current_thinking,
                 );
                 app.messages.push(Message::assistant(format!(
-                    "[ollama endpoint set to {url}]"
+                    "[ollama provider {} endpoint set to {url}]",
+                    current_instance.id,
                 )));
                 app.mark_log_dirty();
             }
 
-            Ok(RunResult::ChangeOpenWebUi { url, api_key }) => {
-                // Upsert an Open WebUI instance.
-                let instance_id =
-                    if current_instance.service_type == provider_instance::ServiceType::OpenWebUi {
-                        current_instance.id.clone()
-                    } else {
-                        "open-webui".to_string()
-                    };
+            Ok(RunResult::ChangeOpenWebUi {
+                instance,
+                url,
+                api_key,
+            }) => {
+                app.clear_pending_provider_setup();
                 let mut inst = config
-                    .find_provider(&instance_id)
+                    .find_provider(&instance.id)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        ProviderInstance::new(
-                            &instance_id,
-                            provider_instance::ServiceType::OpenWebUi,
-                        )
-                    });
+                    .unwrap_or(instance);
                 inst.base_url = Some(url.clone());
                 inst.api_key = Some(api_key.clone());
                 config.open_webui.record_endpoint(url.clone()); // keep legacy in sync
                 config.open_webui.api_key = Some(api_key);
                 config.upsert_provider(inst.clone());
-                config.provider = Some(instance_id.clone());
+                config.provider = Some(inst.id.clone());
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist open-webui config: {e}");
                     app.messages.push(Message::assistant(format!(
@@ -417,7 +441,8 @@ async fn main() -> io::Result<()> {
                     current_thinking,
                 );
                 app.messages.push(Message::assistant(format!(
-                    "[open-webui endpoint set to {url}]"
+                    "[open-webui provider {} endpoint set to {url}]",
+                    current_instance.id,
                 )));
                 app.mark_log_dirty();
             }
@@ -450,11 +475,16 @@ enum RunResult {
         prompt_thinking_selection: bool,
     },
     ChangeProvider(String),
+    AddProvider(ProviderInstance),
     ChangeThinking(ThinkingLevel),
-    /// Switch to (or stay on) Ollama with a new base URL.
-    ChangeOllamaEndpoint(String),
-    /// Switch to Open WebUI with a new base URL and API key.
+    /// Switch to (or stay on) a specific Ollama instance with a new base URL.
+    ChangeOllamaEndpoint {
+        instance: ProviderInstance,
+        url: String,
+    },
+    /// Switch to a specific Open WebUI instance with a new base URL and API key.
     ChangeOpenWebUi {
+        instance: ProviderInstance,
         url: String,
         api_key: String,
     },
@@ -741,28 +771,55 @@ async fn run(
                                             return Ok(RunResult::ChangeThinking(level));
                                         }
                                         Some(SelectionResult::Provider(p)) => {
-                                            // Check the service type of the selected instance
-                                            // to decide whether to open endpoint setup flows.
-                                            let service = config.find_provider(&p)
-                                                .map(|i| i.service_type.clone());
-                                            match service {
-                                                Some(provider_instance::ServiceType::Ollama) => {
-                                                    // Reuse recent endpoints from legacy config
-                                                    // plus the current instance base_url.
-                                                    let mut recent = config.ollama.effective_recent_endpoints();
-                                                    if let Some(inst) = config.find_provider(&p)
-                                                        && let Some(ref url) = inst.base_url
-                                                        && !recent.contains(url)
-                                                    {
-                                                        recent.insert(0, url.clone());
+                                            return Ok(RunResult::ChangeProvider(p));
+                                        }
+                                        Some(SelectionResult::AddProvider) => {
+                                            app.enter_provider_name_input_mode();
+                                        }
+                                        Some(SelectionResult::ProviderServiceType(service_type)) => {
+                                            let service_def = service_type.def();
+                                            let default_api = service_def.default_api.clone();
+                                            app.set_pending_provider_service_type(service_type.clone());
+                                            if service_def.user_selects_api {
+                                                app.enter_provider_api_type_selection_mode(&service_type);
+                                            } else {
+                                                app.set_pending_provider_api_type(default_api);
+                                                if let Some(instance) = app.pending_provider_instance() {
+                                                    match instance.service_type {
+                                                        provider_instance::ServiceType::Ollama => {
+                                                            app.enter_ollama_endpoint_freeform_mode();
+                                                        }
+                                                        provider_instance::ServiceType::OpenAiCompatible => {
+                                                            app.enter_provider_base_url_input_mode();
+                                                        }
+                                                        provider_instance::ServiceType::OpenWebUi => {
+                                                            app.enter_open_webui_url_input_mode();
+                                                        }
+                                                        _ => {
+                                                            let instance = app.finish_pending_provider_setup().expect("pending provider instance");
+                                                            return Ok(RunResult::AddProvider(instance));
+                                                        }
                                                     }
-                                                    app.enter_ollama_endpoint_selection_mode(recent);
                                                 }
-                                                Some(provider_instance::ServiceType::OpenWebUi) => {
-                                                    app.enter_open_webui_url_input_mode();
-                                                }
-                                                _ => {
-                                                    return Ok(RunResult::ChangeProvider(p));
+                                            }
+                                        }
+                                        Some(SelectionResult::ProviderApiType(api_type)) => {
+                                            app.set_pending_provider_api_type(api_type);
+                                            if let Some(instance) = app.pending_provider_instance() {
+                                                match instance.service_type {
+                                                    provider_instance::ServiceType::Ollama => {
+                                                        app.enter_ollama_endpoint_freeform_mode();
+                                                    }
+                                                    provider_instance::ServiceType::OpenAiCompatible => {
+                                                        app.enter_provider_base_url_input_mode();
+                                                    }
+                                                    provider_instance::ServiceType::OpenWebUi => {
+                                                        app.enter_open_webui_url_input_mode();
+                                                    }
+                                                    _ => {
+                                                        let instance = app.finish_pending_provider_setup().expect("pending provider instance");
+                                                        return Ok(RunResult::AddProvider(instance));
+                                                    }
                                                 }
                                             }
                                         }
@@ -785,12 +842,6 @@ async fn run(
                                         }
                                         Some(SelectionResult::LoginAction(action)) => {
                                             app.apply_login_action(action);
-                                        }
-                                        Some(SelectionResult::OllamaEndpoint(url)) => {
-                                            return Ok(RunResult::ChangeOllamaEndpoint(url));
-                                        }
-                                        Some(SelectionResult::OllamaEndpointFreeform) => {
-                                            app.enter_ollama_endpoint_freeform_mode();
                                         }
                                         None => {}
                                     }
@@ -882,7 +933,10 @@ async fn run(
 
                                 if app.ollama_endpoint_input_mode {
                                     if let Some(url) = app.take_ollama_endpoint_input() {
-                                        return Ok(RunResult::ChangeOllamaEndpoint(url));
+                                        let instance = app
+                                            .pending_provider_instance()
+                                            .unwrap_or_else(|| resolve_current_run_instance(app, config));
+                                        return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
                                     }
                                     // Invalid URL: stay in input mode (user can correct it).
                                 } else if app.open_webui_url_input_mode {
@@ -891,9 +945,41 @@ async fn run(
                                     // Invalid URL: stay in input mode.
                                 } else if app.open_webui_token_input_mode {
                                     if let Some((url, token)) = app.take_open_webui_token_input() {
-                                        return Ok(RunResult::ChangeOpenWebUi { url, api_key: token });
+                                        let instance = app
+                                            .pending_provider_instance()
+                                            .unwrap_or_else(|| resolve_current_run_instance(app, config));
+                                        return Ok(RunResult::ChangeOpenWebUi {
+                                            instance,
+                                            url,
+                                            api_key: token,
+                                        });
                                     }
                                     // Empty token: stay in input mode.
+                                } else if app.setup_input_mode == Some(app::SetupInputKind::BaseUrl) {
+                                    if let Some(url) = app.submit_pending_provider_base_url() {
+                                        let instance = app
+                                            .pending_provider_instance()
+                                            .unwrap_or_else(|| resolve_current_run_instance(app, config));
+                                        match instance.service_type {
+                                            provider_instance::ServiceType::Ollama => {
+                                                return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
+                                            }
+                                            provider_instance::ServiceType::OpenAiCompatible => {
+                                                app.enter_provider_api_key_input_mode();
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                } else if app.setup_input_mode == Some(app::SetupInputKind::ApiKey) {
+                                    if app.submit_pending_provider_api_key().is_some()
+                                        && let Some(instance) = app.finish_pending_provider_setup()
+                                    {
+                                        return Ok(RunResult::AddProvider(instance));
+                                    }
+                                } else if app.setup_input_mode == Some(app::SetupInputKind::Name) {
+                                    if app.submit_provider_name_input(&config.providers).is_some() {
+                                        app.enter_provider_service_type_selection_mode();
+                                    }
                                 } else if app.has_pending_ask() {
                                     app.submit_pending_ask_answer();
                                 } else if app.in_slash_mode() {
@@ -926,14 +1012,7 @@ async fn run(
                                             }
                                         }
                                         Some(CommandAction::Provider(name)) => {
-                                            if name == "ollama" {
-                                                let recent = config.ollama.effective_recent_endpoints();
-                                                app.enter_ollama_endpoint_selection_mode(recent);
-                                            } else if name == "open-webui" {
-                                                app.enter_open_webui_url_input_mode();
-                                            } else {
-                                                return Ok(RunResult::ChangeProvider(name));
-                                            }
+                                            return Ok(RunResult::ChangeProvider(name));
                                         }
                                         Some(CommandAction::ProviderNoArg) => {
                                             app.enter_provider_selection_mode(&config.providers);
@@ -1116,6 +1195,13 @@ fn resolve_provider_instance(cli_override: Option<&str>, config: &TauConfig) -> 
     config.providers.first().cloned().unwrap_or_else(|| {
         ProviderInstance::new("copilot", provider_instance::ServiceType::Copilot)
     })
+}
+
+fn resolve_current_run_instance(app: &App, config: &TauConfig) -> ProviderInstance {
+    config
+        .find_provider(&app.current_provider)
+        .cloned()
+        .unwrap_or_else(|| resolve_provider_instance(None, config))
 }
 
 /// Resolve the effective model for a provider instance.

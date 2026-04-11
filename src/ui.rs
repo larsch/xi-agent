@@ -616,26 +616,16 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 prefix,
                 (app.available_shells.len() > 1).then_some("Ctrl+S switch".to_string()),
             )
-        } else if app.ollama_endpoint_input_mode {
+        } else if app.setup_input_mode.is_some() {
+            let instance = app.pending_provider_instance();
+            let kind = app
+                .setup_input_mode
+                .expect("setup_input_mode checked above");
             (
                 app.textarea.lines().to_vec(),
                 app.textarea.cursor(),
-                "ollama endpoint: ".to_string(),
-                Some("http://host:11434   Enter confirm   Esc cancel".to_string()),
-            )
-        } else if app.open_webui_url_input_mode {
-            (
-                app.textarea.lines().to_vec(),
-                app.textarea.cursor(),
-                "open-webui URL: ".to_string(),
-                Some("https://my-webui.example.com   Enter confirm   Esc cancel".to_string()),
-            )
-        } else if app.open_webui_token_input_mode {
-            (
-                app.textarea.lines().to_vec(),
-                app.textarea.cursor(),
-                "open-webui token: ".to_string(),
-                Some("sk-…   Enter confirm   Esc cancel".to_string()),
+                kind.prompt_label(instance.as_ref()),
+                Some(kind.prompt_hint(instance.as_ref())),
             )
         } else {
             (

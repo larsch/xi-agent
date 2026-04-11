@@ -14,7 +14,7 @@ use crate::{
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     llm::{AssistantPhase, DisplayRange, LlmProvider, Message, Role, UsageStats},
-    provider_instance::ProviderInstance,
+    provider_instance::{ApiType, ProviderInstance, ServiceType},
     session::SessionStore,
     shell::{self, ShellKind},
     skills::SkillMeta,
@@ -47,10 +47,12 @@ pub enum SelectionResult {
     AskFreeform,
     /// A login-panel action was selected.
     LoginAction(LoginActionKind),
-    /// An Ollama endpoint URL was confirmed (either picked from history or typed).
-    OllamaEndpoint(String),
-    /// The user chose to type a custom Ollama endpoint URL.
-    OllamaEndpointFreeform,
+    /// The user started the add-provider flow.
+    AddProvider,
+    /// A provider service type was chosen during add-provider setup.
+    ProviderServiceType(ServiceType),
+    /// A provider API type was chosen during add-provider setup.
+    ProviderApiType(ApiType),
 }
 
 /// Actions available in the login action menu.
@@ -66,6 +68,80 @@ struct PendingAsk {
     question: String,
     options: Vec<AskUserOption>,
     allow_freeform: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupInputKind {
+    Name,
+    BaseUrl,
+    ApiKey,
+}
+
+impl SetupInputKind {
+    pub fn prompt_label(self, instance: Option<&ProviderInstance>) -> String {
+        match self {
+            Self::Name => "provider name: ".to_string(),
+            Self::BaseUrl => match instance.map(|p| &p.service_type) {
+                Some(ServiceType::Ollama) => "ollama endpoint: ".to_string(),
+                Some(ServiceType::OpenWebUi) => "open-webui URL: ".to_string(),
+                Some(ServiceType::OpenAiCompatible) => "endpoint URL: ".to_string(),
+                _ => "base URL: ".to_string(),
+            },
+            Self::ApiKey => match instance.map(|p| &p.service_type) {
+                Some(ServiceType::OpenWebUi) => "open-webui token: ".to_string(),
+                Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
+                    "API key: ".to_string()
+                }
+                _ => "token: ".to_string(),
+            },
+        }
+    }
+
+    pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
+        match self {
+            Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
+            Self::BaseUrl => match instance.map(|p| &p.service_type) {
+                Some(ServiceType::Ollama) => {
+                    "http://host:11434   Enter confirm   Esc cancel".to_string()
+                }
+                Some(ServiceType::OpenWebUi) => {
+                    "https://my-webui.example.com   Enter confirm   Esc cancel".to_string()
+                }
+                Some(ServiceType::OpenAiCompatible) => {
+                    "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel".to_string()
+                }
+                _ => "https://example.com   Enter confirm   Esc cancel".to_string(),
+            },
+            Self::ApiKey => match instance.map(|p| &p.service_type) {
+                Some(ServiceType::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
+                Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
+                    "sk-…   Enter confirm   Esc cancel".to_string()
+                }
+                _ => "token   Enter confirm   Esc cancel".to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingProviderSetup {
+    pub id: String,
+    pub service_type: Option<ServiceType>,
+    pub api_type: Option<ApiType>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl PendingProviderSetup {
+    fn new(id: String) -> Self {
+        Self {
+            id,
+            service_type: None,
+            api_type: None,
+            base_url: None,
+            api_key: None,
+        }
+    }
 }
 
 /// Target operation to retry after token refresh completes.
@@ -85,11 +161,12 @@ enum SelectionKind {
     Model,
     Thinking,
     Provider,
+    ProviderServiceType,
+    ProviderApiType,
     LoginProvider,
     ResumeSession,
     AskUser,
     LoginAction,
-    OllamaEndpoint,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
@@ -273,6 +350,12 @@ pub struct App {
     /// The question text to display when `ask_user_freeform_mode` is active.
     pub ask_user_question: Option<String>,
 
+    // ── Add-provider setup state ─────────────────────────────────────────────
+    /// When set, the textarea is being used for a structured provider-setup prompt.
+    pub setup_input_mode: Option<SetupInputKind>,
+    /// Pending provider instance being configured through the add-provider flow.
+    pub pending_provider_setup: Option<PendingProviderSetup>,
+
     // ── Ollama endpoint input mode ────────────────────────────────────────────
     /// When true the textarea is used to type a custom Ollama endpoint URL
     /// rather than a regular chat message.
@@ -376,6 +459,8 @@ impl App {
             ask_reply: None,
             ask_user_freeform_mode: false,
             ask_user_question: None,
+            setup_input_mode: None,
+            pending_provider_setup: None,
             ollama_endpoint_input_mode: false,
             open_webui_url_input_mode: false,
             open_webui_token_input_mode: false,
@@ -791,15 +876,18 @@ impl App {
     /// Priority order is intentional:
     /// 1) cancel pending ask
     /// 2) cancel slash-command input/completion
-    /// 3) cancel Ollama endpoint input
-    /// 4) cancel Open WebUI setup input
-    /// 5) cancel login flow
-    /// 6) abort streaming agent loop
+    /// 3) cancel provider-name input
+    /// 4) cancel Ollama endpoint input
+    /// 5) cancel Open WebUI setup input
+    /// 6) cancel login flow
+    /// 7) abort streaming agent loop
     pub fn handle_escape_in_chat_mode(&mut self) {
         if self.has_pending_ask() {
             self.cancel_pending_ask();
         } else if self.in_slash_mode() {
             self.reset_textarea();
+        } else if self.setup_input_mode.is_some() {
+            self.cancel_setup_input();
         } else if self.ollama_endpoint_input_mode {
             self.cancel_ollama_endpoint_input();
         } else if self.open_webui_url_input_mode {
@@ -965,7 +1053,8 @@ impl App {
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
             | Some(SelectionKind::LoginAction)
-            | Some(SelectionKind::OllamaEndpoint)
+            | Some(SelectionKind::ProviderServiceType)
+            | Some(SelectionKind::ProviderApiType)
             | None => None,
         };
 
@@ -1068,67 +1157,226 @@ impl App {
         self.select_current_default();
     }
 
-    /// Open the provider selection menu with the fixed list of known providers.
+    /// Open the provider selection menu with the configured instances plus an
+    /// explicit action to add a new instance.
     pub fn enter_provider_selection_mode(&mut self, instances: &[ProviderInstance]) {
         self.reset_textarea();
         self.selection.active = true;
         self.selection.kind = Some(SelectionKind::Provider);
         self.selection.title = "  Select provider  ";
-        let items = instances
-            .iter()
-            .map(|p| CompletionItem::from_provider(&p.id, &p.label()))
-            .collect();
+        self.selection.query.clear();
+
+        let mut items = Vec::with_capacity(instances.len() + 1);
+        items.push(CompletionItem {
+            label: "Add provider…".to_string(),
+            detail: "Create a new named provider instance".to_string(),
+            complete_to: "/provider_add".to_string(),
+            loading: false,
+            error: false,
+            match_range: None,
+        });
+        items.extend(
+            instances
+                .iter()
+                .map(|p| CompletionItem::from_provider(&p.id, &p.label())),
+        );
         self.set_selection_items(items);
         self.select_current_default();
     }
 
-    /// Open the Ollama endpoint picker showing recent endpoints and a
-    /// "Enter URL…" sentinel at the bottom.
-    pub fn enter_ollama_endpoint_selection_mode(&mut self, recent: Vec<String>) {
+    /// Enter freeform input mode for the new provider instance name.
+    pub fn enter_provider_name_input_mode(&mut self) {
+        self.exit_selection_mode();
+        self.reset_textarea();
+        self.setup_input_mode = Some(SetupInputKind::Name);
+        self.pending_provider_setup = None;
+    }
+
+    /// Enter freeform input mode for a provider endpoint / base URL.
+    pub fn enter_provider_base_url_input_mode(&mut self) {
+        self.exit_selection_mode();
+        self.reset_textarea();
+        self.setup_input_mode = Some(SetupInputKind::BaseUrl);
+    }
+
+    /// Enter freeform input mode for a provider API key / token.
+    pub fn enter_provider_api_key_input_mode(&mut self) {
+        self.exit_selection_mode();
+        self.reset_textarea();
+        self.setup_input_mode = Some(SetupInputKind::ApiKey);
+    }
+
+    /// Cancel the active provider setup input and clear pending state.
+    pub fn cancel_setup_input(&mut self) {
+        self.setup_input_mode = None;
+        self.pending_provider_setup = None;
+        self.reset_textarea();
+    }
+
+    fn normalize_provider_id(raw: &str) -> Option<String> {
+        let mut out = String::new();
+        let mut prev_dash = false;
+        for ch in raw.trim().chars() {
+            let mapped = match ch {
+                'a'..='z' | '0'..='9' => Some(ch),
+                'A'..='Z' => Some(ch.to_ascii_lowercase()),
+                _ => None,
+            };
+            if let Some(c) = mapped {
+                out.push(c);
+                prev_dash = false;
+            } else if !out.is_empty() && !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+        while out.ends_with('-') {
+            out.pop();
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// Read the typed provider name, normalize it into a stable id, and store
+    /// it as the pending add-provider setup target.
+    pub fn submit_provider_name_input(
+        &mut self,
+        existing_instances: &[ProviderInstance],
+    ) -> Option<String> {
+        let raw = self.textarea.lines().join(" ");
+        let id = Self::normalize_provider_id(&raw)?;
+        if existing_instances.iter().any(|p| p.id == id) {
+            return None;
+        }
+        self.setup_input_mode = None;
+        self.pending_provider_setup = Some(PendingProviderSetup::new(id.clone()));
+        self.reset_textarea();
+        Some(id)
+    }
+
+    pub fn submit_pending_provider_base_url(&mut self) -> Option<String> {
+        let instance = self.pending_provider_instance()?;
+        let raw = self.textarea.lines().join("");
+        let url = match instance.service_type {
+            ServiceType::Ollama => Self::normalize_ollama_endpoint(&raw)?,
+            ServiceType::OpenWebUi | ServiceType::OpenAiCompatible => {
+                Self::normalize_open_webui_url(&raw)?
+            }
+            _ => return None,
+        };
+        self.setup_input_mode = None;
+        if let Some(setup) = self.pending_provider_setup.as_mut() {
+            setup.base_url = Some(url.clone());
+        }
+        self.reset_textarea();
+        Some(url)
+    }
+
+    pub fn submit_pending_provider_api_key(&mut self) -> Option<String> {
+        let token = self.textarea.lines().join("").trim().to_string();
+        if token.is_empty() {
+            return None;
+        }
+        self.setup_input_mode = None;
+        if let Some(setup) = self.pending_provider_setup.as_mut() {
+            setup.api_key = Some(token.clone());
+        }
+        self.reset_textarea();
+        Some(token)
+    }
+
+    /// Show the service-type menu for the pending provider instance.
+    pub fn enter_provider_service_type_selection_mode(&mut self) {
         self.reset_textarea();
         self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::OllamaEndpoint);
-        self.selection.title = "  Ollama endpoint  ";
+        self.selection.kind = Some(SelectionKind::ProviderServiceType);
+        self.selection.title = "  Select service type  ";
         self.selection.query.clear();
-
-        let mut items: Vec<CompletionItem> = recent
-            .into_iter()
-            .map(|url| CompletionItem {
-                label: url.clone(),
-                detail: String::new(),
-                complete_to: format!("/ollama_endpoint {url}"),
+        let items = ServiceType::user_visible()
+            .iter()
+            .map(|service| CompletionItem {
+                label: service.label().to_string(),
+                detail: service.id().to_string(),
+                complete_to: format!("/provider_service {}", service.id()),
                 loading: false,
                 error: false,
                 match_range: None,
             })
             .collect();
-
-        // Sentinel item at the bottom to let the user type a custom URL.
-        items.push(CompletionItem {
-            label: "Enter URL…".to_string(),
-            detail: String::new(),
-            complete_to: "/ollama_endpoint_freeform".to_string(),
-            loading: false,
-            error: false,
-            match_range: None,
-        });
-
         self.set_selection_items(items);
     }
 
-    /// Switch the textarea into Ollama endpoint freeform input mode.
-    /// The UI will render a `ollama endpoint: ` prefix and submit the text
-    /// as a new endpoint URL when Enter is pressed.
+    /// Show the API-type menu for the pending provider instance.
+    pub fn enter_provider_api_type_selection_mode(&mut self, service_type: &ServiceType) {
+        self.reset_textarea();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::ProviderApiType);
+        self.selection.title = "  Select API type  ";
+        self.selection.query.clear();
+        let items = service_type
+            .def()
+            .allowed_apis
+            .iter()
+            .map(|api| CompletionItem {
+                label: api.label().to_string(),
+                detail: String::new(),
+                complete_to: format!("/provider_api {}", api.label()),
+                loading: false,
+                error: false,
+                match_range: None,
+            })
+            .collect();
+        self.set_selection_items(items);
+    }
+
+    pub fn set_pending_provider_service_type(&mut self, service_type: ServiceType) {
+        if let Some(setup) = self.pending_provider_setup.as_mut() {
+            setup.service_type = Some(service_type);
+            setup.api_type = None;
+        }
+    }
+
+    pub fn set_pending_provider_api_type(&mut self, api_type: ApiType) {
+        if let Some(setup) = self.pending_provider_setup.as_mut() {
+            setup.api_type = Some(api_type);
+        }
+    }
+
+    pub fn pending_provider_instance(&self) -> Option<ProviderInstance> {
+        let setup = self.pending_provider_setup.as_ref()?;
+        let service_type = setup.service_type.clone()?;
+        let api_type = setup
+            .api_type
+            .clone()
+            .unwrap_or_else(|| service_type.def().default_api.clone());
+        let mut instance = ProviderInstance::new(setup.id.clone(), service_type);
+        instance.api_type = api_type;
+        instance.base_url = setup.base_url.clone();
+        instance.api_key = setup.api_key.clone();
+        Some(instance)
+    }
+
+    pub fn finish_pending_provider_setup(&mut self) -> Option<ProviderInstance> {
+        let instance = self.pending_provider_instance()?;
+        self.pending_provider_setup = None;
+        Some(instance)
+    }
+
+    pub fn clear_pending_provider_setup(&mut self) {
+        self.pending_provider_setup = None;
+    }
+
+    /// Switch the textarea into Ollama endpoint input mode.
     pub fn enter_ollama_endpoint_freeform_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
+        self.setup_input_mode = Some(SetupInputKind::BaseUrl);
         self.ollama_endpoint_input_mode = true;
     }
 
-    /// Cancel Ollama endpoint freeform input and return to normal mode.
+    /// Cancel Ollama endpoint input and return to normal mode.
     pub fn cancel_ollama_endpoint_input(&mut self) {
         self.ollama_endpoint_input_mode = false;
-        self.reset_textarea();
+        self.cancel_setup_input();
     }
 
     /// Normalize a user-entered Ollama endpoint.
@@ -1177,6 +1425,7 @@ impl App {
         let raw = self.textarea.lines().join("");
         let url = Self::normalize_ollama_endpoint(&raw)?;
         self.ollama_endpoint_input_mode = false;
+        self.setup_input_mode = None;
         self.reset_textarea();
         Some(url)
     }
@@ -1185,8 +1434,7 @@ impl App {
 
     /// Enter URL input mode for Open WebUI setup.
     pub fn enter_open_webui_url_input_mode(&mut self) {
-        self.exit_selection_mode();
-        self.reset_textarea();
+        self.enter_provider_base_url_input_mode();
         self.open_webui_url_input_mode = true;
     }
 
@@ -1194,7 +1442,7 @@ impl App {
     pub fn cancel_open_webui_url_input(&mut self) {
         self.open_webui_url_input_mode = false;
         self.open_webui_pending_url = None;
-        self.reset_textarea();
+        self.cancel_setup_input();
     }
 
     /// Normalize a user-entered Open WebUI URL (must be http/https, no default port).
@@ -1217,12 +1465,10 @@ impl App {
     /// Submit the URL typed in Open WebUI URL input mode.
     /// Returns the normalised URL if valid, and transitions to token input mode.
     pub fn submit_open_webui_url_input(&mut self) -> Option<String> {
-        let raw = self.textarea.lines().join("");
-        let url = Self::normalize_open_webui_url(&raw)?;
+        let url = self.submit_pending_provider_base_url()?;
         self.open_webui_url_input_mode = false;
         self.open_webui_pending_url = Some(url.clone());
-        self.reset_textarea();
-        // Immediately transition to token input mode.
+        self.enter_provider_api_key_input_mode();
         self.open_webui_token_input_mode = true;
         Some(url)
     }
@@ -1231,19 +1477,15 @@ impl App {
     pub fn cancel_open_webui_token_input(&mut self) {
         self.open_webui_token_input_mode = false;
         self.open_webui_pending_url = None;
-        self.reset_textarea();
+        self.cancel_setup_input();
     }
 
     /// Submit the token typed in Open WebUI token input mode.
     /// Returns `Some((url, token))` if a pending URL exists and the token is non-empty.
     pub fn take_open_webui_token_input(&mut self) -> Option<(String, String)> {
-        let token = self.textarea.lines().join("").trim().to_string();
-        if token.is_empty() {
-            return None;
-        }
+        let token = self.submit_pending_provider_api_key()?;
         let url = self.open_webui_pending_url.take()?;
         self.open_webui_token_input_mode = false;
-        self.reset_textarea();
         Some((url, token))
     }
 
@@ -1358,7 +1600,30 @@ impl App {
             Some(SelectionKind::Provider) => item
                 .complete_to
                 .strip_prefix("/provider ")
-                .map(|name| SelectionResult::Provider(name.to_string())),
+                .map(|name| SelectionResult::Provider(name.to_string()))
+                .or_else(|| {
+                    (item.complete_to == "/provider_add").then_some(SelectionResult::AddProvider)
+                }),
+            Some(SelectionKind::ProviderServiceType) => item
+                .complete_to
+                .strip_prefix("/provider_service ")
+                .and_then(ServiceType::from_id)
+                .map(SelectionResult::ProviderServiceType),
+            Some(SelectionKind::ProviderApiType) => item
+                .complete_to
+                .strip_prefix("/provider_api ")
+                .and_then(|label| {
+                    self.pending_provider_setup
+                        .as_ref()?
+                        .service_type
+                        .as_ref()?
+                        .def()
+                        .allowed_apis
+                        .iter()
+                        .find(|api| api.label() == label)
+                        .cloned()
+                })
+                .map(SelectionResult::ProviderApiType),
             Some(SelectionKind::LoginProvider) => item
                 .complete_to
                 .strip_prefix("/login ")
@@ -1390,15 +1655,6 @@ impl App {
                 }
                 _ => None,
             },
-            Some(SelectionKind::OllamaEndpoint) => {
-                if item.complete_to == "/ollama_endpoint_freeform" {
-                    Some(SelectionResult::OllamaEndpointFreeform)
-                } else {
-                    item.complete_to
-                        .strip_prefix("/ollama_endpoint ")
-                        .map(|url| SelectionResult::OllamaEndpoint(url.to_string()))
-                }
-            }
             None => None,
         }?;
 
@@ -2312,6 +2568,7 @@ mod tests {
             types::{AskRequest, AskUserOption, AskUserResponse},
         },
         llm::{Message, Role},
+        provider_instance::{ApiType, ProviderInstance, ServiceType},
         thinking::ThinkingLevel,
     };
 
@@ -2335,11 +2592,119 @@ mod tests {
     }
 
     #[test]
-    fn normalize_ollama_endpoint_adds_default_scheme_and_port() {
+    fn setup_input_kind_uses_service_specific_prompts() {
         assert_eq!(
-            App::normalize_ollama_endpoint("gpu-box"),
-            Some("http://gpu-box:11434".to_string())
+            super::SetupInputKind::Name.prompt_label(None),
+            "provider name: "
         );
+
+        let mut open_webui = ProviderInstance::new("work-webui", ServiceType::OpenWebUi);
+        open_webui.api_type = ApiType::OpenAiCompatible;
+        assert_eq!(
+            super::SetupInputKind::BaseUrl.prompt_label(Some(&open_webui)),
+            "open-webui URL: "
+        );
+        assert_eq!(
+            super::SetupInputKind::ApiKey.prompt_label(Some(&open_webui)),
+            "open-webui token: "
+        );
+
+        let mut ollama = ProviderInstance::new("gpu-box", ServiceType::Ollama);
+        ollama.api_type = ApiType::OllamaChatApi;
+        assert_eq!(
+            super::SetupInputKind::BaseUrl.prompt_label(Some(&ollama)),
+            "ollama endpoint: "
+        );
+
+        let mut compat = ProviderInstance::new("test", ServiceType::OpenAiCompatible);
+        compat.api_type = ApiType::OpenAiCompatible;
+        assert_eq!(
+            super::SetupInputKind::BaseUrl.prompt_label(Some(&compat)),
+            "endpoint URL: "
+        );
+        assert_eq!(
+            super::SetupInputKind::ApiKey.prompt_label(Some(&compat)),
+            "API key: "
+        );
+    }
+
+    #[test]
+    fn submit_pending_provider_base_url_stores_openai_compatible_endpoint() {
+        let mut app = make_app();
+        app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));
+        app.set_pending_provider_service_type(ServiceType::OpenAiCompatible);
+        app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
+        app.enter_provider_base_url_input_mode();
+        app.textarea.insert_str("test");
+
+        let url = app
+            .submit_pending_provider_base_url()
+            .expect("normalized endpoint url");
+        assert_eq!(url, "https://test");
+        assert_eq!(
+            app.pending_provider_instance()
+                .as_ref()
+                .and_then(|p| p.base_url.as_deref()),
+            Some("https://test")
+        );
+    }
+
+    #[test]
+    fn submit_pending_provider_api_key_stores_token() {
+        let mut app = make_app();
+        app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));
+        app.enter_provider_api_key_input_mode();
+        app.textarea.insert_str("sk-test");
+
+        let token = app
+            .submit_pending_provider_api_key()
+            .expect("provider token");
+        assert_eq!(token, "sk-test");
+        assert_eq!(
+            app.pending_provider_setup
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn submit_provider_name_input_slugifies_and_rejects_duplicates() {
+        let mut app = make_app();
+        let providers = vec![crate::provider_instance::ProviderInstance::new(
+            "work-webui",
+            ServiceType::OpenWebUi,
+        )];
+
+        app.enter_provider_name_input_mode();
+        app.textarea.insert_str("Work WebUI");
+        assert!(app.submit_provider_name_input(&providers).is_none());
+
+        app.textarea = App::make_textarea();
+        app.textarea.insert_str("GPU Box");
+        let id = app
+            .submit_provider_name_input(&providers)
+            .expect("new provider id");
+        assert_eq!(id, "gpu-box");
+        assert_eq!(
+            app.pending_provider_setup.as_ref().map(|p| p.id.as_str()),
+            Some("gpu-box")
+        );
+    }
+
+    #[test]
+    fn pending_provider_instance_uses_selected_service_and_api() {
+        let mut app = make_app();
+        app.pending_provider_setup = Some(super::PendingProviderSetup::new("gpu-box".to_string()));
+        app.set_pending_provider_service_type(ServiceType::Ollama);
+        app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
+
+        let instance = app
+            .pending_provider_instance()
+            .expect("pending provider instance");
+        assert_eq!(instance.id, "gpu-box");
+        assert_eq!(instance.service_type, ServiceType::Ollama);
+        assert_eq!(instance.api_type, ApiType::AnthropicCompatible);
     }
 
     #[test]
