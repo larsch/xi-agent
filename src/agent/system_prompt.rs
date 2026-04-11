@@ -80,6 +80,15 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
         guidelines.push("Prefer find_files over bash for filesystem exploration.".to_string());
     }
 
+    // argv-style execution: prefer exec over bash when args contain fragile characters.
+    if has("exec") && has("bash") {
+        guidelines.push(
+            "Prefer exec over bash when arguments contain spaces, backticks, quotes, \
+             dollar signs, newlines, or other characters that are fragile under shell parsing."
+                .to_string(),
+        );
+    }
+
     if has("read_file") && has("edit_file") {
         guidelines.push("Use read_file to examine files before editing. You must use this tool instead of cat or sed.".to_string());
     }
@@ -248,6 +257,10 @@ mod tests {
     fn build_system_prompt_includes_tool_specific_guidelines() {
         let tools = registry(&[
             ("bash", "Run shell commands. With side effects."),
+            (
+                "exec",
+                "Execute a program directly with an argv-style argument list.",
+            ),
             ("find_files", "Find files recursively."),
             ("read_file", "Read files."),
             ("edit_file", "Edit files."),
@@ -264,6 +277,7 @@ mod tests {
         assert!(prompt.contains("Use ask_user only when the task requires a user decision"));
         assert!(prompt.contains("- ask_user: Ask a question."));
         assert!(prompt.contains("- bash: Run shell commands."));
+        assert!(prompt.contains("Prefer exec over bash when arguments contain spaces"));
     }
 
     #[test]
