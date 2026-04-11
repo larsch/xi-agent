@@ -18,12 +18,17 @@ use crate::{
     thinking::ThinkingLevel,
 };
 
+const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const OPENROUTER_REFERER: &str = "https://github.com/larsch/tau";
+const OPENROUTER_TITLE: &str = "tau";
+
 /// All supported back-end providers, in display order.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderKind {
     Copilot,
     OpenAi,
+    OpenRouter,
     Codex,
     Gemini,
     Ollama,
@@ -39,6 +44,7 @@ impl ProviderKind {
         match self {
             Self::Copilot => "copilot",
             Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
@@ -51,6 +57,7 @@ impl ProviderKind {
         match self {
             Self::Copilot => "GitHub Copilot",
             Self::OpenAi => "OpenAI API",
+            Self::OpenRouter => "OpenRouter",
             Self::Codex => "OpenAI Codex (chatgpt.com)",
             Self::Gemini => "Google Gemini CLI (Cloud Code Assist)",
             Self::Ollama => "Ollama (local)",
@@ -63,6 +70,7 @@ impl ProviderKind {
         &[
             Self::Copilot,
             Self::OpenAi,
+            Self::OpenRouter,
             Self::Codex,
             Self::Gemini,
             Self::Ollama,
@@ -75,6 +83,7 @@ impl ProviderKind {
         match s {
             "copilot" | "github-copilot" => Some(Self::Copilot),
             "openai" => Some(Self::OpenAi),
+            "openrouter" => Some(Self::OpenRouter),
             "codex" => Some(Self::Codex),
             "gemini" | "google-gemini" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
@@ -90,6 +99,7 @@ impl ProviderKind {
         match self {
             Self::Copilot => "gpt-4o",
             Self::OpenAi => "gpt-4o",
+            Self::OpenRouter => "openai/gpt-4o",
             Self::Codex => "gpt-5.4",
             Self::Gemini => "gemini-2.5-pro",
             Self::Ollama => "llama3.1",
@@ -254,7 +264,7 @@ pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport
         },
         ProviderKind::Codex => ThinkingSupport::Applied,
         ProviderKind::Gemini => ThinkingSupport::Applied,
-        ProviderKind::OpenAi => {
+        ProviderKind::OpenAi | ProviderKind::OpenRouter => {
             ThinkingSupport::Ignored("openai chat-completions provider does not map thinking yet")
         }
         ProviderKind::Ollama => {
@@ -357,7 +367,7 @@ pub fn build_provider_for_instance(
             Ok(Arc::new(p))
         }
 
-        // ── OpenAI API (api_key in instance) ─────────────────────────────
+        // ── OpenAI-compatible cloud services (api_key in instance) ─────────
         ServiceType::OpenAi | ServiceType::OpenAiCompatible => {
             let base_url = instance
                 .base_url
@@ -370,6 +380,27 @@ pub fn build_provider_for_instance(
                 )
             })?;
             Ok(Arc::new(OpenAiProvider::new(base_url, model, api_key)))
+        }
+        ServiceType::OpenRouter => {
+            let base_url = instance
+                .base_url
+                .clone()
+                .unwrap_or_else(|| OPENROUTER_DEFAULT_BASE_URL.to_string());
+            let api_key = instance.api_key.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing API key for provider '{}'. Set api_key in config.",
+                    instance.id
+                )
+            })?;
+            Ok(Arc::new(OpenAiProvider::new_with_headers(
+                base_url,
+                model,
+                api_key,
+                vec![
+                    ("HTTP-Referer".to_string(), OPENROUTER_REFERER.to_string()),
+                    ("X-Title".to_string(), OPENROUTER_TITLE.to_string()),
+                ],
+            )))
         }
 
         // ── Ollama ────────────────────────────────────────────────────────
@@ -469,6 +500,16 @@ mod tests {
             thinking_support_for(&ProviderKind::Gemini, "gemini-2.5-pro"),
             ThinkingSupport::Applied
         );
+    }
+
+    #[test]
+    fn openrouter_provider_kind_defaults_and_lookup_work() {
+        assert_eq!(
+            ProviderKind::from_name("openrouter"),
+            Some(ProviderKind::OpenRouter)
+        );
+        assert_eq!(ProviderKind::OpenRouter.label(), "OpenRouter");
+        assert_eq!(ProviderKind::OpenRouter.default_model(), "openai/gpt-4o");
     }
 
     // ── Cache-driven routing ─────────────────────────────────────────────────

@@ -61,77 +61,89 @@ impl TauConfig {
         self.providers.len() < before
     }
 
+    /// Ensure singleton built-in hosted providers exist in `providers`.
+    fn ensure_builtin_hosted_providers(&mut self) {
+        if self.find_provider("openrouter").is_none() {
+            self.providers
+                .push(ProviderInstance::new("openrouter", ServiceType::OpenRouter));
+        }
+    }
+
     /// Synthesise provider instances from legacy per-kind config sections.
     ///
-    /// Called automatically by `from_toml_str` when `providers` is empty.
+    /// Called automatically by `from_toml_str`. When `providers` is empty, it
+    /// synthesises instances from the legacy per-kind sections below. It also
+    /// ensures singleton built-in hosted providers are present for newer
+    /// instance-based configs.
     /// Idempotent — safe to call multiple times.
     fn migrate_legacy_providers(&mut self) {
-        if !self.providers.is_empty() {
-            return;
-        }
+        if self.providers.is_empty() {
+            // Copilot — always present as a built-in default.
+            let mut copilot = ProviderInstance::new("copilot", ServiceType::Copilot);
+            copilot.model = self.copilot.model.clone();
+            self.providers.push(copilot);
 
-        // Copilot — always present as a built-in default.
-        let mut copilot = ProviderInstance::new("copilot", ServiceType::Copilot);
-        copilot.model = self.copilot.model.clone();
-        self.providers.push(copilot);
+            // OpenAI — only if an api_key is configured.
+            if self.openai.api_key.is_some() {
+                let mut openai = ProviderInstance::new("openai", ServiceType::OpenAi);
+                openai.base_url = self.openai.base_url.clone();
+                openai.api_key = self.openai.api_key.clone();
+                openai.model = self.openai.model.clone();
+                self.providers.push(openai);
+            }
 
-        // OpenAI — only if an api_key is configured.
-        if self.openai.api_key.is_some() {
-            let mut openai = ProviderInstance::new("openai", ServiceType::OpenAi);
-            openai.base_url = self.openai.base_url.clone();
-            openai.api_key = self.openai.api_key.clone();
-            openai.model = self.openai.model.clone();
-            self.providers.push(openai);
-        }
+            // Codex — always a built-in (auth handled separately via AuthStore).
+            let mut codex = ProviderInstance::new("codex", ServiceType::Codex);
+            codex.base_url = self.codex.base_url.clone();
+            codex.model = self.codex.model.clone();
+            self.providers.push(codex);
 
-        // Codex — always a built-in (auth handled separately via AuthStore).
-        let mut codex = ProviderInstance::new("codex", ServiceType::Codex);
-        codex.base_url = self.codex.base_url.clone();
-        codex.model = self.codex.model.clone();
-        self.providers.push(codex);
+            // Gemini — always a built-in (auth handled separately via AuthStore).
+            let mut gemini = ProviderInstance::new("gemini", ServiceType::Gemini);
+            gemini.base_url = self.gemini.base_url.clone();
+            gemini.model = self.gemini.model.clone();
+            self.providers.push(gemini);
 
-        // Gemini — always a built-in (auth handled separately via AuthStore).
-        let mut gemini = ProviderInstance::new("gemini", ServiceType::Gemini);
-        gemini.base_url = self.gemini.base_url.clone();
-        gemini.model = self.gemini.model.clone();
-        self.providers.push(gemini);
+            // Ollama — only if a base_url is configured; otherwise skip (user
+            // hasn't set it up yet).
+            if self.ollama.base_url.is_some() {
+                let mut ollama = ProviderInstance::new("ollama", ServiceType::Ollama);
+                ollama.base_url = self.ollama.base_url.clone();
+                ollama.model = self.ollama.model.clone();
+                self.providers.push(ollama);
+            }
 
-        // Ollama — only if a base_url is configured; otherwise skip (user
-        // hasn't set it up yet).
-        if self.ollama.base_url.is_some() {
-            let mut ollama = ProviderInstance::new("ollama", ServiceType::Ollama);
-            ollama.base_url = self.ollama.base_url.clone();
-            ollama.model = self.ollama.model.clone();
-            self.providers.push(ollama);
-        }
+            // Open WebUI — only if a base_url is configured.
+            if self.open_webui.base_url.is_some() {
+                let mut open_webui = ProviderInstance::new("open-webui", ServiceType::OpenWebUi);
+                open_webui.base_url = self.open_webui.base_url.clone();
+                open_webui.api_key = self.open_webui.api_key.clone();
+                open_webui.model = self.open_webui.model.clone();
+                self.providers.push(open_webui);
+            }
 
-        // Open WebUI — only if a base_url is configured.
-        if self.open_webui.base_url.is_some() {
-            let mut open_webui = ProviderInstance::new("open-webui", ServiceType::OpenWebUi);
-            open_webui.base_url = self.open_webui.base_url.clone();
-            open_webui.api_key = self.open_webui.api_key.clone();
-            open_webui.model = self.open_webui.model.clone();
-            self.providers.push(open_webui);
-        }
-
-        // Migrate the `provider` field: map legacy provider names to instance ids.
-        if let Some(ref name) = self.provider.clone() {
-            let mapped_id = match name.as_str() {
-                "copilot" | "github-copilot" => Some("copilot"),
-                "openai" => Some("openai"),
-                "codex" => Some("codex"),
-                "gemini" | "google-gemini" => Some("gemini"),
-                "ollama" => Some("ollama"),
-                "open-webui" | "openwebui" => Some("open-webui"),
-                _ => None,
-            };
-            if let Some(id) = mapped_id {
-                // Only keep the mapped id if we actually synthesised that instance.
-                if self.providers.iter().any(|p| p.id == id) {
-                    self.provider = Some(id.to_string());
+            // Migrate the `provider` field: map legacy provider names to instance ids.
+            if let Some(ref name) = self.provider.clone() {
+                let mapped_id = match name.as_str() {
+                    "copilot" | "github-copilot" => Some("copilot"),
+                    "openai" => Some("openai"),
+                    "openrouter" => Some("openrouter"),
+                    "codex" => Some("codex"),
+                    "gemini" | "google-gemini" => Some("gemini"),
+                    "ollama" => Some("ollama"),
+                    "open-webui" | "openwebui" => Some("open-webui"),
+                    _ => None,
+                };
+                if let Some(id) = mapped_id {
+                    // Only keep the mapped id if we actually synthesised that instance.
+                    if self.providers.iter().any(|p| p.id == id) {
+                        self.provider = Some(id.to_string());
+                    }
                 }
             }
         }
+
+        self.ensure_builtin_hosted_providers();
     }
 }
 
@@ -348,6 +360,41 @@ model = "gpt-4o"
     }
 
     #[test]
+    fn migration_synthesises_openrouter_as_builtin_hosted_provider() {
+        let raw = r#"
+provider = "copilot"
+[copilot]
+model = "gpt-4o"
+"#;
+        let cfg = TauConfig::from_toml_str(raw).unwrap();
+        let inst = cfg
+            .find_provider("openrouter")
+            .expect("openrouter instance present");
+        assert_eq!(inst.service_type, ServiceType::OpenRouter);
+        assert_eq!(inst.id, "openrouter");
+    }
+
+    #[test]
+    fn migration_adds_openrouter_to_existing_providers_without_duplication() {
+        let raw = r#"
+[[providers]]
+id = "copilot"
+service_type = "copilot"
+api_type = "openai-compatible"
+model = "claude-sonnet-4.5"
+"#;
+        let cfg = TauConfig::from_toml_str(raw).unwrap();
+        assert!(cfg.find_provider("openrouter").is_some());
+        assert_eq!(
+            cfg.providers
+                .iter()
+                .filter(|p| p.id == "openrouter")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn migration_synthesises_openai_when_api_key_present() {
         let raw = r#"
 [openai]
@@ -425,11 +472,13 @@ api_type = "openai-compatible"
 model = "claude-sonnet-4.5"
 "#;
         let cfg = TauConfig::from_toml_str(raw).unwrap();
-        // providers already present → migration must not add duplicates
-        assert_eq!(cfg.providers.len(), 1);
+        // Explicit providers remain intact, and builtin openrouter is added once.
+        assert_eq!(cfg.providers.len(), 2);
         let inst = cfg.find_provider("copilot").unwrap();
         // The explicit [[providers]] entry wins, not the legacy [copilot] section.
         assert_eq!(inst.model.as_deref(), Some("claude-sonnet-4.5"));
+        let openrouter = cfg.find_provider("openrouter").unwrap();
+        assert_eq!(openrouter.service_type, ServiceType::OpenRouter);
     }
 
     #[test]
@@ -452,7 +501,7 @@ api_type = "ollama-chat-api"
 base_url = "http://gpu-box:11434"
 "#;
         let cfg = TauConfig::from_toml_str(raw).unwrap();
-        assert_eq!(cfg.providers.len(), 2);
+        assert_eq!(cfg.providers.len(), 3);
 
         let webui = cfg.find_provider("work-webui").unwrap();
         assert_eq!(webui.service_type, ServiceType::OpenWebUi);
@@ -461,6 +510,10 @@ base_url = "http://gpu-box:11434"
         let gpu = cfg.find_provider("gpu-box").unwrap();
         assert_eq!(gpu.service_type, ServiceType::Ollama);
         assert_eq!(gpu.api_type, ApiType::OllamaChatApi);
+
+        let openrouter = cfg.find_provider("openrouter").unwrap();
+        assert_eq!(openrouter.service_type, ServiceType::OpenRouter);
+
         assert_eq!(cfg.provider.as_deref(), Some("work-webui"));
     }
 

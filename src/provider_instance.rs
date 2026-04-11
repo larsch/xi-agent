@@ -39,6 +39,8 @@ pub enum ServiceType {
     /// OpenAI API (cloud)
     #[serde(rename = "openai")]
     OpenAi,
+    /// OpenRouter API (cloud)
+    OpenRouter,
     /// OpenAI Codex / chatgpt.com (cloud)
     Codex,
     /// Google Gemini CLI / Cloud Code Assist (cloud)
@@ -51,7 +53,7 @@ pub enum ServiceType {
     /// Open WebUI instance (self-hosted)
     #[serde(rename = "open-webui")]
     OpenWebUi,
-    /// Generic OpenAI-compatible endpoint (e.g. OpenRouter)
+    /// Generic OpenAI-compatible endpoint
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
     /// Internal test provider — never shown to users.
@@ -100,6 +102,15 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         user_selects_api: false,
         multi_instance: false,
         custom_base_url: false,
+    },
+    ServiceDef {
+        id: "openrouter",
+        label: "OpenRouter",
+        allowed_apis: &[ApiType::OpenAiCompatible],
+        default_api: ApiType::OpenAiCompatible,
+        user_selects_api: false,
+        multi_instance: true,
+        custom_base_url: true,
     },
     ServiceDef {
         id: "codex",
@@ -184,6 +195,7 @@ impl ServiceType {
         match self {
             Self::Copilot => "copilot",
             Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
@@ -202,6 +214,7 @@ impl ServiceType {
     pub fn user_visible() -> &'static [ServiceType] {
         &[
             Self::Copilot,
+            Self::OpenRouter,
             Self::OpenAi,
             Self::Codex,
             Self::Gemini,
@@ -216,6 +229,7 @@ impl ServiceType {
         match s {
             "copilot" => Some(Self::Copilot),
             "openai" => Some(Self::OpenAi),
+            "openrouter" => Some(Self::OpenRouter),
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
@@ -232,6 +246,7 @@ impl ServiceType {
         match self {
             Self::Copilot => "gpt-4o",
             Self::OpenAi => "gpt-4o",
+            Self::OpenRouter => "openai/gpt-4o",
             Self::Codex => "gpt-5.4",
             Self::Gemini => "gemini-2.5-pro",
             Self::Ollama => "llama3.1",
@@ -301,6 +316,7 @@ mod tests {
         let types = [
             ServiceType::Copilot,
             ServiceType::OpenAi,
+            ServiceType::OpenRouter,
             ServiceType::Codex,
             ServiceType::Gemini,
             ServiceType::Ollama,
@@ -329,6 +345,7 @@ mod tests {
         let types = [
             ServiceType::Copilot,
             ServiceType::OpenAi,
+            ServiceType::OpenRouter,
             ServiceType::Codex,
             ServiceType::Gemini,
             ServiceType::Ollama,

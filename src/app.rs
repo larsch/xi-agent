@@ -84,11 +84,13 @@ impl SetupInputKind {
             Self::BaseUrl => match instance.map(|p| &p.service_type) {
                 Some(ServiceType::Ollama) => "ollama endpoint: ".to_string(),
                 Some(ServiceType::OpenWebUi) => "open-webui URL: ".to_string(),
+                Some(ServiceType::OpenRouter) => "openrouter URL: ".to_string(),
                 Some(ServiceType::OpenAiCompatible) => "endpoint URL: ".to_string(),
                 _ => "base URL: ".to_string(),
             },
             Self::ApiKey => match instance.map(|p| &p.service_type) {
                 Some(ServiceType::OpenWebUi) => "open-webui token: ".to_string(),
+                Some(ServiceType::OpenRouter) => "OpenRouter API key: ".to_string(),
                 Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
                     "API key: ".to_string()
                 }
@@ -107,6 +109,9 @@ impl SetupInputKind {
                 Some(ServiceType::OpenWebUi) => {
                     "https://my-webui.example.com   Enter confirm   Esc cancel".to_string()
                 }
+                Some(ServiceType::OpenRouter) => {
+                    "https://openrouter.ai/api/v1   Enter confirm   Esc cancel".to_string()
+                }
                 Some(ServiceType::OpenAiCompatible) => {
                     "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel".to_string()
                 }
@@ -114,6 +119,7 @@ impl SetupInputKind {
             },
             Self::ApiKey => match instance.map(|p| &p.service_type) {
                 Some(ServiceType::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
+                Some(ServiceType::OpenRouter) => "sk-or-…   Enter confirm   Esc cancel".to_string(),
                 Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
                     "sk-…   Enter confirm   Esc cancel".to_string()
                 }
@@ -1258,7 +1264,7 @@ impl App {
         let raw = self.textarea.lines().join("");
         let url = match instance.service_type {
             ServiceType::Ollama => Self::normalize_ollama_endpoint(&raw)?,
-            ServiceType::OpenWebUi | ServiceType::OpenAiCompatible => {
+            ServiceType::OpenWebUi | ServiceType::OpenAiCompatible | ServiceType::OpenRouter => {
                 Self::normalize_open_webui_url(&raw)?
             }
             _ => return None,
@@ -2609,6 +2615,17 @@ mod tests {
             "open-webui token: "
         );
 
+        let mut openrouter = ProviderInstance::new("router", ServiceType::OpenRouter);
+        openrouter.api_type = ApiType::OpenAiCompatible;
+        assert_eq!(
+            super::SetupInputKind::BaseUrl.prompt_label(Some(&openrouter)),
+            "openrouter URL: "
+        );
+        assert_eq!(
+            super::SetupInputKind::ApiKey.prompt_label(Some(&openrouter)),
+            "OpenRouter API key: "
+        );
+
         let mut ollama = ProviderInstance::new("gpu-box", ServiceType::Ollama);
         ollama.api_type = ApiType::OllamaChatApi;
         assert_eq!(
@@ -2646,6 +2663,27 @@ mod tests {
                 .as_ref()
                 .and_then(|p| p.base_url.as_deref()),
             Some("https://test")
+        );
+    }
+
+    #[test]
+    fn submit_pending_provider_base_url_stores_openrouter_endpoint() {
+        let mut app = make_app();
+        app.pending_provider_setup = Some(super::PendingProviderSetup::new("router".to_string()));
+        app.set_pending_provider_service_type(ServiceType::OpenRouter);
+        app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
+        app.enter_provider_base_url_input_mode();
+        app.textarea.insert_str("openrouter.ai/api/v1");
+
+        let url = app
+            .submit_pending_provider_base_url()
+            .expect("normalized openrouter url");
+        assert_eq!(url, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            app.pending_provider_instance()
+                .as_ref()
+                .and_then(|p| p.base_url.as_deref()),
+            Some("https://openrouter.ai/api/v1")
         );
     }
 
