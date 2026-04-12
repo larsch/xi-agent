@@ -49,7 +49,7 @@ use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
 use provider::{ThinkingSupport, build_provider_for_instance, thinking_support_for_instance};
-use provider_instance::ProviderInstance;
+use provider_instance::{AuthMode, EndpointBehavior, ProviderInstance};
 use thinking::ThinkingLevel;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -283,12 +283,7 @@ async fn main() -> io::Result<()> {
 
             Ok(RunResult::ChangeProvider(id)) => {
                 if let Some(inst) = config.find_provider(&id).cloned() {
-                    let requires_api_key = matches!(
-                        inst.service_type,
-                        provider_instance::ServiceType::OpenAi
-                            | provider_instance::ServiceType::OpenRouter
-                            | provider_instance::ServiceType::OpenAiCompatible
-                    );
+                    let requires_api_key = provider_setup_requires_api_key(&inst);
                     if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
                         app.pending_provider_setup = Some(app::PendingProviderSetup {
                             id: inst.id.clone(),
@@ -548,6 +543,25 @@ enum RunResult {
 
 fn normalize_paste_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn provider_setup_requires_endpoint(instance: &ProviderInstance) -> bool {
+    matches!(
+        instance.service_type.def().endpoint_behavior,
+        EndpointBehavior::UserSupplied | EndpointBehavior::Overrideable
+    )
+}
+
+fn provider_setup_requires_api_key(instance: &ProviderInstance) -> bool {
+    instance.service_type.def().auth_mode == AuthMode::ApiKey
+}
+
+fn enter_provider_endpoint_input(app: &mut App, instance: &ProviderInstance) {
+    match instance.service_type {
+        provider_instance::ServiceType::Ollama => app.enter_ollama_endpoint_freeform_mode(),
+        provider_instance::ServiceType::OpenWebUi => app.enter_open_webui_url_input_mode(),
+        _ => app.enter_provider_base_url_input_mode(),
+    }
 }
 
 /// Read text from the system clipboard, or return `None` on error.
@@ -841,21 +855,13 @@ async fn run(
                                             } else {
                                                 app.set_pending_provider_api_type(default_api);
                                                 if let Some(instance) = app.pending_provider_instance() {
-                                                    match instance.service_type {
-                                                        provider_instance::ServiceType::Ollama => {
-                                                            app.enter_ollama_endpoint_freeform_mode();
-                                                        }
-                                                        provider_instance::ServiceType::OpenAiCompatible
-                                                        | provider_instance::ServiceType::OpenRouter => {
-                                                            app.enter_provider_base_url_input_mode();
-                                                        }
-                                                        provider_instance::ServiceType::OpenWebUi => {
-                                                            app.enter_open_webui_url_input_mode();
-                                                        }
-                                                        _ => {
-                                                            let instance = app.finish_pending_provider_setup().expect("pending provider instance");
-                                                            return Ok(RunResult::AddProvider(instance));
-                                                        }
+                                                    if provider_setup_requires_endpoint(&instance) {
+                                                        enter_provider_endpoint_input(app, &instance);
+                                                    } else if provider_setup_requires_api_key(&instance) {
+                                                        app.enter_provider_api_key_input_mode();
+                                                    } else {
+                                                        let instance = app.finish_pending_provider_setup().expect("pending provider instance");
+                                                        return Ok(RunResult::AddProvider(instance));
                                                     }
                                                 }
                                             }
@@ -863,21 +869,13 @@ async fn run(
                                         Some(SelectionResult::ProviderApiType(api_type)) => {
                                             app.set_pending_provider_api_type(api_type);
                                             if let Some(instance) = app.pending_provider_instance() {
-                                                match instance.service_type {
-                                                    provider_instance::ServiceType::Ollama => {
-                                                        app.enter_ollama_endpoint_freeform_mode();
-                                                    }
-                                                    provider_instance::ServiceType::OpenAiCompatible
-                                                    | provider_instance::ServiceType::OpenRouter => {
-                                                        app.enter_provider_base_url_input_mode();
-                                                    }
-                                                    provider_instance::ServiceType::OpenWebUi => {
-                                                        app.enter_open_webui_url_input_mode();
-                                                    }
-                                                    _ => {
-                                                        let instance = app.finish_pending_provider_setup().expect("pending provider instance");
-                                                        return Ok(RunResult::AddProvider(instance));
-                                                    }
+                                                if provider_setup_requires_endpoint(&instance) {
+                                                    enter_provider_endpoint_input(app, &instance);
+                                                } else if provider_setup_requires_api_key(&instance) {
+                                                    app.enter_provider_api_key_input_mode();
+                                                } else {
+                                                    let instance = app.finish_pending_provider_setup().expect("pending provider instance");
+                                                    return Ok(RunResult::AddProvider(instance));
                                                 }
                                             }
                                         }
@@ -1018,15 +1016,11 @@ async fn run(
                                         let instance = app
                                             .pending_provider_instance()
                                             .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                                        match instance.service_type {
-                                            provider_instance::ServiceType::Ollama => {
-                                                return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
-                                            }
-                                            provider_instance::ServiceType::OpenAiCompatible
-                                            | provider_instance::ServiceType::OpenRouter => {
-                                                app.enter_provider_api_key_input_mode();
-                                            }
-                                            _ => {}
+                                        if instance.service_type == provider_instance::ServiceType::Ollama {
+                                            return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
+                                        }
+                                        if provider_setup_requires_api_key(&instance) {
+                                            app.enter_provider_api_key_input_mode();
                                         }
                                     }
                                 } else if app.setup_input_mode == Some(app::SetupInputKind::ApiKey) {

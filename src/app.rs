@@ -14,7 +14,7 @@ use crate::{
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     llm::{AssistantPhase, DisplayRange, LlmProvider, Message, Role, UsageStats},
-    provider_instance::{ApiType, ProviderInstance, ServiceType},
+    provider_instance::{ApiType, AuthMode, EndpointBehavior, ProviderInstance, ServiceType},
     session::SessionStore,
     shell::{self, ShellKind},
     skills::SkillMeta,
@@ -80,21 +80,30 @@ pub enum SetupInputKind {
 impl SetupInputKind {
     pub fn prompt_label(self, instance: Option<&ProviderInstance>) -> String {
         match self {
-            Self::Name => "provider name: ".to_string(),
-            Self::BaseUrl => match instance.map(|p| &p.service_type) {
-                Some(ServiceType::Ollama) => "ollama endpoint: ".to_string(),
-                Some(ServiceType::OpenWebUi) => "open-webui URL: ".to_string(),
-                Some(ServiceType::OpenRouter) => "openrouter URL: ".to_string(),
-                Some(ServiceType::OpenAiCompatible) => "endpoint URL: ".to_string(),
-                _ => "base URL: ".to_string(),
+            Self::Name => "provider instance name: ".to_string(),
+            Self::BaseUrl => match instance {
+                Some(p) => match p.service_type.def().endpoint_behavior {
+                    EndpointBehavior::UserSupplied => match p.service_type {
+                        ServiceType::Ollama => "ollama URL: ".to_string(),
+                        ServiceType::OpenWebUi => "open-webui URL: ".to_string(),
+                        ServiceType::OpenAiCompatible => "URL: ".to_string(),
+                        _ => "URL: ".to_string(),
+                    },
+                    EndpointBehavior::Overrideable => "URL override: ".to_string(),
+                    _ => "URL: ".to_string(),
+                },
+                None => "URL: ".to_string(),
             },
-            Self::ApiKey => match instance.map(|p| &p.service_type) {
-                Some(ServiceType::OpenWebUi) => "open-webui token: ".to_string(),
-                Some(ServiceType::OpenRouter) => "OpenRouter API key: ".to_string(),
-                Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
-                    "API key: ".to_string()
-                }
-                _ => "token: ".to_string(),
+            Self::ApiKey => match instance {
+                Some(p) => match p.service_type.def().auth_mode {
+                    AuthMode::ApiKey => match p.service_type {
+                        ServiceType::OpenRouter => "OpenRouter API key: ".to_string(),
+                        ServiceType::OpenWebUi => "open-webui token: ".to_string(),
+                        _ => "API key: ".to_string(),
+                    },
+                    _ => "token: ".to_string(),
+                },
+                None => "API key: ".to_string(),
             },
         }
     }
@@ -102,24 +111,24 @@ impl SetupInputKind {
     pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
         match self {
             Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
-            Self::BaseUrl => match instance.map(|p| &p.service_type) {
+            Self::BaseUrl => match instance.map(|p| p.service_type.clone()) {
                 Some(ServiceType::Ollama) => {
                     "http://host:11434   Enter confirm   Esc cancel".to_string()
                 }
                 Some(ServiceType::OpenWebUi) => {
                     "https://my-webui.example.com   Enter confirm   Esc cancel".to_string()
                 }
-                Some(ServiceType::OpenRouter) => {
-                    "https://openrouter.ai/api/v1   Enter confirm   Esc cancel".to_string()
-                }
                 Some(ServiceType::OpenAiCompatible) => {
                     "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel".to_string()
                 }
+                Some(ServiceType::OpenRouter) => {
+                    "https://openrouter.ai/api/v1   Enter confirm   Esc cancel".to_string()
+                }
                 _ => "https://example.com   Enter confirm   Esc cancel".to_string(),
             },
-            Self::ApiKey => match instance.map(|p| &p.service_type) {
-                Some(ServiceType::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
+            Self::ApiKey => match instance.map(|p| p.service_type.clone()) {
                 Some(ServiceType::OpenRouter) => "sk-or-…   Enter confirm   Esc cancel".to_string(),
+                Some(ServiceType::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
                 Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
                     "sk-…   Enter confirm   Esc cancel".to_string()
                 }
@@ -1295,7 +1304,7 @@ impl App {
         self.reset_textarea();
         self.selection.active = true;
         self.selection.kind = Some(SelectionKind::ProviderServiceType);
-        self.selection.title = "  Select service type  ";
+        self.selection.title = "  Select backend type  ";
         self.selection.query.clear();
         let items = ServiceType::user_visible()
             .iter()
@@ -2601,7 +2610,7 @@ mod tests {
     fn setup_input_kind_uses_service_specific_prompts() {
         assert_eq!(
             super::SetupInputKind::Name.prompt_label(None),
-            "provider name: "
+            "provider instance name: "
         );
 
         let mut open_webui = ProviderInstance::new("work-webui", ServiceType::OpenWebUi);
@@ -2619,7 +2628,7 @@ mod tests {
         openrouter.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&openrouter)),
-            "openrouter URL: "
+            "URL: "
         );
         assert_eq!(
             super::SetupInputKind::ApiKey.prompt_label(Some(&openrouter)),
@@ -2630,19 +2639,26 @@ mod tests {
         ollama.api_type = ApiType::OllamaChatApi;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&ollama)),
-            "ollama endpoint: "
+            "ollama URL: "
         );
 
         let mut compat = ProviderInstance::new("test", ServiceType::OpenAiCompatible);
         compat.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&compat)),
-            "endpoint URL: "
+            "URL: "
         );
         assert_eq!(
             super::SetupInputKind::ApiKey.prompt_label(Some(&compat)),
             "API key: "
         );
+    }
+
+    #[test]
+    fn enter_provider_service_type_selection_mode_uses_backend_type_title() {
+        let mut app = make_app();
+        app.enter_provider_service_type_selection_mode();
+        assert_eq!(app.selection.title, "  Select backend type  ");
     }
 
     #[test]

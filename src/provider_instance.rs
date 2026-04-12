@@ -60,12 +60,39 @@ pub enum ServiceType {
     Test,
 }
 
-/// Metadata tau keeps about a service type.
+/// Whether a preset represents a built-in hosted provider or a user-supplied service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendClass {
+    BuiltInHosted,
+    UserSuppliedService,
+    Internal,
+}
+
+/// How the user authenticates a provider instance for a preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    OAuthLogin,
+    ApiKey,
+    None,
+}
+
+/// Whether the endpoint is predetermined or supplied by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointBehavior {
+    Predetermined,
+    UserSupplied,
+    Overrideable,
+    Internal,
+}
+
+/// Metadata tau keeps about a service type / backend preset.
 pub struct ServiceDef {
     /// Machine-readable id (matches `ServiceType` serialisation).
     pub id: &'static str,
     /// Human-readable display label.
     pub label: &'static str,
+    /// Which class of backend this preset belongs to.
+    pub backend_class: BackendClass,
     /// API types that this service supports, in preference order.
     pub allowed_apis: &'static [ApiType],
     /// The recommended / default API type.
@@ -75,8 +102,10 @@ pub struct ServiceDef {
     pub user_selects_api: bool,
     /// Whether multiple instances of this service make sense.
     pub multi_instance: bool,
-    /// Whether a custom base URL can be set by the user.
-    pub custom_base_url: bool,
+    /// Whether the endpoint is predetermined, user-supplied, or overrideable.
+    pub endpoint_behavior: EndpointBehavior,
+    /// Which authentication mode this preset requires.
+    pub auth_mode: AuthMode,
 }
 
 /// Static catalog of all supported service types.
@@ -84,6 +113,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
     ServiceDef {
         id: "copilot",
         label: "GitHub Copilot",
+        backend_class: BackendClass::BuiltInHosted,
         allowed_apis: &[
             ApiType::OpenAiCompatible,
             ApiType::OpenAiResponses,
@@ -92,47 +122,57 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
         multi_instance: false,
-        custom_base_url: false,
+        endpoint_behavior: EndpointBehavior::Predetermined,
+        auth_mode: AuthMode::OAuthLogin,
     },
     ServiceDef {
         id: "openai",
         label: "OpenAI API",
+        backend_class: BackendClass::BuiltInHosted,
         allowed_apis: &[ApiType::OpenAiCompatible],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
         multi_instance: false,
-        custom_base_url: false,
+        endpoint_behavior: EndpointBehavior::Predetermined,
+        auth_mode: AuthMode::ApiKey,
     },
     ServiceDef {
         id: "openrouter",
         label: "OpenRouter",
+        backend_class: BackendClass::BuiltInHosted,
         allowed_apis: &[ApiType::OpenAiCompatible],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
         multi_instance: true,
-        custom_base_url: true,
+        endpoint_behavior: EndpointBehavior::Predetermined,
+        auth_mode: AuthMode::ApiKey,
     },
     ServiceDef {
         id: "codex",
         label: "OpenAI Codex (chatgpt.com)",
+        backend_class: BackendClass::BuiltInHosted,
         allowed_apis: &[ApiType::OpenAiResponses],
         default_api: ApiType::OpenAiResponses,
         user_selects_api: false,
         multi_instance: false,
-        custom_base_url: false,
+        endpoint_behavior: EndpointBehavior::Predetermined,
+        auth_mode: AuthMode::OAuthLogin,
     },
     ServiceDef {
         id: "gemini",
         label: "Google Gemini CLI (Cloud Code Assist)",
+        backend_class: BackendClass::BuiltInHosted,
         allowed_apis: &[ApiType::GeminiNative],
         default_api: ApiType::GeminiNative,
         user_selects_api: false,
         multi_instance: false,
-        custom_base_url: false,
+        endpoint_behavior: EndpointBehavior::Predetermined,
+        auth_mode: AuthMode::OAuthLogin,
     },
     ServiceDef {
         id: "ollama",
         label: "Ollama",
+        backend_class: BackendClass::UserSuppliedService,
         allowed_apis: &[
             ApiType::OllamaChatApi,
             ApiType::OpenAiCompatible,
@@ -141,43 +181,52 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         default_api: ApiType::OllamaChatApi,
         user_selects_api: true,
         multi_instance: true,
-        custom_base_url: true,
+        endpoint_behavior: EndpointBehavior::UserSupplied,
+        auth_mode: AuthMode::None,
     },
     ServiceDef {
         id: "ollama-com",
         label: "ollama.com",
+        backend_class: BackendClass::BuiltInHosted,
         allowed_apis: &[ApiType::OllamaChatApi],
         default_api: ApiType::OllamaChatApi,
         user_selects_api: false,
         multi_instance: false,
-        custom_base_url: false,
+        endpoint_behavior: EndpointBehavior::Predetermined,
+        auth_mode: AuthMode::None,
     },
     ServiceDef {
         id: "open-webui",
         label: "Open WebUI",
+        backend_class: BackendClass::UserSuppliedService,
         allowed_apis: &[ApiType::OpenAiCompatible, ApiType::OllamaChatApi],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: true,
         multi_instance: true,
-        custom_base_url: true,
+        endpoint_behavior: EndpointBehavior::UserSupplied,
+        auth_mode: AuthMode::ApiKey,
     },
     ServiceDef {
         id: "openai-compatible",
         label: "OpenAI-compatible endpoint",
+        backend_class: BackendClass::UserSuppliedService,
         allowed_apis: &[ApiType::OpenAiCompatible],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
         multi_instance: true,
-        custom_base_url: true,
+        endpoint_behavior: EndpointBehavior::UserSupplied,
+        auth_mode: AuthMode::ApiKey,
     },
     ServiceDef {
         id: "test",
         label: "Test (UI exercise)",
+        backend_class: BackendClass::Internal,
         allowed_apis: &[ApiType::Test],
         default_api: ApiType::Test,
         user_selects_api: false,
         multi_instance: false,
-        custom_base_url: false,
+        endpoint_behavior: EndpointBehavior::Internal,
+        auth_mode: AuthMode::None,
     },
 ];
 
@@ -361,6 +410,31 @@ mod tests {
             });
             assert_eq!(st.id(), roundtripped.id());
         }
+    }
+
+    #[test]
+    fn provider_preset_metadata_matches_spec_semantics() {
+        let openrouter = ServiceType::OpenRouter.def();
+        assert_eq!(openrouter.backend_class, BackendClass::BuiltInHosted);
+        assert_eq!(openrouter.auth_mode, AuthMode::ApiKey);
+        assert_eq!(
+            openrouter.endpoint_behavior,
+            EndpointBehavior::Predetermined
+        );
+
+        let copilot = ServiceType::Copilot.def();
+        assert_eq!(copilot.auth_mode, AuthMode::OAuthLogin);
+        assert_eq!(copilot.endpoint_behavior, EndpointBehavior::Predetermined);
+
+        let ollama = ServiceType::Ollama.def();
+        assert_eq!(ollama.backend_class, BackendClass::UserSuppliedService);
+        assert_eq!(ollama.auth_mode, AuthMode::None);
+        assert_eq!(ollama.endpoint_behavior, EndpointBehavior::UserSupplied);
+
+        let webui = ServiceType::OpenWebUi.def();
+        assert_eq!(webui.backend_class, BackendClass::UserSuppliedService);
+        assert_eq!(webui.auth_mode, AuthMode::ApiKey);
+        assert_eq!(webui.endpoint_behavior, EndpointBehavior::UserSupplied);
     }
 
     #[test]
