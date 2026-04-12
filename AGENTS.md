@@ -8,6 +8,13 @@ This repository is a AI agent harness for the terminal, built with Rust.
 - Fix all clippy issues before committing (`cargo clippy`).
 - Ensure all tests pass before committing (`cargo test`).
 
+## Working modes
+
+- Use the `fastpath` skill for trivial, clearly bounded changes when appropriate.
+- When `fastpath` is used and the user accepts the result, proceed with the remaining fastpath follow-through for that task without asking for per-step permission again.
+- This includes reconciliation work such as updating `.todo` or other relevant tracking artifacts so they reflect the accepted state.
+- `fastpath` acceptance does not override the explicit commit/push approval rule below.
+
 ## Debugging
 
 - Debug logs are written to `~/.cache/tau`.

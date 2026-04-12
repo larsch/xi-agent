@@ -49,6 +49,10 @@ pub enum SelectionResult {
     LoginAction(LoginActionKind),
     /// The user started the add-provider flow.
     AddProvider,
+    /// The user cancelled a pending provider removal confirmation.
+    CancelProviderRemoval,
+    /// The user confirmed removing a custom provider instance.
+    RemoveProvider(String),
     /// A provider backend type was chosen during add-provider setup.
     ProviderBackendPreset(BackendPreset),
     /// A provider API type was chosen during add-provider setup.
@@ -155,6 +159,11 @@ pub struct PendingProviderSetup {
     pub editing_existing: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingProviderRemoval {
+    pub id: String,
+}
+
 impl PendingProviderSetup {
     fn new(id: String) -> Self {
         Self {
@@ -202,6 +211,7 @@ pub(crate) enum SelectionKind {
     ResumeSession,
     AskUser,
     LoginAction,
+    ConfirmProviderRemoval,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
@@ -390,6 +400,8 @@ pub struct App {
     pub setup_input_mode: Option<SetupInputKind>,
     /// Pending provider instance being configured through the add-provider flow.
     pub pending_provider_setup: Option<PendingProviderSetup>,
+    /// Pending custom provider instance being confirmed for removal.
+    pub pending_provider_removal: Option<PendingProviderRemoval>,
 
     // ── Ollama endpoint input mode ────────────────────────────────────────────
     /// When true the textarea is used to type a custom Ollama endpoint URL
@@ -496,6 +508,7 @@ impl App {
             ask_user_question: None,
             setup_input_mode: None,
             pending_provider_setup: None,
+            pending_provider_removal: None,
             ollama_endpoint_input_mode: false,
             open_webui_url_input_mode: false,
             open_webui_token_input_mode: false,
@@ -921,6 +934,9 @@ impl App {
             self.cancel_pending_ask();
         } else if self.in_slash_mode() {
             self.reset_textarea();
+        } else if self.selection.kind == Some(SelectionKind::ConfirmProviderRemoval) {
+            self.exit_selection_mode();
+            self.clear_pending_provider_removal();
         } else if self.setup_input_mode.is_some() {
             self.cancel_setup_input();
         } else if self.ollama_endpoint_input_mode {
@@ -1088,6 +1104,7 @@ impl App {
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
             | Some(SelectionKind::LoginAction)
+            | Some(SelectionKind::ConfirmProviderRemoval)
             | Some(SelectionKind::ProviderBackendPreset)
             | Some(SelectionKind::ProviderApiType)
             | None => None,
@@ -1175,6 +1192,11 @@ impl App {
         self.selection.kind == Some(SelectionKind::Provider)
     }
 
+    /// Returns true when the active selection is the provider-removal confirmation.
+    pub fn in_provider_removal_confirmation_mode(&self) -> bool {
+        self.selection.kind == Some(SelectionKind::ConfirmProviderRemoval)
+    }
+
     /// Returns the currently highlighted provider id in the provider picker.
     pub fn selected_provider_id(&self) -> Option<&str> {
         if self.selection.kind != Some(SelectionKind::Provider) {
@@ -1239,6 +1261,7 @@ impl App {
     /// Start editing an existing custom provider instance.
     pub fn enter_provider_edit_mode(&mut self, instance: &ProviderInstance) {
         self.exit_selection_mode();
+        self.pending_provider_removal = None;
         self.pending_provider_setup = Some(PendingProviderSetup::from_instance(instance));
         match instance.backend_preset {
             BackendPreset::Ollama => {
@@ -1279,6 +1302,7 @@ impl App {
         self.reset_textarea();
         self.setup_input_mode = Some(SetupInputKind::Name);
         self.pending_provider_setup = None;
+        self.pending_provider_removal = None;
     }
 
     /// Enter freeform input mode for a provider endpoint / base URL.
@@ -1299,6 +1323,7 @@ impl App {
     pub fn cancel_setup_input(&mut self) {
         self.setup_input_mode = None;
         self.pending_provider_setup = None;
+        self.pending_provider_removal = None;
         self.reset_textarea();
     }
 
@@ -1458,11 +1483,50 @@ impl App {
     pub fn finish_pending_provider_setup(&mut self) -> Option<ProviderInstance> {
         let instance = self.pending_provider_instance()?;
         self.pending_provider_setup = None;
+        self.pending_provider_removal = None;
         Some(instance)
     }
 
     pub fn clear_pending_provider_setup(&mut self) {
         self.pending_provider_setup = None;
+        self.pending_provider_removal = None;
+    }
+
+    pub fn enter_provider_removal_confirmation_mode(&mut self, instance: &ProviderInstance) {
+        self.reset_textarea();
+        self.selection.active = true;
+        self.selection.kind = Some(SelectionKind::ConfirmProviderRemoval);
+        self.selection.title = "  Remove provider?  ";
+        self.selection.query.clear();
+        self.pending_provider_setup = None;
+        self.pending_provider_removal = Some(PendingProviderRemoval {
+            id: instance.id.clone(),
+        });
+        self.set_selection_items(vec![
+            CompletionItem {
+                label: format!("Remove {}", instance.id),
+                detail: format!(
+                    "Delete custom provider ({})",
+                    instance.backend_preset.label()
+                ),
+                complete_to: "/provider_remove_confirm".to_string(),
+                loading: false,
+                error: false,
+                match_range: None,
+            },
+            CompletionItem {
+                label: "Cancel".to_string(),
+                detail: "Keep provider".to_string(),
+                complete_to: "/provider_remove_cancel".to_string(),
+                loading: false,
+                error: false,
+                match_range: None,
+            },
+        ]);
+    }
+
+    pub fn clear_pending_provider_removal(&mut self) {
+        self.pending_provider_removal = None;
     }
 
     /// Switch the textarea into Ollama endpoint input mode.
@@ -1641,7 +1705,10 @@ impl App {
     /// Returns true if the active selection menu supports free-text filtering.
     /// The login-action menu is a fixed short list and disables filtering.
     pub fn selection_filter_enabled(&self) -> bool {
-        self.selection.kind != Some(SelectionKind::LoginAction)
+        !matches!(
+            self.selection.kind,
+            Some(SelectionKind::LoginAction) | Some(SelectionKind::ConfirmProviderRemoval)
+        )
     }
 
     pub fn selection_add_char(&mut self, c: char) {
@@ -1711,6 +1778,14 @@ impl App {
                 .or_else(|| {
                     (item.complete_to == "/provider_add").then_some(SelectionResult::AddProvider)
                 }),
+            Some(SelectionKind::ConfirmProviderRemoval) => match item.complete_to.as_str() {
+                "/provider_remove_confirm" => self
+                    .pending_provider_removal
+                    .as_ref()
+                    .map(|pending| SelectionResult::RemoveProvider(pending.id.clone())),
+                "/provider_remove_cancel" => Some(SelectionResult::CancelProviderRemoval),
+                _ => None,
+            },
             Some(SelectionKind::ProviderBackendPreset) => item
                 .complete_to
                 .strip_prefix("/provider_service ")
@@ -2768,6 +2843,77 @@ mod tests {
         assert!(items.contains(&"/provider copilot"));
         assert!(items.contains(&"/provider gpu-box"));
         assert!(items.contains(&"/provider work-webui"));
+    }
+
+    #[test]
+    fn enter_provider_removal_confirmation_mode_tracks_target_provider() {
+        let mut app = make_app();
+        let instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+
+        app.enter_provider_removal_confirmation_mode(&instance);
+
+        assert_eq!(
+            app.selection.kind,
+            Some(super::SelectionKind::ConfirmProviderRemoval)
+        );
+        assert_eq!(app.selection.title, "  Remove provider?  ");
+        assert_eq!(
+            app.pending_provider_removal
+                .as_ref()
+                .map(|pending| pending.id.as_str()),
+            Some("gpu-box")
+        );
+        let items: Vec<_> = app
+            .selection
+            .items
+            .iter()
+            .map(|item| item.complete_to.as_str())
+            .collect();
+        assert_eq!(
+            items,
+            vec!["/provider_remove_confirm", "/provider_remove_cancel"]
+        );
+    }
+
+    #[test]
+    fn apply_selection_returns_remove_provider_confirmation() {
+        let mut app = make_app();
+        let instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+        app.enter_provider_removal_confirmation_mode(&instance);
+        app.selection.selected = 0;
+
+        let result = app.apply_selection();
+
+        assert!(matches!(
+            result,
+            Some(super::SelectionResult::RemoveProvider(id)) if id == "gpu-box"
+        ));
+    }
+
+    #[test]
+    fn apply_selection_returns_cancel_provider_removal() {
+        let mut app = make_app();
+        let instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+        app.enter_provider_removal_confirmation_mode(&instance);
+        app.selection.selected = 1;
+
+        let result = app.apply_selection();
+
+        assert!(matches!(
+            result,
+            Some(super::SelectionResult::CancelProviderRemoval)
+        ));
+    }
+
+    #[test]
+    fn clear_pending_provider_setup_clears_pending_provider_removal() {
+        let mut app = make_app();
+        let instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+        app.enter_provider_removal_confirmation_mode(&instance);
+
+        app.clear_pending_provider_setup();
+
+        assert!(app.pending_provider_removal.is_none());
     }
 
     #[test]

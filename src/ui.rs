@@ -403,10 +403,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         // Header row: title on the left, key hints on the right.
         let hints = if app.in_provider_selection_mode() {
             if app.selection_filter_enabled() {
-                "↑↓ navigate   Enter select   Ctrl+E edit provider   type filter   Esc cancel  "
+                "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   type filter   Esc cancel  "
             } else {
-                "↑↓ navigate   Enter select   Ctrl+E edit provider   Esc cancel  "
+                "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   Esc cancel  "
             }
+        } else if app.in_provider_removal_confirmation_mode() {
+            "↑↓ navigate   Enter select   Esc cancel  "
         } else if app.selection_filter_enabled() {
             "↑↓ navigate   type filter   Enter select   Esc cancel  "
         } else {

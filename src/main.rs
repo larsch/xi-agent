@@ -429,6 +429,40 @@ async fn main() -> io::Result<()> {
                 app.mark_log_dirty();
             }
 
+            Ok(RunResult::RemoveProvider(id)) => {
+                app.clear_pending_provider_setup();
+                app.clear_pending_provider_removal();
+                if config.remove_provider(&id) {
+                    if config.provider.as_deref() == Some(id.as_str()) {
+                        config.provider = config.providers.first().map(|p| p.id.clone());
+                    }
+                    if let Err(e) = config.save() {
+                        log::debug!("failed to persist provider removal: {e}");
+                        app.messages.push(Message::assistant(format!(
+                            "[failed to persist config.toml: {e}]"
+                        )));
+                        app.mark_log_dirty();
+                    }
+                    current_instance = resolve_provider_instance(None, &config);
+                    current_model = resolve_model_for_instance(None, &current_instance);
+                    app.current_model = current_model.clone();
+                    current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                    app.current_thinking = current_thinking;
+                    app.current_provider = current_instance.id.clone();
+                    app.provider_instances = config.providers.clone();
+                    app.available_models = None;
+                    maybe_warn_thinking_unsupported(
+                        &mut app,
+                        &current_instance,
+                        &current_model,
+                        current_thinking,
+                    );
+                    app.messages
+                        .push(Message::assistant(format!("[removed provider {id}]")));
+                    app.mark_log_dirty();
+                }
+            }
+
             Ok(RunResult::ChangeThinking(level)) => {
                 current_thinking = level;
                 app.current_thinking = level;
@@ -561,6 +595,7 @@ enum RunResult {
     AddProvider(ProviderInstance),
     UpdateProvider(ProviderInstance),
     UpdateProviderApiKey(ProviderInstance),
+    RemoveProvider(String),
     ChangeThinking(ThinkingLevel),
     /// Switch to (or stay on) a specific Ollama instance with a new base URL.
     ChangeOllamaEndpoint {
@@ -731,6 +766,7 @@ async fn run(
 
                         if key.code == KeyCode::Char('r')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !app.selection.active
                         {
                             app.resume_latest_for_current_cwd();
                             continue;
@@ -864,7 +900,8 @@ async fn run(
                                     }
                                 }
                                 KeyCode::Char('e')
-                                    if key.modifiers == KeyModifiers::CONTROL
+                                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                                        && !key.modifiers.contains(KeyModifiers::ALT)
                                         && app.in_provider_selection_mode() =>
                                 {
                                     if let Some(id) = app.selected_provider_id()
@@ -873,6 +910,19 @@ async fn run(
                                             == provider_instance::BackendClass::UserSuppliedService
                                     {
                                         app.enter_provider_edit_mode(instance);
+                                    }
+                                }
+                                KeyCode::Char('r')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                                        && !key.modifiers.contains(KeyModifiers::ALT)
+                                        && app.in_provider_selection_mode() =>
+                                {
+                                    if let Some(id) = app.selected_provider_id()
+                                        && let Some(instance) = config.find_provider(id)
+                                        && instance.backend_preset.def().backend_class
+                                            == provider_instance::BackendClass::UserSuppliedService
+                                    {
+                                        app.enter_provider_removal_confirmation_mode(instance);
                                     }
                                 }
                                 KeyCode::Enter if key.modifiers.is_empty() => {
@@ -891,6 +941,12 @@ async fn run(
                                         }
                                         Some(SelectionResult::AddProvider) => {
                                             app.enter_provider_name_input_mode();
+                                        }
+                                        Some(SelectionResult::CancelProviderRemoval) => {
+                                            app.clear_pending_provider_removal();
+                                        }
+                                        Some(SelectionResult::RemoveProvider(id)) => {
+                                            return Ok(RunResult::RemoveProvider(id));
                                         }
                                         Some(SelectionResult::ProviderBackendPreset(backend_preset)) => {
                                             let service_def = backend_preset.def();
@@ -956,6 +1012,9 @@ async fn run(
                                     } else if app.streaming() {
                                         app.abort_agent_loop();
                                     } else {
+                                        if app.in_provider_removal_confirmation_mode() {
+                                            app.clear_pending_provider_removal();
+                                        }
                                         app.exit_selection_mode();
                                     }
                                 }
