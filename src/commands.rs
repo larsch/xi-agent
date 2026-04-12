@@ -523,11 +523,11 @@ mod tests {
         let providers = vec![
             crate::provider_instance::ProviderInstance::new(
                 "gemini",
-                crate::provider_instance::ServiceType::Gemini,
+                crate::provider_instance::BackendPreset::Gemini,
             ),
             crate::provider_instance::ProviderInstance::new(
                 "gpu-box",
-                crate::provider_instance::ServiceType::Ollama,
+                crate::provider_instance::BackendPreset::Ollama,
             ),
         ];
         let provider_items =

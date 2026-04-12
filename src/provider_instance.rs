@@ -33,7 +33,7 @@ impl ApiType {
 /// Recognisable software / cloud services tau supports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ServiceType {
+pub enum BackendPreset {
     /// GitHub Copilot (cloud, managed routing)
     Copilot,
     /// OpenAI API (cloud)
@@ -85,9 +85,9 @@ pub enum EndpointBehavior {
     Internal,
 }
 
-/// Metadata tau keeps about a service type / backend preset.
-pub struct ServiceDef {
-    /// Machine-readable id (matches `ServiceType` serialisation).
+/// Metadata tau keeps about a backend preset.
+pub struct BackendPresetDef {
+    /// Machine-readable id (matches `BackendPreset` serialisation).
     pub id: &'static str,
     /// Human-readable display label.
     pub label: &'static str,
@@ -108,9 +108,9 @@ pub struct ServiceDef {
     pub auth_mode: AuthMode,
 }
 
-/// Static catalog of all supported service types.
-pub const SERVICE_CATALOG: &[ServiceDef] = &[
-    ServiceDef {
+/// Static catalog of all supported backend presets.
+pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
+    BackendPresetDef {
         id: "copilot",
         label: "GitHub Copilot",
         backend_class: BackendClass::BuiltInHosted,
@@ -125,7 +125,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "openai",
         label: "OpenAI API",
         backend_class: BackendClass::BuiltInHosted,
@@ -136,7 +136,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::ApiKey,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "openrouter",
         label: "OpenRouter",
         backend_class: BackendClass::BuiltInHosted,
@@ -147,7 +147,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::ApiKey,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "codex",
         label: "OpenAI Codex (chatgpt.com)",
         backend_class: BackendClass::BuiltInHosted,
@@ -158,7 +158,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "gemini",
         label: "Google Gemini CLI (Cloud Code Assist)",
         backend_class: BackendClass::BuiltInHosted,
@@ -169,7 +169,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "ollama",
         label: "Ollama",
         backend_class: BackendClass::UserSuppliedService,
@@ -184,7 +184,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::None,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "ollama-com",
         label: "ollama.com",
         backend_class: BackendClass::BuiltInHosted,
@@ -195,7 +195,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::None,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "open-webui",
         label: "Open WebUI",
         backend_class: BackendClass::UserSuppliedService,
@@ -206,7 +206,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::ApiKey,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "openai-compatible",
         label: "OpenAI-compatible endpoint",
         backend_class: BackendClass::UserSuppliedService,
@@ -217,7 +217,7 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::ApiKey,
     },
-    ServiceDef {
+    BackendPresetDef {
         id: "test",
         label: "Test (UI exercise)",
         backend_class: BackendClass::Internal,
@@ -230,14 +230,14 @@ pub const SERVICE_CATALOG: &[ServiceDef] = &[
     },
 ];
 
-impl ServiceType {
-    /// Look up this service type's static definition.
-    pub fn def(&self) -> &'static ServiceDef {
+impl BackendPreset {
+    /// Look up this backend preset's static definition.
+    pub fn def(&self) -> &'static BackendPresetDef {
         let id = self.id();
-        SERVICE_CATALOG
+        BACKEND_PRESET_CATALOG
             .iter()
             .find(|d| d.id == id)
-            .expect("every ServiceType has a catalog entry")
+            .expect("every BackendPreset has a catalog entry")
     }
 
     pub fn id(&self) -> &'static str {
@@ -259,8 +259,8 @@ impl ServiceType {
         self.def().label
     }
 
-    /// All service types visible in the "add provider" menu.
-    pub fn user_visible() -> &'static [ServiceType] {
+    /// All backend presets visible in the "add provider" menu.
+    pub fn user_visible() -> &'static [BackendPreset] {
         &[
             Self::Copilot,
             Self::OpenRouter,
@@ -315,8 +315,9 @@ pub struct ProviderInstance {
     /// Stable identifier and user-visible name (e.g. "work-webui", "gpu-box").
     /// Used as the key in config and selection state.
     pub id: String,
-    /// The recognisable software / service this instance connects to.
-    pub service_type: ServiceType,
+    /// The backend preset this instance connects to.
+    #[serde(rename = "service_type", alias = "backend_preset")]
+    pub backend_preset: BackendPreset,
     /// The API protocol tau uses to talk to this instance.
     pub api_type: ApiType,
     /// Base URL (required for self-hosted; absent for cloud services that have
@@ -330,12 +331,12 @@ pub struct ProviderInstance {
 
 impl ProviderInstance {
     /// Construct a new instance with the recommended defaults for the given
-    /// service type.
-    pub fn new(id: impl Into<String>, service_type: ServiceType) -> Self {
-        let api_type = service_type.def().default_api.clone();
+    /// backend preset.
+    pub fn new(id: impl Into<String>, backend_preset: BackendPreset) -> Self {
+        let api_type = backend_preset.def().default_api.clone();
         Self {
             id: id.into(),
-            service_type,
+            backend_preset,
             api_type,
             base_url: None,
             api_key: None,
@@ -345,14 +346,14 @@ impl ProviderInstance {
 
     /// Display label shown in provider selection lists.
     pub fn label(&self) -> String {
-        format!("{} ({})", self.id, self.service_type.label())
+        format!("{} ({})", self.id, self.backend_preset.label())
     }
 
     /// Effective model: last-selected model, or the service default.
     pub fn effective_model(&self) -> &str {
         self.model
             .as_deref()
-            .unwrap_or_else(|| self.service_type.default_model())
+            .unwrap_or_else(|| self.backend_preset.default_model())
     }
 }
 
@@ -361,18 +362,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_service_type_has_catalog_entry() {
+    fn every_backend_preset_has_catalog_entry() {
         let types = [
-            ServiceType::Copilot,
-            ServiceType::OpenAi,
-            ServiceType::OpenRouter,
-            ServiceType::Codex,
-            ServiceType::Gemini,
-            ServiceType::Ollama,
-            ServiceType::OllamaCom,
-            ServiceType::OpenWebUi,
-            ServiceType::OpenAiCompatible,
-            ServiceType::Test,
+            BackendPreset::Copilot,
+            BackendPreset::OpenAi,
+            BackendPreset::OpenRouter,
+            BackendPreset::Codex,
+            BackendPreset::Gemini,
+            BackendPreset::Ollama,
+            BackendPreset::OllamaCom,
+            BackendPreset::OpenWebUi,
+            BackendPreset::OpenAiCompatible,
+            BackendPreset::Test,
         ];
         for st in &types {
             let def = st.def();
@@ -390,22 +391,22 @@ mod tests {
     }
 
     #[test]
-    fn service_type_round_trips_through_id() {
+    fn backend_preset_round_trips_through_id() {
         let types = [
-            ServiceType::Copilot,
-            ServiceType::OpenAi,
-            ServiceType::OpenRouter,
-            ServiceType::Codex,
-            ServiceType::Gemini,
-            ServiceType::Ollama,
-            ServiceType::OllamaCom,
-            ServiceType::OpenWebUi,
-            ServiceType::OpenAiCompatible,
-            ServiceType::Test,
+            BackendPreset::Copilot,
+            BackendPreset::OpenAi,
+            BackendPreset::OpenRouter,
+            BackendPreset::Codex,
+            BackendPreset::Gemini,
+            BackendPreset::Ollama,
+            BackendPreset::OllamaCom,
+            BackendPreset::OpenWebUi,
+            BackendPreset::OpenAiCompatible,
+            BackendPreset::Test,
         ];
         for st in &types {
             let id = st.id();
-            let roundtripped = ServiceType::from_id(id).unwrap_or_else(|| {
+            let roundtripped = BackendPreset::from_id(id).unwrap_or_else(|| {
                 panic!("from_id failed for id={id}");
             });
             assert_eq!(st.id(), roundtripped.id());
@@ -414,7 +415,7 @@ mod tests {
 
     #[test]
     fn provider_preset_metadata_matches_spec_semantics() {
-        let openrouter = ServiceType::OpenRouter.def();
+        let openrouter = BackendPreset::OpenRouter.def();
         assert_eq!(openrouter.backend_class, BackendClass::BuiltInHosted);
         assert_eq!(openrouter.auth_mode, AuthMode::ApiKey);
         assert_eq!(
@@ -422,16 +423,16 @@ mod tests {
             EndpointBehavior::Predetermined
         );
 
-        let copilot = ServiceType::Copilot.def();
+        let copilot = BackendPreset::Copilot.def();
         assert_eq!(copilot.auth_mode, AuthMode::OAuthLogin);
         assert_eq!(copilot.endpoint_behavior, EndpointBehavior::Predetermined);
 
-        let ollama = ServiceType::Ollama.def();
+        let ollama = BackendPreset::Ollama.def();
         assert_eq!(ollama.backend_class, BackendClass::UserSuppliedService);
         assert_eq!(ollama.auth_mode, AuthMode::None);
         assert_eq!(ollama.endpoint_behavior, EndpointBehavior::UserSupplied);
 
-        let webui = ServiceType::OpenWebUi.def();
+        let webui = BackendPreset::OpenWebUi.def();
         assert_eq!(webui.backend_class, BackendClass::UserSuppliedService);
         assert_eq!(webui.auth_mode, AuthMode::ApiKey);
         assert_eq!(webui.endpoint_behavior, EndpointBehavior::UserSupplied);
@@ -439,20 +440,20 @@ mod tests {
 
     #[test]
     fn provider_instance_new_uses_default_api() {
-        let inst = ProviderInstance::new("my-ollama", ServiceType::Ollama);
+        let inst = ProviderInstance::new("my-ollama", BackendPreset::Ollama);
         assert_eq!(inst.api_type, ApiType::OllamaChatApi);
         assert_eq!(inst.effective_model(), "llama3.1");
     }
 
     #[test]
     fn provider_instance_effective_model_falls_back_to_default() {
-        let inst = ProviderInstance::new("copilot", ServiceType::Copilot);
+        let inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
         assert_eq!(inst.effective_model(), "gpt-4o");
     }
 
     #[test]
     fn provider_instance_effective_model_uses_override() {
-        let mut inst = ProviderInstance::new("copilot", ServiceType::Copilot);
+        let mut inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
         inst.model = Some("claude-sonnet-4.5".to_string());
         assert_eq!(inst.effective_model(), "claude-sonnet-4.5");
     }

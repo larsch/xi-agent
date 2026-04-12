@@ -14,7 +14,7 @@ use crate::{
         openai::OpenAiProvider,
         test_provider::TestProvider,
     },
-    provider_instance::{ApiType, ProviderInstance, ServiceType},
+    provider_instance::{ApiType, BackendPreset, ProviderInstance},
     thinking::ThinkingLevel,
 };
 
@@ -285,7 +285,7 @@ pub fn thinking_support_for_instance(instance: &ProviderInstance, _model: &str) 
         ApiType::OpenAiResponses => ThinkingSupport::Applied,
         ApiType::GeminiNative => ThinkingSupport::Applied,
         ApiType::OpenAiCompatible => {
-            if instance.service_type == ServiceType::Copilot {
+            if instance.backend_preset == BackendPreset::Copilot {
                 ThinkingSupport::Ignored(
                     "copilot chat-completions route does not expose reasoning.effort",
                 )
@@ -312,9 +312,9 @@ pub fn build_provider_for_instance(
 ) -> anyhow::Result<Arc<dyn LlmProvider + Send + Sync>> {
     let model = instance.effective_model();
 
-    match instance.service_type {
+    match instance.backend_preset {
         // ── Cloud services with AuthStore credentials ─────────────────────
-        ServiceType::Copilot => {
+        BackendPreset::Copilot => {
             let store = AuthStore::load_default()?;
             let creds = store.get_copilot().ok_or_else(|| {
                 anyhow::anyhow!("Not authenticated for copilot. Run /login copilot.")
@@ -333,7 +333,7 @@ pub fn build_provider_for_instance(
             );
             Ok(Arc::new(p))
         }
-        ServiceType::Codex => {
+        BackendPreset::Codex => {
             let store = AuthStore::load_default()?;
             let creds = store
                 .get_codex()
@@ -346,7 +346,7 @@ pub fn build_provider_for_instance(
                 .with_reasoning_effort(thinking.to_reasoning_effort().map(ToString::to_string));
             Ok(Arc::new(p))
         }
-        ServiceType::Gemini => {
+        BackendPreset::Gemini => {
             let store = AuthStore::load_default()?;
             let creds = store.get_gemini().ok_or_else(|| {
                 anyhow::anyhow!("Not authenticated for gemini. Run /login gemini.")
@@ -368,7 +368,7 @@ pub fn build_provider_for_instance(
         }
 
         // ── OpenAI-compatible cloud services (api_key in instance) ─────────
-        ServiceType::OpenAi | ServiceType::OpenAiCompatible => {
+        BackendPreset::OpenAi | BackendPreset::OpenAiCompatible => {
             let base_url = instance
                 .base_url
                 .clone()
@@ -381,7 +381,7 @@ pub fn build_provider_for_instance(
             })?;
             Ok(Arc::new(OpenAiProvider::new(base_url, model, api_key)))
         }
-        ServiceType::OpenRouter => {
+        BackendPreset::OpenRouter => {
             let base_url = instance
                 .base_url
                 .clone()
@@ -404,14 +404,14 @@ pub fn build_provider_for_instance(
         }
 
         // ── Ollama ────────────────────────────────────────────────────────
-        ServiceType::Ollama => {
+        BackendPreset::Ollama => {
             let base = instance
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             Ok(Arc::new(OllamaProvider::new(base, model.to_string())))
         }
-        ServiceType::OllamaCom => {
+        BackendPreset::OllamaCom => {
             let base = instance
                 .base_url
                 .clone()
@@ -420,7 +420,7 @@ pub fn build_provider_for_instance(
         }
 
         // ── Open WebUI ────────────────────────────────────────────────────
-        ServiceType::OpenWebUi => {
+        BackendPreset::OpenWebUi => {
             let base = instance.base_url.clone().ok_or_else(|| {
                 anyhow::anyhow!(
                     "No base URL for Open WebUI provider '{}'. Configure it first.",
@@ -441,7 +441,7 @@ pub fn build_provider_for_instance(
         }
 
         // ── Test ──────────────────────────────────────────────────────────
-        ServiceType::Test => Ok(Arc::new(TestProvider::new())),
+        BackendPreset::Test => Ok(Arc::new(TestProvider::new())),
     }
 }
 

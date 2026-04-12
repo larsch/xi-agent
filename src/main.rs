@@ -287,7 +287,7 @@ async fn main() -> io::Result<()> {
                     if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
                         app.pending_provider_setup = Some(app::PendingProviderSetup {
                             id: inst.id.clone(),
-                            service_type: Some(inst.service_type.clone()),
+                            backend_preset: Some(inst.backend_preset.clone()),
                             api_type: Some(inst.api_type.clone()),
                             base_url: inst.base_url.clone(),
                             api_key: inst.api_key.clone(),
@@ -354,7 +354,7 @@ async fn main() -> io::Result<()> {
                 app.messages.push(Message::assistant(format!(
                     "[added provider {} ({})]",
                     current_instance.id,
-                    current_instance.service_type.label(),
+                    current_instance.backend_preset.label(),
                 )));
                 app.mark_log_dirty();
             }
@@ -547,19 +547,19 @@ fn normalize_paste_text(text: &str) -> String {
 
 fn provider_setup_requires_endpoint(instance: &ProviderInstance) -> bool {
     matches!(
-        instance.service_type.def().endpoint_behavior,
+        instance.backend_preset.def().endpoint_behavior,
         EndpointBehavior::UserSupplied | EndpointBehavior::Overrideable
     )
 }
 
 fn provider_setup_requires_api_key(instance: &ProviderInstance) -> bool {
-    instance.service_type.def().auth_mode == AuthMode::ApiKey
+    instance.backend_preset.def().auth_mode == AuthMode::ApiKey
 }
 
 fn enter_provider_endpoint_input(app: &mut App, instance: &ProviderInstance) {
-    match instance.service_type {
-        provider_instance::ServiceType::Ollama => app.enter_ollama_endpoint_freeform_mode(),
-        provider_instance::ServiceType::OpenWebUi => app.enter_open_webui_url_input_mode(),
+    match instance.backend_preset {
+        provider_instance::BackendPreset::Ollama => app.enter_ollama_endpoint_freeform_mode(),
+        provider_instance::BackendPreset::OpenWebUi => app.enter_open_webui_url_input_mode(),
         _ => app.enter_provider_base_url_input_mode(),
     }
 }
@@ -846,12 +846,12 @@ async fn run(
                                         Some(SelectionResult::AddProvider) => {
                                             app.enter_provider_name_input_mode();
                                         }
-                                        Some(SelectionResult::ProviderServiceType(service_type)) => {
-                                            let service_def = service_type.def();
+                                        Some(SelectionResult::ProviderBackendPreset(backend_preset)) => {
+                                            let service_def = backend_preset.def();
                                             let default_api = service_def.default_api.clone();
-                                            app.set_pending_provider_service_type(service_type.clone());
+                                            app.set_pending_provider_backend_preset(backend_preset.clone());
                                             if service_def.user_selects_api {
-                                                app.enter_provider_api_type_selection_mode(&service_type);
+                                                app.enter_provider_api_type_selection_mode(&backend_preset);
                                             } else {
                                                 app.set_pending_provider_api_type(default_api);
                                                 if let Some(instance) = app.pending_provider_instance() {
@@ -1016,7 +1016,7 @@ async fn run(
                                         let instance = app
                                             .pending_provider_instance()
                                             .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                                        if instance.service_type == provider_instance::ServiceType::Ollama {
+                                        if instance.backend_preset == provider_instance::BackendPreset::Ollama {
                                             return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
                                         }
                                         if provider_setup_requires_api_key(&instance) {
@@ -1034,7 +1034,7 @@ async fn run(
                                     }
                                 } else if app.setup_input_mode == Some(app::SetupInputKind::Name) {
                                     if app.submit_provider_name_input(&config.providers).is_some() {
-                                        app.enter_provider_service_type_selection_mode();
+                                        app.enter_provider_backend_preset_selection_mode();
                                     }
                                 } else if app.has_pending_ask() {
                                     app.submit_pending_ask_answer();
@@ -1249,7 +1249,7 @@ fn resolve_provider_instance(cli_override: Option<&str>, config: &TauConfig) -> 
     }
     // First configured instance, or a synthesised copilot default.
     config.providers.first().cloned().unwrap_or_else(|| {
-        ProviderInstance::new("copilot", provider_instance::ServiceType::Copilot)
+        ProviderInstance::new("copilot", provider_instance::BackendPreset::Copilot)
     })
 }
 
@@ -1265,7 +1265,7 @@ fn resolve_model_for_instance(cli_override: Option<&str>, instance: &ProviderIns
     cli_override
         .map(ToString::to_string)
         .or_else(|| instance.model.clone())
-        .unwrap_or_else(|| instance.service_type.default_model().to_string())
+        .unwrap_or_else(|| instance.backend_preset.default_model().to_string())
 }
 
 /// Instance-based variant of `persist_provider_model_selection`.
@@ -1279,7 +1279,7 @@ fn persist_provider_model_selection_v2(
     app: &mut App,
 ) {
     // Never persist the test provider.
-    if instance.service_type == provider_instance::ServiceType::Test {
+    if instance.backend_preset == provider_instance::BackendPreset::Test {
         return;
     }
     config.provider = Some(instance.id.clone());
@@ -1400,7 +1400,7 @@ async fn run_print_mode(
     let current_instance = resolve_provider_instance(provider_override, config);
     let current_model = resolve_model_for_instance(model_override, &current_instance);
     let current_thinking = resolve_thinking_level_for_model(config, &current_model);
-    let provider_name = current_instance.service_type.id().to_string();
+    let provider_name = current_instance.backend_preset.id().to_string();
 
     // Proactive preflight: refresh the token before building the provider so
     // that build_provider reads fresh credentials from the auth store.
@@ -1628,7 +1628,7 @@ mod tests {
     };
     use crate::{
         config::TauConfig,
-        provider_instance::{ProviderInstance, ServiceType},
+        provider_instance::{BackendPreset, ProviderInstance},
         thinking::ThinkingLevel,
     };
 
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn resolve_model_prefers_cli_over_instance() {
-        let mut inst = ProviderInstance::new("openai", ServiceType::OpenAi);
+        let mut inst = ProviderInstance::new("openai", BackendPreset::OpenAi);
         inst.model = Some("gpt-4.1".to_string());
         let model = resolve_model_for_instance(Some("gpt-4.1-mini"), &inst);
         assert_eq!(model, "gpt-4.1-mini");
@@ -1648,7 +1648,7 @@ mod tests {
 
     #[test]
     fn resolve_model_uses_instance_model() {
-        let mut inst = ProviderInstance::new("copilot", ServiceType::Copilot);
+        let mut inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
         inst.model = Some("gpt-5.3-codex".to_string());
         let model = resolve_model_for_instance(None, &inst);
         assert_eq!(model, "gpt-5.3-codex");
@@ -1656,9 +1656,9 @@ mod tests {
 
     #[test]
     fn resolve_model_falls_back_to_service_default() {
-        let inst = ProviderInstance::new("copilot", ServiceType::Copilot);
+        let inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
         let model = resolve_model_for_instance(None, &inst);
-        assert_eq!(model, ServiceType::Copilot.default_model());
+        assert_eq!(model, BackendPreset::Copilot.default_model());
     }
 
     #[test]

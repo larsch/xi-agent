@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::Context;
 
-use crate::provider_instance::{ProviderInstance, ServiceType};
+use crate::provider_instance::{BackendPreset, ProviderInstance};
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TauConfig {
@@ -64,8 +64,10 @@ impl TauConfig {
     /// Ensure singleton built-in hosted providers exist in `providers`.
     fn ensure_builtin_hosted_providers(&mut self) {
         if self.find_provider("openrouter").is_none() {
-            self.providers
-                .push(ProviderInstance::new("openrouter", ServiceType::OpenRouter));
+            self.providers.push(ProviderInstance::new(
+                "openrouter",
+                BackendPreset::OpenRouter,
+            ));
         }
     }
 
@@ -79,13 +81,13 @@ impl TauConfig {
     fn migrate_legacy_providers(&mut self) {
         if self.providers.is_empty() {
             // Copilot — always present as a built-in default.
-            let mut copilot = ProviderInstance::new("copilot", ServiceType::Copilot);
+            let mut copilot = ProviderInstance::new("copilot", BackendPreset::Copilot);
             copilot.model = self.copilot.model.clone();
             self.providers.push(copilot);
 
             // OpenAI — only if an api_key is configured.
             if self.openai.api_key.is_some() {
-                let mut openai = ProviderInstance::new("openai", ServiceType::OpenAi);
+                let mut openai = ProviderInstance::new("openai", BackendPreset::OpenAi);
                 openai.base_url = self.openai.base_url.clone();
                 openai.api_key = self.openai.api_key.clone();
                 openai.model = self.openai.model.clone();
@@ -93,13 +95,13 @@ impl TauConfig {
             }
 
             // Codex — always a built-in (auth handled separately via AuthStore).
-            let mut codex = ProviderInstance::new("codex", ServiceType::Codex);
+            let mut codex = ProviderInstance::new("codex", BackendPreset::Codex);
             codex.base_url = self.codex.base_url.clone();
             codex.model = self.codex.model.clone();
             self.providers.push(codex);
 
             // Gemini — always a built-in (auth handled separately via AuthStore).
-            let mut gemini = ProviderInstance::new("gemini", ServiceType::Gemini);
+            let mut gemini = ProviderInstance::new("gemini", BackendPreset::Gemini);
             gemini.base_url = self.gemini.base_url.clone();
             gemini.model = self.gemini.model.clone();
             self.providers.push(gemini);
@@ -107,7 +109,7 @@ impl TauConfig {
             // Ollama — only if a base_url is configured; otherwise skip (user
             // hasn't set it up yet).
             if self.ollama.base_url.is_some() {
-                let mut ollama = ProviderInstance::new("ollama", ServiceType::Ollama);
+                let mut ollama = ProviderInstance::new("ollama", BackendPreset::Ollama);
                 ollama.base_url = self.ollama.base_url.clone();
                 ollama.model = self.ollama.model.clone();
                 self.providers.push(ollama);
@@ -115,7 +117,7 @@ impl TauConfig {
 
             // Open WebUI — only if a base_url is configured.
             if self.open_webui.base_url.is_some() {
-                let mut open_webui = ProviderInstance::new("open-webui", ServiceType::OpenWebUi);
+                let mut open_webui = ProviderInstance::new("open-webui", BackendPreset::OpenWebUi);
                 open_webui.base_url = self.open_webui.base_url.clone();
                 open_webui.api_key = self.open_webui.api_key.clone();
                 open_webui.model = self.open_webui.model.clone();
@@ -267,7 +269,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{OllamaConfig, TauConfig};
-    use crate::provider_instance::{ApiType, ServiceType};
+    use crate::provider_instance::{ApiType, BackendPreset};
 
     #[test]
     fn parses_full_config_toml() {
@@ -354,7 +356,7 @@ model = "gpt-4o"
         let inst = cfg
             .find_provider("copilot")
             .expect("copilot instance present");
-        assert_eq!(inst.service_type, ServiceType::Copilot);
+        assert_eq!(inst.backend_preset, BackendPreset::Copilot);
         assert_eq!(inst.model.as_deref(), Some("gpt-4o"));
         assert_eq!(cfg.provider.as_deref(), Some("copilot"));
     }
@@ -370,7 +372,7 @@ model = "gpt-4o"
         let inst = cfg
             .find_provider("openrouter")
             .expect("openrouter instance present");
-        assert_eq!(inst.service_type, ServiceType::OpenRouter);
+        assert_eq!(inst.backend_preset, BackendPreset::OpenRouter);
         assert_eq!(inst.id, "openrouter");
     }
 
@@ -379,7 +381,7 @@ model = "gpt-4o"
         let raw = r#"
 [[providers]]
 id = "copilot"
-service_type = "copilot"
+backend_preset = "copilot"
 api_type = "openai-compatible"
 model = "claude-sonnet-4.5"
 "#;
@@ -405,7 +407,7 @@ model = "gpt-4o-mini"
         let inst = cfg
             .find_provider("openai")
             .expect("openai instance present");
-        assert_eq!(inst.service_type, ServiceType::OpenAi);
+        assert_eq!(inst.backend_preset, BackendPreset::OpenAi);
         assert_eq!(inst.api_key.as_deref(), Some("sk-test"));
         assert_eq!(inst.model.as_deref(), Some("gpt-4o-mini"));
     }
@@ -431,7 +433,7 @@ model = "llama3.1"
         let inst = cfg
             .find_provider("ollama")
             .expect("ollama instance present");
-        assert_eq!(inst.service_type, ServiceType::Ollama);
+        assert_eq!(inst.backend_preset, BackendPreset::Ollama);
         assert_eq!(inst.api_type, ApiType::OllamaChatApi);
         assert_eq!(inst.base_url.as_deref(), Some("http://gpu-box:11434"));
     }
@@ -455,7 +457,7 @@ model = "llama3.1"
         let inst = cfg
             .find_provider("open-webui")
             .expect("open-webui instance present");
-        assert_eq!(inst.service_type, ServiceType::OpenWebUi);
+        assert_eq!(inst.backend_preset, BackendPreset::OpenWebUi);
         assert_eq!(inst.api_key.as_deref(), Some("token123"));
     }
 
@@ -467,7 +469,7 @@ model = "gpt-4o"
 
 [[providers]]
 id = "copilot"
-service_type = "copilot"
+backend_preset = "copilot"
 api_type = "openai-compatible"
 model = "claude-sonnet-4.5"
 "#;
@@ -478,7 +480,7 @@ model = "claude-sonnet-4.5"
         // The explicit [[providers]] entry wins, not the legacy [copilot] section.
         assert_eq!(inst.model.as_deref(), Some("claude-sonnet-4.5"));
         let openrouter = cfg.find_provider("openrouter").unwrap();
-        assert_eq!(openrouter.service_type, ServiceType::OpenRouter);
+        assert_eq!(openrouter.backend_preset, BackendPreset::OpenRouter);
     }
 
     #[test]
@@ -488,7 +490,7 @@ provider = "work-webui"
 
 [[providers]]
 id = "work-webui"
-service_type = "open-webui"
+backend_preset = "open-webui"
 api_type = "openai-compatible"
 base_url = "https://work.example.com"
 api_key = "tok"
@@ -496,7 +498,7 @@ model = "llama3.1"
 
 [[providers]]
 id = "gpu-box"
-service_type = "ollama"
+backend_preset = "ollama"
 api_type = "ollama-chat-api"
 base_url = "http://gpu-box:11434"
 "#;
@@ -504,15 +506,15 @@ base_url = "http://gpu-box:11434"
         assert_eq!(cfg.providers.len(), 3);
 
         let webui = cfg.find_provider("work-webui").unwrap();
-        assert_eq!(webui.service_type, ServiceType::OpenWebUi);
+        assert_eq!(webui.backend_preset, BackendPreset::OpenWebUi);
         assert_eq!(webui.base_url.as_deref(), Some("https://work.example.com"));
 
         let gpu = cfg.find_provider("gpu-box").unwrap();
-        assert_eq!(gpu.service_type, ServiceType::Ollama);
+        assert_eq!(gpu.backend_preset, BackendPreset::Ollama);
         assert_eq!(gpu.api_type, ApiType::OllamaChatApi);
 
         let openrouter = cfg.find_provider("openrouter").unwrap();
-        assert_eq!(openrouter.service_type, ServiceType::OpenRouter);
+        assert_eq!(openrouter.backend_preset, BackendPreset::OpenRouter);
 
         assert_eq!(cfg.provider.as_deref(), Some("work-webui"));
     }
@@ -521,12 +523,12 @@ base_url = "http://gpu-box:11434"
     fn upsert_and_remove_provider() {
         let mut cfg = TauConfig::default();
         use crate::provider_instance::ProviderInstance;
-        let inst = ProviderInstance::new("my-ollama", ServiceType::Ollama);
+        let inst = ProviderInstance::new("my-ollama", BackendPreset::Ollama);
         cfg.upsert_provider(inst);
         assert!(cfg.find_provider("my-ollama").is_some());
 
         // Upsert again with model set
-        let mut inst2 = ProviderInstance::new("my-ollama", ServiceType::Ollama);
+        let mut inst2 = ProviderInstance::new("my-ollama", BackendPreset::Ollama);
         inst2.model = Some("mistral".into());
         cfg.upsert_provider(inst2);
         assert_eq!(cfg.providers.len(), 1);

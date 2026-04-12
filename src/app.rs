@@ -14,7 +14,7 @@ use crate::{
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     llm::{AssistantPhase, DisplayRange, LlmProvider, Message, Role, UsageStats},
-    provider_instance::{ApiType, AuthMode, EndpointBehavior, ProviderInstance, ServiceType},
+    provider_instance::{ApiType, AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
     session::SessionStore,
     shell::{self, ShellKind},
     skills::SkillMeta,
@@ -49,8 +49,8 @@ pub enum SelectionResult {
     LoginAction(LoginActionKind),
     /// The user started the add-provider flow.
     AddProvider,
-    /// A provider service type was chosen during add-provider setup.
-    ProviderServiceType(ServiceType),
+    /// A provider backend type was chosen during add-provider setup.
+    ProviderBackendPreset(BackendPreset),
     /// A provider API type was chosen during add-provider setup.
     ProviderApiType(ApiType),
 }
@@ -82,11 +82,11 @@ impl SetupInputKind {
         match self {
             Self::Name => "provider instance name: ".to_string(),
             Self::BaseUrl => match instance {
-                Some(p) => match p.service_type.def().endpoint_behavior {
-                    EndpointBehavior::UserSupplied => match p.service_type {
-                        ServiceType::Ollama => "ollama URL: ".to_string(),
-                        ServiceType::OpenWebUi => "open-webui URL: ".to_string(),
-                        ServiceType::OpenAiCompatible => "URL: ".to_string(),
+                Some(p) => match p.backend_preset.def().endpoint_behavior {
+                    EndpointBehavior::UserSupplied => match p.backend_preset {
+                        BackendPreset::Ollama => "ollama URL: ".to_string(),
+                        BackendPreset::OpenWebUi => "open-webui URL: ".to_string(),
+                        BackendPreset::OpenAiCompatible => "URL: ".to_string(),
                         _ => "URL: ".to_string(),
                     },
                     EndpointBehavior::Overrideable => "URL override: ".to_string(),
@@ -95,10 +95,10 @@ impl SetupInputKind {
                 None => "URL: ".to_string(),
             },
             Self::ApiKey => match instance {
-                Some(p) => match p.service_type.def().auth_mode {
-                    AuthMode::ApiKey => match p.service_type {
-                        ServiceType::OpenRouter => "OpenRouter API key: ".to_string(),
-                        ServiceType::OpenWebUi => "open-webui token: ".to_string(),
+                Some(p) => match p.backend_preset.def().auth_mode {
+                    AuthMode::ApiKey => match p.backend_preset {
+                        BackendPreset::OpenRouter => "OpenRouter API key: ".to_string(),
+                        BackendPreset::OpenWebUi => "open-webui token: ".to_string(),
                         _ => "API key: ".to_string(),
                     },
                     _ => "token: ".to_string(),
@@ -111,25 +111,27 @@ impl SetupInputKind {
     pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
         match self {
             Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
-            Self::BaseUrl => match instance.map(|p| p.service_type.clone()) {
-                Some(ServiceType::Ollama) => {
+            Self::BaseUrl => match instance.map(|p| p.backend_preset.clone()) {
+                Some(BackendPreset::Ollama) => {
                     "http://host:11434   Enter confirm   Esc cancel".to_string()
                 }
-                Some(ServiceType::OpenWebUi) => {
+                Some(BackendPreset::OpenWebUi) => {
                     "https://my-webui.example.com   Enter confirm   Esc cancel".to_string()
                 }
-                Some(ServiceType::OpenAiCompatible) => {
+                Some(BackendPreset::OpenAiCompatible) => {
                     "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel".to_string()
                 }
-                Some(ServiceType::OpenRouter) => {
+                Some(BackendPreset::OpenRouter) => {
                     "https://openrouter.ai/api/v1   Enter confirm   Esc cancel".to_string()
                 }
                 _ => "https://example.com   Enter confirm   Esc cancel".to_string(),
             },
-            Self::ApiKey => match instance.map(|p| p.service_type.clone()) {
-                Some(ServiceType::OpenRouter) => "sk-or-…   Enter confirm   Esc cancel".to_string(),
-                Some(ServiceType::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
-                Some(ServiceType::OpenAiCompatible) | Some(ServiceType::OpenAi) => {
+            Self::ApiKey => match instance.map(|p| p.backend_preset.clone()) {
+                Some(BackendPreset::OpenRouter) => {
+                    "sk-or-…   Enter confirm   Esc cancel".to_string()
+                }
+                Some(BackendPreset::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
+                Some(BackendPreset::OpenAiCompatible) | Some(BackendPreset::OpenAi) => {
                     "sk-…   Enter confirm   Esc cancel".to_string()
                 }
                 _ => "token   Enter confirm   Esc cancel".to_string(),
@@ -141,7 +143,7 @@ impl SetupInputKind {
 #[derive(Debug, Clone)]
 pub struct PendingProviderSetup {
     pub id: String,
-    pub service_type: Option<ServiceType>,
+    pub backend_preset: Option<BackendPreset>,
     pub api_type: Option<ApiType>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -151,7 +153,7 @@ impl PendingProviderSetup {
     fn new(id: String) -> Self {
         Self {
             id,
-            service_type: None,
+            backend_preset: None,
             api_type: None,
             base_url: None,
             api_key: None,
@@ -176,7 +178,7 @@ enum SelectionKind {
     Model,
     Thinking,
     Provider,
-    ProviderServiceType,
+    ProviderBackendPreset,
     ProviderApiType,
     LoginProvider,
     ResumeSession,
@@ -1068,7 +1070,7 @@ impl App {
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
             | Some(SelectionKind::LoginAction)
-            | Some(SelectionKind::ProviderServiceType)
+            | Some(SelectionKind::ProviderBackendPreset)
             | Some(SelectionKind::ProviderApiType)
             | None => None,
         };
@@ -1271,11 +1273,11 @@ impl App {
     pub fn submit_pending_provider_base_url(&mut self) -> Option<String> {
         let instance = self.pending_provider_instance()?;
         let raw = self.textarea.lines().join("");
-        let url = match instance.service_type {
-            ServiceType::Ollama => Self::normalize_ollama_endpoint(&raw)?,
-            ServiceType::OpenWebUi | ServiceType::OpenAiCompatible | ServiceType::OpenRouter => {
-                Self::normalize_open_webui_url(&raw)?
-            }
+        let url = match instance.backend_preset {
+            BackendPreset::Ollama => Self::normalize_ollama_endpoint(&raw)?,
+            BackendPreset::OpenWebUi
+            | BackendPreset::OpenAiCompatible
+            | BackendPreset::OpenRouter => Self::normalize_open_webui_url(&raw)?,
             _ => return None,
         };
         self.setup_input_mode = None;
@@ -1299,14 +1301,14 @@ impl App {
         Some(token)
     }
 
-    /// Show the service-type menu for the pending provider instance.
-    pub fn enter_provider_service_type_selection_mode(&mut self) {
+    /// Show the backend-type menu for the pending provider instance.
+    pub fn enter_provider_backend_preset_selection_mode(&mut self) {
         self.reset_textarea();
         self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::ProviderServiceType);
+        self.selection.kind = Some(SelectionKind::ProviderBackendPreset);
         self.selection.title = "  Select backend type  ";
         self.selection.query.clear();
-        let items = ServiceType::user_visible()
+        let items = BackendPreset::user_visible()
             .iter()
             .map(|service| CompletionItem {
                 label: service.label().to_string(),
@@ -1321,13 +1323,13 @@ impl App {
     }
 
     /// Show the API-type menu for the pending provider instance.
-    pub fn enter_provider_api_type_selection_mode(&mut self, service_type: &ServiceType) {
+    pub fn enter_provider_api_type_selection_mode(&mut self, backend_preset: &BackendPreset) {
         self.reset_textarea();
         self.selection.active = true;
         self.selection.kind = Some(SelectionKind::ProviderApiType);
         self.selection.title = "  Select API type  ";
         self.selection.query.clear();
-        let items = service_type
+        let items = backend_preset
             .def()
             .allowed_apis
             .iter()
@@ -1343,9 +1345,9 @@ impl App {
         self.set_selection_items(items);
     }
 
-    pub fn set_pending_provider_service_type(&mut self, service_type: ServiceType) {
+    pub fn set_pending_provider_backend_preset(&mut self, backend_preset: BackendPreset) {
         if let Some(setup) = self.pending_provider_setup.as_mut() {
-            setup.service_type = Some(service_type);
+            setup.backend_preset = Some(backend_preset);
             setup.api_type = None;
         }
     }
@@ -1358,12 +1360,12 @@ impl App {
 
     pub fn pending_provider_instance(&self) -> Option<ProviderInstance> {
         let setup = self.pending_provider_setup.as_ref()?;
-        let service_type = setup.service_type.clone()?;
+        let backend_preset = setup.backend_preset.clone()?;
         let api_type = setup
             .api_type
             .clone()
-            .unwrap_or_else(|| service_type.def().default_api.clone());
-        let mut instance = ProviderInstance::new(setup.id.clone(), service_type);
+            .unwrap_or_else(|| backend_preset.def().default_api.clone());
+        let mut instance = ProviderInstance::new(setup.id.clone(), backend_preset);
         instance.api_type = api_type;
         instance.base_url = setup.base_url.clone();
         instance.api_key = setup.api_key.clone();
@@ -1619,18 +1621,18 @@ impl App {
                 .or_else(|| {
                     (item.complete_to == "/provider_add").then_some(SelectionResult::AddProvider)
                 }),
-            Some(SelectionKind::ProviderServiceType) => item
+            Some(SelectionKind::ProviderBackendPreset) => item
                 .complete_to
                 .strip_prefix("/provider_service ")
-                .and_then(ServiceType::from_id)
-                .map(SelectionResult::ProviderServiceType),
+                .and_then(BackendPreset::from_id)
+                .map(SelectionResult::ProviderBackendPreset),
             Some(SelectionKind::ProviderApiType) => item
                 .complete_to
                 .strip_prefix("/provider_api ")
                 .and_then(|label| {
                     self.pending_provider_setup
                         .as_ref()?
-                        .service_type
+                        .backend_preset
                         .as_ref()?
                         .def()
                         .allowed_apis
@@ -2583,7 +2585,7 @@ mod tests {
             types::{AskRequest, AskUserOption, AskUserResponse},
         },
         llm::{Message, Role},
-        provider_instance::{ApiType, ProviderInstance, ServiceType},
+        provider_instance::{ApiType, BackendPreset, ProviderInstance},
         thinking::ThinkingLevel,
     };
 
@@ -2613,7 +2615,7 @@ mod tests {
             "provider instance name: "
         );
 
-        let mut open_webui = ProviderInstance::new("work-webui", ServiceType::OpenWebUi);
+        let mut open_webui = ProviderInstance::new("work-webui", BackendPreset::OpenWebUi);
         open_webui.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&open_webui)),
@@ -2624,7 +2626,7 @@ mod tests {
             "open-webui token: "
         );
 
-        let mut openrouter = ProviderInstance::new("router", ServiceType::OpenRouter);
+        let mut openrouter = ProviderInstance::new("router", BackendPreset::OpenRouter);
         openrouter.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&openrouter)),
@@ -2635,14 +2637,14 @@ mod tests {
             "OpenRouter API key: "
         );
 
-        let mut ollama = ProviderInstance::new("gpu-box", ServiceType::Ollama);
+        let mut ollama = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
         ollama.api_type = ApiType::OllamaChatApi;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&ollama)),
             "ollama URL: "
         );
 
-        let mut compat = ProviderInstance::new("test", ServiceType::OpenAiCompatible);
+        let mut compat = ProviderInstance::new("test", BackendPreset::OpenAiCompatible);
         compat.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
             super::SetupInputKind::BaseUrl.prompt_label(Some(&compat)),
@@ -2655,9 +2657,9 @@ mod tests {
     }
 
     #[test]
-    fn enter_provider_service_type_selection_mode_uses_backend_type_title() {
+    fn enter_provider_backend_preset_selection_mode_uses_backend_type_title() {
         let mut app = make_app();
-        app.enter_provider_service_type_selection_mode();
+        app.enter_provider_backend_preset_selection_mode();
         assert_eq!(app.selection.title, "  Select backend type  ");
     }
 
@@ -2665,7 +2667,7 @@ mod tests {
     fn submit_pending_provider_base_url_stores_openai_compatible_endpoint() {
         let mut app = make_app();
         app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));
-        app.set_pending_provider_service_type(ServiceType::OpenAiCompatible);
+        app.set_pending_provider_backend_preset(BackendPreset::OpenAiCompatible);
         app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
         app.enter_provider_base_url_input_mode();
         app.textarea.insert_str("test");
@@ -2686,7 +2688,7 @@ mod tests {
     fn submit_pending_provider_base_url_stores_openrouter_endpoint() {
         let mut app = make_app();
         app.pending_provider_setup = Some(super::PendingProviderSetup::new("router".to_string()));
-        app.set_pending_provider_service_type(ServiceType::OpenRouter);
+        app.set_pending_provider_backend_preset(BackendPreset::OpenRouter);
         app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
         app.enter_provider_base_url_input_mode();
         app.textarea.insert_str("openrouter.ai/api/v1");
@@ -2727,7 +2729,7 @@ mod tests {
         let mut app = make_app();
         let providers = vec![crate::provider_instance::ProviderInstance::new(
             "work-webui",
-            ServiceType::OpenWebUi,
+            BackendPreset::OpenWebUi,
         )];
 
         app.enter_provider_name_input_mode();
@@ -2750,14 +2752,14 @@ mod tests {
     fn pending_provider_instance_uses_selected_service_and_api() {
         let mut app = make_app();
         app.pending_provider_setup = Some(super::PendingProviderSetup::new("gpu-box".to_string()));
-        app.set_pending_provider_service_type(ServiceType::Ollama);
+        app.set_pending_provider_backend_preset(BackendPreset::Ollama);
         app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
 
         let instance = app
             .pending_provider_instance()
             .expect("pending provider instance");
         assert_eq!(instance.id, "gpu-box");
-        assert_eq!(instance.service_type, ServiceType::Ollama);
+        assert_eq!(instance.backend_preset, BackendPreset::Ollama);
         assert_eq!(instance.api_type, ApiType::AnthropicCompatible);
     }
 

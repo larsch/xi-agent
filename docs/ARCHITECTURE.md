@@ -17,9 +17,9 @@ src/
   markdown.rs          — markdown → ratatui Lines renderer (paragraphs, headings, code, tables, lists)
   commands.rs          — slash-command registry and completion items
   config.rs            — config.toml loading (XDG + HOME fallback)
-  provider.rs          — ProviderKind enum, build_provider(), context-window fallback table
+  provider.rs          — provider routing, thinking support, context-window fallback table
+  provider_instance.rs — BackendPreset/ProviderInstance types and preset metadata catalog
   session.rs           — persisted chat session storage/index
-  thinking.rs          — ThinkingLevel enum, parse/serialize, per-model resolution
   tool_presentation.rs — tool call/result rendering helpers for the TUI
   auth/                — provider auth store + login/refresh flows + token-state preflight
   agent/
@@ -186,9 +186,9 @@ loop logic.
 
 **Outer provider loop in `main.rs`** — `run()` returns a `RunResult` enum
 (`Quit | ChangeModel | ChangeProvider`) rather than mutating global state.
-The outer loop in `main` rebuilds the provider and re-enters `run()` on
-every model/provider switch, so `App` and `ui` never depend on which
-provider is active.
+The outer loop in `main` rebuilds the active provider instance's transport and
+re-enters `run()` on every model/provider-instance switch, so `App` and `ui`
+never depend directly on backend transport details.
 
 **Typed provider errors** — `LlmEvent::Error`, `AgentEvent::Error`, and
 `ModelListFuture` carry `ProviderError` (with `ProviderErrorKind`) rather
