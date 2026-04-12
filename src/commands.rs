@@ -120,8 +120,8 @@ impl CompletionItem {
 
     pub(crate) fn from_provider(name: &str, label: &str) -> Self {
         Self {
-            label: format!("{name}  —  {label}"),
-            detail: String::new(),
+            label: name.to_string(),
+            detail: label.to_string(),
             complete_to: format!("/provider {}", name),
             loading: false,
             error: false,

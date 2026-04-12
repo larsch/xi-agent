@@ -953,6 +953,21 @@ fn build_selection_lines(
     terminal_width: usize,
 ) -> Vec<Line<'static>> {
     const INDENT: &str = "  ";
+    const PREFIX_WIDTH: usize = 2; // "▶ " or "  "
+    const SEP: &str = "  —  ";
+
+    // Align the detail column: pad all labels to the longest visible label.
+    let visible: Vec<_> = items
+        .iter()
+        .skip(scroll)
+        .take(MAX_SELECTION_VISIBLE)
+        .collect();
+    let label_col = visible
+        .iter()
+        .filter(|it| !it.loading && !it.detail.is_empty())
+        .map(|it| it.label.width())
+        .max()
+        .unwrap_or(0);
 
     items
         .iter()
@@ -985,17 +1000,38 @@ fn build_selection_lines(
 
             // Cursor indicator for selected row.
             let prefix = if is_sel { "▶ " } else { "  " };
-            let used = INDENT.len() + prefix.width() + item.label.width();
-            let fill = " ".repeat(terminal_width.saturating_sub(used));
-            Line::from(vec![
-                Span::styled(INDENT, Style::default().bg(bg)),
-                Span::styled(prefix, Style::default().fg(Color::White).bg(bg)),
-                Span::styled(
-                    item.label.clone(),
-                    Style::default().fg(SELECTION_ITEM_FG).bg(bg),
-                ),
-                Span::styled(fill, Style::default().bg(bg)),
-            ])
+
+            if !item.detail.is_empty() {
+                // Pad label to label_col so the separator column aligns.
+                let pad = " ".repeat(label_col.saturating_sub(item.label.width()));
+                let used =
+                    INDENT.len() + PREFIX_WIDTH + label_col + SEP.len() + item.detail.width();
+                let fill = " ".repeat(terminal_width.saturating_sub(used));
+                Line::from(vec![
+                    Span::styled(INDENT, Style::default().bg(bg)),
+                    Span::styled(prefix, Style::default().fg(Color::White).bg(bg)),
+                    Span::styled(
+                        item.label.clone(),
+                        Style::default().fg(SELECTION_ITEM_FG).bg(bg),
+                    ),
+                    Span::styled(pad, Style::default().bg(bg)),
+                    Span::styled(SEP, Style::default().fg(Color::DarkGray).bg(bg)),
+                    Span::styled(item.detail.clone(), Style::default().fg(Color::Gray).bg(bg)),
+                    Span::styled(fill, Style::default().bg(bg)),
+                ])
+            } else {
+                let used = INDENT.len() + PREFIX_WIDTH + item.label.width();
+                let fill = " ".repeat(terminal_width.saturating_sub(used));
+                Line::from(vec![
+                    Span::styled(INDENT, Style::default().bg(bg)),
+                    Span::styled(prefix, Style::default().fg(Color::White).bg(bg)),
+                    Span::styled(
+                        item.label.clone(),
+                        Style::default().fg(SELECTION_ITEM_FG).bg(bg),
+                    ),
+                    Span::styled(fill, Style::default().bg(bg)),
+                ])
+            }
         })
         .collect()
 }
@@ -2447,6 +2483,35 @@ mod tests {
         let row = line_text(&lines[0]);
         assert!(row.contains("fetching…"));
         assert!(!row.contains("▶ "));
+    }
+
+    #[test]
+    fn selection_detail_column_is_vertically_aligned() {
+        let items = vec![
+            CompletionItem {
+                label: "short".to_string(),
+                detail: "Alpha".to_string(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+                match_range: None,
+            },
+            CompletionItem {
+                label: "a-much-longer-label".to_string(),
+                detail: "Beta".to_string(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+                match_range: None,
+            },
+        ];
+
+        // Use selected = usize::MAX so neither row gets the ▶ cursor prefix,
+        // avoiding multi-byte offset skew in the byte-position comparison.
+        let lines = build_selection_lines(&items, usize::MAX, 0, 80);
+        let first = line_text(&lines[0]);
+        let second = line_text(&lines[1]);
+        assert_eq!(first.find('—'), second.find('—'));
     }
 
     #[test]
