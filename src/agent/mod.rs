@@ -166,6 +166,13 @@ pub async fn run_agent_loop(
             // Only changes made during the subsequent user-input window will
             // be reported by the next check_modified() call.
             config.file_tracker.lock().unwrap().refresh_baselines();
+            // Check for steering messages that arrived while the LLM was
+            // generating its final response.  If any are present, keep the
+            // loop alive so they are processed rather than silently dropped.
+            if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
+                let _ = tx.send(AgentEvent::TurnEnd);
+                continue;
+            }
             let _ = tx.send(AgentEvent::TurnEnd);
             let _ = tx.send(AgentEvent::Done);
             return;
