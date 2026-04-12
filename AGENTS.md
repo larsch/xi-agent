@@ -13,7 +13,7 @@ This repository is a AI agent harness for the terminal, built with Rust.
 - Use the `fastpath` skill for trivial, clearly bounded changes when appropriate.
 - When `fastpath` is used and the user accepts the result, proceed with the remaining fastpath follow-through for that task without asking for per-step permission again.
 - This includes reconciliation work such as updating `.todo` or other relevant tracking artifacts so they reflect the accepted state.
-- `fastpath` acceptance does not override the explicit commit/push approval rule below.
+- When operating under `fastpath`, user acceptance of the change also authorizes the remaining fastpath follow-through, including any intended commit or push, unless the user explicitly asks to control those steps separately.
 
 ## Debugging
 
