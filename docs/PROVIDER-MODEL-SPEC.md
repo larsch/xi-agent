@@ -286,6 +286,11 @@ Built-in hosted providers appear here as built-in provider instances.
 Custom backends appear here after the user creates a provider instance for
 them.
 
+User-supplied provider instances may also be edited directly from the main
+provider picker via a shortcut on the currently highlighted provider entry.
+That edit action is attached to the existing provider row rather than shown as
+its own separate picker item.
+
 ### Add-provider flow
 
 The add-provider flow creates a **new provider instance**.

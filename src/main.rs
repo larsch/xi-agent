@@ -285,13 +285,8 @@ async fn main() -> io::Result<()> {
                 if let Some(inst) = config.find_provider(&id).cloned() {
                     let requires_api_key = provider_setup_requires_api_key(&inst);
                     if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
-                        app.pending_provider_setup = Some(app::PendingProviderSetup {
-                            id: inst.id.clone(),
-                            backend_preset: Some(inst.backend_preset.clone()),
-                            api_type: Some(inst.api_type.clone()),
-                            base_url: inst.base_url.clone(),
-                            api_key: inst.api_key.clone(),
-                        });
+                        app.pending_provider_setup =
+                            Some(app::PendingProviderSetup::from_instance(&inst));
                         app.enter_provider_api_key_input_mode();
                         continue;
                     }
@@ -353,6 +348,44 @@ async fn main() -> io::Result<()> {
                 );
                 app.messages.push(Message::assistant(format!(
                     "[added provider {} ({})]",
+                    current_instance.id,
+                    current_instance.backend_preset.label(),
+                )));
+                app.mark_log_dirty();
+            }
+
+            Ok(RunResult::UpdateProvider(instance)) => {
+                app.clear_pending_provider_setup();
+                let instance_id = instance.id.clone();
+                let current_model_for_instance = resolve_model_for_instance(None, &instance);
+                config.upsert_provider(instance.clone());
+                config.provider = Some(instance_id);
+                if let Err(e) = config.save() {
+                    log::debug!("failed to persist updated provider config: {e}");
+                    app.messages.push(Message::assistant(format!(
+                        "[failed to persist config.toml: {e}]"
+                    )));
+                    app.mark_log_dirty();
+                }
+                current_instance = config
+                    .find_provider(&instance.id)
+                    .cloned()
+                    .unwrap_or(instance);
+                current_model = current_model_for_instance;
+                app.current_model = current_model.clone();
+                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+                app.current_thinking = current_thinking;
+                app.current_provider = current_instance.id.clone();
+                app.provider_instances = config.providers.clone();
+                app.available_models = None;
+                maybe_warn_thinking_unsupported(
+                    &mut app,
+                    &current_instance,
+                    &current_model,
+                    current_thinking,
+                );
+                app.messages.push(Message::assistant(format!(
+                    "[updated provider {} ({})]",
                     current_instance.id,
                     current_instance.backend_preset.label(),
                 )));
@@ -526,6 +559,7 @@ enum RunResult {
     },
     ChangeProvider(String),
     AddProvider(ProviderInstance),
+    UpdateProvider(ProviderInstance),
     UpdateProviderApiKey(ProviderInstance),
     ChangeThinking(ThinkingLevel),
     /// Switch to (or stay on) a specific Ollama instance with a new base URL.
@@ -829,6 +863,18 @@ async fn run(
                                         app.selection_add_char(c);
                                     }
                                 }
+                                KeyCode::Char('e')
+                                    if key.modifiers == KeyModifiers::CONTROL
+                                        && app.in_provider_selection_mode() =>
+                                {
+                                    if let Some(id) = app.selected_provider_id()
+                                        && let Some(instance) = config.find_provider(id)
+                                        && instance.backend_preset.def().backend_class
+                                            == provider_instance::BackendClass::UserSuppliedService
+                                    {
+                                        app.enter_provider_edit_mode(instance);
+                                    }
+                                }
                                 KeyCode::Enter if key.modifiers.is_empty() => {
                                     match app.apply_selection() {
                                         Some(SelectionResult::Model(m)) => {
@@ -1019,7 +1065,17 @@ async fn run(
                                         if instance.backend_preset == provider_instance::BackendPreset::Ollama {
                                             return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
                                         }
-                                        if provider_setup_requires_api_key(&instance) {
+                                        if app.pending_provider_setup_is_edit() {
+                                            if provider_setup_requires_api_key(&instance) {
+                                                app.enter_provider_api_key_input_mode();
+                                                if let Some(existing_token) = instance.api_key.as_deref() {
+                                                    app.textarea.insert_str(existing_token);
+                                                }
+                                            } else {
+                                                let instance = app.finish_pending_provider_setup().expect("pending provider instance");
+                                                return Ok(RunResult::UpdateProvider(instance));
+                                            }
+                                        } else if provider_setup_requires_api_key(&instance) {
                                             app.enter_provider_api_key_input_mode();
                                         }
                                     }
@@ -1027,6 +1083,9 @@ async fn run(
                                     if app.submit_pending_provider_api_key().is_some()
                                         && let Some(instance) = app.finish_pending_provider_setup()
                                     {
+                                        if app.pending_provider_setup_is_edit() {
+                                            return Ok(RunResult::UpdateProvider(instance));
+                                        }
                                         if config.find_provider(&instance.id).is_some() {
                                             return Ok(RunResult::UpdateProviderApiKey(instance));
                                         }

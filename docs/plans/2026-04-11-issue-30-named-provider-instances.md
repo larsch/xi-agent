@@ -138,10 +138,14 @@ Verification completed for this checkpoint:
 
 Accepted for later follow-up rather than this checkpoint:
 
-- edit provider flow
 - delete provider flow
 - polish multiline token / setup-input textarea behavior
 - any further provider-management UX refinement
+
+Completed follow-up since this checkpoint:
+
+- edit provider flow via a shortcut on the selected provider entry in the main
+  provider picker (`Ctrl+E` for user-supplied providers)
 
 ### Next resume point
 

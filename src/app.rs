@@ -99,6 +99,9 @@ impl SetupInputKind {
                     AuthMode::ApiKey => match p.backend_preset {
                         BackendPreset::OpenRouter => "OpenRouter API key: ".to_string(),
                         BackendPreset::OpenWebUi => "open-webui token: ".to_string(),
+                        _ if p.base_url.is_some() => {
+                            "API key (leave empty to keep current): ".to_string()
+                        }
                         _ => "API key: ".to_string(),
                     },
                     _ => "token: ".to_string(),
@@ -126,15 +129,17 @@ impl SetupInputKind {
                 }
                 _ => "https://example.com   Enter confirm   Esc cancel".to_string(),
             },
-            Self::ApiKey => match instance.map(|p| p.backend_preset.clone()) {
-                Some(BackendPreset::OpenRouter) => {
-                    "sk-or-…   Enter confirm   Esc cancel".to_string()
-                }
-                Some(BackendPreset::OpenWebUi) => "sk-…   Enter confirm   Esc cancel".to_string(),
-                Some(BackendPreset::OpenAiCompatible) | Some(BackendPreset::OpenAi) => {
-                    "sk-…   Enter confirm   Esc cancel".to_string()
-                }
-                _ => "token   Enter confirm   Esc cancel".to_string(),
+            Self::ApiKey => match instance {
+                Some(p) if p.api_key.is_some() => "Enter keep current   Esc cancel".to_string(),
+                Some(p) => match p.backend_preset {
+                    BackendPreset::OpenRouter => "sk-or-…   Enter confirm   Esc cancel".to_string(),
+                    BackendPreset::OpenWebUi => "sk-…   Enter confirm   Esc cancel".to_string(),
+                    BackendPreset::OpenAiCompatible | BackendPreset::OpenAi => {
+                        "sk-…   Enter confirm   Esc cancel".to_string()
+                    }
+                    _ => "token   Enter confirm   Esc cancel".to_string(),
+                },
+                None => "token   Enter confirm   Esc cancel".to_string(),
             },
         }
     }
@@ -147,6 +152,7 @@ pub struct PendingProviderSetup {
     pub api_type: Option<ApiType>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    pub editing_existing: bool,
 }
 
 impl PendingProviderSetup {
@@ -157,6 +163,18 @@ impl PendingProviderSetup {
             api_type: None,
             base_url: None,
             api_key: None,
+            editing_existing: false,
+        }
+    }
+
+    pub(crate) fn from_instance(instance: &ProviderInstance) -> Self {
+        Self {
+            id: instance.id.clone(),
+            backend_preset: Some(instance.backend_preset.clone()),
+            api_type: Some(instance.api_type.clone()),
+            base_url: instance.base_url.clone(),
+            api_key: instance.api_key.clone(),
+            editing_existing: true,
         }
     }
 }
@@ -174,7 +192,7 @@ enum RetryTarget {
 pub const MAX_SELECTION_VISIBLE: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SelectionKind {
+pub(crate) enum SelectionKind {
     Model,
     Thinking,
     Provider,
@@ -1152,6 +1170,23 @@ impl App {
         self.select_current_default();
     }
 
+    /// Returns true when the active selection is the provider picker.
+    pub fn in_provider_selection_mode(&self) -> bool {
+        self.selection.kind == Some(SelectionKind::Provider)
+    }
+
+    /// Returns the currently highlighted provider id in the provider picker.
+    pub fn selected_provider_id(&self) -> Option<&str> {
+        if self.selection.kind != Some(SelectionKind::Provider) {
+            return None;
+        }
+        self.selection
+            .items
+            .get(self.selection.selected)?
+            .complete_to
+            .strip_prefix("/provider ")
+    }
+
     /// Open the thinking-level selection menu.
     pub fn enter_thinking_selection_mode(&mut self) {
         self.reset_textarea();
@@ -1199,6 +1234,43 @@ impl App {
         );
         self.set_selection_items(items);
         self.select_current_default();
+    }
+
+    /// Start editing an existing custom provider instance.
+    pub fn enter_provider_edit_mode(&mut self, instance: &ProviderInstance) {
+        self.exit_selection_mode();
+        self.pending_provider_setup = Some(PendingProviderSetup::from_instance(instance));
+        match instance.backend_preset {
+            BackendPreset::Ollama => {
+                self.enter_ollama_endpoint_freeform_mode();
+                self.textarea = Self::make_textarea();
+                if let Some(base_url) = instance.base_url.as_deref() {
+                    self.textarea.insert_str(base_url);
+                }
+            }
+            BackendPreset::OpenWebUi | BackendPreset::OpenAiCompatible => {
+                self.enter_provider_base_url_input_mode();
+                self.textarea = Self::make_textarea();
+                if let Some(base_url) = instance.base_url.as_deref() {
+                    self.textarea.insert_str(base_url);
+                }
+                self.open_webui_url_input_mode = false;
+                self.ollama_endpoint_input_mode = false;
+            }
+            _ => {
+                self.enter_provider_base_url_input_mode();
+                if let Some(base_url) = instance.base_url.as_deref() {
+                    self.textarea.insert_str(base_url);
+                }
+            }
+        }
+    }
+
+    pub fn pending_provider_setup_is_edit(&self) -> bool {
+        self.pending_provider_setup
+            .as_ref()
+            .map(|setup| setup.editing_existing)
+            .unwrap_or(false)
     }
 
     /// Enter freeform input mode for the new provider instance name.
@@ -1290,15 +1362,26 @@ impl App {
 
     pub fn submit_pending_provider_api_key(&mut self) -> Option<String> {
         let token = self.textarea.lines().join("").trim().to_string();
-        if token.is_empty() {
+        let existing_token = self
+            .pending_provider_setup
+            .as_ref()
+            .and_then(|setup| setup.api_key.clone());
+        let keep_existing = token.is_empty() && self.pending_provider_setup_is_edit();
+        if token.is_empty() && !keep_existing {
             return None;
         }
         self.setup_input_mode = None;
-        if let Some(setup) = self.pending_provider_setup.as_mut() {
+        if let Some(setup) = self.pending_provider_setup.as_mut()
+            && !keep_existing
+        {
             setup.api_key = Some(token.clone());
         }
         self.reset_textarea();
-        Some(token)
+        if keep_existing {
+            existing_token
+        } else {
+            Some(token)
+        }
     }
 
     /// Show the backend-type menu for the pending provider instance.
@@ -1486,6 +1569,13 @@ impl App {
         self.open_webui_url_input_mode = false;
         self.open_webui_pending_url = Some(url.clone());
         self.enter_provider_api_key_input_mode();
+        if let Some(existing_token) = self
+            .pending_provider_setup
+            .as_ref()
+            .and_then(|setup| setup.api_key.as_deref())
+        {
+            self.textarea.insert_str(existing_token);
+        }
         self.open_webui_token_input_mode = true;
         Some(url)
     }
@@ -2657,6 +2747,30 @@ mod tests {
     }
 
     #[test]
+    fn enter_provider_selection_mode_lists_add_and_provider_entries() {
+        let mut app = make_app();
+        let providers = vec![
+            ProviderInstance::new("copilot", BackendPreset::Copilot),
+            ProviderInstance::new("gpu-box", BackendPreset::Ollama),
+            ProviderInstance::new("work-webui", BackendPreset::OpenWebUi),
+        ];
+
+        app.enter_provider_selection_mode(&providers);
+
+        let items: Vec<_> = app
+            .selection
+            .items
+            .iter()
+            .map(|item| item.complete_to.as_str())
+            .collect();
+
+        assert!(items.contains(&"/provider_add"));
+        assert!(items.contains(&"/provider copilot"));
+        assert!(items.contains(&"/provider gpu-box"));
+        assert!(items.contains(&"/provider work-webui"));
+    }
+
+    #[test]
     fn enter_provider_backend_preset_selection_mode_uses_backend_type_title() {
         let mut app = make_app();
         app.enter_provider_backend_preset_selection_mode();
@@ -2739,6 +2853,56 @@ mod tests {
                 .as_ref()
                 .and_then(|p| p.api_key.as_deref()),
             Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn provider_selection_mode_reports_selected_provider_id() {
+        let mut app = make_app();
+        app.enter_provider_selection_mode(&[
+            ProviderInstance::new("copilot", BackendPreset::Copilot),
+            ProviderInstance::new("gpu-box", BackendPreset::Ollama),
+        ]);
+        app.selection.selected = app
+            .selection
+            .items
+            .iter()
+            .position(|item| item.complete_to == "/provider gpu-box")
+            .expect("provider item present");
+
+        assert!(app.in_provider_selection_mode());
+        assert_eq!(app.selected_provider_id(), Some("gpu-box"));
+    }
+
+    #[test]
+    fn enter_provider_edit_mode_prefills_existing_base_url() {
+        let mut app = make_app();
+        let mut instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+        instance.base_url = Some("http://gpu-box:11434".to_string());
+
+        app.enter_provider_edit_mode(&instance);
+
+        assert!(app.pending_provider_setup_is_edit());
+        assert_eq!(app.textarea.lines().join(""), "http://gpu-box:11434");
+    }
+
+    #[test]
+    fn submit_pending_provider_api_key_keeps_existing_value_when_editing() {
+        let mut app = make_app();
+        let mut instance = ProviderInstance::new("work-webui", BackendPreset::OpenWebUi);
+        instance.api_key = Some("sk-existing".to_string());
+        app.pending_provider_setup = Some(super::PendingProviderSetup::from_instance(&instance));
+        app.enter_provider_api_key_input_mode();
+
+        let token = app
+            .submit_pending_provider_api_key()
+            .expect("provider token");
+        assert_eq!(token, "sk-existing");
+        assert_eq!(
+            app.pending_provider_setup
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("sk-existing")
         );
     }
 
