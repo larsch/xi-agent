@@ -105,7 +105,7 @@ pub struct Message {
 // llm/error.rs — typed provider failure
 pub enum ProviderErrorKind { Unauthorized, Forbidden, RateLimited, ServerError, Network, Other }
 pub struct ProviderError { pub kind: ProviderErrorKind, pub status_code: Option<u16>,
-                           pub provider: String, pub message: String }
+                           pub source: String, pub message: String }
 
 pub enum LlmEvent {
     Token { text: String, phase: AssistantPhase },
@@ -144,7 +144,7 @@ pub enum AgentEvent {
     ToolCallEnd   { id, name, result: ToolResult },
     TurnEnd,
     Done,
-    Error(ProviderError),  // typed; display via Display impl for user-facing messages
+    Error(ProviderError),  // typed low-level error; app/main format user-facing text
 }
 
 pub struct AgentLoopConfig {
@@ -194,8 +194,12 @@ never depend directly on backend transport details.
 `ModelListFuture` carry `ProviderError` (with `ProviderErrorKind`) rather
 than a raw string. HTTP status is mapped centrally in `llm/common.rs`:
 401→`Unauthorized`, 403→`Forbidden`, 429→`RateLimited`, 5xx→`ServerError`,
-network failures→`Network`. `App` matches on kind directly; no substring
-heuristics. 403 explicitly does **not** trigger a token refresh.
+network failures→`Network`. Lower layers preserve structured error facts
+(`status_code`, low-level `source`, original `message`) without rewriting the
+provider/body text. User-facing wording is composed later in `app.rs` and
+`main.rs` using the active provider/backend label, so OpenAI-compatible
+transports do not surface as `OpenAI` for backends such as Open WebUI. 403
+explicitly does **not** trigger a token refresh.
 
 **Proactive auth refresh** — before submitting a request or starting a model
 fetch, `App::check_token_preflight` inspects the stored `expires_at` via

@@ -144,7 +144,7 @@ pub fn map_http_error(
         _ => ProviderError {
             kind: ProviderErrorKind::Other,
             status_code: Some(status.as_u16()),
-            provider: provider.to_string(),
+            source: provider.to_string(),
             message: body,
         },
     }

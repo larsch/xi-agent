@@ -44,7 +44,7 @@ use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
-use app::{App, InputMode, SelectionResult};
+use app::{App, InputMode, SelectionResult, format_provider_error_for_display};
 use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
@@ -1457,6 +1457,10 @@ struct PrintModeProviderCtx<'a> {
     name: &'a str,
 }
 
+fn provider_display_name(instance: &ProviderInstance) -> String {
+    instance.backend_preset.label().to_string()
+}
+
 /// Non-interactive mode: run the agent loop for `prompt`, stream output to
 /// stdout, and exit when the loop finishes.
 /// Returns `true` if `provider` is one of the three OAuth providers that
@@ -1636,6 +1640,7 @@ async fn run_print_mode_loop(
                                     return run_print_mode_loop_inner(
                                         messages_for_retry,
                                         new_provider,
+                                        &provider_display_name(ctx.instance),
                                     )
                                     .await;
                                 }
@@ -1649,13 +1654,21 @@ async fn run_print_mode_loop(
                         }
                         Err(refresh_err) => {
                             log::warn!("reactive refresh failed: {refresh_err}");
-                            eprintln!("error: {e} (token refresh also failed: {refresh_err})");
+                            let rendered = format_provider_error_for_display(
+                                &provider_display_name(ctx.instance),
+                                &e,
+                            );
+                            eprintln!(
+                                "error: {rendered} (token refresh also failed: {refresh_err})"
+                            );
                             return 1;
                         }
                     }
                 }
 
-                eprintln!("error: {e}");
+                let rendered =
+                    format_provider_error_for_display(&provider_display_name(ctx.instance), &e);
+                eprintln!("error: {rendered}");
                 return 1;
             }
         }
@@ -1670,6 +1683,7 @@ async fn run_print_mode_loop(
 async fn run_print_mode_loop_inner(
     messages: Vec<Message>,
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
+    provider_label: &str,
 ) -> i32 {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1725,7 +1739,8 @@ async fn run_print_mode_loop_inner(
                 return 0;
             }
             AgentEvent::Error(e) => {
-                eprintln!("error: {e}");
+                let rendered = format_provider_error_for_display(provider_label, &e);
+                eprintln!("error: {rendered}");
                 return 1;
             }
         }
@@ -1737,10 +1752,13 @@ async fn run_print_mode_loop_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_paste_text, resolve_model_for_instance, resolve_thinking_level_for_model,
+        normalize_paste_text, provider_display_name, resolve_model_for_instance,
+        resolve_thinking_level_for_model,
     };
     use crate::{
+        app::format_provider_error_for_display,
         config::TauConfig,
+        llm::ProviderError,
         provider_instance::{BackendPreset, ProviderInstance},
         thinking::ThinkingLevel,
     };
@@ -1802,5 +1820,24 @@ mod tests {
         let cfg = TauConfig::default();
         let level = resolve_thinking_level_for_model(&cfg, "gpt-4o");
         assert_eq!(level, ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn provider_display_name_uses_backend_label() {
+        let instance = ProviderInstance::new("work-webui", BackendPreset::OpenWebUi);
+        assert_eq!(provider_display_name(&instance), "Open WebUI");
+    }
+
+    #[test]
+    fn print_mode_error_format_uses_backend_label() {
+        let instance = ProviderInstance::new("work-webui", BackendPreset::OpenWebUi);
+        let err = ProviderError::server_error("OpenAI", 524, "error code: 524");
+
+        let rendered = format_provider_error_for_display(&provider_display_name(&instance), &err);
+
+        assert_eq!(
+            rendered,
+            "Open WebUI timed out on the backend (524).\nProvider message: error code: 524"
+        );
     }
 }

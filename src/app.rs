@@ -13,7 +13,9 @@ use crate::{
     },
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
-    llm::{AssistantPhase, DisplayRange, LlmProvider, Message, Role, UsageStats},
+    llm::{
+        AssistantPhase, DisplayRange, LlmProvider, Message, ProviderErrorKind, Role, UsageStats,
+    },
     provider_instance::{ApiType, AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
     session::SessionStore,
     shell::{self, ShellKind},
@@ -448,6 +450,74 @@ pub struct App {
 
 // Convenience alias used throughout this module.
 type DynProvider = Arc<dyn LlmProvider + Send + Sync + 'static>;
+
+pub(crate) fn format_provider_error_for_display(
+    provider_label: &str,
+    err: &crate::llm::ProviderError,
+) -> String {
+    let subject = if provider_label.trim().is_empty() {
+        "The provider"
+    } else {
+        provider_label
+    };
+
+    let summary = match (err.kind, err.status_code) {
+        (ProviderErrorKind::Unauthorized, Some(code)) => {
+            format!("{subject} rejected the request because authentication expired ({code}).")
+        }
+        (ProviderErrorKind::Unauthorized, None) => {
+            format!("{subject} rejected the request because authentication expired.")
+        }
+        (ProviderErrorKind::Forbidden, Some(code)) => {
+            format!("{subject} rejected the request because access was denied ({code}).")
+        }
+        (ProviderErrorKind::Forbidden, None) => {
+            format!("{subject} rejected the request because access was denied.")
+        }
+        (ProviderErrorKind::RateLimited, Some(code)) => {
+            format!("{subject} is rate limiting requests ({code}).")
+        }
+        (ProviderErrorKind::RateLimited, None) => {
+            format!("{subject} is rate limiting requests.")
+        }
+        (ProviderErrorKind::ServerError, Some(524)) => {
+            format!("{subject} timed out on the backend (524).")
+        }
+        (ProviderErrorKind::ServerError, Some(code)) => {
+            format!("{subject} reported a backend error ({code}).")
+        }
+        (ProviderErrorKind::ServerError, None) => {
+            format!("{subject} reported a backend error.")
+        }
+        (ProviderErrorKind::Network, _) => {
+            format!("Could not reach {subject}.")
+        }
+        (ProviderErrorKind::Other, Some(code)) => {
+            format!("{subject} could not process the request ({code}).")
+        }
+        (ProviderErrorKind::Other, None) => {
+            format!("{subject} could not process the request.")
+        }
+    };
+
+    let message = err.message.trim();
+    if message.is_empty() {
+        summary
+    } else {
+        format!("{summary}\nProvider message: {message}")
+    }
+}
+
+fn active_provider_display_name(
+    current_provider: &str,
+    provider_instances: &[ProviderInstance],
+) -> String {
+    provider_instances
+        .iter()
+        .find(|instance| instance.id == current_provider)
+        .map(|instance| instance.backend_preset.label().to_string())
+        .unwrap_or_else(|| current_provider.to_string())
+}
 
 impl App {
     fn bump_log_revision(&mut self) {
@@ -1032,7 +1102,12 @@ impl App {
                 if is_unauthorized && self.trigger_auth_refresh(RetryTarget::ModelFetch) {
                     // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
-                    self.model_fetch_error = Some(e.to_string());
+                    let provider_label = active_provider_display_name(
+                        &self.current_provider,
+                        &self.provider_instances,
+                    );
+                    self.model_fetch_error =
+                        Some(format_provider_error_for_display(&provider_label, &e));
                 }
             }
         }
@@ -2789,8 +2864,13 @@ impl App {
                     self.streaming_status = None;
                     // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
+                    let provider_label = active_provider_display_name(
+                        &self.current_provider,
+                        &self.provider_instances,
+                    );
+                    let rendered = format_provider_error_for_display(&provider_label, &e);
                     self.messages
-                        .push(Message::assistant(format!("[Error: {e}]")));
+                        .push(Message::assistant(format!("[Error: {rendered}]")));
                     self.bump_log_revision();
                     self.streaming_status = None;
                     self.persist_messages();
@@ -2818,13 +2898,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, StreamingStatus};
+    use super::{App, StreamingStatus, format_provider_error_for_display};
     use crate::{
         agent::{
             AgentLoopConfig,
             types::{AskRequest, AskUserOption, AskUserResponse},
         },
-        llm::{Message, Role},
+        llm::{Message, ProviderError, Role},
         provider_instance::{ApiType, BackendPreset, ProviderInstance},
         thinking::ThinkingLevel,
     };
@@ -3366,6 +3446,26 @@ mod tests {
                 .items
                 .iter()
                 .all(|i| i.complete_to != "/ask_user_freeform")
+        );
+    }
+
+    #[test]
+    fn format_provider_error_uses_natural_english_and_message() {
+        let err = ProviderError::server_error("OpenAI", 524, "error code: 524");
+        let rendered = format_provider_error_for_display("Open WebUI", &err);
+        assert_eq!(
+            rendered,
+            "Open WebUI timed out on the backend (524).\nProvider message: error code: 524"
+        );
+    }
+
+    #[test]
+    fn format_provider_error_handles_network_failures() {
+        let err = ProviderError::network("Ollama", "connection refused");
+        let rendered = format_provider_error_for_display("Open WebUI", &err);
+        assert_eq!(
+            rendered,
+            "Could not reach Open WebUI.\nProvider message: connection refused"
         );
     }
 

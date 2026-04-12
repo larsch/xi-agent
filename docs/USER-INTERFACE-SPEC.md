@@ -4,6 +4,8 @@
 
 - Start in interactive mode by default.
 - Support non-interactive mode with `-p/--print` flag, which prints the result of each command to stdout instead of rendering a UI.
+- User-facing provider errors in both interactive and non-interactive modes should be rendered in natural English first, followed by the original provider message as supporting detail.
+- Error text should identify the active backend/provider label (for example `Open WebUI`) rather than leaking the transport/API name used underneath.
 
 # Interactive UI
 

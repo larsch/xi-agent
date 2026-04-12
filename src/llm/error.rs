@@ -24,82 +24,74 @@ pub enum ProviderErrorKind {
 pub struct ProviderError {
     pub kind: ProviderErrorKind,
     pub status_code: Option<u16>,
-    pub provider: String,
+    /// Low-level source identity that produced the error (transport/provider module).
+    /// This is preserved for debugging and logs, not for final UI wording.
+    pub source: String,
+    /// Original provider/body message, preserved as-is.
     pub message: String,
 }
 
 impl ProviderError {
-    /// Construct an `Unauthorized` error.
-    pub fn unauthorized(provider: impl Into<String>, message: impl Into<String>) -> Self {
+    fn new(
+        kind: ProviderErrorKind,
+        status_code: Option<u16>,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            kind: ProviderErrorKind::Unauthorized,
-            status_code: Some(401),
-            provider: provider.into(),
+            kind,
+            status_code,
+            source: source.into(),
             message: message.into(),
         }
+    }
+
+    /// Construct an `Unauthorized` error.
+    pub fn unauthorized(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Unauthorized, Some(401), source, message)
     }
 
     /// Construct a `Forbidden` error.
-    pub fn forbidden(provider: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            kind: ProviderErrorKind::Forbidden,
-            status_code: Some(403),
-            provider: provider.into(),
-            message: message.into(),
-        }
+    pub fn forbidden(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Forbidden, Some(403), source, message)
     }
 
     /// Construct a `RateLimited` error.
-    pub fn rate_limited(provider: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            kind: ProviderErrorKind::RateLimited,
-            status_code: Some(429),
-            provider: provider.into(),
-            message: message.into(),
-        }
+    pub fn rate_limited(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::RateLimited, Some(429), source, message)
     }
 
     /// Construct a `ServerError` error.
     pub fn server_error(
-        provider: impl Into<String>,
+        source: impl Into<String>,
         status_code: u16,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            kind: ProviderErrorKind::ServerError,
-            status_code: Some(status_code),
-            provider: provider.into(),
-            message: message.into(),
-        }
+        Self::new(
+            ProviderErrorKind::ServerError,
+            Some(status_code),
+            source,
+            message,
+        )
     }
 
     /// Construct a `Network` error.
-    pub fn network(provider: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            kind: ProviderErrorKind::Network,
-            status_code: None,
-            provider: provider.into(),
-            message: message.into(),
-        }
+    pub fn network(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Network, None, source, message)
     }
 
     /// Construct an `Other` error.
-    pub fn other(provider: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            kind: ProviderErrorKind::Other,
-            status_code: None,
-            provider: provider.into(),
-            message: message.into(),
-        }
+    pub fn other(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::Other, None, source, message)
     }
 }
 
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(status) = self.status_code {
-            write!(f, "{} returned {}: {}", self.provider, status, self.message)
+            write!(f, "{} ({}): {}", self.source, status, self.message)
         } else {
-            write!(f, "{}: {}", self.provider, self.message)
+            write!(f, "{}: {}", self.source, self.message)
         }
     }
 }
@@ -115,7 +107,7 @@ mod tests {
         let err = ProviderError::unauthorized("copilot", "token expired");
         assert_eq!(err.kind, ProviderErrorKind::Unauthorized);
         assert_eq!(err.status_code, Some(401));
-        assert_eq!(err.provider, "copilot");
+        assert_eq!(err.source, "copilot");
         assert_eq!(err.message, "token expired");
     }
 
@@ -157,12 +149,20 @@ mod tests {
     #[test]
     fn display_with_status_code() {
         let err = ProviderError::unauthorized("copilot", "invalid token");
-        assert_eq!(format!("{err}"), "copilot returned 401: invalid token");
+        assert_eq!(format!("{err}"), "copilot (401): invalid token");
     }
 
     #[test]
     fn display_without_status_code() {
         let err = ProviderError::network("openai", "connection timeout");
         assert_eq!(format!("{err}"), "openai: connection timeout");
+    }
+
+    #[test]
+    fn source_is_preserved_even_when_ui_uses_other_identity() {
+        let err = ProviderError::server_error("OpenAI", 524, "error code: 524");
+        assert_eq!(err.source, "OpenAI");
+        assert_eq!(err.status_code, Some(524));
+        assert_eq!(err.message, "error code: 524");
     }
 }
