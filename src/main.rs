@@ -78,6 +78,20 @@ struct Cli {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// Build a [`FileTracker`] pre-configured to ignore tau's own generated files:
+///
+/// - Session files (data dir `sessions/` subtree).
+/// - Debug logs (cache dir).
+/// - Instruction files named `AGENTS.md` or `SKILL.md` (matched by filename).
+fn build_file_tracker() -> FileTracker {
+    let excluded_prefixes: Vec<std::path::PathBuf> = dirs::PROJECT_DIRS
+        .as_ref()
+        .map(|d| vec![d.data_dir().join("sessions"), d.cache_dir().to_path_buf()])
+        .unwrap_or_default();
+
+    FileTracker::with_exclusions(excluded_prefixes, &["AGENTS.md", "SKILL.md"])
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     debug_log::init_logging();
@@ -148,7 +162,7 @@ async fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let file_tracker = Arc::new(Mutex::new(FileTracker::new()));
+    let file_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
 
     let mut app = App::new(
@@ -1533,7 +1547,7 @@ async fn run_print_mode(
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let headless_tracker = Arc::new(Mutex::new(FileTracker::new()));
+    let headless_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let tools = register_builtin_tools(None, Arc::clone(&headless_tracker), custom_tools);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1696,7 +1710,7 @@ async fn run_print_mode_loop_inner(
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     // AgentLoopConfig is not Clone; rebuild a minimal headless one for the retry.
-    let retry_tracker = Arc::new(Mutex::new(FileTracker::new()));
+    let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let retry_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless-retry")));
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let retry_tools = register_builtin_tools(None, Arc::clone(&retry_tracker), custom_tools);

@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    ffi::OsString,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -29,21 +30,72 @@ pub struct ChangedFile {
 
 /// Tracks files touched by the agent's file tools and detects external
 /// modifications using a two-stage check: mtime first, then SHA-256.
+///
+/// Paths can be excluded from tracking in two ways:
+/// - **Prefix exclusions**: any path whose canonical prefix matches one of the
+///   entries in `excluded_prefixes` is silently skipped.  Use this for
+///   directories such as the session store or debug-log directory.
+/// - **Filename exclusions**: any path whose file name (last component) matches
+///   one of the entries in `excluded_filenames` is silently skipped.  Use this
+///   for instruction files such as `AGENTS.md` and `SKILL.md` that should not
+///   trigger change notifications.
 #[derive(Default)]
 pub struct FileTracker {
     files: HashMap<PathBuf, FileSnapshot>,
+    /// Directory prefixes whose contents should never be tracked.
+    excluded_prefixes: Vec<PathBuf>,
+    /// Exact file names (last path component) that should never be tracked.
+    excluded_filenames: HashSet<OsString>,
 }
 
 impl FileTracker {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a tracker that ignores paths under the given directory prefixes
+    /// and paths whose file name matches any entry in `filenames`.
+    ///
+    /// `filenames` entries are matched against `path.file_name()` only (the
+    /// last component), so `"AGENTS.md"` matches `/any/dir/AGENTS.md`.
+    pub fn with_exclusions(excluded_prefixes: Vec<PathBuf>, excluded_filenames: &[&str]) -> Self {
+        Self {
+            files: HashMap::new(),
+            excluded_prefixes,
+            excluded_filenames: excluded_filenames.iter().map(OsString::from).collect(),
+        }
+    }
+
+    /// Returns `true` when `path` should be silently ignored by [`record`].
+    fn is_excluded(&self, path: &Path) -> bool {
+        // Filename-based exclusion (e.g. AGENTS.md, SKILL.md).
+        if let Some(name) = path.file_name()
+            && self.excluded_filenames.contains(name)
+        {
+            return true;
+        }
+
+        // Prefix-based exclusion (e.g. sessions dir, cache dir).
+        for prefix in &self.excluded_prefixes {
+            if path.starts_with(prefix) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Record the current state of `path`. Called after a successful
     /// `read_file`, `write_file`, or `edit_file` tool execution.
     ///
     /// Non-UTF-8 files are silently skipped (binary files are not tracked).
+    /// Paths matching the configured exclusions are also silently skipped.
     pub fn record(&mut self, path: &Path) {
+        if self.is_excluded(path) {
+            log::debug!("file_tracker: skipping excluded path {}", path.display());
+            return;
+        }
         match snapshot(path) {
             Ok(snap) => {
                 self.files.insert(path.to_path_buf(), snap);
@@ -230,6 +282,92 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f
+    }
+
+    // ── exclusion tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn excluded_filename_is_not_tracked() {
+        let f = write_temp("instructions\n");
+        // Rename to AGENTS.md via a path that ends in that filename.
+        let dir = tempfile::tempdir().unwrap();
+        let agents_md = dir.path().join("AGENTS.md");
+        std::fs::write(&agents_md, "instructions\n").unwrap();
+
+        let mut tracker = FileTracker::with_exclusions(vec![], &["AGENTS.md"]);
+        tracker.record(&agents_md);
+
+        // Modify the file — if it were tracked this would be reported.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&agents_md, "changed\n").unwrap();
+
+        let changed = tracker.check_modified();
+        assert!(
+            changed.is_empty(),
+            "excluded filename should never be tracked"
+        );
+        drop(f);
+    }
+
+    #[test]
+    fn excluded_prefix_is_not_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_file = sessions_dir.join("session-abc.jsonl");
+        std::fs::write(&session_file, "line1\n").unwrap();
+
+        let mut tracker = FileTracker::with_exclusions(vec![sessions_dir.clone()], &[]);
+        tracker.record(&session_file);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&session_file, "line2\n").unwrap();
+
+        let changed = tracker.check_modified();
+        assert!(
+            changed.is_empty(),
+            "file under excluded prefix should never be tracked"
+        );
+    }
+
+    #[test]
+    fn non_excluded_file_still_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let regular_file = dir.path().join("main.rs");
+        std::fs::write(&regular_file, "fn main() {}\n").unwrap();
+
+        let sessions_dir = dir.path().join("sessions");
+        let mut tracker =
+            FileTracker::with_exclusions(vec![sessions_dir], &["AGENTS.md", "SKILL.md"]);
+        tracker.record(&regular_file);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&regular_file, "fn main() { todo!() }\n").unwrap();
+
+        let changed = tracker.check_modified();
+        assert_eq!(
+            changed.len(),
+            1,
+            "non-excluded file should still be tracked"
+        );
+    }
+
+    #[test]
+    fn skill_md_excluded_by_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_file = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_file, "# skill\n").unwrap();
+
+        let mut tracker = FileTracker::with_exclusions(vec![], &["SKILL.md"]);
+        tracker.record(&skill_file);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&skill_file, "# changed skill\n").unwrap();
+
+        let changed = tracker.check_modified();
+        assert!(changed.is_empty(), "SKILL.md should be excluded");
     }
 
     #[test]
