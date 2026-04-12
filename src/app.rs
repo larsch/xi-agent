@@ -1904,6 +1904,28 @@ impl App {
         }
     }
 
+    /// Jump forward one page (MAX_SELECTION_VISIBLE items) in the selection menu.
+    pub fn selection_page_down(&mut self) {
+        let len = self.selection.items.len();
+        if len > 0 {
+            let new = (self.selection.selected + MAX_SELECTION_VISIBLE).min(len - 1);
+            self.selection.selected = new;
+            self.ensure_selection_visible();
+        }
+    }
+
+    /// Jump backward one page (MAX_SELECTION_VISIBLE items) in the selection menu.
+    pub fn selection_page_up(&mut self) {
+        let len = self.selection.items.len();
+        if len > 0 {
+            self.selection.selected = self
+                .selection
+                .selected
+                .saturating_sub(MAX_SELECTION_VISIBLE);
+            self.ensure_selection_visible();
+        }
+    }
+
     /// Confirm the currently highlighted selection.
     pub fn apply_selection(&mut self) -> Option<SelectionResult> {
         let item = self.selection.items.get(self.selection.selected)?;

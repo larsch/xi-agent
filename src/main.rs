@@ -849,6 +849,12 @@ async fn run(
                                         }
                                     }
                                 }
+                                KeyCode::PageDown => {
+                                    app.selection_page_down();
+                                }
+                                KeyCode::PageUp => {
+                                    app.selection_page_up();
+                                }
                                 KeyCode::Backspace => {
                                     if app.ask_user_freeform_mode {
                                         // Route backspace into the textarea.
