@@ -2664,6 +2664,24 @@ mod tests {
     }
 
     #[test]
+    fn enter_provider_backend_preset_selection_mode_lists_only_user_addable_backends() {
+        let mut app = make_app();
+        app.enter_provider_backend_preset_selection_mode();
+
+        let labels: Vec<_> = app
+            .selection
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+
+        assert_eq!(
+            labels,
+            vec!["Ollama", "Open WebUI", "OpenAI-compatible endpoint"]
+        );
+    }
+
+    #[test]
     fn submit_pending_provider_base_url_stores_openai_compatible_endpoint() {
         let mut app = make_app();
         app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));

@@ -261,17 +261,7 @@ impl BackendPreset {
 
     /// All backend presets visible in the "add provider" menu.
     pub fn user_visible() -> &'static [BackendPreset] {
-        &[
-            Self::Copilot,
-            Self::OpenRouter,
-            Self::OpenAi,
-            Self::Codex,
-            Self::Gemini,
-            Self::Ollama,
-            Self::OllamaCom,
-            Self::OpenWebUi,
-            Self::OpenAiCompatible,
-        ]
+        &[Self::Ollama, Self::OpenWebUi, Self::OpenAiCompatible]
     }
 
     pub fn from_id(s: &str) -> Option<Self> {
@@ -411,6 +401,18 @@ mod tests {
             });
             assert_eq!(st.id(), roundtripped.id());
         }
+    }
+
+    #[test]
+    fn user_visible_presets_only_include_user_addable_backends() {
+        assert_eq!(
+            BackendPreset::user_visible(),
+            &[
+                BackendPreset::Ollama,
+                BackendPreset::OpenWebUi,
+                BackendPreset::OpenAiCompatible,
+            ]
+        );
     }
 
     #[test]
