@@ -354,10 +354,18 @@ async fn main() -> io::Result<()> {
                 app.mark_log_dirty();
             }
 
-            Ok(RunResult::UpdateProvider(instance)) => {
+            Ok(RunResult::UpdateProvider {
+                original_id,
+                instance,
+            }) => {
                 app.clear_pending_provider_setup();
                 let instance_id = instance.id.clone();
                 let current_model_for_instance = resolve_model_for_instance(None, &instance);
+                if let Some(original_id) = original_id.as_deref()
+                    && original_id != instance.id
+                {
+                    config.remove_provider(original_id);
+                }
                 config.upsert_provider(instance.clone());
                 config.provider = Some(instance_id);
                 if let Err(e) = config.save() {
@@ -385,46 +393,9 @@ async fn main() -> io::Result<()> {
                     current_thinking,
                 );
                 app.messages.push(Message::assistant(format!(
-                    "[updated provider {} ({})]",
+                    "[edited provider {} ({})]",
                     current_instance.id,
                     current_instance.backend_preset.label(),
-                )));
-                app.mark_log_dirty();
-            }
-
-            Ok(RunResult::UpdateProviderApiKey(instance)) => {
-                app.clear_pending_provider_setup();
-                let instance_id = instance.id.clone();
-                let current_model_for_instance = resolve_model_for_instance(None, &instance);
-                config.upsert_provider(instance.clone());
-                config.provider = Some(instance_id);
-                if let Err(e) = config.save() {
-                    log::debug!("failed to persist provider api key: {e}");
-                    app.messages.push(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
-                    app.mark_log_dirty();
-                }
-                current_instance = config
-                    .find_provider(&instance.id)
-                    .cloned()
-                    .unwrap_or(instance);
-                current_model = current_model_for_instance;
-                app.current_model = current_model.clone();
-                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                app.current_thinking = current_thinking;
-                app.current_provider = current_instance.id.clone();
-                app.provider_instances = config.providers.clone();
-                app.available_models = None;
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
-                app.messages.push(Message::assistant(format!(
-                    "[updated provider {} API key]",
-                    current_instance.id,
                 )));
                 app.mark_log_dirty();
             }
@@ -593,8 +564,10 @@ enum RunResult {
     },
     ChangeProvider(String),
     AddProvider(ProviderInstance),
-    UpdateProvider(ProviderInstance),
-    UpdateProviderApiKey(ProviderInstance),
+    UpdateProvider {
+        original_id: Option<String>,
+        instance: ProviderInstance,
+    },
     RemoveProvider(String),
     ChangeThinking(ThinkingLevel),
     /// Switch to (or stay on) a specific Ollama instance with a new base URL.
@@ -940,7 +913,8 @@ async fn run(
                                             return Ok(RunResult::ChangeProvider(p));
                                         }
                                         Some(SelectionResult::AddProvider) => {
-                                            app.enter_provider_name_input_mode();
+                                            app.begin_new_provider_setup();
+                                            app.enter_provider_backend_preset_selection_mode();
                                         }
                                         Some(SelectionResult::CancelProviderRemoval) => {
                                             app.clear_pending_provider_removal();
@@ -962,8 +936,7 @@ async fn run(
                                                     } else if provider_setup_requires_api_key(&instance) {
                                                         app.enter_provider_api_key_input_mode();
                                                     } else {
-                                                        let instance = app.finish_pending_provider_setup().expect("pending provider instance");
-                                                        return Ok(RunResult::AddProvider(instance));
+                                                        app.enter_provider_name_input_mode();
                                                     }
                                                 }
                                             }
@@ -976,8 +949,7 @@ async fn run(
                                                 } else if provider_setup_requires_api_key(&instance) {
                                                     app.enter_provider_api_key_input_mode();
                                                 } else {
-                                                    let instance = app.finish_pending_provider_setup().expect("pending provider instance");
-                                                    return Ok(RunResult::AddProvider(instance));
+                                                    app.enter_provider_name_input_mode();
                                                 }
                                             }
                                         }
@@ -1094,10 +1066,21 @@ async fn run(
 
                                 if app.ollama_endpoint_input_mode {
                                     if let Some(url) = app.take_ollama_endpoint_input() {
-                                        let instance = app
-                                            .pending_provider_instance()
-                                            .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                                        return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
+                                        if app.pending_provider_setup_is_edit() {
+                                            let instance = app
+                                                .pending_provider_instance()
+                                                .unwrap_or_else(|| {
+                                                    resolve_current_run_instance(app, config)
+                                                });
+                                            return Ok(RunResult::ChangeOllamaEndpoint {
+                                                instance,
+                                                url,
+                                            });
+                                        }
+                                        if let Some(setup) = app.pending_provider_setup.as_mut() {
+                                            setup.base_url = Some(url);
+                                        }
+                                        app.enter_provider_name_input_mode();
                                     }
                                     // Invalid URL: stay in input mode (user can correct it).
                                 } else if app.open_webui_url_input_mode {
@@ -1121,8 +1104,14 @@ async fn run(
                                         let instance = app
                                             .pending_provider_instance()
                                             .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                                        if instance.backend_preset == provider_instance::BackendPreset::Ollama {
-                                            return Ok(RunResult::ChangeOllamaEndpoint { instance, url });
+                                        if app.pending_provider_setup_is_edit()
+                                            && instance.backend_preset
+                                                == provider_instance::BackendPreset::Ollama
+                                        {
+                                            return Ok(RunResult::ChangeOllamaEndpoint {
+                                                instance,
+                                                url,
+                                            });
                                         }
                                         if app.pending_provider_setup_is_edit() {
                                             if provider_setup_requires_api_key(&instance) {
@@ -1131,28 +1120,34 @@ async fn run(
                                                     app.textarea.insert_str(existing_token);
                                                 }
                                             } else {
-                                                let instance = app.finish_pending_provider_setup().expect("pending provider instance");
-                                                return Ok(RunResult::UpdateProvider(instance));
+                                                app.enter_provider_name_input_mode();
                                             }
                                         } else if provider_setup_requires_api_key(&instance) {
                                             app.enter_provider_api_key_input_mode();
+                                        } else {
+                                            app.enter_provider_name_input_mode();
                                         }
                                     }
-                                } else if app.setup_input_mode == Some(app::SetupInputKind::ApiKey) {
-                                    if app.submit_pending_provider_api_key().is_some()
-                                        && let Some(instance) = app.finish_pending_provider_setup()
-                                    {
-                                        if app.pending_provider_setup_is_edit() {
-                                            return Ok(RunResult::UpdateProvider(instance));
-                                        }
-                                        if config.find_provider(&instance.id).is_some() {
-                                            return Ok(RunResult::UpdateProviderApiKey(instance));
-                                        }
-                                        return Ok(RunResult::AddProvider(instance));
+                                } else if app.setup_input_mode == Some(app::SetupInputKind::ApiKey)
+                                {
+                                    if app.submit_pending_provider_api_key().is_some() {
+                                        app.enter_provider_name_input_mode();
                                     }
                                 } else if app.setup_input_mode == Some(app::SetupInputKind::Name) {
-                                    if app.submit_provider_name_input(&config.providers).is_some() {
-                                        app.enter_provider_backend_preset_selection_mode();
+                                    let was_edit = app.pending_provider_setup_is_edit();
+                                    let original_id = app
+                                        .pending_provider_original_id()
+                                        .map(ToOwned::to_owned);
+                                    if app.submit_provider_name_input(&config.providers).is_some()
+                                        && let Some(instance) = app.finish_pending_provider_setup()
+                                    {
+                                        if was_edit {
+                                            return Ok(RunResult::UpdateProvider {
+                                                original_id,
+                                                instance,
+                                            });
+                                        }
+                                        return Ok(RunResult::AddProvider(instance));
                                     }
                                 } else if app.has_pending_ask() {
                                     app.submit_pending_ask_answer();

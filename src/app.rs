@@ -25,6 +25,8 @@ use crate::export;
 
 // ── Streaming status ──────────────────────────────────────────────────────────
 
+pub const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434";
+
 /// Describes what the agent/provider is currently doing while a turn is active.
 #[derive(Debug, Clone)]
 pub enum StreamingStatus {
@@ -151,6 +153,7 @@ impl SetupInputKind {
 
 #[derive(Debug, Clone)]
 pub struct PendingProviderSetup {
+    pub original_id: String,
     pub id: String,
     pub backend_preset: Option<BackendPreset>,
     pub api_type: Option<ApiType>,
@@ -167,6 +170,7 @@ pub struct PendingProviderRemoval {
 impl PendingProviderSetup {
     fn new(id: String) -> Self {
         Self {
+            original_id: id.clone(),
             id,
             backend_preset: None,
             api_type: None,
@@ -178,6 +182,7 @@ impl PendingProviderSetup {
 
     pub(crate) fn from_instance(instance: &ProviderInstance) -> Self {
         Self {
+            original_id: instance.id.clone(),
             id: instance.id.clone(),
             backend_preset: Some(instance.backend_preset.clone()),
             api_type: Some(instance.api_type.clone()),
@@ -1296,13 +1301,37 @@ impl App {
             .unwrap_or(false)
     }
 
+    pub fn pending_provider_original_id(&self) -> Option<&str> {
+        self.pending_provider_setup
+            .as_ref()
+            .and_then(|setup| setup.editing_existing.then_some(setup.original_id.as_str()))
+    }
+
+    /// Begin setup for a new custom provider instance.
+    pub fn begin_new_provider_setup(&mut self) {
+        self.exit_selection_mode();
+        self.reset_textarea();
+        self.setup_input_mode = None;
+        self.pending_provider_setup = Some(PendingProviderSetup::new(String::new()));
+        self.pending_provider_removal = None;
+    }
+
     /// Enter freeform input mode for the new provider instance name.
     pub fn enter_provider_name_input_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
         self.setup_input_mode = Some(SetupInputKind::Name);
-        self.pending_provider_setup = None;
         self.pending_provider_removal = None;
+        if let Some(existing_id) = self
+            .pending_provider_setup
+            .as_ref()
+            .filter(|setup| setup.editing_existing)
+            .map(|setup| setup.id.clone())
+        {
+            self.textarea.insert_str(&existing_id);
+        } else if let Some(suggested) = self.suggested_pending_provider_id() {
+            self.textarea.insert_str(&suggested);
+        }
     }
 
     /// Enter freeform input mode for a provider endpoint / base URL.
@@ -1329,25 +1358,59 @@ impl App {
 
     fn normalize_provider_id(raw: &str) -> Option<String> {
         let mut out = String::new();
-        let mut prev_dash = false;
+        let mut prev_sep = false;
         for ch in raw.trim().chars() {
             let mapped = match ch {
-                'a'..='z' | '0'..='9' => Some(ch),
+                'a'..='z' | '0'..='9' | '.' => Some(ch),
                 'A'..='Z' => Some(ch.to_ascii_lowercase()),
                 _ => None,
             };
             if let Some(c) = mapped {
                 out.push(c);
-                prev_dash = false;
-            } else if !out.is_empty() && !prev_dash {
+                prev_sep = false;
+            } else if !out.is_empty() && !prev_sep {
                 out.push('-');
-                prev_dash = true;
+                prev_sep = true;
             }
         }
-        while out.ends_with('-') {
+        while out.ends_with(['-', '.']) {
             out.pop();
         }
         if out.is_empty() { None } else { Some(out) }
+    }
+
+    fn provider_type_suffix(backend_preset: &BackendPreset) -> &'static str {
+        match backend_preset {
+            BackendPreset::Ollama => "ollama",
+            BackendPreset::OpenWebUi => "open-webui",
+            BackendPreset::OpenAiCompatible => "openai-compatible",
+            BackendPreset::Copilot => "copilot",
+            BackendPreset::OpenAi => "openai",
+            BackendPreset::OpenRouter => "openrouter",
+            BackendPreset::Codex => "codex",
+            BackendPreset::Gemini => "gemini",
+            BackendPreset::OllamaCom => "ollama-com",
+            BackendPreset::Test => "test",
+        }
+    }
+
+    fn suggested_pending_provider_id(&self) -> Option<String> {
+        let setup = self.pending_provider_setup.as_ref()?;
+        if setup.editing_existing {
+            return Some(setup.id.clone());
+        }
+        let backend_preset = setup.backend_preset.as_ref()?;
+        let host = setup
+            .base_url
+            .as_deref()
+            .and_then(|base| reqwest::Url::parse(base).ok())
+            .and_then(|url| url.host_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| backend_preset.id().to_string());
+        let raw = match backend_preset {
+            BackendPreset::Ollama => format!("ollama-{host}"),
+            _ => format!("{}-{}", host, Self::provider_type_suffix(backend_preset)),
+        };
+        Self::normalize_provider_id(&raw)
     }
 
     /// Read the typed provider name, normalize it into a stable id, and store
@@ -1358,11 +1421,15 @@ impl App {
     ) -> Option<String> {
         let raw = self.textarea.lines().join(" ");
         let id = Self::normalize_provider_id(&raw)?;
-        if existing_instances.iter().any(|p| p.id == id) {
+        let setup = self.pending_provider_setup.as_mut()?;
+        if existing_instances
+            .iter()
+            .any(|p| p.id == id && (!setup.editing_existing || p.id != setup.original_id))
+        {
             return None;
         }
         self.setup_input_mode = None;
-        self.pending_provider_setup = Some(PendingProviderSetup::new(id.clone()));
+        setup.id = id.clone();
         self.reset_textarea();
         Some(id)
     }
@@ -1473,7 +1540,12 @@ impl App {
             .api_type
             .clone()
             .unwrap_or_else(|| backend_preset.def().default_api.clone());
-        let mut instance = ProviderInstance::new(setup.id.clone(), backend_preset);
+        let id = if setup.id.is_empty() {
+            self.suggested_pending_provider_id()?
+        } else {
+            setup.id.clone()
+        };
+        let mut instance = ProviderInstance::new(id, backend_preset);
         instance.api_type = api_type;
         instance.base_url = setup.base_url.clone();
         instance.api_key = setup.api_key.clone();
@@ -1535,6 +1607,9 @@ impl App {
         self.reset_textarea();
         self.setup_input_mode = Some(SetupInputKind::BaseUrl);
         self.ollama_endpoint_input_mode = true;
+        if !self.pending_provider_setup_is_edit() {
+            self.textarea.insert_str(DEFAULT_OLLAMA_ENDPOINT);
+        }
     }
 
     /// Cancel Ollama endpoint input and return to normal mode.
@@ -3021,6 +3096,20 @@ mod tests {
     }
 
     #[test]
+    fn enter_ollama_endpoint_freeform_mode_prefills_default_for_new_provider() {
+        let mut app = make_app();
+        app.begin_new_provider_setup();
+        app.set_pending_provider_backend_preset(BackendPreset::Ollama);
+
+        app.enter_ollama_endpoint_freeform_mode();
+
+        assert_eq!(
+            app.textarea.lines().join(""),
+            super::DEFAULT_OLLAMA_ENDPOINT
+        );
+    }
+
+    #[test]
     fn enter_provider_edit_mode_prefills_existing_base_url() {
         let mut app = make_app();
         let mut instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
@@ -3060,10 +3149,18 @@ mod tests {
             BackendPreset::OpenWebUi,
         )];
 
+        app.begin_new_provider_setup();
+        app.set_pending_provider_backend_preset(BackendPreset::OpenWebUi);
+        if let Some(setup) = app.pending_provider_setup.as_mut() {
+            setup.base_url = Some("https://work.example.com".to_string());
+        }
         app.enter_provider_name_input_mode();
+        assert_eq!(app.textarea.lines().join(""), "work.example.com-open-webui");
+        app.textarea = App::make_textarea();
         app.textarea.insert_str("Work WebUI");
         assert!(app.submit_provider_name_input(&providers).is_none());
 
+        app.enter_provider_name_input_mode();
         app.textarea = App::make_textarea();
         app.textarea.insert_str("GPU Box");
         let id = app
@@ -3074,6 +3171,65 @@ mod tests {
             app.pending_provider_setup.as_ref().map(|p| p.id.as_str()),
             Some("gpu-box")
         );
+    }
+
+    #[test]
+    fn pending_provider_instance_uses_suggested_id_when_name_not_confirmed_yet() {
+        let mut app = make_app();
+        app.begin_new_provider_setup();
+        app.set_pending_provider_backend_preset(BackendPreset::Ollama);
+        app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
+        if let Some(setup) = app.pending_provider_setup.as_mut() {
+            setup.base_url = Some("http://mydomain.com:11434".to_string());
+        }
+
+        let instance = app
+            .pending_provider_instance()
+            .expect("pending provider instance");
+        assert_eq!(instance.id, "ollama-mydomain.com");
+        assert_eq!(instance.backend_preset, BackendPreset::Ollama);
+        assert_eq!(instance.api_type, ApiType::AnthropicCompatible);
+    }
+
+    #[test]
+    fn enter_provider_name_input_mode_prefills_existing_name_when_editing() {
+        let mut app = make_app();
+        let mut instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+        instance.base_url = Some("http://gpu-box:11434".to_string());
+
+        app.pending_provider_setup = Some(super::PendingProviderSetup::from_instance(&instance));
+        app.enter_provider_name_input_mode();
+
+        assert_eq!(app.textarea.lines().join(""), "gpu-box");
+    }
+
+    #[test]
+    fn enter_provider_name_input_mode_prefills_ollama_name_from_endpoint() {
+        let mut app = make_app();
+        app.begin_new_provider_setup();
+        app.set_pending_provider_backend_preset(BackendPreset::Ollama);
+        if let Some(setup) = app.pending_provider_setup.as_mut() {
+            setup.base_url = Some("http://localhost:11434".to_string());
+        }
+
+        app.enter_provider_name_input_mode();
+
+        assert_eq!(app.textarea.lines().join(""), "ollama-localhost");
+    }
+
+    #[test]
+    fn pending_provider_instance_uses_backend_based_placeholder_id_before_url_is_known() {
+        let mut app = make_app();
+        app.begin_new_provider_setup();
+        app.set_pending_provider_backend_preset(BackendPreset::Ollama);
+        app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
+
+        let instance = app
+            .pending_provider_instance()
+            .expect("pending provider instance");
+        assert_eq!(instance.id, "ollama-ollama");
+        assert_eq!(instance.backend_preset, BackendPreset::Ollama);
+        assert_eq!(instance.api_type, ApiType::AnthropicCompatible);
     }
 
     #[test]

@@ -542,6 +542,29 @@ base_url = "http://gpu-box:11434"
         assert!(!cfg.remove_provider("my-ollama")); // idempotent
     }
 
+    #[test]
+    fn upsert_provider_replaces_existing_provider_after_rename_when_old_id_removed() {
+        let mut cfg = TauConfig::default();
+        let mut original =
+            crate::provider_instance::ProviderInstance::new("gpu-box", BackendPreset::Ollama);
+        original.base_url = Some("http://gpu-box:11434".to_string());
+        cfg.upsert_provider(original);
+
+        let mut renamed =
+            crate::provider_instance::ProviderInstance::new("renamed-box", BackendPreset::Ollama);
+        renamed.base_url = Some("http://gpu-box:11434".to_string());
+
+        assert!(cfg.remove_provider("gpu-box"));
+        cfg.upsert_provider(renamed.clone());
+
+        assert!(cfg.find_provider("gpu-box").is_none());
+        let inst = cfg
+            .find_provider("renamed-box")
+            .expect("renamed provider present");
+        assert_eq!(inst.base_url.as_deref(), Some("http://gpu-box:11434"));
+        assert_eq!(cfg.providers.len(), 1);
+    }
+
     // ── Legacy tests (kept for backward compatibility) ────────────────────────
 
     #[test]
