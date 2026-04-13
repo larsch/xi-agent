@@ -114,17 +114,18 @@ async fn main() -> io::Result<()> {
     // ── Non-interactive (--print / -p) mode ───────────────────────────────────
     if let Some(words) = cli.print {
         let prompt = words.join(" ");
-        return run_print_mode(
-            prompt,
-            cli.provider.as_deref(),
-            cli.model.as_deref(),
-            &config,
-        )
-        .await;
+        let provider_override = cli.provider.as_deref().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "--print requires --provider <name>",
+            )
+        })?;
+        return run_print_mode(prompt, provider_override, cli.model.as_deref(), &config).await;
     }
 
     // Priority: --provider flag > config.toml > default.
-    let mut current_instance = resolve_provider_instance(cli.provider.as_deref(), &config);
+    let mut current_instance = resolve_provider_instance(cli.provider.as_deref(), &config)
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
 
     // Priority: --model flag > config.toml > provider default.
     let mut current_model = resolve_model_for_instance(cli.model.as_deref(), &current_instance);
@@ -428,7 +429,7 @@ async fn main() -> io::Result<()> {
                         )));
                         app.mark_log_dirty();
                     }
-                    current_instance = resolve_provider_instance(None, &config);
+                    current_instance = resolve_default_provider_instance(&config);
                     current_model = resolve_model_for_instance(None, &current_instance);
                     app.current_model = current_model.clone();
                     current_thinking = resolve_thinking_level_for_model(&config, &current_model);
@@ -1360,20 +1361,13 @@ async fn run(
     }
 }
 
-/// Resolve the active [`ProviderInstance`] from the CLI override or config.
+/// Resolve the default active [`ProviderInstance`] from config.
 ///
 /// Resolution order:
-/// 1. CLI `--provider` flag matched against instance ids
-/// 2. `config.provider` matched against instance ids
-/// 3. First instance in `config.providers`
-/// 4. Synthetic copilot default
-fn resolve_provider_instance(cli_override: Option<&str>, config: &TauConfig) -> ProviderInstance {
-    // Try CLI override as an instance id.
-    if let Some(id) = cli_override
-        && let Some(inst) = config.find_provider(id)
-    {
-        return inst.clone();
-    }
+/// 1. `config.provider` matched against instance ids
+/// 2. First instance in `config.providers`
+/// 3. Synthetic copilot default
+fn resolve_default_provider_instance(config: &TauConfig) -> ProviderInstance {
     // Try config.provider as an instance id.
     if let Some(ref id) = config.provider
         && let Some(inst) = config.find_provider(id)
@@ -1386,11 +1380,41 @@ fn resolve_provider_instance(cli_override: Option<&str>, config: &TauConfig) -> 
     })
 }
 
+fn resolve_provider_instance(
+    cli_override: Option<&str>,
+    config: &TauConfig,
+) -> Result<ProviderInstance, String> {
+    if let Some(id) = cli_override {
+        if id == "test" {
+            return Ok(ProviderInstance::new(
+                "test",
+                provider_instance::BackendPreset::Test,
+            ));
+        }
+        if let Some(inst) = config.find_provider(id) {
+            return Ok(inst.clone());
+        }
+
+        let mut allowed = config
+            .providers
+            .iter()
+            .map(|instance| instance.id.as_str())
+            .collect::<Vec<_>>();
+        allowed.push("test");
+        return Err(format!(
+            "unknown provider '{id}'. Expected one of: {}",
+            allowed.join(", ")
+        ));
+    }
+
+    Ok(resolve_default_provider_instance(config))
+}
+
 fn resolve_current_run_instance(app: &App, config: &TauConfig) -> ProviderInstance {
     config
         .find_provider(&app.current_provider)
         .cloned()
-        .unwrap_or_else(|| resolve_provider_instance(None, config))
+        .unwrap_or_else(|| resolve_default_provider_instance(config))
 }
 
 /// Resolve the effective model for a provider instance.
@@ -1530,11 +1554,12 @@ async fn preflight_token_refresh(provider: &str) -> bool {
 
 async fn run_print_mode(
     prompt: String,
-    provider_override: Option<&str>,
+    provider_override: &str,
     model_override: Option<&str>,
     config: &TauConfig,
 ) -> io::Result<()> {
-    let current_instance = resolve_provider_instance(provider_override, config);
+    let current_instance = resolve_provider_instance(Some(provider_override), config)
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
     let current_model = resolve_model_for_instance(model_override, &current_instance);
     let current_thinking = resolve_thinking_level_for_model(config, &current_model);
     let provider_name = current_instance.backend_preset.id().to_string();
@@ -1772,8 +1797,8 @@ async fn run_print_mode_loop_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_paste_text, provider_display_name, resolve_model_for_instance,
-        resolve_thinking_level_for_model,
+        normalize_paste_text, provider_display_name, resolve_default_provider_instance,
+        resolve_model_for_instance, resolve_provider_instance, resolve_thinking_level_for_model,
     };
     use crate::{
         app::format_provider_error_for_display,
@@ -1790,11 +1815,66 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_prefers_cli_over_instance() {
-        let mut inst = ProviderInstance::new("openai", BackendPreset::OpenAi);
-        inst.model = Some("gpt-4.1".to_string());
-        let model = resolve_model_for_instance(Some("gpt-4.1-mini"), &inst);
-        assert_eq!(model, "gpt-4.1-mini");
+    fn resolve_provider_instance_accepts_exact_configured_provider_id() {
+        let mut cfg = TauConfig::default();
+        cfg.providers.push(ProviderInstance::new(
+            "work-webui",
+            BackendPreset::OpenWebUi,
+        ));
+
+        let instance =
+            resolve_provider_instance(Some("work-webui"), &cfg).expect("provider should resolve");
+
+        assert_eq!(instance.id, "work-webui");
+        assert_eq!(instance.backend_preset, BackendPreset::OpenWebUi);
+    }
+
+    #[test]
+    fn resolve_provider_instance_accepts_hidden_test_provider() {
+        let cfg = TauConfig::default();
+
+        let instance = resolve_provider_instance(Some("test"), &cfg).expect("test should resolve");
+
+        assert_eq!(instance.id, "test");
+        assert_eq!(instance.backend_preset, BackendPreset::Test);
+    }
+
+    #[test]
+    fn resolve_provider_instance_rejects_unknown_cli_provider() {
+        let mut cfg = TauConfig::default();
+        cfg.providers
+            .push(ProviderInstance::new("copilot", BackendPreset::Copilot));
+        cfg.providers.push(ProviderInstance::new(
+            "work-webui",
+            BackendPreset::OpenWebUi,
+        ));
+
+        let err = resolve_provider_instance(Some("does-not-exist"), &cfg)
+            .expect_err("unknown provider should be rejected");
+
+        assert_eq!(
+            err,
+            "unknown provider 'does-not-exist'. Expected one of: copilot, work-webui, test"
+        );
+    }
+
+    #[test]
+    fn resolve_default_provider_instance_prefers_configured_default() {
+        let mut cfg = TauConfig {
+            provider: Some("work-webui".to_string()),
+            ..TauConfig::default()
+        };
+        cfg.providers
+            .push(ProviderInstance::new("copilot", BackendPreset::Copilot));
+        cfg.providers.push(ProviderInstance::new(
+            "work-webui",
+            BackendPreset::OpenWebUi,
+        ));
+
+        let instance = resolve_default_provider_instance(&cfg);
+
+        assert_eq!(instance.id, "work-webui");
+        assert_eq!(instance.backend_preset, BackendPreset::OpenWebUi);
     }
 
     #[test]
