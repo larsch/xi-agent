@@ -13,9 +13,11 @@ use crate::{
     },
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
+    event_log::EventLog,
     llm::{
         AssistantPhase, DisplayRange, LlmProvider, Message, ProviderErrorKind, Role, UsageStats,
     },
+    projection::DisplayProjection,
     provider_instance::{ApiType, AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
     session::SessionStore,
     shell::{self, ShellKind},
@@ -24,6 +26,7 @@ use crate::{
 };
 
 use crate::export;
+use crate::session_event::SessionEvent;
 
 // ── Streaming status ──────────────────────────────────────────────────────────
 
@@ -392,6 +395,16 @@ pub struct App {
     current_cwd: String,
     resume_available_for_cwd: bool,
 
+    // ── Event log ─────────────────────────────────────────────────────────────
+    /// Append-only session event log.  `None` until the first session is
+    /// created or resumed.
+    pub(crate) event_log: Option<EventLog>,
+    /// Stateful incremental display renderer driven by the event log.
+    pub(crate) display_projection: DisplayProjection,
+    /// Buffer of events accumulated during the current in-flight turn.
+    /// Flushed to the event log as a batch on `TurnEnd`, `Done`, or `Error`.
+    pending_turn_events: Vec<crate::session_event::SessionEvent>,
+
     // ── ask_user overlay state ───────────────────────────────────────────────
     pending_ask: Option<PendingAsk>,
     ask_reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
@@ -577,6 +590,9 @@ impl App {
             current_session_id: None,
             current_cwd: String::new(),
             resume_available_for_cwd: false,
+            event_log: None,
+            display_projection: DisplayProjection::new(),
+            pending_turn_events: Vec::new(),
             pending_ask: None,
             ask_reply: None,
             ask_user_freeform_mode: false,
@@ -613,6 +629,28 @@ impl App {
         if self.streaming() {
             self.throbber_tick = self.throbber_tick.wrapping_add(1);
         }
+    }
+
+    /// Record a model/provider change in the event log.
+    ///
+    /// Call this whenever `current_model` or `current_provider` is updated so
+    /// that the change is preserved in the session history.
+    pub fn record_model_changed(&mut self) {
+        self.append_event_immediate(SessionEvent::ModelChanged {
+            model: self.current_model.clone(),
+            provider: self.current_provider.clone(),
+            timestamp: Self::now_ts(),
+        });
+    }
+
+    /// Record a thinking-level change in the event log.
+    ///
+    /// Call this whenever `current_thinking` is updated.
+    pub fn record_thinking_level_changed(&mut self) {
+        self.append_event_immediate(SessionEvent::ThinkingLevelChanged {
+            level: self.current_thinking,
+            timestamp: Self::now_ts(),
+        });
     }
 
     /// Returns true when the throbber should be visible.
@@ -694,9 +732,15 @@ impl App {
         let Some(store) = self.session_store.as_ref() else {
             return;
         };
-        match store.load_messages(session_id) {
-            Ok(messages) => {
-                self.messages = messages;
+        // Load the event log; fall back to legacy messages path for old sessions.
+        match store.load_events(session_id) {
+            Ok(log) => {
+                // Rebuild messages and display projection from the event log.
+                self.messages = crate::projection::project_display_messages(&log.events);
+                let mut proj = DisplayProjection::new();
+                proj.rebuild(&log.events);
+                self.display_projection = proj;
+                self.event_log = Some(log);
                 self.current_session_id = Some(session_id.to_string());
                 self.auto_scroll = true;
                 self.log_scroll = 0;
@@ -2480,36 +2524,52 @@ impl App {
         "unknown".to_string()
     }
 
-    fn persist_messages(&mut self) {
-        let Some(store) = self.session_store.as_mut() else {
+    /// Ensure an [`EventLog`] exists for the current session before submitting
+    /// a user message.  Creates the session and loads (or initialises) the log
+    /// if needed.  No-op when the event log is already populated.
+    fn ensure_event_log_for_submit(&mut self) {
+        if self.event_log.is_some() {
             return;
-        };
-
-        let session_id = match self.current_session_id.clone() {
-            Some(id) => id,
-            None => match store.create_session(&self.current_cwd) {
-                Ok(id) => {
-                    self.current_session_id = Some(id.clone());
-                    id
+        }
+        let session_id = self.ensure_session_id();
+        if let Some(store) = &self.session_store {
+            match store.load_events(&session_id) {
+                Ok(log) => {
+                    self.display_projection.rebuild(&log.events);
+                    self.event_log = Some(log);
                 }
                 Err(e) => {
-                    log::debug!("failed to create session: {}", e);
-                    return;
+                    log::debug!("failed to load event log for session {session_id}: {e}");
                 }
-            },
-        };
-
-        if let Err(e) = store.save_messages(&session_id, &self.current_cwd, &self.messages) {
-            log::debug!("failed to persist session {}: {}", session_id, e);
+            }
         }
+    }
+
+    fn persist_messages(&mut self) {
+        // Persistence is now driven incrementally by `flush_turn_events` and
+        // `append_event_immediate` via the event log.  This method is kept as
+        // a call-site placeholder so that callers do not need to be updated
+        // individually; its only remaining job is to refresh the resume hint.
+        //
+        // The legacy `save_messages` full-rewrite path is intentionally not
+        // called here any more.  It will be removed in the final cleanup once
+        // `app.messages` and `SessionStore::save_messages` are retired.
         self.refresh_resume_availability();
     }
 
     /// Export the current visible session to a standalone HTML file.
     pub fn export_session_html(&mut self, requested_path: Option<&str>) {
         let path = export::resolve_export_path(&self.current_cwd, requested_path);
+        // Use the event log projection when available; fall back to messages.
+        let display_messages;
+        let messages_ref: &[Message] = if let Some(log) = &self.event_log {
+            display_messages = crate::projection::project_display_messages(&log.events);
+            &display_messages
+        } else {
+            &self.messages
+        };
         let html = export::build_session_export_html(
-            &self.messages,
+            messages_ref,
             &self.current_cwd,
             &self.current_provider,
             &self.current_model,
@@ -2536,6 +2596,9 @@ impl App {
     pub fn new_conversation(&mut self) {
         self.messages.clear();
         self.current_session_id = None;
+        self.event_log = None;
+        self.display_projection = DisplayProjection::new();
+        self.pending_turn_events.clear();
         self.queued_steering.clear();
         self.steering_tx = None;
         self.latest_usage = None;
@@ -2580,24 +2643,25 @@ impl App {
 
     /// Build the message list to send to the LLM from the current history.
     ///
-    /// Prepends the system prompt (if set), filters out messages where
-    /// `include_in_llm` is false, and removes a trailing empty provisional
-    /// assistant message that may be left over from an interrupted turn.
+    /// Prepends the system prompt (if set).  When an event log is available,
+    /// delegates to [`project_llm_messages`] for the session history;
+    /// otherwise falls back to the legacy `messages` filter path.
+    ///
+    /// [`project_llm_messages`]: crate::projection::project_llm_messages
     fn prepare_llm_messages(&self) -> Vec<Message> {
-        let mut msgs: Vec<Message> = self
-            .system_prompt
-            .iter()
-            .map(Message::system)
-            .chain(self.messages.iter().filter(|m| m.include_in_llm).cloned())
-            .collect();
+        let mut msgs: Vec<Message> = self.system_prompt.iter().map(Message::system).collect();
 
-        // Drop a trailing empty assistant message that was added only to hold
-        // the ToolIntentStart phase marker — sending it to the LLM is harmless
-        // but confusing.
-        if matches!(msgs.last().map(|m| &m.role), Some(Role::Assistant))
-            && msgs.last().map(|m| m.content.is_empty()).unwrap_or(false)
-        {
-            msgs.pop();
+        if let Some(log) = &self.event_log {
+            msgs.extend(crate::projection::project_llm_messages(&log.events));
+        } else {
+            // Legacy path: filter messages directly.
+            msgs.extend(self.messages.iter().filter(|m| m.include_in_llm).cloned());
+            // Drop a trailing empty assistant message (streaming artefact).
+            if matches!(msgs.last().map(|m| &m.role), Some(Role::Assistant))
+                && msgs.last().map(|m| m.content.is_empty()).unwrap_or(false)
+            {
+                msgs.pop();
+            }
         }
 
         msgs
@@ -2647,8 +2711,14 @@ impl App {
             return;
         }
 
-        self.messages.push(Message::user(trimmed));
+        self.messages.push(Message::user(trimmed.clone()));
         self.bump_log_revision();
+        // Append UserMessage to the event log immediately — it is a complete unit.
+        self.ensure_event_log_for_submit();
+        self.append_event_immediate(SessionEvent::UserMessage {
+            content: trimmed,
+            timestamp: Self::now_ts(),
+        });
         self.persist_messages();
         self.reset_textarea();
 
@@ -2668,8 +2738,14 @@ impl App {
             return;
         }
 
-        self.messages.push(Message::user(text.trim().to_string()));
+        let trimmed = text.trim().to_string();
+        self.messages.push(Message::user(trimmed.clone()));
         self.bump_log_revision();
+        self.ensure_event_log_for_submit();
+        self.append_event_immediate(SessionEvent::UserMessage {
+            content: trimmed,
+            timestamp: Self::now_ts(),
+        });
         self.persist_messages();
         self.reset_textarea();
 
@@ -2769,6 +2845,44 @@ impl App {
 
     // ── Agent event handling ──────────────────────────────────────────────────
 
+    /// Current wall-clock time as seconds since UNIX epoch.
+    fn now_ts() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Flush `pending_turn_events` to the event log and clear the buffer.
+    ///
+    /// Called at every turn-completion boundary (`TurnEnd`, `Done`, `Error`).
+    fn flush_turn_events(&mut self) {
+        if self.pending_turn_events.is_empty() {
+            return;
+        }
+        let batch: Vec<SessionEvent> = std::mem::take(&mut self.pending_turn_events);
+        if let Some(log) = self.event_log.as_mut() {
+            if let Err(e) = log.append_batch(&batch) {
+                log::debug!("failed to append turn events to event log: {e}");
+            } else {
+                self.display_projection.apply_new_events(&log.events);
+            }
+        }
+    }
+
+    /// Append a single event to the event log immediately (for events that are
+    /// complete units on their own: `UserMessage`, `ModelChanged`,
+    /// `ThinkingLevelChanged`).
+    fn append_event_immediate(&mut self, ev: SessionEvent) {
+        if let Some(log) = self.event_log.as_mut() {
+            if let Err(e) = log.append_batch(&[ev]) {
+                log::debug!("failed to append event to event log: {e}");
+            } else {
+                self.display_projection.apply_new_events(&log.events);
+            }
+        }
+    }
+
     pub fn apply_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::ThinkingToken(token) => {
@@ -2779,6 +2893,8 @@ impl App {
                         .get_or_insert_with(String::new)
                         .push_str(&token);
                 }
+                // Accumulate into pending turn buffer (assistant message is
+                // finalised on TurnEnd/Done — updated in-place until then).
                 self.bump_log_revision();
             }
             AgentEvent::Usage(usage) => {
@@ -2808,6 +2924,11 @@ impl App {
                 if let Some(pos) = self.queued_steering.iter().position(|m| m == &text) {
                     self.queued_steering.remove(pos);
                 }
+                // Steering messages are user messages — append immediately.
+                self.append_event_immediate(SessionEvent::UserMessage {
+                    content: text,
+                    timestamp: Self::now_ts(),
+                });
                 self.bump_log_revision();
             }
             AgentEvent::StatusUpdate(msg) => {
@@ -2821,7 +2942,15 @@ impl App {
             }
             AgentEvent::ToolCallStart { id, name, args } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.messages.push(Message::tool_call(id, name, args));
+                self.messages
+                    .push(Message::tool_call(id.clone(), name.clone(), args.clone()));
+                // ToolCall is buffered; only flushed together with its result.
+                self.pending_turn_events.push(SessionEvent::ToolCall {
+                    id,
+                    name,
+                    args,
+                    timestamp: Self::now_ts(),
+                });
                 self.bump_log_revision();
             }
             AgentEvent::ToolCallEnd { id, result } => {
@@ -2832,10 +2961,32 @@ impl App {
                     total_lines: tr.total_lines,
                 });
                 let mut msg = Message::tool_result(&id, result.content.clone(), result.is_error);
-                if let Some(dr) = display_range {
+                if let Some(dr) = display_range.clone() {
                     msg = msg.with_display_range(dr);
                 }
                 self.messages.push(msg);
+                // ToolResult completes the pair — buffered until TurnEnd/Done.
+                // Resolve tool name from the matching pending ToolCall.
+                let name = self
+                    .pending_turn_events
+                    .iter()
+                    .rev()
+                    .find_map(|e| {
+                        if let SessionEvent::ToolCall { id: cid, name, .. } = e {
+                            if cid == &id { Some(name.clone()) } else { None }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                self.pending_turn_events.push(SessionEvent::ToolResult {
+                    id,
+                    name,
+                    content: result.content,
+                    is_error: result.is_error,
+                    display_range,
+                    timestamp: Self::now_ts(),
+                });
                 self.bump_log_revision();
             }
             AgentEvent::ExternalFileChange {
@@ -2845,11 +2996,21 @@ impl App {
                 self.last_output_at = Some(std::time::Instant::now());
                 // Mirror the notification into the UI message log so it appears
                 // in the conversation display, just as a user message would.
-                self.messages.push(Message::user(notification));
+                self.messages.push(Message::user(notification.clone()));
+                // External file change notifications are user-visible context
+                // injected into the conversation — treat as UserMessage.
+                self.append_event_immediate(SessionEvent::UserMessage {
+                    content: notification,
+                    timestamp: Self::now_ts(),
+                });
                 self.bump_log_revision();
             }
             AgentEvent::TurnEnd => {
                 self.streaming_status = Some(StreamingStatus::Waiting);
+                // Finalise the assistant message in the pending buffer before
+                // flushing, using the current in-memory messages state.
+                self.finalise_assistant_turn_event();
+                self.flush_turn_events();
                 self.persist_messages();
             }
             AgentEvent::Done => {
@@ -2860,6 +3021,8 @@ impl App {
                 self.steering_tx = None;
                 self.queued_steering.clear();
                 self.bump_log_revision();
+                // The final TurnEnd already flushed the turn buffer.
+                // Done only cleans up live streaming state.
                 self.persist_messages();
             }
             AgentEvent::Error(e) => {
@@ -2884,7 +3047,9 @@ impl App {
                     );
                     self.login.auth_retry_budget -= 1;
                     self.streaming_status = None;
-                    // Refresh triggered; retry will happen automatically after refresh completes
+                    // Refresh triggered; retry will happen automatically after refresh completes.
+                    // Discard pending events — the turn will be retried from scratch.
+                    self.pending_turn_events.clear();
                 } else {
                     let provider_label = active_provider_display_name(
                         &self.current_provider,
@@ -2895,6 +3060,13 @@ impl App {
                         .push(Message::assistant(format!("[Error: {rendered}]")));
                     self.bump_log_revision();
                     self.streaming_status = None;
+                    // Discard any partially accumulated assistant/tool events
+                    // and append a TurnError instead.
+                    self.pending_turn_events.clear();
+                    self.append_event_immediate(SessionEvent::TurnError {
+                        message: format!("[Error: {rendered}]"),
+                        timestamp: Self::now_ts(),
+                    });
                     self.persist_messages();
                 }
             }
@@ -2908,6 +3080,52 @@ impl App {
                 self.messages.push(Message::assistant(""));
                 self.bump_log_revision();
             }
+        }
+    }
+
+    /// Snapshot the current in-memory assistant message into `pending_turn_events`.
+    ///
+    /// Called just before flushing the turn buffer so that the final content,
+    /// thinking, phase, and usage are captured.  If the pending buffer already
+    /// contains an `AssistantMessage` it is replaced; otherwise one is prepended
+    /// before any tool events.
+    fn finalise_assistant_turn_event(&mut self) {
+        // Find the in-progress assistant message (the last Role::Assistant in messages).
+        let asst = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .cloned();
+
+        let Some(asst) = asst else { return };
+
+        // Don't record a completely empty assistant turn with no tools either.
+        let has_tools = self
+            .pending_turn_events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::ToolCall { .. }));
+        if asst.content.is_empty() && asst.thinking.is_none() && !has_tools {
+            return;
+        }
+
+        let ev = SessionEvent::AssistantMessage {
+            content: asst.content.clone(),
+            thinking: asst.thinking.clone(),
+            phase: asst.assistant_phase.unwrap_or(AssistantPhase::Final),
+            usage: self.latest_usage,
+            timestamp: Self::now_ts(),
+        };
+
+        // Replace existing AssistantMessage in the buffer or prepend.
+        if let Some(pos) = self
+            .pending_turn_events
+            .iter()
+            .position(|e| matches!(e, SessionEvent::AssistantMessage { .. }))
+        {
+            self.pending_turn_events[pos] = ev;
+        } else {
+            self.pending_turn_events.insert(0, ev);
         }
     }
 
@@ -3646,6 +3864,43 @@ mod tests {
                 "should not append duplicate tool result"
             );
         });
+    }
+
+    #[test]
+    fn done_does_not_duplicate_assistant_turn_after_turn_end() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+
+        let mut app = make_app();
+        app.event_log = Some(crate::event_log::EventLog::load(&path).expect("load event log"));
+
+        // Seed a user message (normally appended on submit).
+        app.messages.push(Message::user("hello"));
+        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
+            content: "hello".to_string(),
+            timestamp: 1,
+        });
+
+        // Simulate a simple assistant turn with no tools.
+        app.apply_event(crate::agent::types::AgentEvent::TextToken {
+            text: "hi".to_string(),
+            phase: crate::llm::AssistantPhase::Final,
+        });
+        app.apply_event(crate::agent::types::AgentEvent::TurnEnd);
+        app.apply_event(crate::agent::types::AgentEvent::Done);
+
+        let log = app.event_log.as_ref().expect("event log");
+        let assistant_count = log
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::session_event::SessionEvent::AssistantMessage { .. }
+                )
+            })
+            .count();
+        assert_eq!(assistant_count, 1, "assistant turn should be written once");
     }
 
     // ── prepare_llm_messages ─────────────────────────────────────────────────

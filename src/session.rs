@@ -62,6 +62,7 @@ impl SessionStore {
         Ok(session_id)
     }
 
+    #[allow(dead_code)]
     pub fn save_messages(
         &mut self,
         session_id: &str,
@@ -85,6 +86,7 @@ impl SessionStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn load_messages(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
         let Some(path) = self.find_session_file_by_id(session_id)? else {
             return Ok(vec![]);
@@ -206,6 +208,24 @@ impl SessionStore {
         self.sessions_dir
             .join(cwd_key(cwd))
             .join(format!("{session_id}.jsonl"))
+    }
+
+    /// Resolve the JSONL path for a session's event log.
+    ///
+    /// If a file already exists for `session_id` (located by scanning the
+    /// sessions directory), that path is returned so that the event log reuses
+    /// the same file as the legacy session.  For sessions that have no file
+    /// yet, a path under an `_unknown_cwd` bucket is returned as a fallback;
+    /// it will be superseded by the first `save_messages` call that associates
+    /// the session with a real cwd.
+    pub(crate) fn resolve_event_log_path(&self, session_id: &str) -> anyhow::Result<PathBuf> {
+        if let Some(existing) = self.find_session_file_by_id(session_id)? {
+            return Ok(existing);
+        }
+        Ok(self
+            .sessions_dir
+            .join("_unknown_cwd")
+            .join(format!("{session_id}.jsonl")))
     }
 
     fn find_session_file_by_id(&self, session_id: &str) -> anyhow::Result<Option<PathBuf>> {

@@ -26,7 +26,7 @@ pub enum AssistantPhase {
 }
 
 /// Normalized token usage reported by a provider for a completed turn.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UsageStats {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,

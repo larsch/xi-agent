@@ -26,13 +26,16 @@ mod commands;
 mod config;
 mod debug_log;
 mod dirs;
+mod event_log;
 mod export;
 mod llm;
 mod markdown;
 mod process;
+mod projection;
 mod provider;
 mod provider_instance;
 mod session;
+mod session_event;
 mod shell;
 mod skills;
 mod thinking;
@@ -272,6 +275,8 @@ async fn main() -> io::Result<()> {
                 current_model = name;
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
+                app.record_model_changed();
+                app.record_thinking_level_changed();
                 // Invalidate cached model list so the next fetch is fresh.
                 app.available_models = None;
                 persist_provider_model_selection_v2(
@@ -312,6 +317,8 @@ async fn main() -> io::Result<()> {
                     current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                     app.current_thinking = current_thinking;
                     app.current_provider = current_instance.id.clone();
+                    app.record_model_changed();
+                    app.record_thinking_level_changed();
                     app.available_models = None;
                     persist_provider_model_selection_v2(
                         &mut config,
@@ -353,6 +360,8 @@ async fn main() -> io::Result<()> {
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
                 app.current_provider = current_instance.id.clone();
+                app.record_model_changed();
+                app.record_thinking_level_changed();
                 app.provider_instances = config.providers.clone();
                 app.available_models = None;
                 maybe_warn_thinking_unsupported(
@@ -399,6 +408,8 @@ async fn main() -> io::Result<()> {
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
                 app.current_provider = current_instance.id.clone();
+                app.record_model_changed();
+                app.record_thinking_level_changed();
                 app.provider_instances = config.providers.clone();
                 app.available_models = None;
                 maybe_warn_thinking_unsupported(
@@ -435,6 +446,8 @@ async fn main() -> io::Result<()> {
                     current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                     app.current_thinking = current_thinking;
                     app.current_provider = current_instance.id.clone();
+                    app.record_model_changed();
+                    app.record_thinking_level_changed();
                     app.provider_instances = config.providers.clone();
                     app.available_models = None;
                     maybe_warn_thinking_unsupported(
@@ -452,6 +465,7 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::ChangeThinking(level)) => {
                 current_thinking = level;
                 app.current_thinking = level;
+                app.record_thinking_level_changed();
                 persist_provider_model_selection_v2(
                     &mut config,
                     &current_instance,
@@ -492,6 +506,8 @@ async fn main() -> io::Result<()> {
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
                 app.current_provider = current_instance.id.clone();
+                app.record_model_changed();
+                app.record_thinking_level_changed();
                 app.available_models = None;
                 maybe_warn_thinking_unsupported(
                     &mut app,
@@ -536,6 +552,8 @@ async fn main() -> io::Result<()> {
                 current_thinking = resolve_thinking_level_for_model(&config, &current_model);
                 app.current_thinking = current_thinking;
                 app.current_provider = current_instance.id.clone();
+                app.record_model_changed();
+                app.record_thinking_level_changed();
                 app.available_models = None;
                 maybe_warn_thinking_unsupported(
                     &mut app,
