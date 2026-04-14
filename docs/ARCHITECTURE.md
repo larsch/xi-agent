@@ -257,12 +257,32 @@ into the conversation history and mirrored to the UI via
 `Arc<Mutex<FileTracker>>` shared between `AgentLoopConfig` and the three
 file tools.
 
+## Context Compaction
+
+Tau now supports durable context compaction through the session event log.
+When a completed turn crosses the active model's context threshold, or when a
+provider returns a context-overflow-style error, the agent generates a
+structured summary of older history and appends a
+`SessionEvent::CompactionSummary` boundary. The LLM projection injects the
+most recent summary as a synthetic user message and excludes older events,
+while the display projection shows a visible `[compacted: Xk → Yk tokens]`
+marker.
+
+Compaction uses two token measures:
+- provider-reported turn usage when available for trigger decisions
+- tau-estimated current context size (`chars / 4`) for cut-point selection and
+  before/after reporting
+
+The compaction algorithm preserves recent history verbatim, respects
+assistant tool-call/tool-result pairing, derives cumulative `<read-files>` and
+`<modified-files>` sections from persisted file-tool events, and can be
+triggered manually with `/compact [instructions]` to add user guidance to the
+summary prompt.
+
 ## What Is Not Here Yet
 
 - **OS keyring-backed secret storage** — auth is now tau-owned and supports
   in-app `/login`, but secrets still live in `auth.json` rather than the
   platform keyring. See [ROADMAP](ROADMAP.md).
-- **Context window management** — no truncation or summarisation when
-  conversation history exceeds the model's context window. See [ROADMAP](ROADMAP.md).
 
 See [ROADMAP](ROADMAP.md) for prioritised work items.

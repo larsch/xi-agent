@@ -56,6 +56,12 @@ pub static COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "compact",
+        usage: "/compact [instructions]",
+        description: "Compact session context now, optionally with summary instructions",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "reload",
         usage: "/reload",
         description: "Reload AGENTS.md context and available skills",
@@ -373,6 +379,8 @@ pub enum CommandAction {
     Resume(String),
     /// `/resume` with no argument — show session picker.
     ResumeNoArg,
+    /// Trigger immediate context compaction with optional user instructions.
+    Compact(Option<String>),
     /// Invoke a skill by name, with optional free-form args.
     Skill {
         name: String,
@@ -416,6 +424,8 @@ pub fn parse(input: &str) -> Option<CommandAction> {
         "login" => Some(CommandAction::LoginNoArg),
         "resume" if !arg.is_empty() => Some(CommandAction::Resume(arg.to_string())),
         "resume" => Some(CommandAction::ResumeNoArg),
+        "compact" if !arg.is_empty() => Some(CommandAction::Compact(Some(arg.to_string()))),
+        "compact" => Some(CommandAction::Compact(None)),
         _ => None,
     }
 }
@@ -475,6 +485,14 @@ mod tests {
             Some(CommandAction::Resume(id)) if id == "abc123"
         ));
         assert!(matches!(parse("/resume"), Some(CommandAction::ResumeNoArg)));
+        assert!(matches!(
+            parse("/compact"),
+            Some(CommandAction::Compact(None))
+        ));
+        assert!(matches!(
+            parse("/compact include file paths only"),
+            Some(CommandAction::Compact(Some(text))) if text == "include file paths only"
+        ));
     }
 
     #[test]

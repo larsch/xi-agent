@@ -32,10 +32,13 @@ Move secrets out of `auth.toml` and into the platform credential store:
 Keep only non-secret metadata in the tau app config directory.
 
 ### Context compaction
-Long agentic sessions silently degrade when the conversation history exceeds
-the model's context window. Implement a soft-limit warning and a truncation
-strategy (drop oldest non-system messages, or summarise) before the window
-fills.
+Long agentic sessions are now compacted automatically before the model's
+context window fills. Tau uses provider-reported usage when available to
+trigger post-turn compaction, falls back to estimated context size when
+needed, retries once after context-overflow errors, and records structured
+compaction summaries in the session log. Users can also trigger compaction
+manually with `/compact [instructions]` to steer what the summary should keep
+or omit.
 
 Tracked in Gitea: [issue #11](https://gitea.belunktum.dk/larsch/tau/issues/11).
 

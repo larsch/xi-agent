@@ -105,6 +105,10 @@ async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -286,6 +290,10 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -375,6 +383,10 @@ async fn agent_loop_before_hook_blocks_tool() {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: Some(Box::new(|_name, _args| false)), // block everything
         after_tool_call: None,
     };
@@ -524,6 +536,10 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -601,6 +617,10 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -661,6 +681,10 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         // Cancel via the watch channel as soon as the tool call finishes.
         after_tool_call: Some(Box::new(move |_name, _result| {

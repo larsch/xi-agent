@@ -405,6 +405,9 @@ pub struct App {
     /// Flushed to the event log as a batch on `TurnEnd`, `Done`, or `Error`.
     pending_turn_events: Vec<crate::session_event::SessionEvent>,
 
+    /// Optional manual compaction instructions for the next launched compaction-only task.
+    pending_manual_compaction_instructions: Option<String>,
+
     // ── ask_user overlay state ───────────────────────────────────────────────
     pending_ask: Option<PendingAsk>,
     ask_reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
@@ -593,6 +596,7 @@ impl App {
             event_log: None,
             display_projection: DisplayProjection::new(),
             pending_turn_events: Vec::new(),
+            pending_manual_compaction_instructions: None,
             pending_ask: None,
             ask_reply: None,
             ask_user_freeform_mode: false,
@@ -2623,6 +2627,14 @@ impl App {
             tools: self.agent_config.tools.clone(),
             file_tracker: Arc::clone(&self.agent_config.file_tracker),
             tool_output_log: Arc::clone(&self.agent_config.tool_output_log),
+            session_events: self
+                .event_log
+                .as_ref()
+                .map(|log| log.events.clone())
+                .unwrap_or_default(),
+            current_model: self.current_model.clone(),
+            auto_compaction_enabled: true,
+            manual_compaction_instructions: self.pending_manual_compaction_instructions.take(),
             before_tool_call: None,
             after_tool_call: None,
         };
@@ -2700,6 +2712,30 @@ impl App {
             self.reset_textarea();
             self.auto_scroll = true;
         }
+    }
+
+    /// Trigger a compaction-only task against the current session state.
+    pub fn trigger_manual_compaction(
+        &mut self,
+        instructions: Option<String>,
+        provider: &DynProvider,
+    ) {
+        if self.streaming() || self.login.active {
+            return;
+        }
+
+        self.ensure_event_log_for_submit();
+        self.pending_manual_compaction_instructions = instructions;
+
+        if self.check_token_preflight(RetryTarget::AgentTurn) {
+            return;
+        }
+
+        self.streaming_status = Some(StreamingStatus::Waiting);
+        self.login.auth_retry_budget = 1;
+        self.auto_scroll = true;
+        let llm_messages = self.prepare_llm_messages();
+        self.start_agent_task(llm_messages, provider);
     }
 
     /// Take the textarea content and start the agent loop.
@@ -2940,6 +2976,47 @@ impl App {
                 };
                 self.bump_log_revision();
             }
+            AgentEvent::Compacting => {
+                self.last_output_at = Some(std::time::Instant::now());
+                self.streaming_status = Some(StreamingStatus::Message("compacting…".to_string()));
+                self.bump_log_revision();
+            }
+            AgentEvent::CompactionDone {
+                summary,
+                trigger_reason,
+                context_window,
+                reserve_tokens,
+                keep_recent_tokens,
+                tokens_before,
+                tokens_after,
+                read_files,
+                modified_files,
+            } => {
+                let ev = SessionEvent::CompactionSummary {
+                    summary,
+                    trigger_reason,
+                    context_window,
+                    reserve_tokens,
+                    keep_recent_tokens,
+                    tokens_before,
+                    tokens_after,
+                    read_files,
+                    modified_files,
+                    timestamp: Self::now_ts(),
+                };
+                self.append_event_immediate(ev);
+                if let Some(log) = &self.event_log {
+                    self.messages = crate::projection::project_display_messages(&log.events);
+                }
+                self.latest_usage = Some(UsageStats {
+                    input_tokens: Some(tokens_after),
+                    output_tokens: None,
+                    total_tokens: Some(tokens_after),
+                });
+                self.auto_scroll = true;
+                self.bump_log_revision();
+                self.persist_messages();
+            }
             AgentEvent::ToolCallStart { id, name, args } => {
                 self.last_output_at = Some(std::time::Instant::now());
                 self.messages
@@ -3162,6 +3239,10 @@ mod tests {
                 tool_output_log: std::sync::Arc::new(std::sync::Mutex::new(
                     crate::agent::ToolOutputLog::new("test-session"),
                 )),
+                session_events: vec![],
+                current_model: "gpt-4o".to_string(),
+                auto_compaction_enabled: true,
+                manual_compaction_instructions: None,
                 before_tool_call: None,
                 after_tool_call: None,
             },

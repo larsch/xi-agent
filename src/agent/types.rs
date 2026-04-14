@@ -4,6 +4,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::agent::tools::truncate::TruncationResult;
 use crate::llm::{AssistantPhase, UsageStats};
+use crate::session_event::CompactionTrigger;
 
 // ── Tool result ───────────────────────────────────────────────────────────────
 
@@ -212,6 +213,20 @@ pub enum AgentEvent {
     /// A transient status message from the provider (e.g. "Rate limited, retrying in 7s…").
     /// Should be shown to the user but is not part of the conversation history.
     StatusUpdate(String),
+    /// The loop is performing a compaction pass.
+    Compacting,
+    /// A compaction summary was produced and should be appended to the session log.
+    CompactionDone {
+        summary: String,
+        trigger_reason: CompactionTrigger,
+        context_window: usize,
+        reserve_tokens: usize,
+        keep_recent_tokens: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+        read_files: Vec<String>,
+        modified_files: Vec<String>,
+    },
     // ── Tool lifecycle ─────────────────────────────────────────────────────────
     /// The model requested a tool call; execution is about to begin.
     ToolCallStart {
@@ -255,6 +270,15 @@ pub struct AgentLoopConfig {
     /// Log that persists full tool output to temp files for the session.
     pub tool_output_log:
         std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+    /// Current session event log snapshot used for compaction decisions.
+    pub session_events: Vec<crate::session_event::SessionEvent>,
+    /// Active model name used for context window lookup and summary requests.
+    pub current_model: String,
+    /// When true, allow threshold-based auto-compaction after completed turns.
+    pub auto_compaction_enabled: bool,
+    /// Optional manual compaction instructions to apply immediately when the
+    /// loop starts, before any normal assistant turn is requested.
+    pub manual_compaction_instructions: Option<String>,
     /// Optional hook called before each tool execution.
     /// Return `false` to block the tool call (an error result is returned instead).
     pub before_tool_call: Option<BeforeToolCall>,

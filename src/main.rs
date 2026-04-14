@@ -177,6 +177,10 @@ async fn main() -> io::Result<()> {
             tools: std::collections::HashMap::new(),
             file_tracker: Arc::clone(&file_tracker),
             tool_output_log: Arc::clone(&tool_output_log),
+            session_events: vec![],
+            current_model: current_model.clone(),
+            auto_compaction_enabled: true,
+            manual_compaction_instructions: None,
             before_tool_call: None,
             after_tool_call: None,
         },
@@ -1276,6 +1280,9 @@ async fn run(
                                         Some(CommandAction::ResumeNoArg) => {
                                             app.enter_resume_selection_mode();
                                         }
+                                        Some(CommandAction::Compact(instructions)) => {
+                                            app.trigger_manual_compaction(instructions, provider);
+                                        }
                                         Some(CommandAction::Skill { name, args }) => {
                                             match app.loaded_skills.iter().find(|s| s.name == name) {
                                                 Some(skill) => {
@@ -1605,6 +1612,10 @@ async fn run_print_mode(
         tools,
         file_tracker: headless_tracker,
         tool_output_log: headless_log,
+        session_events: vec![],
+        current_model: current_instance.effective_model().to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -1661,6 +1672,20 @@ async fn run_print_mode_loop(
             }
             AgentEvent::StatusUpdate(msg) => {
                 eprintln!("{msg}");
+            }
+            AgentEvent::Compacting => {
+                eprintln!("compacting…");
+            }
+            AgentEvent::CompactionDone {
+                tokens_before,
+                tokens_after,
+                ..
+            } => {
+                eprintln!(
+                    "compacted: {}k → {}k tokens",
+                    tokens_before / 1000,
+                    tokens_after / 1000
+                );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
                 eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
@@ -1761,6 +1786,10 @@ async fn run_print_mode_loop_inner(
         tools: retry_tools,
         file_tracker: retry_tracker,
         tool_output_log: retry_log,
+        session_events: vec![],
+        current_model: String::new(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
     };
@@ -1783,6 +1812,20 @@ async fn run_print_mode_loop_inner(
             | AgentEvent::TurnEnd => {}
             AgentEvent::StatusUpdate(msg) => {
                 eprintln!("{msg}");
+            }
+            AgentEvent::Compacting => {
+                eprintln!("compacting…");
+            }
+            AgentEvent::CompactionDone {
+                tokens_before,
+                tokens_after,
+                ..
+            } => {
+                eprintln!(
+                    "compacted: {}k → {}k tokens",
+                    tokens_before / 1000,
+                    tokens_after / 1000
+                );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
                 eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));

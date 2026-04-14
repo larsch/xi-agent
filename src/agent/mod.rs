@@ -4,8 +4,10 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition};
+use crate::session_event::{CompactionTrigger, SessionEvent};
 use file_tracker::build_notification;
 
+pub mod compaction;
 pub mod file_tracker;
 pub mod system_prompt;
 pub mod tool_output_log;
@@ -34,6 +36,37 @@ fn drain_steering_messages(
     consumed
 }
 
+async fn emit_compaction(
+    provider: Arc<dyn LlmProvider>,
+    tx: &UnboundedSender<AgentEvent>,
+    session_events: &[SessionEvent],
+    model: &str,
+    trigger_reason: CompactionTrigger,
+    user_instructions: Option<String>,
+) -> Result<compaction::CompactionOutcome, crate::llm::ProviderError> {
+    let _ = tx.send(AgentEvent::Compacting);
+    let outcome = compaction::compact_events(
+        provider,
+        session_events.to_vec(),
+        model,
+        trigger_reason,
+        user_instructions,
+    )
+    .await?;
+    let _ = tx.send(AgentEvent::CompactionDone {
+        summary: outcome.summary.clone(),
+        trigger_reason: outcome.trigger_reason.clone(),
+        context_window: outcome.context_window,
+        reserve_tokens: outcome.reserve_tokens,
+        keep_recent_tokens: outcome.keep_recent_tokens,
+        tokens_before: outcome.tokens_before,
+        tokens_after: outcome.tokens_after,
+        read_files: outcome.read_files.clone(),
+        modified_files: outcome.modified_files.clone(),
+    });
+    Ok(outcome)
+}
+
 /// Run the agent loop: call the LLM, execute tool calls, repeat until the
 /// model gives a final text answer.
 ///
@@ -57,6 +90,30 @@ pub async fn run_agent_loop(
         })
         .collect();
 
+    let mut session_events = config.session_events.clone();
+    let mut overflow_retry_remaining = 1usize;
+
+    if config.manual_compaction_instructions.is_some() {
+        match emit_compaction(
+            Arc::clone(&provider),
+            &tx,
+            &session_events,
+            &config.current_model,
+            CompactionTrigger::Threshold,
+            config.manual_compaction_instructions.clone(),
+        )
+        .await
+        {
+            Ok(_) => {
+                let _ = tx.send(AgentEvent::Done);
+            }
+            Err(e) => {
+                let _ = tx.send(AgentEvent::Error(e));
+            }
+        }
+        return;
+    }
+
     loop {
         // ── Cancellation check ────────────────────────────────────────────────
         if *cancel_rx.borrow() {
@@ -69,6 +126,10 @@ pub async fn run_agent_loop(
             let paths: Vec<std::path::PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
             let notification = build_notification(&changes);
             messages.push(Message::user(notification.clone()));
+            session_events.push(SessionEvent::UserMessage {
+                content: notification.clone(),
+                timestamp: 0,
+            });
             let _ = tx.send(AgentEvent::ExternalFileChange {
                 paths,
                 notification,
@@ -89,6 +150,7 @@ pub async fn run_agent_loop(
         let mut pending_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, args)
         let mut tool_intent_seen = false;
 
+        let mut latest_usage = None;
         let mut stream_error: Option<crate::llm::ProviderError> = None;
 
         while let Some(ev) = stream.next().await {
@@ -110,6 +172,7 @@ pub async fn run_agent_loop(
                         .push_str(&t);
                 }
                 LlmEvent::Usage(usage) => {
+                    latest_usage = Some(usage);
                     let _ = tx.send(AgentEvent::Usage(usage));
                 }
                 LlmEvent::ToolIntentStart => {
@@ -132,6 +195,40 @@ pub async fn run_agent_loop(
         }
 
         if let Some(e) = stream_error {
+            if overflow_retry_remaining > 0 && compaction::is_context_overflow_error(&e) {
+                overflow_retry_remaining -= 1;
+                match emit_compaction(
+                    Arc::clone(&provider),
+                    &tx,
+                    &session_events,
+                    &config.current_model,
+                    CompactionTrigger::OverflowRetry,
+                    None,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        session_events.push(SessionEvent::CompactionSummary {
+                            summary: outcome.summary.clone(),
+                            trigger_reason: outcome.trigger_reason,
+                            context_window: outcome.context_window,
+                            reserve_tokens: outcome.reserve_tokens,
+                            keep_recent_tokens: outcome.keep_recent_tokens,
+                            tokens_before: outcome.tokens_before,
+                            tokens_after: outcome.tokens_after,
+                            read_files: outcome.read_files,
+                            modified_files: outcome.modified_files,
+                            timestamp: 0,
+                        });
+                        messages = crate::projection::project_llm_messages(&session_events);
+                        continue;
+                    }
+                    Err(compaction_error) => {
+                        let _ = tx.send(AgentEvent::Error(compaction_error));
+                        return;
+                    }
+                }
+            }
             let _ = tx.send(AgentEvent::Error(e));
             return;
         }
@@ -149,31 +246,64 @@ pub async fn run_agent_loop(
 
         // Append assistant message to history (even if empty when tools were called).
         let mut asst_msg = Message::assistant(&assistant_text);
-        asst_msg.thinking = assistant_thinking;
-        asst_msg.assistant_phase = Some(if pending_tool_calls.is_empty() {
+        asst_msg.thinking = assistant_thinking.clone();
+        let final_phase = if pending_tool_calls.is_empty() {
             AssistantPhase::Final
         } else if assistant_phase == AssistantPhase::Unknown {
             AssistantPhase::Provisional
         } else {
             assistant_phase
-        });
+        };
+        asst_msg.assistant_phase = Some(final_phase);
         messages.push(asst_msg);
+        session_events.push(SessionEvent::AssistantMessage {
+            content: assistant_text.clone(),
+            thinking: assistant_thinking.clone(),
+            phase: final_phase,
+            usage: latest_usage,
+            timestamp: 0,
+        });
 
         // ── No tool calls → final answer ──────────────────────────────────────
         if pending_tool_calls.is_empty() {
             // Refresh baselines before returning to user input so that any
             // file changes the agent made during this run are absorbed.
-            // Only changes made during the subsequent user-input window will
-            // be reported by the next check_modified() call.
             config.file_tracker.lock().unwrap().refresh_baselines();
             // Check for steering messages that arrived while the LLM was
-            // generating its final response.  If any are present, keep the
+            // generating its final response. If any are present, keep the
             // loop alive so they are processed rather than silently dropped.
             if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
                 let _ = tx.send(AgentEvent::TurnEnd);
                 continue;
             }
             let _ = tx.send(AgentEvent::TurnEnd);
+
+            if config.auto_compaction_enabled {
+                let (context_window, reserve_tokens, _keep_recent_tokens) =
+                    compaction::context_window_and_budgets(&config.current_model);
+                let used_tokens = latest_usage
+                    .and_then(|u| u.used_tokens())
+                    .unwrap_or_else(|| compaction::estimate_session_tokens(&session_events));
+                if used_tokens > context_window.saturating_sub(reserve_tokens) {
+                    match emit_compaction(
+                        Arc::clone(&provider),
+                        &tx,
+                        &session_events,
+                        &config.current_model,
+                        CompactionTrigger::Threshold,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let _ = tx.send(AgentEvent::Error(e));
+                            return;
+                        }
+                    }
+                }
+            }
+
             let _ = tx.send(AgentEvent::Done);
             return;
         }
@@ -228,12 +358,25 @@ pub async fn run_agent_loop(
             });
 
             // Append tool call + result to history for the next LLM turn.
-            messages.push(Message::tool_call(&id, &name, args));
+            messages.push(Message::tool_call(&id, &name, args.clone()));
             messages.push(Message::tool_result(&id, &result.content, result.is_error));
+            session_events.push(SessionEvent::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                args: args.clone(),
+                timestamp: 0,
+            });
+            session_events.push(SessionEvent::ToolResult {
+                id: id.clone(),
+                name: name.clone(),
+                content: result.content.clone(),
+                is_error: result.is_error,
+                display_range: None,
+                timestamp: 0,
+            });
 
             // ── Post-tool cancellation check ──────────────────────────────────
             if *cancel_rx.borrow() {
-                // Handle remaining pending tool calls as interrupted.
                 for (skip_id, skip_name, skip_args) in
                     pending_tool_calls.iter().skip(idx + 1).cloned()
                 {
@@ -247,16 +390,28 @@ pub async fn run_agent_loop(
                         id: skip_id.clone(),
                         result: interrupted.clone(),
                     });
-                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args));
+                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args.clone()));
                     messages.push(Message::tool_result(&skip_id, &interrupted.content, true));
+                    session_events.push(SessionEvent::ToolCall {
+                        id: skip_id.clone(),
+                        name: skip_name.clone(),
+                        args: skip_args,
+                        timestamp: 0,
+                    });
+                    session_events.push(SessionEvent::ToolResult {
+                        id: skip_id,
+                        name: skip_name,
+                        content: interrupted.content,
+                        is_error: true,
+                        display_range: None,
+                        timestamp: 0,
+                    });
                 }
-                // Refresh baselines and send TurnEnd before returning.
                 config.file_tracker.lock().unwrap().refresh_baselines();
                 let _ = tx.send(AgentEvent::TurnEnd);
                 return;
             }
 
-            // If steering arrived, consume it now and skip remaining tool calls.
             if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
                 for (skip_id, skip_name, skip_args) in
                     pending_tool_calls.iter().skip(idx + 1).cloned()
@@ -271,18 +426,28 @@ pub async fn run_agent_loop(
                         id: skip_id.clone(),
                         result: skipped.clone(),
                     });
-                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args));
+                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args.clone()));
                     messages.push(Message::tool_result(&skip_id, &skipped.content, true));
+                    session_events.push(SessionEvent::ToolCall {
+                        id: skip_id.clone(),
+                        name: skip_name.clone(),
+                        args: skip_args,
+                        timestamp: 0,
+                    });
+                    session_events.push(SessionEvent::ToolResult {
+                        id: skip_id,
+                        name: skip_name,
+                        content: skipped.content,
+                        is_error: true,
+                        display_range: None,
+                        timestamp: 0,
+                    });
                 }
                 stop_after_turn_for_steering = true;
                 break;
             }
         }
 
-        // Refresh baselines after every tool-call batch so that any files
-        // the agent modified during this turn are not reported as external
-        // changes on the next loop iteration.  (ask_user already calls this
-        // before blocking, covering the mid-loop pause case.)
         config.file_tracker.lock().unwrap().refresh_baselines();
 
         let _ = tx.send(AgentEvent::TurnEnd);

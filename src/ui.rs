@@ -1967,6 +1967,10 @@ mod tests {
                 tool_output_log: std::sync::Arc::new(std::sync::Mutex::new(
                     crate::agent::ToolOutputLog::new("test"),
                 )),
+                session_events: vec![],
+                current_model: "gpt-4o".to_string(),
+                auto_compaction_enabled: true,
+                manual_compaction_instructions: None,
                 before_tool_call: None,
                 after_tool_call: None,
             },
