@@ -463,7 +463,7 @@ fn count_non_empty_lines(path: &Path) -> anyhow::Result<usize> {
 /// Read the first line of the first user prompt in a session file.
 fn read_first_user_prompt(path: &Path) -> Option<String> {
     #[derive(serde::Deserialize)]
-    struct MinimalMessage {
+    struct LegacyMessage {
         role: String,
         content: String,
     }
@@ -476,7 +476,21 @@ fn read_first_user_prompt(path: &Path) -> Option<String> {
         if line.is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<MinimalMessage>(line) else {
+
+        if let Ok(crate::session_event::SessionEvent::UserMessage { content, .. }) =
+            serde_json::from_str::<crate::session_event::SessionEvent>(line)
+        {
+            let first_line = content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string());
+            if first_line.is_some() {
+                return first_line;
+            }
+            continue;
+        }
+
+        let Ok(msg) = serde_json::from_str::<LegacyMessage>(line) else {
             continue;
         };
         if msg.role.to_lowercase() != "user" {
@@ -600,6 +614,32 @@ mod tests {
             .expect("latest for normalized cwd");
         assert_eq!(latest.id, "20260328T120000-aaaaaaaa");
         assert_eq!(latest.cwd, "D:\\today");
+    }
+
+    #[test]
+    fn first_prompt_is_read_from_event_log_user_message() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+
+        let session_id = store.create_session("/repo").expect("create session");
+        let path = store.session_file_path("/repo", &session_id);
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"model_changed\",\"model\":\"gpt\",\"provider\":\"openai\",\"timestamp\":1}\n",
+                "{\"type\":\"user_message\",\"content\":\"\\nFirst prompt line\\nSecond line\",\"timestamp\":2}\n",
+                "{\"type\":\"assistant_message\",\"content\":\"hi\",\"thinking\":null,\"phase\":\"final\",\"usage\":null,\"timestamp\":3}\n"
+            ),
+        )
+        .expect("write event log");
+
+        let meta = store
+            .list_sessions()
+            .into_iter()
+            .find(|s| s.id == session_id)
+            .expect("session metadata");
+
+        assert_eq!(meta.first_prompt.as_deref(), Some("First prompt line"));
     }
 
     #[test]
