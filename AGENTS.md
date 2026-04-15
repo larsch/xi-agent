@@ -11,9 +11,8 @@ This repository is a AI agent harness for the terminal, built with Rust.
 ## Working modes
 
 - Use the `fastpath` skill for trivial, clearly bounded changes when appropriate.
-- When `fastpath` is used and the user accepts the result, proceed with the remaining fastpath follow-through for that task without asking for per-step permission again.
-- This includes reconciliation work such as updating `.todo` or other relevant tracking artifacts so they reflect the accepted state.
-- When operating under `fastpath`, user acceptance of the change also authorizes the remaining fastpath follow-through, including any intended commit or push, unless the user explicitly asks to control those steps separately.
+- Use the `workflow` skill for non-trivial changes.
+- Follow the active skill for stage gates, acceptance handling, reconciliation, and any repository follow-through.
 
 ## Debugging
 
@@ -39,5 +38,5 @@ Open work items are tracked as Gitea issues at https://gitea.belunktum.dk/larsch
 
 ## Committing and pushing
 
-- Never run `git commit` or `git push` without explicit user instruction.
-- A passing preflight is not permission to commit — wait for the user to say so.
+- Follow the active skill's gate and authorization rules for `git commit` and `git push`.
+- A passing preflight is not by itself permission to commit.
