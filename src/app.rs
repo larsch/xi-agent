@@ -2989,6 +2989,7 @@ impl App {
                 keep_recent_tokens,
                 tokens_before,
                 tokens_after,
+                retained_event_count,
                 read_files,
                 modified_files,
             } => {
@@ -3000,6 +3001,7 @@ impl App {
                     keep_recent_tokens,
                     tokens_before,
                     tokens_after,
+                    retained_event_count: Some(retained_event_count),
                     read_files,
                     modified_files,
                     timestamp: Self::now_ts(),

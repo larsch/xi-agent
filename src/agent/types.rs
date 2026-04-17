@@ -224,6 +224,7 @@ pub enum AgentEvent {
         keep_recent_tokens: usize,
         tokens_before: usize,
         tokens_after: usize,
+        retained_event_count: usize,
         read_files: Vec<String>,
         modified_files: Vec<String>,
     },

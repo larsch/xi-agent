@@ -144,6 +144,15 @@ pub enum SessionEvent {
         tokens_before: usize,
         /// Estimated context tokens after compaction.
         tokens_after: usize,
+        /// Number of trailing events from pre-compaction history that must be
+        /// retained verbatim after injecting this summary.
+        ///
+        /// When present, projection keeps that many events from immediately
+        /// before this summary event and appends any events written after this
+        /// summary. When absent (legacy sessions), projection falls back to the
+        /// old boundary behavior and only keeps events after this summary.
+        #[serde(default)]
+        retained_event_count: Option<usize>,
         /// Files read during the compacted history span.
         read_files: Vec<String>,
         /// Files written or edited during the compacted history span.
@@ -323,6 +332,7 @@ mod tests {
             keep_recent_tokens: 20_000,
             tokens_before: 184_000,
             tokens_after: 22_000,
+            retained_event_count: Some(42),
             read_files: vec!["src/main.rs".to_string()],
             modified_files: vec![],
             timestamp: ts(),
@@ -333,6 +343,19 @@ mod tests {
             matches!(decoded, SessionEvent::CompactionSummary { tokens_before, tokens_after, .. }
                 if tokens_before == 184_000 && tokens_after == 22_000)
         );
+    }
+
+    #[test]
+    fn compaction_summary_missing_retained_event_count_defaults_to_none() {
+        let json = r#"{"type":"compaction_summary","summary":"s","trigger_reason":"threshold","context_window":200000,"reserve_tokens":16000,"keep_recent_tokens":20000,"tokens_before":100,"tokens_after":50,"read_files":[],"modified_files":[],"timestamp":1713000000}"#;
+        let decoded: SessionEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            decoded,
+            SessionEvent::CompactionSummary {
+                retained_event_count: None,
+                ..
+            }
+        ));
     }
 
     // ── Type tag format ───────────────────────────────────────────────────────

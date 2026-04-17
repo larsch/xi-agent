@@ -13,10 +13,11 @@
 //! # Compaction boundary
 //!
 //! When a [`SessionEvent::CompactionSummary`] is present in the log,
-//! `project_llm_messages` treats it as a boundary: events *before* the most
-//! recent compaction are excluded from the output; the summary itself is
-//! injected as a single synthetic context message; events *after* the boundary
-//! are projected verbatim.
+//! `project_llm_messages` treats it as a boundary: the summary is injected as
+//! a synthetic context message, and the post-compaction tail is retained.
+//! For newer summaries this tail is reconstructed from
+//! `retained_event_count`; legacy summaries fall back to events after the
+//! summary line.
 //!
 //! This stub behaviour is correct and complete for phase 1 (no compaction
 //! events will appear in the log yet).  Phase 2 will exercise the boundary
@@ -39,10 +40,12 @@ use crate::{
 /// # Compaction boundary
 ///
 /// If the log contains one or more [`SessionEvent::CompactionSummary`] events,
-/// only the most recent boundary is considered.  Events before it are
-/// discarded; the summary is injected as a synthetic user message (the role
-/// the LLM expects for injected context); events after it are projected
-/// verbatim.
+/// only the most recent boundary is considered. The summary is injected as a
+/// synthetic user message. For newer compactions that record
+/// `retained_event_count`, that many events immediately preceding the summary
+/// are also preserved verbatim, and events after the summary are projected as
+/// normal. Legacy compactions without this metadata keep only post-summary
+/// events.
 ///
 /// # Trailing empty assistant message
 ///
@@ -60,8 +63,24 @@ pub fn project_llm_messages(events: &[SessionEvent]) -> Vec<Message> {
 
     if let Some(idx) = start {
         // Inject the compaction summary as a synthetic context message.
-        if let SessionEvent::CompactionSummary { summary, .. } = &events[idx] {
+        if let SessionEvent::CompactionSummary {
+            summary,
+            retained_event_count,
+            ..
+        } = &events[idx]
+        {
             msgs.push(Message::user(summary.clone()));
+
+            // New sessions include retained tail metadata so we can keep the
+            // requested recent span from immediately before the boundary while
+            // staying append-only.
+            if let Some(retained) = retained_event_count {
+                let retained = (*retained).min(idx);
+                let tail_start = idx.saturating_sub(retained);
+                for ev in &events[tail_start..idx] {
+                    push_llm_message(&mut msgs, ev);
+                }
+            }
         }
         // Project events after the boundary.
         for ev in &events[idx + 1..] {
@@ -339,6 +358,7 @@ mod tests {
             keep_recent_tokens: 20_000,
             tokens_before: before,
             tokens_after: after,
+            retained_event_count: None,
             read_files: vec![],
             modified_files: vec![],
             timestamp: ts(),
@@ -485,6 +505,36 @@ mod tests {
         assert!(msgs[0].content.contains("fix stuff"));
         assert_eq!(msgs[1].content, "new");
         assert_eq!(msgs[2].content, "new reply");
+    }
+
+    #[test]
+    fn llm_compaction_with_retained_tail_keeps_recent_pre_summary_events() {
+        let events = vec![
+            user_ev("old"),
+            assistant_ev("old reply"),
+            user_ev("keep me"),
+            assistant_ev("keep reply"),
+            SessionEvent::CompactionSummary {
+                summary: "## Goal\nfix stuff".to_string(),
+                trigger_reason: CompactionTrigger::Threshold,
+                context_window: 200_000,
+                reserve_tokens: 16_000,
+                keep_recent_tokens: 20_000,
+                tokens_before: 50_000,
+                tokens_after: 5_000,
+                retained_event_count: Some(2),
+                read_files: vec![],
+                modified_files: vec![],
+                timestamp: ts(),
+            },
+            user_ev("new"),
+        ];
+        let msgs = project_llm_messages(&events);
+        assert_eq!(msgs.len(), 4);
+        assert!(msgs[0].content.contains("fix stuff"));
+        assert_eq!(msgs[1].content, "keep me");
+        assert_eq!(msgs[2].content, "keep reply");
+        assert_eq!(msgs[3].content, "new");
     }
 
     #[test]

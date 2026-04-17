@@ -61,6 +61,7 @@ async fn emit_compaction(
         keep_recent_tokens: outcome.keep_recent_tokens,
         tokens_before: outcome.tokens_before,
         tokens_after: outcome.tokens_after,
+        retained_event_count: outcome.retained_event_count,
         read_files: outcome.read_files.clone(),
         modified_files: outcome.modified_files.clone(),
     });
@@ -216,6 +217,7 @@ pub async fn run_agent_loop(
                             keep_recent_tokens: outcome.keep_recent_tokens,
                             tokens_before: outcome.tokens_before,
                             tokens_after: outcome.tokens_after,
+                            retained_event_count: Some(outcome.retained_event_count),
                             read_files: outcome.read_files,
                             modified_files: outcome.modified_files,
                             timestamp: 0,

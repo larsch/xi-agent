@@ -20,6 +20,7 @@ pub struct CompactionOutcome {
     pub keep_recent_tokens: usize,
     pub tokens_before: usize,
     pub tokens_after: usize,
+    pub retained_event_count: usize,
     pub read_files: Vec<String>,
     pub modified_files: Vec<String>,
 }
@@ -98,16 +99,14 @@ pub async fn compact_events(
         ));
     }
 
-    let mut cut = choose_cut_index(&units, keep_recent_tokens);
-    if cut == 0 && !units.is_empty() {
-        cut = units.len();
-    }
+    let cut = choose_cut_index(&units, keep_recent_tokens);
 
     let summarized_units = &units[..cut];
     let summarized_events = summarized_units
         .iter()
         .flat_map(|u| u.events.iter().cloned())
         .collect::<Vec<_>>();
+    let retained_event_count = units[cut..].iter().map(|u| u.events.len()).sum::<usize>();
     let kept_messages = units[cut..]
         .iter()
         .flat_map(|u| u.messages.iter().cloned())
@@ -137,6 +136,7 @@ pub async fn compact_events(
         keep_recent_tokens,
         tokens_before,
         tokens_after,
+        retained_event_count,
         read_files: merged_files.read_files,
         modified_files: merged_files.modified_files,
     })
@@ -264,7 +264,7 @@ fn choose_cut_index(units: &[Unit], keep_recent_tokens: usize) -> usize {
 
     for (idx, unit) in units.iter().enumerate().rev() {
         let unit_tokens = estimate_messages_tokens(&unit.messages);
-        if cut == units.len() || kept_tokens.saturating_add(unit_tokens) <= keep_recent_tokens {
+        if kept_tokens.saturating_add(unit_tokens) <= keep_recent_tokens {
             kept_tokens = kept_tokens.saturating_add(unit_tokens);
             cut = idx;
         } else {
@@ -543,6 +543,15 @@ mod tests {
     }
 
     #[test]
+    fn cut_selection_can_compact_everything_when_budget_is_tiny() {
+        let units = build_units(&[user("u1"), assistant("a1"), user("u2"), assistant("a2")]);
+
+        // Force a tiny keep budget so even the newest unit cannot fit.
+        let cut = choose_cut_index(&units, 0);
+        assert_eq!(cut, units.len());
+    }
+
+    #[test]
     fn derives_file_sets_from_tool_calls() {
         let files = derive_files_from_events(&[
             SessionEvent::ToolCall {
@@ -587,6 +596,7 @@ mod tests {
                 keep_recent_tokens: 1,
                 tokens_before: 10,
                 tokens_after: 2,
+                retained_event_count: None,
                 read_files: vec!["x".to_string()],
                 modified_files: vec!["y".to_string()],
                 timestamp: 3,
