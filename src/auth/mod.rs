@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tokio::sync::mpsc::UnboundedSender;
+use crate::app_event::{AppEvent, AppEventTx};
 
 pub mod codex;
 pub mod copilot;
@@ -51,15 +51,11 @@ pub enum LoginEvent {
     Finished,
 }
 
-pub async fn login_provider(
-    provider: &str,
-    tx: UnboundedSender<LoginEvent>,
-    cancel: Arc<AtomicBool>,
-) {
+pub async fn login_provider(provider: &str, tx: AppEventTx, cancel: Arc<AtomicBool>) {
     log::debug!("login_provider called: provider={provider}");
-    let _ = tx.send(LoginEvent::Info(format!(
+    let _ = tx.send(AppEvent::Login(LoginEvent::Info(format!(
         "Starting login for {provider}..."
-    )));
+    ))));
 
     let result = match provider {
         "copilot" => {
@@ -69,14 +65,14 @@ pub async fn login_provider(
                         verification_uri,
                         user_code,
                     } => {
-                        let _ = tx.send(LoginEvent::AuthCode {
+                        let _ = tx.send(AppEvent::Login(LoginEvent::AuthCode {
                             url: verification_uri,
                             code: Some(user_code),
                             flow: AuthFlow::DeviceCode,
-                        });
+                        }));
                     }
                     copilot::CopilotLoginEvent::Progress(msg) => {
-                        let _ = tx.send(LoginEvent::Info(msg));
+                        let _ = tx.send(AppEvent::Login(LoginEvent::Info(msg)));
                     }
                 },
                 cancel.clone(),
@@ -93,14 +89,14 @@ pub async fn login_provider(
             let creds = codex::login(
                 |ev| match ev {
                     codex::CodexLoginEvent::OpenBrowser(url) => {
-                        let _ = tx.send(LoginEvent::AuthCode {
+                        let _ = tx.send(AppEvent::Login(LoginEvent::AuthCode {
                             url,
                             code: None,
                             flow: AuthFlow::RedirectCallback,
-                        });
+                        }));
                     }
                     codex::CodexLoginEvent::Progress(msg) => {
-                        let _ = tx.send(LoginEvent::Info(msg));
+                        let _ = tx.send(AppEvent::Login(LoginEvent::Info(msg)));
                     }
                 },
                 cancel.clone(),
@@ -117,14 +113,14 @@ pub async fn login_provider(
             let creds = gemini::login(
                 |ev| match ev {
                     gemini::GeminiLoginEvent::OpenBrowser(url) => {
-                        let _ = tx.send(LoginEvent::AuthCode {
+                        let _ = tx.send(AppEvent::Login(LoginEvent::AuthCode {
                             url,
                             code: None,
                             flow: AuthFlow::RedirectCallback,
-                        });
+                        }));
                     }
                     gemini::GeminiLoginEvent::Progress(msg) => {
-                        let _ = tx.send(LoginEvent::Info(msg));
+                        let _ = tx.send(AppEvent::Login(LoginEvent::Info(msg)));
                     }
                 },
                 cancel.clone(),
@@ -144,9 +140,9 @@ pub async fn login_provider(
 
     match result {
         Ok(Ok(())) => {
-            let _ = tx.send(LoginEvent::Success {
+            let _ = tx.send(AppEvent::Login(LoginEvent::Success {
                 provider: provider.to_string(),
-            });
+            }));
         }
         Ok(Err(e)) | Err(e) => {
             let is_cancelled = cancel.load(Ordering::Relaxed)
@@ -156,14 +152,14 @@ pub async fn login_provider(
             } else {
                 e.to_string()
             };
-            let _ = tx.send(LoginEvent::Error {
+            let _ = tx.send(AppEvent::Login(LoginEvent::Error {
                 provider: provider.to_string(),
                 message,
-            });
+            }));
         }
     }
 
-    let _ = tx.send(LoginEvent::Finished);
+    let _ = tx.send(AppEvent::Login(LoginEvent::Finished));
 }
 
 /// Refresh the stored OAuth token for `provider` and persist the result.
@@ -211,23 +207,23 @@ pub async fn refresh_token(provider: &str) -> anyhow::Result<()> {
 /// Refresh the stored token for `provider` and report the outcome on `tx`.
 ///
 /// This is a thin wrapper around [`refresh_token`] for use by the interactive
-/// TUI, which communicates refresh results via a [`LoginEvent`] channel.
-pub async fn refresh_provider(provider: &str, tx: UnboundedSender<LoginEvent>) {
+/// TUI, which communicates refresh results via a unified [`AppEvent`] channel.
+pub async fn refresh_provider(provider: &str, tx: AppEventTx) {
     let result = refresh_token(provider).await;
     match result {
         Ok(()) => {
-            let _ = tx.send(LoginEvent::RefreshResult {
+            let _ = tx.send(AppEvent::Login(LoginEvent::RefreshResult {
                 provider: provider.to_string(),
                 success: true,
                 message: "Token refreshed".to_string(),
-            });
+            }));
         }
         Err(e) => {
-            let _ = tx.send(LoginEvent::RefreshResult {
+            let _ = tx.send(AppEvent::Login(LoginEvent::RefreshResult {
                 provider: provider.to_string(),
                 success: false,
                 message: e.to_string(),
-            });
+            }));
         }
     }
 }

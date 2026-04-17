@@ -4,13 +4,14 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc::error::TryRecvError, task::JoinHandle};
 
 use crate::{
     agent::{
         AgentLoopConfig, ToolOutputLog, run_agent_loop,
-        types::{AgentEvent, AskRequest, AskRequestTx, AskUserOption, AskUserResponse},
+        types::{AgentEvent, AskRequest, AskUserOption, AskUserResponse},
     },
+    app_event::{AppEvent, AppEventTx},
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
     event_log::EventLog,
@@ -440,9 +441,9 @@ pub struct App {
     pub open_webui_pending_url: Option<String>,
 
     // ── Async channels ────────────────────────────────────────────────────────
-    /// Receives AgentEvents forwarded from the active agent loop task.
-    pub(crate) event_rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    /// Receives background app events forwarded from tasks targeting the UI.
+    pub(crate) app_event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    app_event_tx: AppEventTx,
     steering_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// User steering messages queued while a loop is running; rendered pinned
     /// at the bottom of the log with a 🕹️ icon until consumed.
@@ -452,16 +453,6 @@ pub struct App {
     /// Cancellation sender for the active agent loop task.
     /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
     cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
-    /// Receives model lists forwarded from `list_models` tasks.
-    pub(crate) models_rx:
-        tokio::sync::mpsc::UnboundedReceiver<Result<Vec<String>, crate::llm::ProviderError>>,
-    models_tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<String>, crate::llm::ProviderError>>,
-    /// Receives login status events from background auth tasks.
-    pub(crate) login_rx: tokio::sync::mpsc::UnboundedReceiver<LoginEvent>,
-    login_tx: tokio::sync::mpsc::UnboundedSender<LoginEvent>,
-    /// Receives ask_user requests from AskUserTool executions.
-    pub(crate) ask_rx: tokio::sync::mpsc::UnboundedReceiver<AskRequest>,
-    ask_tx: AskRequestTx,
 }
 
 // Convenience alias used throughout this module.
@@ -551,10 +542,7 @@ impl App {
         initial_thinking: ThinkingLevel,
         agent_config: AgentLoopConfig,
     ) -> Self {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (models_tx, models_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (login_tx, login_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (ask_tx, ask_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let available_shells = shell::discover_available_shells();
         let selected_shell = available_shells.first().copied().unwrap_or(ShellKind::Bash);
         Self {
@@ -608,18 +596,12 @@ impl App {
             open_webui_url_input_mode: false,
             open_webui_token_input_mode: false,
             open_webui_pending_url: None,
-            event_rx,
-            event_tx,
+            app_event_rx,
+            app_event_tx,
             steering_tx: None,
             queued_steering: Vec::new(),
             agent_task: None,
             cancel_tx: None,
-            models_rx,
-            models_tx,
-            login_rx,
-            login_tx,
-            ask_rx,
-            ask_tx,
         }
     }
 
@@ -685,8 +667,8 @@ impl App {
         self.show_info = !self.show_info;
     }
 
-    pub fn ask_request_tx(&self) -> AskRequestTx {
-        self.ask_tx.clone()
+    pub fn app_event_tx(&self) -> AppEventTx {
+        self.app_event_tx.clone()
     }
 
     pub fn init_session_persistence(&mut self, cwd: String) {
@@ -862,7 +844,7 @@ impl App {
         }
 
         let provider = self.current_provider.clone();
-        let tx = self.login_tx.clone();
+        let tx = self.app_event_tx();
         tokio::spawn(async move {
             auth::refresh_provider(&provider, tx).await;
         });
@@ -1129,10 +1111,10 @@ impl App {
         self.models_loading = true;
         self.model_fetch_error = None;
         let future = provider.list_models();
-        let tx = self.models_tx.clone();
+        let tx = self.app_event_tx();
         tokio::spawn(async move {
             let result = future.await;
-            let _ = tx.send(result);
+            let _ = tx.send(AppEvent::ModelsReady(result));
         });
     }
 
@@ -2412,7 +2394,7 @@ impl App {
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.login.cancel = Some(cancel.clone());
-        let tx = self.login_tx.clone();
+        let tx = self.app_event_tx();
         let provider = provider.to_string();
 
         tokio::spawn(async move {
@@ -2647,7 +2629,7 @@ impl App {
         self.cancel_tx = Some(cancel_tx);
 
         let provider = Arc::clone(provider);
-        let tx = self.event_tx.clone();
+        let tx = self.app_event_tx();
         self.agent_task = Some(tokio::spawn(async move {
             run_agent_loop(llm_messages, config, provider, tx, steering_rx, cancel_rx).await;
         }));
@@ -2919,7 +2901,19 @@ impl App {
         }
     }
 
-    pub fn apply_event(&mut self, ev: AgentEvent) {
+    pub fn apply_app_event(&mut self, ev: AppEvent) {
+        match ev {
+            AppEvent::Agent(ev) => {
+                self.apply_agent_event(ev);
+                self.drain_app_events();
+            }
+            AppEvent::ModelsReady(result) => self.apply_model_list(result),
+            AppEvent::Login(ev) => self.apply_login_event(ev),
+            AppEvent::AskUser(req) => self.receive_ask_request(req),
+        }
+    }
+
+    pub fn apply_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::ThinkingToken(token) => {
                 self.last_output_at = Some(std::time::Instant::now());
@@ -3208,9 +3202,13 @@ impl App {
         }
     }
 
-    pub fn apply_events(&mut self) {
-        while let Ok(ev) = self.event_rx.try_recv() {
-            self.apply_event(ev);
+    pub fn drain_app_events(&mut self) {
+        loop {
+            match self.app_event_rx.try_recv() {
+                Ok(AppEvent::Agent(ev)) => self.apply_agent_event(ev),
+                Ok(other) => self.apply_app_event(other),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
         }
     }
 }
@@ -3965,12 +3963,12 @@ mod tests {
         });
 
         // Simulate a simple assistant turn with no tools.
-        app.apply_event(crate::agent::types::AgentEvent::TextToken {
+        app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
             text: "hi".to_string(),
             phase: crate::llm::AssistantPhase::Final,
         });
-        app.apply_event(crate::agent::types::AgentEvent::TurnEnd);
-        app.apply_event(crate::agent::types::AgentEvent::Done);
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+        app.apply_agent_event(crate::agent::types::AgentEvent::Done);
 
         let log = app.event_log.as_ref().expect("event log");
         let assistant_count = log

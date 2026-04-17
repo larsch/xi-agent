@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use tokio::sync::oneshot;
 
 use crate::agent::tools::truncate::TruncationResult;
 use crate::llm::{AssistantPhase, UsageStats};
@@ -190,9 +190,6 @@ pub enum AskUserResponse {
     Answer(String),
     Cancelled,
 }
-
-/// Sender type used by `AskUserTool` to post requests to the UI.
-pub type AskRequestTx = UnboundedSender<AskRequest>;
 
 // ── Agent events ──────────────────────────────────────────────────────────────
 

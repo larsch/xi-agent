@@ -164,14 +164,14 @@ use powershell::PowerShellTool;
 use read::ReadFileTool;
 use write::WriteTool;
 
-use crate::agent::types::AskRequestTx;
+use crate::app_event::AppEventTx;
 
 /// Instantiate the built-in tools and return a populated `ToolRegistry`.
 ///
 /// `custom` tools are appended after built-ins; any custom tool whose name
 /// collides with a built-in is silently dropped (logged at debug).
 pub fn register_builtin_tools(
-    ask_tx: Option<AskRequestTx>,
+    app_event_tx: Option<AppEventTx>,
     file_tracker: Arc<Mutex<FileTracker>>,
     custom: Vec<custom::CustomTool>,
 ) -> ToolRegistry {
@@ -182,7 +182,10 @@ pub fn register_builtin_tools(
         Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
-        Arc::new(AskUserTool::new(ask_tx, Some(Arc::clone(&file_tracker)))),
+        Arc::new(AskUserTool::new(
+            app_event_tx,
+            Some(Arc::clone(&file_tracker)),
+        )),
     ];
 
     #[cfg(target_os = "windows")]

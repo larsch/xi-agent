@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::agent::tools::ask_user::AskUserTool;
 use crate::agent::types::{AgentEvent, AskUserResponse, Tool};
 use crate::agent::{AgentLoopConfig, run_agent_loop};
+use crate::app_event::AppEvent;
 use crate::llm::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition,
     UsageStats,
@@ -96,9 +97,9 @@ fn make_log() -> Arc<Mutex<crate::agent::tool_output_log::ToolOutputLog>> {
     ))
 }
 
-/// Run the agent loop with the given provider and collect all emitted events.
+/// Run the agent loop with the given provider and collect all emitted agent events.
 async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let config = AgentLoopConfig {
@@ -124,7 +125,9 @@ async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
     .await;
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        events.push(ev);
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
     }
     events
 }
@@ -280,7 +283,7 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
         ],
     ]);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (steering_tx, steering_rx) = mpsc::unbounded_channel();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -320,7 +323,9 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        events.push(ev);
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
     }
 
     assert!(
@@ -378,7 +383,7 @@ async fn agent_loop_before_hook_blocks_tool() {
         ],
     ]);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let config = AgentLoopConfig {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
@@ -405,7 +410,9 @@ async fn agent_loop_before_hook_blocks_tool() {
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        events.push(ev);
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
     }
 
     let has_blocked_result = events
@@ -498,15 +505,14 @@ fn test_read_agents_md_from_nested_cwd_includes_parent_chain_in_order() {
 
 #[tokio::test]
 async fn agent_loop_ask_user_no_options_completes_loop() {
-    use crate::agent::types::AskRequest;
     use tokio::sync::mpsc as tmspc;
 
-    let (ask_tx, mut ask_rx) = tmspc::unbounded_channel::<AskRequest>();
+    let (app_tx, mut app_rx) = tmspc::unbounded_channel::<AppEvent>();
 
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
     tools.insert(
         "ask_user".to_string(),
-        Arc::new(AskUserTool::new(Some(ask_tx), None)),
+        Arc::new(AskUserTool::new(Some(app_tx), None)),
     );
 
     // Turn 1: LLM asks a freeform question (no options).
@@ -529,7 +535,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
         ],
     ]);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let config = AgentLoopConfig {
@@ -557,10 +563,15 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
     });
 
     // Simulate the UI: receive the ask request and reply with a freeform answer.
-    let req = ask_rx
-        .recv()
-        .await
-        .expect("agent should send an ask_user request");
+    let req = loop {
+        let ev = app_rx
+            .recv()
+            .await
+            .expect("agent should send app events while ask_user is pending");
+        if let AppEvent::AskUser(req) = ev {
+            break req;
+        }
+    };
     assert_eq!(req.question, "What is your name?");
     assert!(req.options.is_empty(), "expected no options");
     req.reply
@@ -571,7 +582,9 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        events.push(ev);
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
     }
 
     assert!(
@@ -607,7 +620,7 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         }
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     // Pre-cancel: send true before the loop even starts.
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
@@ -638,7 +651,9 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
     // No events should have been emitted.
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        events.push(ev);
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
     }
     assert!(
         events.is_empty(),
@@ -670,7 +685,7 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
         ],
     ]);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -705,7 +720,9 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        events.push(ev);
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
     }
 
     // The first tool call must have completed.

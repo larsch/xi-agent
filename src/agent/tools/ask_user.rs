@@ -5,17 +5,16 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::agent::file_tracker::FileTracker;
-use crate::agent::types::{
-    AskRequest, AskRequestTx, AskUserOption, AskUserResponse, Tool, ToolResult,
-};
+use crate::agent::types::{AskRequest, AskUserOption, AskUserResponse, Tool, ToolResult};
+use crate::app_event::{AppEvent, AppEventTx};
 
 pub struct AskUserTool {
-    tx: Option<AskRequestTx>,
+    tx: Option<AppEventTx>,
     file_tracker: Option<Arc<Mutex<FileTracker>>>,
 }
 
 impl AskUserTool {
-    pub fn new(tx: Option<AskRequestTx>, file_tracker: Option<Arc<Mutex<FileTracker>>>) -> Self {
+    pub fn new(tx: Option<AppEventTx>, file_tracker: Option<Arc<Mutex<FileTracker>>>) -> Self {
         Self { tx, file_tracker }
     }
 }
@@ -133,7 +132,7 @@ impl Tool for AskUserTool {
                 reply: reply_tx,
             };
 
-            if tx.send(request).is_err() {
+            if tx.send(AppEvent::AskUser(request)).is_err() {
                 return ToolResult::err("ask_user failed: UI channel closed");
             }
 

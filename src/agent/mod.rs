@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::app_event::AppEvent;
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition};
 use crate::session_event::{CompactionTrigger, SessionEvent};
 use file_tracker::build_notification;
@@ -25,11 +26,13 @@ pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
 fn drain_steering_messages(
     steering_rx: &mut UnboundedReceiver<String>,
     messages: &mut Vec<Message>,
-    tx: &UnboundedSender<AgentEvent>,
+    tx: &UnboundedSender<AppEvent>,
 ) -> bool {
     let mut consumed = false;
     while let Ok(text) = steering_rx.try_recv() {
-        let _ = tx.send(AgentEvent::SteeringConsumed { text: text.clone() });
+        let _ = tx.send(AppEvent::Agent(AgentEvent::SteeringConsumed {
+            text: text.clone(),
+        }));
         messages.push(Message::user(text));
         consumed = true;
     }
@@ -38,13 +41,13 @@ fn drain_steering_messages(
 
 async fn emit_compaction(
     provider: Arc<dyn LlmProvider>,
-    tx: &UnboundedSender<AgentEvent>,
+    tx: &UnboundedSender<AppEvent>,
     session_events: &[SessionEvent],
     model: &str,
     trigger_reason: CompactionTrigger,
     user_instructions: Option<String>,
 ) -> Result<compaction::CompactionOutcome, crate::llm::ProviderError> {
-    let _ = tx.send(AgentEvent::Compacting);
+    let _ = tx.send(AppEvent::Agent(AgentEvent::Compacting));
     let outcome = compaction::compact_events(
         provider,
         session_events.to_vec(),
@@ -53,7 +56,7 @@ async fn emit_compaction(
         user_instructions,
     )
     .await?;
-    let _ = tx.send(AgentEvent::CompactionDone {
+    let _ = tx.send(AppEvent::Agent(AgentEvent::CompactionDone {
         summary: outcome.summary.clone(),
         trigger_reason: outcome.trigger_reason.clone(),
         context_window: outcome.context_window,
@@ -64,19 +67,19 @@ async fn emit_compaction(
         retained_event_count: outcome.retained_event_count,
         read_files: outcome.read_files.clone(),
         modified_files: outcome.modified_files.clone(),
-    });
+    }));
     Ok(outcome)
 }
 
 /// Run the agent loop: call the LLM, execute tool calls, repeat until the
 /// model gives a final text answer.
 ///
-/// All activity is reported back to `App` via `AgentEvent`s sent on `tx`.
+/// All activity is reported back to `App` via `AppEvent::Agent(...)` values sent on `tx`.
 pub async fn run_agent_loop(
     mut messages: Vec<Message>,
     config: AgentLoopConfig,
     provider: Arc<dyn LlmProvider>,
-    tx: UnboundedSender<AgentEvent>,
+    tx: UnboundedSender<AppEvent>,
     mut steering_rx: UnboundedReceiver<String>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -106,10 +109,10 @@ pub async fn run_agent_loop(
         .await
         {
             Ok(_) => {
-                let _ = tx.send(AgentEvent::Done);
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
             }
             Err(e) => {
-                let _ = tx.send(AgentEvent::Error(e));
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
             }
         }
         return;
@@ -131,10 +134,10 @@ pub async fn run_agent_loop(
                 content: notification.clone(),
                 timestamp: 0,
             });
-            let _ = tx.send(AgentEvent::ExternalFileChange {
+            let _ = tx.send(AppEvent::Agent(AgentEvent::ExternalFileChange {
                 paths,
                 notification,
-            });
+            }));
         }
 
         // Insert queued steering messages before the next assistant turn.
@@ -157,27 +160,27 @@ pub async fn run_agent_loop(
         while let Some(ev) = stream.next().await {
             match ev {
                 LlmEvent::Token { text, phase } => {
-                    let _ = tx.send(AgentEvent::TextToken {
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::TextToken {
                         text: text.clone(),
                         phase,
-                    });
+                    }));
                     assistant_text.push_str(&text);
                     if phase != AssistantPhase::Unknown {
                         assistant_phase = phase;
                     }
                 }
                 LlmEvent::ThinkingToken(t) => {
-                    let _ = tx.send(AgentEvent::ThinkingToken(t.clone()));
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::ThinkingToken(t.clone())));
                     assistant_thinking
                         .get_or_insert_with(String::new)
                         .push_str(&t);
                 }
                 LlmEvent::Usage(usage) => {
                     latest_usage = Some(usage);
-                    let _ = tx.send(AgentEvent::Usage(usage));
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::Usage(usage)));
                 }
                 LlmEvent::ToolIntentStart => {
-                    let _ = tx.send(AgentEvent::ToolIntentStart);
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolIntentStart));
                     assistant_phase = AssistantPhase::Provisional;
                     tool_intent_seen = true;
                 }
@@ -190,7 +193,7 @@ pub async fn run_agent_loop(
                     break;
                 }
                 LlmEvent::StatusUpdate(msg) => {
-                    let _ = tx.send(AgentEvent::StatusUpdate(msg));
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(msg)));
                 }
             }
         }
@@ -226,12 +229,12 @@ pub async fn run_agent_loop(
                         continue;
                     }
                     Err(compaction_error) => {
-                        let _ = tx.send(AgentEvent::Error(compaction_error));
+                        let _ = tx.send(AppEvent::Agent(AgentEvent::Error(compaction_error)));
                         return;
                     }
                 }
             }
-            let _ = tx.send(AgentEvent::Error(e));
+            let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
             return;
         }
 
@@ -239,9 +242,11 @@ pub async fn run_agent_loop(
         // tool call arrived (e.g. truncated by max_tokens), treat it as an
         // error rather than silently accepting an empty assistant turn.
         if tool_intent_seen && pending_tool_calls.is_empty() {
-            let _ = tx.send(AgentEvent::Error(crate::llm::ProviderError::other(
-                "agent",
-                "Tool call was indicated but not completed (response may have been truncated).",
+            let _ = tx.send(AppEvent::Agent(AgentEvent::Error(
+                crate::llm::ProviderError::other(
+                    "agent",
+                    "Tool call was indicated but not completed (response may have been truncated).",
+                ),
             )));
             return;
         }
@@ -275,10 +280,10 @@ pub async fn run_agent_loop(
             // generating its final response. If any are present, keep the
             // loop alive so they are processed rather than silently dropped.
             if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
-                let _ = tx.send(AgentEvent::TurnEnd);
+                let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
                 continue;
             }
-            let _ = tx.send(AgentEvent::TurnEnd);
+            let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
 
             if config.auto_compaction_enabled {
                 let (context_window, reserve_tokens, _keep_recent_tokens) =
@@ -299,25 +304,25 @@ pub async fn run_agent_loop(
                     {
                         Ok(_) => {}
                         Err(e) => {
-                            let _ = tx.send(AgentEvent::Error(e));
+                            let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
                             return;
                         }
                     }
                 }
             }
 
-            let _ = tx.send(AgentEvent::Done);
+            let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
             return;
         }
 
         // ── Execute tool calls sequentially ───────────────────────────────────
         let mut stop_after_turn_for_steering = false;
         for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
-            let _ = tx.send(AgentEvent::ToolCallStart {
+            let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
                 id: id.clone(),
                 name: name.clone(),
                 args: args.clone(),
-            });
+            }));
 
             // before_tool_call hook
             let blocked = config
@@ -354,10 +359,10 @@ pub async fn run_agent_loop(
                 result = override_result;
             }
 
-            let _ = tx.send(AgentEvent::ToolCallEnd {
+            let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
                 id: id.clone(),
                 result: result.clone(),
-            });
+            }));
 
             // Append tool call + result to history for the next LLM turn.
             messages.push(Message::tool_call(&id, &name, args.clone()));
@@ -382,16 +387,16 @@ pub async fn run_agent_loop(
                 for (skip_id, skip_name, skip_args) in
                     pending_tool_calls.iter().skip(idx + 1).cloned()
                 {
-                    let _ = tx.send(AgentEvent::ToolCallStart {
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
                         id: skip_id.clone(),
                         name: skip_name.clone(),
                         args: skip_args.clone(),
-                    });
+                    }));
                     let interrupted = ToolResult::err("Interrupted by user");
-                    let _ = tx.send(AgentEvent::ToolCallEnd {
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
                         id: skip_id.clone(),
                         result: interrupted.clone(),
-                    });
+                    }));
                     messages.push(Message::tool_call(&skip_id, &skip_name, skip_args.clone()));
                     messages.push(Message::tool_result(&skip_id, &interrupted.content, true));
                     session_events.push(SessionEvent::ToolCall {
@@ -410,7 +415,7 @@ pub async fn run_agent_loop(
                     });
                 }
                 config.file_tracker.lock().unwrap().refresh_baselines();
-                let _ = tx.send(AgentEvent::TurnEnd);
+                let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
                 return;
             }
 
@@ -418,16 +423,16 @@ pub async fn run_agent_loop(
                 for (skip_id, skip_name, skip_args) in
                     pending_tool_calls.iter().skip(idx + 1).cloned()
                 {
-                    let _ = tx.send(AgentEvent::ToolCallStart {
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
                         id: skip_id.clone(),
                         name: skip_name.clone(),
                         args: skip_args.clone(),
-                    });
+                    }));
                     let skipped = ToolResult::err("Skipped due to queued user message.");
-                    let _ = tx.send(AgentEvent::ToolCallEnd {
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
                         id: skip_id.clone(),
                         result: skipped.clone(),
-                    });
+                    }));
                     messages.push(Message::tool_call(&skip_id, &skip_name, skip_args.clone()));
                     messages.push(Message::tool_result(&skip_id, &skipped.content, true));
                     session_events.push(SessionEvent::ToolCall {
@@ -452,7 +457,7 @@ pub async fn run_agent_loop(
 
         config.file_tracker.lock().unwrap().refresh_baselines();
 
-        let _ = tx.send(AgentEvent::TurnEnd);
+        let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
 
         if stop_after_turn_for_steering {
             continue;

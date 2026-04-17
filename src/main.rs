@@ -21,6 +21,7 @@ use std::{
 
 mod agent;
 mod app;
+mod app_event;
 mod auth;
 mod commands;
 mod config;
@@ -48,6 +49,7 @@ use agent::{
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
 use app::{App, InputMode, SelectionResult, format_provider_error_for_display};
+use app_event::AppEvent;
 use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
@@ -186,9 +188,10 @@ async fn main() -> io::Result<()> {
         },
     );
 
+    let app_event_tx = app.app_event_tx();
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let tools = register_builtin_tools(
-        Some(app.ask_request_tx()),
+        Some(app_event_tx.clone()),
         Arc::clone(&file_tracker),
         custom_tools,
     );
@@ -248,7 +251,7 @@ async fn main() -> io::Result<()> {
                 let custom_tools = load_custom_tools(&custom_tool_dirs());
                 let custom_count = custom_tools.len();
                 let tools = register_builtin_tools(
-                    Some(app.ask_request_tx()),
+                    Some(app_event_tx.clone()),
                     Arc::clone(&file_tracker),
                     custom_tools,
                 );
@@ -1353,29 +1356,13 @@ async fn run(
                 }
             }
 
-            // ── LLM streaming events ──────────────────────────────────────────
-            Some(ev) = app.event_rx.recv() => {
-                app.apply_event(ev);
-                app.apply_events();
-            }
-
-            // ── Model list fetched ────────────────────────────────────────────
-            Some(models) = app.models_rx.recv() => {
-                app.apply_model_list(models);
-            }
-
-            // ── Login flow events ─────────────────────────────────────────────
-            Some(ev) = app.login_rx.recv() => {
-                app.apply_login_event(ev);
+            // ── Background app events ───────────────────────────────────────
+            Some(ev) = app.app_event_rx.recv() => {
+                app.apply_app_event(ev);
                 if app.login.needs_rebuild {
                     app.login.needs_rebuild = false;
                     return Ok(RunResult::RebuildProvider);
                 }
-            }
-
-            // ── ask_user tool requests ─────────────────────────────────────────
-            Some(req) = app.ask_rx.recv() => {
-                app.receive_ask_request(req);
             }
 
             // ── Throbber animation tick ───────────────────────────────────────
@@ -1643,7 +1630,7 @@ async fn run_print_mode_loop(
     // Keep a clone of messages so we can retry the agent loop once on 401.
     let messages_for_retry = messages.clone();
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -1652,6 +1639,9 @@ async fn run_print_mode_loop(
     });
 
     while let Some(ev) = rx.recv().await {
+        let AppEvent::Agent(ev) = ev else {
+            continue;
+        };
         match ev {
             AgentEvent::TextToken { text, .. } => {
                 print!("{text}");
@@ -1773,7 +1763,7 @@ async fn run_print_mode_loop_inner(
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
     provider_label: &str,
 ) -> i32 {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -1799,6 +1789,9 @@ async fn run_print_mode_loop_inner(
     });
 
     while let Some(ev) = rx.recv().await {
+        let AppEvent::Agent(ev) = ev else {
+            continue;
+        };
         match ev {
             AgentEvent::TextToken { text, .. } => {
                 print!("{text}");
