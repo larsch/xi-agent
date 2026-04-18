@@ -1165,8 +1165,8 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.live_notices.clear();
-        app.live_notices.extend(vec![Message::tool_result(
+        app.live_turn.notices.clear();
+        app.live_turn.notices.extend(vec![Message::tool_result(
             "1",
             "tool output that used to be much longer",
             false,
@@ -1177,8 +1177,9 @@ mod tests {
             .draw(|f| draw(f, &mut app))
             .expect("first draw succeeds");
 
-        app.live_notices.clear();
-        app.live_notices
+        app.live_turn.notices.clear();
+        app.live_turn
+            .notices
             .extend(vec![Message::tool_result("1", "short", false)]);
         app.mark_log_dirty();
 
@@ -1196,7 +1197,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.live_notices.extend(vec![
+        app.live_turn.notices.extend(vec![
             Message::user("one"),
             Message::user("two"),
             Message::user("three"),
@@ -1223,7 +1224,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.live_notices.extend(vec![
+        app.live_turn.notices.extend(vec![
             Message::user("one"),
             Message::user("two"),
             Message::user("three"),

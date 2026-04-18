@@ -30,6 +30,7 @@ mod debug_log;
 mod dirs;
 mod event_log;
 mod export;
+mod live_turn;
 mod llm;
 mod markdown;
 mod process;

@@ -14,6 +14,7 @@ use crate::{
     app_event::{AppEvent, AppEventTx},
     auth::{self, AuthFlow, LoginEvent},
     commands::{self, CompletionItem},
+    live_turn::{LiveToolEntry, LiveToolResult, LiveTurnState, compose_display},
     llm::{
         AssistantPhase, DisplayRange, LlmProvider, Message, ProviderErrorKind, Role, UsageStats,
     },
@@ -445,16 +446,10 @@ pub struct App {
     /// Committed session state: durable event log plus derived read models.
     /// `None` until the first session is created or resumed.
     pub(crate) session_state: Option<SessionState>,
-    /// Transient UI-only notices that have no backing `SessionEvent`.
-    ///
-    /// These include: "session persistence unavailable", shell-command output,
-    /// export confirmations, abort messages, error messages shown before the
-    /// corresponding `TurnError` event is appended, etc.
-    ///
-    /// This field is a stepping-stone toward `LiveTurnState::notices` (Step 4).
-    /// Notices are shown in the chat log below committed session messages.
-    /// They are never forwarded to the LLM.
-    pub(crate) live_notices: Vec<Message>,
+    /// Transient in-flight state for the current (or most recently flushed)
+    /// agent turn. Streaming assistant text, tool call/result pairs, and
+    /// UI-only notices all live here until committed or cleared.
+    pub(crate) live_turn: LiveTurnState,
     /// Buffer of events accumulated during the current in-flight turn.
     /// Flushed to session state as a batch on `TurnEnd`, `Done`, or `Error`.
     pending_turn_events: Vec<crate::session_event::SessionEvent>,
@@ -615,7 +610,7 @@ impl App {
             current_cwd: String::new(),
             resume_available_for_cwd: false,
             session_state: None,
-            live_notices: Vec::new(),
+            live_turn: LiveTurnState::new(),
             pending_turn_events: Vec::new(),
             pending_manual_compaction_instructions: None,
             ask_user: AskUserState::new(),
@@ -721,7 +716,7 @@ impl App {
             }
             Err(e) => {
                 log::debug!("session persistence disabled: {}", e);
-                self.live_notices.push(Message::assistant(format!(
+                self.live_turn.notices.push(Message::assistant(format!(
                     "[session persistence unavailable: {e}]"
                 )));
                 self.bump_log_revision();
@@ -734,43 +729,43 @@ impl App {
     }
 
     /// Return all messages to display in the chat log: committed session
-    /// messages followed by transient live notices.
-    ///
-    /// This is the primary accessor for UI rendering.  It allocates a `Vec`
-    /// because the two sources (committed + notices) may need to be composed.
-    /// Call sites that only need to know emptiness should prefer
-    /// `display_is_empty()`.
+    /// messages followed by the live turn overlay (streaming assistant,
+    /// in-flight tools, and UI-only notices).
     pub fn display_messages_combined(&self) -> Vec<Message> {
-        let mut msgs = self
+        let committed = self
             .session_state
             .as_ref()
-            .map(|s| s.display_messages().to_vec())
-            .unwrap_or_default();
-        msgs.extend(self.live_notices.iter().cloned());
-        msgs
+            .map(|s| s.display_messages())
+            .unwrap_or(&[]);
+        compose_display(committed, &self.live_turn, self.streaming())
     }
 
     /// Push a transient UI-only notice (not backed by a `SessionEvent`).
     pub fn push_notice(&mut self, msg: Message) {
-        self.live_notices.push(msg);
+        self.live_turn.notices.push(msg);
     }
 
-    /// Whether there are no committed display messages and no notices.
+    /// Whether there are no committed display messages and no live overlay.
     pub fn display_is_empty(&self) -> bool {
         self.session_state
             .as_ref()
             .map(|s| s.display_is_empty())
             .unwrap_or(true)
-            && self.live_notices.is_empty()
+            && self.live_turn.notices.is_empty()
+            && !self.live_turn.has_assistant_content()
+            && !self.live_turn.has_tool_entries()
     }
 
-    /// Number of displayed messages (committed + notices).
+    /// Number of displayed messages (committed + live overlay).
     pub fn display_len(&self) -> usize {
-        self.session_state
+        let committed = self
+            .session_state
             .as_ref()
             .map(|s| s.display_len())
-            .unwrap_or(0)
-            + self.live_notices.len()
+            .unwrap_or(0);
+        // Use streaming=false for counting purposes (we don't want the
+        // waiting-cursor empty slot to affect the count used for shell IDs).
+        committed + self.live_turn.render_overlay(false).len()
     }
 
     pub fn should_show_resume_hint(&self) -> bool {
@@ -786,7 +781,7 @@ impl App {
             return;
         };
         let Some(meta) = store.latest_for_cwd(&self.current_cwd) else {
-            self.live_notices.push(Message::assistant(
+            self.live_turn.notices.push(Message::assistant(
                 "[no resumable session in this working folder]",
             ));
             self.bump_log_revision();
@@ -803,14 +798,14 @@ impl App {
         match store.load_events(session_id) {
             Ok(log) => {
                 self.session_state = Some(SessionState::from_event_log(log));
-                self.live_notices.clear();
+                self.live_turn.clear_all();
                 self.current_session_id = Some(session_id.to_string());
                 self.auto_scroll = true;
                 self.log_scroll = 0;
                 self.bump_log_revision();
             }
             Err(e) => {
-                self.live_notices.push(Message::assistant(format!(
+                self.live_turn.notices.push(Message::assistant(format!(
                     "[failed to resume session: {e}]"
                 )));
                 self.bump_log_revision();
@@ -1040,7 +1035,7 @@ impl App {
             }),
         );
         call_msg.include_in_llm = false;
-        self.live_notices.push(call_msg);
+        self.live_turn.notices.push(call_msg);
 
         let output = shell::run_shell_command_blocking(self.selected_shell, &cwd, &command);
         let mut body = String::new();
@@ -1062,7 +1057,7 @@ impl App {
 
         let mut out_msg = Message::tool_result(call_id, body, output.exit_code != 0);
         out_msg.include_in_llm = false;
-        self.live_notices.push(out_msg);
+        self.live_turn.notices.push(out_msg);
         self.bump_log_revision();
 
         self.persist_messages();
@@ -2507,7 +2502,7 @@ impl App {
             }
             LoginEvent::Success { provider } => {
                 log::debug!("login success: provider={provider}");
-                self.live_notices.push(Message::assistant(format!(
+                self.live_turn.notices.push(Message::assistant(format!(
                     "[login successful: {provider}]"
                 )));
                 self.bump_log_revision();
@@ -2516,7 +2511,7 @@ impl App {
             }
             LoginEvent::Error { provider, message } => {
                 log::debug!("login error: provider={} err={}", provider, message);
-                self.live_notices.push(Message::assistant(format!(
+                self.live_turn.notices.push(Message::assistant(format!(
                     "[login failed for {provider}: {message}]"
                 )));
                 self.bump_log_revision();
@@ -2540,7 +2535,7 @@ impl App {
                     self.login.needs_rebuild = true;
                 } else {
                     self.login.retry_after_refresh = false;
-                    self.live_notices.push(Message::assistant(format!(
+                    self.live_turn.notices.push(Message::assistant(format!(
                         "[token refresh failed for {provider}: {message}. Run /login {provider}]"
                     )));
                     self.bump_log_revision();
@@ -2636,7 +2631,7 @@ impl App {
                 timestamp: Self::now_ts(),
             });
         } else {
-            self.live_notices.push(Message::user(content));
+            self.live_turn.notices.push(Message::user(content));
             self.bump_log_revision();
         }
     }
@@ -2662,13 +2657,14 @@ impl App {
 
         match export::write_export_file(&path, &html) {
             Ok(()) => {
-                self.live_notices.push(Message::assistant(format!(
+                self.live_turn.notices.push(Message::assistant(format!(
                     "[session exported to {}]",
                     path.display()
                 )));
             }
             Err(e) => {
-                self.live_notices
+                self.live_turn
+                    .notices
                     .push(Message::assistant(format!("[export failed: {e}]")));
             }
         }
@@ -2680,7 +2676,7 @@ impl App {
     pub fn new_conversation(&mut self) {
         self.current_session_id = None;
         self.session_state = None;
-        self.live_notices.clear();
+        self.live_turn.clear_all();
         self.pending_turn_events.clear();
         self.runtime.queued_steering.clear();
         self.runtime.steering_tx = None;
@@ -2859,12 +2855,12 @@ impl App {
         }
 
         // Pop the trailing error notice if present. Error messages live in
-        // `live_notices` (they are not committed session events).
-        if let Some(last) = self.live_notices.last()
+        // `live_turn.notices` (they are not committed session events).
+        if let Some(last) = self.live_turn.notices.last()
             && last.role == Role::Assistant
             && (last.content.starts_with("[Error:") || last.content.starts_with("[token refresh"))
         {
-            self.live_notices.pop();
+            self.live_turn.notices.pop();
             self.bump_log_revision();
             self.persist_messages();
         }
@@ -2891,7 +2887,8 @@ impl App {
         }
 
         for id in pending_ids {
-            self.live_notices
+            self.live_turn
+                .notices
                 .push(Message::tool_result(id, "failure: aborted by user", true));
         }
     }
@@ -2908,7 +2905,8 @@ impl App {
             self.runtime.steering_tx = None;
             self.runtime.queued_steering.clear();
             self.append_abort_results_for_pending_tool_calls();
-            self.live_notices
+            self.live_turn
+                .notices
                 .push(Message::assistant("[agent loop aborted]"));
             self.bump_log_revision();
             self.persist_messages();
@@ -2957,11 +2955,11 @@ impl App {
             if let Err(e) = ss.append_batch(&batch) {
                 log::debug!("failed to append turn events to session state: {e}");
             }
-            // append_batch rebuilds the display projection from durable events.
-            // Remove in-flight turn entries from live_notices so they are not
-            // shown twice (they are now represented in the committed display state).
-            self.live_notices
-                .retain(|m| !matches!(m.role, Role::Assistant | Role::ToolCall | Role::ToolResult));
+            // append_batch rebuilds the committed display projection from durable events.
+            // Clear the in-flight turn fields (assistant content, tool entries) from
+            // LiveTurnState — they are now represented in committed display state.
+            // Notices are preserved (they survive turn boundaries).
+            self.live_turn.clear_turn();
         }
     }
 
@@ -2992,12 +2990,10 @@ impl App {
         match ev {
             AgentEvent::ThinkingToken(token) => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.ensure_assistant_message();
-                if let Some(last) = self.live_notices.last_mut() {
-                    last.thinking
-                        .get_or_insert_with(String::new)
-                        .push_str(&token);
-                }
+                self.live_turn
+                    .assistant_thinking
+                    .get_or_insert_with(String::new)
+                    .push_str(&token);
                 self.bump_log_revision();
             }
             AgentEvent::Usage(usage) => {
@@ -3005,20 +3001,14 @@ impl App {
             }
             AgentEvent::TextToken { text, phase } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.ensure_assistant_message();
-                if let Some(last) = self.live_notices.last_mut() {
-                    last.content.push_str(&text);
-                    if phase != AssistantPhase::Unknown {
-                        last.assistant_phase = Some(phase);
-                    }
+                self.live_turn.assistant_content.push_str(&text);
+                if phase != AssistantPhase::Unknown {
+                    self.live_turn.assistant_phase = phase;
                 }
                 self.bump_log_revision();
             }
             AgentEvent::ToolIntentStart => {
-                self.ensure_assistant_message();
-                if let Some(last) = self.live_notices.last_mut() {
-                    last.assistant_phase = Some(AssistantPhase::Provisional);
-                }
+                self.live_turn.assistant_phase = AssistantPhase::Provisional;
                 self.bump_log_revision();
             }
             AgentEvent::SteeringConsumed { text } => {
@@ -3082,8 +3072,12 @@ impl App {
             }
             AgentEvent::ToolCallStart { id, name, args } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.live_notices
-                    .push(Message::tool_call(id.clone(), name.clone(), args.clone()));
+                self.live_turn.tool_entries.push(LiveToolEntry {
+                    id: id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                    result: None,
+                });
                 // ToolCall is buffered; only flushed together with its result.
                 self.pending_turn_events.push(SessionEvent::ToolCall {
                     id,
@@ -3100,12 +3094,14 @@ impl App {
                     last_line: tr.first_kept_line + tr.output_lines - 1,
                     total_lines: tr.total_lines,
                 });
-                let mut msg = Message::tool_result(&id, result.content.clone(), result.is_error);
-                if let Some(dr) = display_range.clone() {
-                    msg = msg.with_display_range(dr);
+                // Update the matching live tool entry with its result.
+                if let Some(entry) = self.live_turn.find_tool_entry_mut(&id) {
+                    entry.result = Some(LiveToolResult {
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                        display_range: display_range.clone(),
+                    });
                 }
-                self.live_notices.push(msg);
-                // ToolResult completes the pair — buffered until TurnEnd/Done.
                 // Resolve tool name from the matching pending ToolCall.
                 let name = self
                     .pending_turn_events
@@ -3182,21 +3178,24 @@ impl App {
                     self.login.auth_retry_budget -= 1;
                     self.streaming_status = None;
                     // Refresh triggered; retry will happen automatically after refresh completes.
-                    // Discard pending events — the turn will be retried from scratch.
+                    // Discard pending events and in-flight turn state — the turn will be retried.
                     self.pending_turn_events.clear();
+                    self.live_turn.clear_turn();
                 } else {
                     let provider_label = active_provider_display_name(
                         &self.current_provider,
                         &self.provider_instances,
                     );
                     let rendered = format_provider_error_for_display(&provider_label, &e);
-                    self.live_notices
+                    self.live_turn
+                        .notices
                         .push(Message::assistant(format!("[Error: {rendered}]")));
                     self.bump_log_revision();
                     self.streaming_status = None;
                     // Discard any partially accumulated assistant/tool events
                     // and append a TurnError instead.
                     self.pending_turn_events.clear();
+                    self.live_turn.clear_turn();
                     self.append_event_immediate(SessionEvent::TurnError {
                         message: format!("[Error: {rendered}]"),
                         timestamp: Self::now_ts(),
@@ -3207,46 +3206,34 @@ impl App {
         }
     }
 
-    fn ensure_assistant_message(&mut self) {
-        match self.live_notices.last().map(|m| &m.role) {
-            Some(Role::Assistant) => {}
-            _ => {
-                self.live_notices.push(Message::assistant(""));
-                self.bump_log_revision();
-            }
-        }
-    }
-
-    /// Snapshot the current in-memory assistant message into `pending_turn_events`.
+    /// Assemble the `AssistantMessage` session event from `LiveTurnState` fields
+    /// and insert it into `pending_turn_events`.
     ///
     /// Called just before flushing the turn buffer so that the final content,
-    /// thinking, phase, and usage are captured.  If the pending buffer already
-    /// contains an `AssistantMessage` it is replaced; otherwise one is prepended
-    /// before any tool events.
+    /// thinking, phase, and usage are captured directly from `live_turn` —
+    /// not read back from committed display state.
     fn finalise_assistant_turn_event(&mut self) {
-        // Find the in-progress assistant message in live_notices.
-        let asst = self
-            .live_notices
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::Assistant)
-            .cloned();
-
-        let Some(asst) = asst else { return };
+        let content = self.live_turn.assistant_content.clone();
+        let thinking = self.live_turn.assistant_thinking.clone();
+        let phase = self.live_turn.assistant_phase;
 
         // Don't record a completely empty assistant turn with no tools either.
         let has_tools = self
             .pending_turn_events
             .iter()
             .any(|e| matches!(e, SessionEvent::ToolCall { .. }));
-        if asst.content.is_empty() && asst.thinking.is_none() && !has_tools {
+        if content.is_empty() && thinking.is_none() && !has_tools {
             return;
         }
 
         let ev = SessionEvent::AssistantMessage {
-            content: asst.content.clone(),
-            thinking: asst.thinking.clone(),
-            phase: asst.assistant_phase.unwrap_or(AssistantPhase::Final),
+            content,
+            thinking,
+            phase: if phase == AssistantPhase::Unknown {
+                AssistantPhase::Final
+            } else {
+                phase
+            },
             usage: self.latest_usage,
             timestamp: Self::now_ts(),
         };
@@ -3911,7 +3898,8 @@ mod tests {
                 "slash input should be cleared"
             );
             assert!(
-                !app.live_notices
+                !app.live_turn
+                    .notices
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "ESC slash cancel should not append an abort notice"
@@ -3943,7 +3931,8 @@ mod tests {
                 "agent task should be removed when stream is aborted"
             );
             assert!(
-                app.live_notices
+                app.live_turn
+                    .notices
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "abort should append user-visible abort notice"
@@ -3970,7 +3959,8 @@ mod tests {
             app.abort_agent_loop();
 
             let tool_result = app
-                .live_notices
+                .live_turn
+                .notices
                 .iter()
                 .find(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
                 .expect("expected abort tool result");
@@ -4007,7 +3997,8 @@ mod tests {
             app.abort_agent_loop();
 
             let matching_results = app
-                .live_notices
+                .live_turn
+                .notices
                 .iter()
                 .filter(|m| {
                     m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1")
