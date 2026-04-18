@@ -279,7 +279,7 @@ pub enum InputMode {
 
 // ── Selection state ───────────────────────────────────────────────────────────
 
-/// All state for the full-screen selection/picker overlay.
+/// All state for the selection menu panel.
 pub struct SelectionState {
     /// True when the selection picker is active.
     pub active: bool,
@@ -316,7 +316,7 @@ impl SelectionState {
 
 // ── Login state ───────────────────────────────────────────────────────────────
 
-/// All state for the login / OAuth overlay.
+/// All state for the login/authentication panel.
 pub struct LoginState {
     pub active: bool,
     pub provider: Option<String>,
@@ -434,7 +434,7 @@ pub struct App {
     /// Best-effort token usage reported for the latest completed turn.
     pub latest_usage: Option<UsageStats>,
 
-    // ── Login overlay ─────────────────────────────────────────────────────────
+    // ── Login panel ───────────────────────────────────────────────────────────
     pub login: LoginState,
 
     // ── Session persistence ───────────────────────────────────────────────────
