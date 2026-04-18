@@ -7,8 +7,6 @@ mod menu;
 mod pending;
 mod status;
 
-use std::collections::HashMap;
-
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
@@ -44,13 +42,13 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
-fn build_log_lines_cached(app: &App, width: usize) -> Vec<Line<'static>> {
-    let mut cache: HashMap<usize, Vec<Line<'static>>> = HashMap::new();
-    let messages = app.display_projection.messages();
-    cache
-        .entry(width)
-        .or_insert_with(|| build_log_lines(messages, app.streaming(), width))
-        .clone()
+fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
+    if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
+    {
+        let lines = build_log_lines(app.display_projection.messages(), app.streaming(), width);
+        app.cached_log_lines = Some((app.log_revision, width, lines));
+    }
+    &app.cached_log_lines.as_ref().unwrap().2
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -139,17 +137,17 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let has_scrollbar = total_lines > inner_height && !app.auto_scroll;
     let log_scroll = app.log_scroll;
-    let all_lines = build_log_lines_cached(app, log_width);
     let visible_lines: Vec<Line<'static>> = {
+        let all = build_log_lines_cached(app, log_width);
         if total_lines <= inner_height {
             let padding = inner_height - total_lines;
             let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
-            v.extend(all_lines.iter().cloned());
+            v.extend(all.iter().cloned());
             v
         } else {
             let start = log_scroll;
             let end = (start + inner_height).min(total_lines);
-            all_lines[start..end].to_vec()
+            all[start..end].to_vec()
         }
     };
 

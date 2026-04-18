@@ -1,3 +1,4 @@
+use ratatui::text::Line;
 use ratatui_textarea::{CursorMove, TextArea};
 use std::sync::{
     Arc,
@@ -371,6 +372,11 @@ pub struct App {
     pub input_mode: InputMode,
     pub selected_shell: ShellKind,
     pub available_shells: Vec<ShellKind>,
+    /// Monotonic revision bump for any visible log-content change.
+    /// Used to invalidate cached wrapped log lines.
+    pub log_revision: u64,
+    /// Cached pre-wrapped log lines for the most recent `(log_revision, width)`.
+    pub cached_log_lines: Option<(u64, usize, Vec<Line<'static>>)>,
     pub log_scroll: usize,
     /// When true, the view always follows the bottom (auto-scrolls).
     pub auto_scroll: bool,
@@ -549,9 +555,14 @@ fn active_provider_display_name(
 }
 
 impl App {
-    fn bump_log_revision(&mut self) {}
+    fn bump_log_revision(&mut self) {
+        self.log_revision = self.log_revision.wrapping_add(1);
+        self.cached_log_lines = None;
+    }
 
-    pub fn mark_log_dirty(&mut self) {}
+    pub fn mark_log_dirty(&mut self) {
+        self.bump_log_revision();
+    }
 
     pub fn new(
         initial_model: impl Into<String>,
@@ -567,6 +578,8 @@ impl App {
             input_mode: InputMode::Chat,
             selected_shell,
             available_shells,
+            log_revision: 0,
+            cached_log_lines: None,
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
