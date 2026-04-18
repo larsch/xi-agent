@@ -2,8 +2,9 @@ use clap::Parser;
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -700,6 +701,12 @@ impl LlmProvider for UnavailableProvider {
 #[cfg(windows)]
 const PASTE_ENTER_THRESHOLD_MS: Option<u128> = Some(10);
 
+enum KeyDispatch {
+    NotHandled,
+    Continue,
+    Return(RunResult),
+}
+
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -725,610 +732,15 @@ async fn run(
             Some(Ok(ev)) = crossterm_events.next() => {
                 match ev {
                     Event::Key(key) => {
-                        // On Windows with keyboard enhancement flags enabled,
-                        // Crossterm can emit both Press and Release key events.
-                        // Ignore Release so one shortcut maps to one action.
-                        if key.kind == KeyEventKind::Release {
-                            continue;
-                        }
-
-                        // Record the time of every non-Enter key press so we
-                        // can detect paste-injected Enter events below.
-                        #[cfg(windows)]
-                        if key.code != KeyCode::Enter {
-                            last_key_at = Some(std::time::Instant::now());
-                        }
-
-                        if key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            if app.input_mode == InputMode::Shell {
-                                app.exit_shell_mode();
-                                continue;
-                            }
-                            return Ok(RunResult::Quit);
-                        }
-
-                        if key.code == KeyCode::Char('d')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            if app.input_mode == InputMode::Shell {
-                                if app.shell_input_is_empty() {
-                                    app.exit_shell_mode();
-                                }
-                                continue;
-                            }
-
-                            let input_is_empty = app
-                                .textarea
-                                .lines()
-                                .iter()
-                                .all(|line| line.trim().is_empty());
-                            if input_is_empty {
-                                return Ok(RunResult::Quit);
-                            }
-                            continue;
-                        }
-
-                        if key.code == KeyCode::Char('i')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            app.toggle_info();
-                            continue;
-                        }
-
-                        if key.code == KeyCode::Char('r')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !app.selection.active
-                        {
-                            app.resume_latest_for_current_cwd();
-                            continue;
-                        }
-
-                        // ── Ctrl+V paste (Windows conhost fallback) ───────────
-                        // On Windows terminals that do not support bracketed
-                        // paste (e.g. conhost), pasting via Ctrl+V delivers the
-                        // clipboard content as individual KEY_EVENTs.  Every
-                        // newline in the clipboard arrives as VK_RETURN →
-                        // KeyCode::Enter, which the normal handler would treat
-                        // as a form submit.
-                        //
-                        // We intercept Ctrl+V here and read the clipboard text
-                        // directly, bypassing the Win32 console input path.
-                        // This is safe because on VT-capable terminals (Windows
-                        // Terminal with bracketed paste enabled) Ctrl+V is
-                        // converted to an Event::Paste and the key event is
-                        // suppressed, so we will never reach this branch there.
-                        #[cfg(windows)]
-                        if key.code == KeyCode::Char('v')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !app.login.active
-                        {
-                            if let Some(text) = read_clipboard_text() {
-                                let normalized = normalize_paste_text(&text);
-                                if app.selection.active {
-                                    app.exit_selection_mode();
-                                }
-                                if app.input_mode == InputMode::Shell {
-                                    app.shell_textarea.insert_str(normalized);
-                                } else {
-                                    app.textarea.insert_str(normalized);
-                                    app.update_completions();
-                                    if app.should_fetch_models() {
-                                        app.start_model_fetch(provider);
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
-                        // ── Shell input mode ─────────────────────────────────
-                        if app.input_mode == InputMode::Shell {
-                            if key.code == KeyCode::Char('s')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                app.cycle_shell();
-                                continue;
-                            }
-
-                            match key.code {
-                                KeyCode::Esc => {
-                                    app.exit_shell_mode();
-                                }
-                                KeyCode::Backspace if app.shell_input_is_empty() => {
-                                    app.exit_shell_mode();
-                                }
-                                KeyCode::Enter if key.modifiers.is_empty() => {
-                                    #[cfg(windows)]
-                                    if let (Some(threshold), Some(t)) =
-                                        (PASTE_ENTER_THRESHOLD_MS, last_key_at)
-                                        && t.elapsed().as_millis() < threshold
-                                    {
-                                        app.shell_textarea.insert_newline();
-                                        continue;
-                                    }
-                                    app.submit_shell_command();
-                                }
-                                _ => {
-                                    app.shell_textarea.input(Event::Key(key));
-                                }
-                            }
-                            continue;
-                        }
-
-                        // ── Selection menu mode ───────────────────────────────
-                        if app.selection.active {
-                            match key.code {
-                                KeyCode::Up => {
-                                    app.selection_select_prev();
-                                    // If navigating away from the freeform sentinel,
-                                    // cancel the in-progress typed response.
-                                    if app.ask_user_freeform_mode {
-                                        let on_sentinel = app
-                                            .selection
-                                            .items
-                                            .get(app.selection.selected)
-                                            .map(|i| i.complete_to == "/ask_user_freeform")
-                                            .unwrap_or(false);
-                                        if !on_sentinel {
-                                            app.cancel_ask_freeform_typing();
-                                        }
-                                    }
-                                }
-                                KeyCode::Down => {
-                                    app.selection_select_next();
-                                    if app.ask_user_freeform_mode {
-                                        let on_sentinel = app
-                                            .selection
-                                            .items
-                                            .get(app.selection.selected)
-                                            .map(|i| i.complete_to == "/ask_user_freeform")
-                                            .unwrap_or(false);
-                                        if !on_sentinel {
-                                            app.cancel_ask_freeform_typing();
-                                        }
-                                    }
-                                }
-                                KeyCode::PageDown => {
-                                    app.selection_page_down();
-                                }
-                                KeyCode::PageUp => {
-                                    app.selection_page_up();
-                                }
-                                KeyCode::Backspace => {
-                                    if app.ask_user_freeform_mode {
-                                        // Route backspace into the textarea.
-                                        app.textarea.delete_char();
-                                        // If the textarea is now empty, cancel freeform typing.
-                                        if app.textarea.lines().iter().all(|l| l.is_empty()) {
-                                            app.cancel_ask_freeform_typing();
-                                        }
-                                    } else {
-                                        app.selection_backspace();
-                                    }
-                                }
-                                KeyCode::Char(c)
-                                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                                {
-                                    if app.pending_ask_allows_freeform() {
-                                        app.begin_ask_freeform_typing();
-                                        app.textarea.insert_char(c);
-                                    } else {
-                                        app.selection_add_char(c);
-                                    }
-                                }
-                                KeyCode::Char('e')
-                                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                                        && !key.modifiers.contains(KeyModifiers::ALT)
-                                        && app.in_provider_selection_mode() =>
-                                {
-                                    if let Some(id) = app.selected_provider_id()
-                                        && let Some(instance) = config.find_provider(id)
-                                        && instance.backend_preset.def().backend_class
-                                            == provider_instance::BackendClass::UserSuppliedService
-                                    {
-                                        app.enter_provider_edit_mode(instance);
-                                    }
-                                }
-                                KeyCode::Char('r')
-                                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                                        && !key.modifiers.contains(KeyModifiers::ALT)
-                                        && app.in_provider_selection_mode() =>
-                                {
-                                    if let Some(id) = app.selected_provider_id()
-                                        && let Some(instance) = config.find_provider(id)
-                                        && instance.backend_preset.def().backend_class
-                                            == provider_instance::BackendClass::UserSuppliedService
-                                    {
-                                        app.enter_provider_removal_confirmation_mode(instance);
-                                    }
-                                }
-                                KeyCode::Enter if key.modifiers.is_empty() => {
-                                    match app.apply_selection() {
-                                        Some(SelectionResult::Model(m)) => {
-                                            return Ok(RunResult::ChangeModel {
-                                                name: m,
-                                                prompt_thinking_selection: true,
-                                            });
-                                        }
-                                        Some(SelectionResult::Thinking(level)) => {
-                                            return Ok(RunResult::ChangeThinking(level));
-                                        }
-                                        Some(SelectionResult::Provider(p)) => {
-                                            return Ok(RunResult::ChangeProvider(p));
-                                        }
-                                        Some(SelectionResult::AddProvider) => {
-                                            app.begin_new_provider_setup();
-                                            app.enter_provider_backend_preset_selection_mode();
-                                        }
-                                        Some(SelectionResult::CancelProviderRemoval) => {
-                                            app.clear_pending_provider_removal();
-                                        }
-                                        Some(SelectionResult::RemoveProvider(id)) => {
-                                            return Ok(RunResult::RemoveProvider(id));
-                                        }
-                                        Some(SelectionResult::ProviderBackendPreset(backend_preset)) => {
-                                            let service_def = backend_preset.def();
-                                            let default_api = service_def.default_api.clone();
-                                            app.set_pending_provider_backend_preset(backend_preset.clone());
-                                            if service_def.user_selects_api {
-                                                app.enter_provider_api_type_selection_mode(&backend_preset);
-                                            } else {
-                                                app.set_pending_provider_api_type(default_api);
-                                                if let Some(instance) = app.pending_provider_instance() {
-                                                    if provider_setup_requires_endpoint(&instance) {
-                                                        enter_provider_endpoint_input(app, &instance);
-                                                    } else if provider_setup_requires_api_key(&instance) {
-                                                        app.enter_provider_api_key_input_mode();
-                                                    } else {
-                                                        app.enter_provider_name_input_mode();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Some(SelectionResult::ProviderApiType(api_type)) => {
-                                            app.set_pending_provider_api_type(api_type);
-                                            if let Some(instance) = app.pending_provider_instance() {
-                                                if provider_setup_requires_endpoint(&instance) {
-                                                    enter_provider_endpoint_input(app, &instance);
-                                                } else if provider_setup_requires_api_key(&instance) {
-                                                    app.enter_provider_api_key_input_mode();
-                                                } else {
-                                                    app.enter_provider_name_input_mode();
-                                                }
-                                            }
-                                        }
-                                        Some(SelectionResult::LoginProvider(p)) => {
-                                            app.start_login(&p);
-                                        }
-                                        Some(SelectionResult::ResumeSession(id)) => {
-                                            app.resume_session_by_id(&id);
-                                        }
-                                        Some(SelectionResult::AskOption(answer)) => {
-                                            app.select_pending_ask_option(answer);
-                                        }
-                                        Some(SelectionResult::AskFreeform) => {
-                                            if app.ask_user_freeform_mode {
-                                                // Text already typed — submit it.
-                                                app.submit_pending_ask_answer();
-                                            } else {
-                                                app.enter_ask_freeform_mode();
-                                            }
-                                        }
-                                        Some(SelectionResult::LoginAction(action)) => {
-                                            app.apply_login_action(action);
-                                        }
-                                        None => {}
-                                    }
-                                }
-                                KeyCode::Esc => {
-                                    if app.has_pending_ask() {
-                                        app.cancel_pending_ask();
-                                    } else if app.in_slash_mode() {
-                                        app.reset_textarea();
-                                    } else if app.streaming() {
-                                        app.abort_agent_loop();
-                                    } else {
-                                        if app.in_provider_removal_confirmation_mode() {
-                                            app.clear_pending_provider_removal();
-                                        }
-                                        app.exit_selection_mode();
-                                    }
-                                }
-                                _ => {}
-                            }
-                            continue;
-                        }
-
-                        if key.code == KeyCode::Esc {
-                            app.handle_escape_in_chat_mode();
-                            continue;
-                        }
-
-                        if app.login.active {
-                            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
-                                app.enter_login_action_menu();
-                            }
-                            continue;
-                        }
-
-                        if key.code == KeyCode::Char('!')
-                            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-                        {
-                            let chat_input_is_empty = app
-                                .textarea
-                                .lines()
-                                .iter()
-                                .all(|line| line.trim().is_empty());
-                            if chat_input_is_empty {
-                                app.enter_shell_mode();
-                                continue;
-                            }
-                        }
-
-                        match key.code {
-                            KeyCode::PageUp   => app.scroll_up(),
-                            KeyCode::PageDown => app.scroll_down(),
-
-                            KeyCode::Up => {
-                                if !app.completions.is_empty() {
-                                    app.completion_select_prev();
-                                } else {
-                                    app.textarea.input(Event::Key(key));
-                                }
-                            }
-                            KeyCode::Down => {
-                                if !app.completions.is_empty() {
-                                    app.completion_select_next();
-                                } else {
-                                    app.textarea.input(Event::Key(key));
-                                }
-                            }
-
-                            KeyCode::Tab => {
-                                if !app.completions.is_empty() {
-                                    app.apply_completion();
-                                }
-                            }
-
-                            KeyCode::Enter if key.modifiers.is_empty() => {
-                                // On Windows without bracketed-paste support,
-                                // every newline in pasted text arrives as a
-                                // bare Enter.  If this Enter arrived within
-                                // PASTE_ENTER_THRESHOLD_MS of the previous
-                                // key event it is almost certainly part of a
-                                // paste burst — insert a newline instead of
-                                // submitting.
-                                #[cfg(windows)]
-                                if let (Some(threshold), Some(t)) =
-                                    (PASTE_ENTER_THRESHOLD_MS, last_key_at)
-                                    && t.elapsed().as_millis() < threshold
-                                {
-                                    app.textarea.insert_newline();
-                                    app.update_completions();
-                                    continue;
-                                }
-
-                                if app.ollama_endpoint_input_mode {
-                                    if let Some(url) = app.take_ollama_endpoint_input() {
-                                        if app.pending_provider_setup_is_edit() {
-                                            let instance = app
-                                                .pending_provider_instance()
-                                                .unwrap_or_else(|| {
-                                                    resolve_current_run_instance(app, config)
-                                                });
-                                            return Ok(RunResult::ChangeOllamaEndpoint {
-                                                instance,
-                                                url,
-                                            });
-                                        }
-                                        if let Some(setup) = app.pending_provider_setup.as_mut() {
-                                            setup.base_url = Some(url);
-                                        }
-                                        app.enter_provider_name_input_mode();
-                                    }
-                                    // Invalid URL: stay in input mode (user can correct it).
-                                } else if app.open_webui_url_input_mode {
-                                    // submit_open_webui_url_input transitions to token mode internally.
-                                    app.submit_open_webui_url_input();
-                                    // Invalid URL: stay in input mode.
-                                } else if app.open_webui_token_input_mode {
-                                    if let Some((url, token)) = app.take_open_webui_token_input() {
-                                        let instance = app
-                                            .pending_provider_instance()
-                                            .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                                        return Ok(RunResult::ChangeOpenWebUi {
-                                            instance,
-                                            url,
-                                            api_key: token,
-                                        });
-                                    }
-                                    // Empty token: stay in input mode.
-                                } else if app.setup_input_mode == Some(app::SetupInputKind::BaseUrl) {
-                                    if let Some(url) = app.submit_pending_provider_base_url() {
-                                        let instance = app
-                                            .pending_provider_instance()
-                                            .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                                        if app.pending_provider_setup_is_edit()
-                                            && instance.backend_preset
-                                                == provider_instance::BackendPreset::Ollama
-                                        {
-                                            return Ok(RunResult::ChangeOllamaEndpoint {
-                                                instance,
-                                                url,
-                                            });
-                                        }
-                                        if app.pending_provider_setup_is_edit() {
-                                            if provider_setup_requires_api_key(&instance) {
-                                                app.enter_provider_api_key_input_mode();
-                                                if let Some(existing_token) = instance.api_key.as_deref() {
-                                                    app.textarea.insert_str(existing_token);
-                                                }
-                                            } else {
-                                                app.enter_provider_name_input_mode();
-                                            }
-                                        } else if provider_setup_requires_api_key(&instance) {
-                                            app.enter_provider_api_key_input_mode();
-                                        } else {
-                                            app.enter_provider_name_input_mode();
-                                        }
-                                    }
-                                } else if app.setup_input_mode == Some(app::SetupInputKind::ApiKey)
-                                {
-                                    if app.submit_pending_provider_api_key().is_some() {
-                                        app.enter_provider_name_input_mode();
-                                    }
-                                } else if app.setup_input_mode == Some(app::SetupInputKind::Name) {
-                                    let was_edit = app.pending_provider_setup_is_edit();
-                                    let original_id = app
-                                        .pending_provider_original_id()
-                                        .map(ToOwned::to_owned);
-                                    if app.submit_provider_name_input(&config.providers).is_some()
-                                        && let Some(instance) = app.finish_pending_provider_setup()
-                                    {
-                                        if was_edit {
-                                            return Ok(RunResult::UpdateProvider {
-                                                original_id,
-                                                instance,
-                                            });
-                                        }
-                                        return Ok(RunResult::AddProvider(instance));
-                                    }
-                                } else if app.has_pending_ask() {
-                                    app.submit_pending_ask_answer();
-                                } else if app.in_slash_mode() {
-                                    let input = app.slash_submit_text().unwrap_or_default();
-                                    app.reset_textarea();
-
-                                    match commands::parse(&input) {
-                                        Some(CommandAction::New) => {
-                                            app.new_conversation();
-                                        }
-                                        Some(CommandAction::Export(path)) => {
-                                            app.export_session_html(path.as_deref());
-                                        }
-                                        Some(CommandAction::Reload) => {
-                                            return Ok(RunResult::ReloadContext);
-                                        }
-                                        Some(CommandAction::Quit) => {
-                                            return Ok(RunResult::Quit);
-                                        }
-                                        Some(CommandAction::Model(name)) => {
-                                            return Ok(RunResult::ChangeModel {
-                                                name,
-                                                prompt_thinking_selection: true,
-                                            });
-                                        }
-                                        Some(CommandAction::ModelNoArg) => {
-                                            app.enter_model_selection_mode();
-                                            if app.should_fetch_models_for_selection() {
-                                                app.start_model_fetch(provider);
-                                            }
-                                        }
-                                        Some(CommandAction::Provider(name)) => {
-                                            return Ok(RunResult::ChangeProvider(name));
-                                        }
-                                        Some(CommandAction::ProviderNoArg) => {
-                                            app.enter_provider_selection_mode(&config.providers);
-                                        }
-                                        Some(CommandAction::Thinking(raw)) => {
-                                            let thinking_supported = config
-                                                .find_provider(&app.current_provider)
-                                                .map(|inst| {
-                                                    thinking_support_for_instance(
-                                                        inst,
-                                                        &app.current_model,
-                                                    ) == ThinkingSupport::Applied
-                                                })
-                                                .unwrap_or(false);
-                                            if !thinking_supported {
-                                                continue;
-                                            }
-                                            match ThinkingLevel::parse(&raw) {
-                                                Some(level) => {
-                                                    return Ok(RunResult::ChangeThinking(level));
-                                                }
-                                                None => {
-                                                    app.messages.push(llm::Message::assistant(format!(
-                                                        "[invalid thinking level: '{raw}' (use off|minimal|low|medium|high|xhigh)]"
-                                                    )));
-                                                    app.mark_log_dirty();
-                                                }
-                                            }
-                                        }
-                                        Some(CommandAction::ThinkingNoArg) => {
-                                            let thinking_supported = config
-                                                .find_provider(&app.current_provider)
-                                                .map(|inst| {
-                                                    thinking_support_for_instance(
-                                                        inst,
-                                                        &app.current_model,
-                                                    ) == ThinkingSupport::Applied
-                                                })
-                                                .unwrap_or(false);
-                                            if thinking_supported {
-                                                app.enter_thinking_selection_mode();
-                                            }
-                                        }
-                                        Some(CommandAction::Login(provider)) => {
-                                            app.start_login(&provider);
-                                        }
-                                        Some(CommandAction::LoginNoArg) => {
-                                            app.enter_login_selection_mode();
-                                        }
-                                        Some(CommandAction::Resume(session_id)) => {
-                                            app.resume_session_by_id(&session_id);
-                                        }
-                                        Some(CommandAction::ResumeNoArg) => {
-                                            app.enter_resume_selection_mode();
-                                        }
-                                        Some(CommandAction::Compact(instructions)) => {
-                                            app.trigger_manual_compaction(instructions, provider);
-                                        }
-                                        Some(CommandAction::Skill { name, args }) => {
-                                            match app.loaded_skills.iter().find(|s| s.name == name) {
-                                                Some(skill) => {
-                                                    match skills::expand_skill(skill, &args) {
-                                                        Ok(expanded) => {
-                                                            app.submit_with_text(expanded, provider);
-                                                        }
-                                                        Err(e) => {
-                                                            app.messages.push(llm::Message::assistant(
-                                                                format!("[skill error: {e}]"),
-                                                            ));
-                                                            app.mark_log_dirty();
-                                                        }
-                                                    }
-                                                }
-                                                None => {
-                                                    app.messages.push(llm::Message::assistant(
-                                                        format!("[unknown skill: '{name}']"),
-                                                    ));
-                                                    app.mark_log_dirty();
-                                                }
-                                            }
-                                        }
-                                        None => {}
-                                    }
-                                } else if app.streaming() {
-                                    app.enqueue_steering_from_input();
-                                } else {
-                                    app.submit(provider);
-                                }
-                            }
-                            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                                app.textarea.insert_newline();
-                                app.update_completions();
-                            }
-
-                            _ => {
-                                app.textarea.input(Event::Key(key));
-                                app.update_completions();
-                                if app.should_fetch_models() {
-                                    app.start_model_fetch(provider);
-                                }
-                            }
+                        if let Some(result) = handle_key_event(
+                            app,
+                            provider,
+                            config,
+                            key,
+                            #[cfg(windows)]
+                            &mut last_key_at,
+                        ) {
+                            return Ok(result);
                         }
                     }
                     Event::Mouse(mouse) => match mouse.kind {
@@ -1338,18 +750,7 @@ async fn run(
                     },
                     Event::Paste(text) => {
                         if !app.login.active {
-                            if app.selection.active {
-                                app.exit_selection_mode();
-                            }
-                            if app.input_mode == InputMode::Shell {
-                                app.shell_textarea.insert_str(normalize_paste_text(&text));
-                            } else {
-                                app.textarea.insert_str(normalize_paste_text(&text));
-                                app.update_completions();
-                                if app.should_fetch_models() {
-                                    app.start_model_fetch(provider);
-                                }
-                            }
+                            apply_paste(app, provider, &text);
                         }
                     },
                     _ => {}
@@ -1369,6 +770,654 @@ async fn run(
             _ = tick_interval.tick() => {
                 app.tick();
             }
+        }
+    }
+}
+
+fn handle_key_event(
+    app: &mut App,
+    provider: &Arc<dyn LlmProvider + Send + Sync>,
+    config: &TauConfig,
+    key: KeyEvent,
+    #[cfg(windows)] last_key_at: &mut Option<std::time::Instant>,
+) -> Option<RunResult> {
+    // On Windows with keyboard enhancement flags enabled,
+    // Crossterm can emit both Press and Release key events.
+    // Ignore Release so one shortcut maps to one action.
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+
+    // Record the time of every non-Enter key press so we
+    // can detect paste-injected Enter events below.
+    #[cfg(windows)]
+    if key.code != KeyCode::Enter {
+        *last_key_at = Some(std::time::Instant::now());
+    }
+
+    match handle_global_key_shortcuts(
+        app,
+        provider,
+        key,
+        #[cfg(windows)]
+        last_key_at,
+    ) {
+        KeyDispatch::NotHandled => {}
+        KeyDispatch::Continue => return None,
+        KeyDispatch::Return(result) => return Some(result),
+    }
+
+    if app.input_mode == InputMode::Shell {
+        return match handle_shell_mode_key(
+            app,
+            key,
+            #[cfg(windows)]
+            last_key_at.as_ref(),
+        ) {
+            KeyDispatch::NotHandled | KeyDispatch::Continue => None,
+            KeyDispatch::Return(result) => Some(result),
+        };
+    }
+
+    if app.selection.active {
+        return match handle_selection_mode_key(app, config, key) {
+            KeyDispatch::NotHandled | KeyDispatch::Continue => None,
+            KeyDispatch::Return(result) => Some(result),
+        };
+    }
+
+    match handle_chat_mode_key(
+        app,
+        provider,
+        config,
+        key,
+        #[cfg(windows)]
+        last_key_at.as_ref(),
+    ) {
+        KeyDispatch::NotHandled | KeyDispatch::Continue => None,
+        KeyDispatch::Return(result) => Some(result),
+    }
+}
+
+fn handle_global_key_shortcuts(
+    app: &mut App,
+    _provider: &Arc<dyn LlmProvider + Send + Sync>,
+    key: KeyEvent,
+    #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
+) -> KeyDispatch {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if app.input_mode == InputMode::Shell {
+            app.exit_shell_mode();
+            return KeyDispatch::Continue;
+        }
+        return KeyDispatch::Return(RunResult::Quit);
+    }
+
+    if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if app.input_mode == InputMode::Shell {
+            if app.shell_input_is_empty() {
+                app.exit_shell_mode();
+            }
+            return KeyDispatch::Continue;
+        }
+
+        let input_is_empty = app
+            .textarea
+            .lines()
+            .iter()
+            .all(|line| line.trim().is_empty());
+        if input_is_empty {
+            return KeyDispatch::Return(RunResult::Quit);
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.toggle_info();
+        return KeyDispatch::Continue;
+    }
+
+    if key.code == KeyCode::Char('r')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !app.selection.active
+    {
+        app.resume_latest_for_current_cwd();
+        return KeyDispatch::Continue;
+    }
+
+    #[cfg(windows)]
+    if key.code == KeyCode::Char('v')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !app.login.active
+    {
+        if let Some(text) = read_clipboard_text() {
+            apply_paste(app, provider, &text);
+        }
+        return KeyDispatch::Continue;
+    }
+
+    KeyDispatch::NotHandled
+}
+
+fn handle_shell_mode_key(
+    app: &mut App,
+    key: KeyEvent,
+    #[cfg(windows)] last_key_at: Option<&std::time::Instant>,
+) -> KeyDispatch {
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cycle_shell();
+        return KeyDispatch::Continue;
+    }
+
+    match key.code {
+        KeyCode::Esc => app.exit_shell_mode(),
+        KeyCode::Backspace if app.shell_input_is_empty() => app.exit_shell_mode(),
+        KeyCode::Enter if key.modifiers.is_empty() => {
+            #[cfg(windows)]
+            if let (Some(threshold), Some(t)) = (PASTE_ENTER_THRESHOLD_MS, last_key_at)
+                && t.elapsed().as_millis() < threshold
+            {
+                app.shell_textarea.insert_newline();
+                return KeyDispatch::Continue;
+            }
+            app.submit_shell_command();
+        }
+        _ => {
+            app.shell_textarea.input(Event::Key(key));
+        }
+    }
+
+    KeyDispatch::Continue
+}
+
+fn handle_selection_mode_key(app: &mut App, config: &TauConfig, key: KeyEvent) -> KeyDispatch {
+    match key.code {
+        KeyCode::Up => {
+            app.selection_select_prev();
+            cancel_ask_freeform_if_off_sentinel(app);
+        }
+        KeyCode::Down => {
+            app.selection_select_next();
+            cancel_ask_freeform_if_off_sentinel(app);
+        }
+        KeyCode::PageDown => app.selection_page_down(),
+        KeyCode::PageUp => app.selection_page_up(),
+        KeyCode::Backspace => {
+            if app.ask_user_freeform_mode {
+                app.textarea.delete_char();
+                if app.textarea.lines().iter().all(|l| l.is_empty()) {
+                    app.cancel_ask_freeform_typing();
+                }
+            } else {
+                app.selection_backspace();
+            }
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if app.pending_ask_allows_freeform() {
+                app.begin_ask_freeform_typing();
+                app.textarea.insert_char(c);
+            } else {
+                app.selection_add_char(c);
+            }
+        }
+        KeyCode::Char('e')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && app.in_provider_selection_mode() =>
+        {
+            if let Some(id) = app.selected_provider_id()
+                && let Some(instance) = config.find_provider(id)
+                && instance.backend_preset.def().backend_class
+                    == provider_instance::BackendClass::UserSuppliedService
+            {
+                app.enter_provider_edit_mode(instance);
+            }
+        }
+        KeyCode::Char('r')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && app.in_provider_selection_mode() =>
+        {
+            if let Some(id) = app.selected_provider_id()
+                && let Some(instance) = config.find_provider(id)
+                && instance.backend_preset.def().backend_class
+                    == provider_instance::BackendClass::UserSuppliedService
+            {
+                app.enter_provider_removal_confirmation_mode(instance);
+            }
+        }
+        KeyCode::Enter if key.modifiers.is_empty() => {
+            return handle_selection_enter(app);
+        }
+        KeyCode::Esc => {
+            if app.has_pending_ask() {
+                app.cancel_pending_ask();
+            } else if app.in_slash_mode() {
+                app.reset_textarea();
+            } else if app.streaming() {
+                app.abort_agent_loop();
+            } else {
+                if app.in_provider_removal_confirmation_mode() {
+                    app.clear_pending_provider_removal();
+                }
+                app.exit_selection_mode();
+            }
+        }
+        _ => {}
+    }
+
+    KeyDispatch::Continue
+}
+
+fn handle_selection_enter(app: &mut App) -> KeyDispatch {
+    match app.apply_selection() {
+        Some(SelectionResult::Model(m)) => KeyDispatch::Return(RunResult::ChangeModel {
+            name: m,
+            prompt_thinking_selection: true,
+        }),
+        Some(SelectionResult::Thinking(level)) => {
+            KeyDispatch::Return(RunResult::ChangeThinking(level))
+        }
+        Some(SelectionResult::Provider(p)) => KeyDispatch::Return(RunResult::ChangeProvider(p)),
+        Some(SelectionResult::AddProvider) => {
+            app.begin_new_provider_setup();
+            app.enter_provider_backend_preset_selection_mode();
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::CancelProviderRemoval) => {
+            app.clear_pending_provider_removal();
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::RemoveProvider(id)) => {
+            KeyDispatch::Return(RunResult::RemoveProvider(id))
+        }
+        Some(SelectionResult::ProviderBackendPreset(backend_preset)) => {
+            let service_def = backend_preset.def();
+            let default_api = service_def.default_api.clone();
+            app.set_pending_provider_backend_preset(backend_preset.clone());
+            if service_def.user_selects_api {
+                app.enter_provider_api_type_selection_mode(&backend_preset);
+            } else {
+                app.set_pending_provider_api_type(default_api);
+                if let Some(instance) = app.pending_provider_instance() {
+                    if provider_setup_requires_endpoint(&instance) {
+                        enter_provider_endpoint_input(app, &instance);
+                    } else if provider_setup_requires_api_key(&instance) {
+                        app.enter_provider_api_key_input_mode();
+                    } else {
+                        app.enter_provider_name_input_mode();
+                    }
+                }
+            }
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::ProviderApiType(api_type)) => {
+            app.set_pending_provider_api_type(api_type);
+            if let Some(instance) = app.pending_provider_instance() {
+                if provider_setup_requires_endpoint(&instance) {
+                    enter_provider_endpoint_input(app, &instance);
+                } else if provider_setup_requires_api_key(&instance) {
+                    app.enter_provider_api_key_input_mode();
+                } else {
+                    app.enter_provider_name_input_mode();
+                }
+            }
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::LoginProvider(p)) => {
+            app.start_login(&p);
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::ResumeSession(id)) => {
+            app.resume_session_by_id(&id);
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::AskOption(answer)) => {
+            app.select_pending_ask_option(answer);
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::AskFreeform) => {
+            if app.ask_user_freeform_mode {
+                app.submit_pending_ask_answer();
+            } else {
+                app.enter_ask_freeform_mode();
+            }
+            KeyDispatch::Continue
+        }
+        Some(SelectionResult::LoginAction(action)) => {
+            app.apply_login_action(action);
+            KeyDispatch::Continue
+        }
+        None => KeyDispatch::Continue,
+    }
+}
+
+fn handle_chat_mode_key(
+    app: &mut App,
+    provider: &Arc<dyn LlmProvider + Send + Sync>,
+    config: &TauConfig,
+    key: KeyEvent,
+    #[cfg(windows)] last_key_at: Option<&std::time::Instant>,
+) -> KeyDispatch {
+    if key.code == KeyCode::Esc {
+        app.handle_escape_in_chat_mode();
+        return KeyDispatch::Continue;
+    }
+
+    if app.login.active {
+        if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+            app.enter_login_action_menu();
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if key.code == KeyCode::Char('!')
+        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+    {
+        let chat_input_is_empty = app
+            .textarea
+            .lines()
+            .iter()
+            .all(|line| line.trim().is_empty());
+        if chat_input_is_empty {
+            app.enter_shell_mode();
+            return KeyDispatch::Continue;
+        }
+    }
+
+    match key.code {
+        KeyCode::PageUp => app.scroll_up(),
+        KeyCode::PageDown => app.scroll_down(),
+        KeyCode::Up => {
+            if !app.completions.is_empty() {
+                app.completion_select_prev();
+            } else {
+                app.textarea.input(Event::Key(key));
+            }
+        }
+        KeyCode::Down => {
+            if !app.completions.is_empty() {
+                app.completion_select_next();
+            } else {
+                app.textarea.input(Event::Key(key));
+            }
+        }
+        KeyCode::Tab => {
+            if !app.completions.is_empty() {
+                app.apply_completion();
+            }
+        }
+        KeyCode::Enter if key.modifiers.is_empty() => {
+            #[cfg(windows)]
+            if let (Some(threshold), Some(t)) = (PASTE_ENTER_THRESHOLD_MS, last_key_at)
+                && t.elapsed().as_millis() < threshold
+            {
+                app.textarea.insert_newline();
+                app.update_completions();
+                return KeyDispatch::Continue;
+            }
+
+            return handle_chat_submit(app, provider, config);
+        }
+        KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+            app.textarea.insert_newline();
+            app.update_completions();
+        }
+        _ => {
+            app.textarea.input(Event::Key(key));
+            app.update_completions();
+            if app.should_fetch_models() {
+                app.start_model_fetch(provider);
+            }
+        }
+    }
+
+    KeyDispatch::Continue
+}
+
+fn handle_chat_submit(
+    app: &mut App,
+    provider: &Arc<dyn LlmProvider + Send + Sync>,
+    config: &TauConfig,
+) -> KeyDispatch {
+    if app.ollama_endpoint_input_mode {
+        if let Some(url) = app.take_ollama_endpoint_input() {
+            if app.pending_provider_setup_is_edit() {
+                let instance = app
+                    .pending_provider_instance()
+                    .unwrap_or_else(|| resolve_current_run_instance(app, config));
+                return KeyDispatch::Return(RunResult::ChangeOllamaEndpoint { instance, url });
+            }
+            if let Some(setup) = app.pending_provider_setup.as_mut() {
+                setup.base_url = Some(url);
+            }
+            app.enter_provider_name_input_mode();
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if app.open_webui_url_input_mode {
+        app.submit_open_webui_url_input();
+        return KeyDispatch::Continue;
+    }
+
+    if app.open_webui_token_input_mode {
+        if let Some((url, token)) = app.take_open_webui_token_input() {
+            let instance = app
+                .pending_provider_instance()
+                .unwrap_or_else(|| resolve_current_run_instance(app, config));
+            return KeyDispatch::Return(RunResult::ChangeOpenWebUi {
+                instance,
+                url,
+                api_key: token,
+            });
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if app.setup_input_mode == Some(app::SetupInputKind::BaseUrl) {
+        if let Some(url) = app.submit_pending_provider_base_url() {
+            let instance = app
+                .pending_provider_instance()
+                .unwrap_or_else(|| resolve_current_run_instance(app, config));
+            if app.pending_provider_setup_is_edit()
+                && instance.backend_preset == provider_instance::BackendPreset::Ollama
+            {
+                return KeyDispatch::Return(RunResult::ChangeOllamaEndpoint { instance, url });
+            }
+            if app.pending_provider_setup_is_edit() {
+                if provider_setup_requires_api_key(&instance) {
+                    app.enter_provider_api_key_input_mode();
+                    if let Some(existing_token) = instance.api_key.as_deref() {
+                        app.textarea.insert_str(existing_token);
+                    }
+                } else {
+                    app.enter_provider_name_input_mode();
+                }
+            } else if provider_setup_requires_api_key(&instance) {
+                app.enter_provider_api_key_input_mode();
+            } else {
+                app.enter_provider_name_input_mode();
+            }
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if app.setup_input_mode == Some(app::SetupInputKind::ApiKey) {
+        if app.submit_pending_provider_api_key().is_some() {
+            app.enter_provider_name_input_mode();
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if app.setup_input_mode == Some(app::SetupInputKind::Name) {
+        let was_edit = app.pending_provider_setup_is_edit();
+        let original_id = app.pending_provider_original_id().map(ToOwned::to_owned);
+        if app.submit_provider_name_input(&config.providers).is_some()
+            && let Some(instance) = app.finish_pending_provider_setup()
+        {
+            if was_edit {
+                return KeyDispatch::Return(RunResult::UpdateProvider {
+                    original_id,
+                    instance,
+                });
+            }
+            return KeyDispatch::Return(RunResult::AddProvider(instance));
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if app.has_pending_ask() {
+        app.submit_pending_ask_answer();
+        return KeyDispatch::Continue;
+    }
+
+    if app.in_slash_mode() {
+        return handle_slash_submit(app, provider, config);
+    }
+
+    if app.streaming() {
+        app.enqueue_steering_from_input();
+    } else {
+        app.submit(provider);
+    }
+    KeyDispatch::Continue
+}
+
+fn handle_slash_submit(
+    app: &mut App,
+    provider: &Arc<dyn LlmProvider + Send + Sync>,
+    config: &TauConfig,
+) -> KeyDispatch {
+    let input = app.slash_submit_text().unwrap_or_default();
+    app.reset_textarea();
+
+    match commands::parse(&input) {
+        Some(CommandAction::New) => app.new_conversation(),
+        Some(CommandAction::Export(path)) => app.export_session_html(path.as_deref()),
+        Some(CommandAction::Reload) => return KeyDispatch::Return(RunResult::ReloadContext),
+        Some(CommandAction::Quit) => return KeyDispatch::Return(RunResult::Quit),
+        Some(CommandAction::Model(name)) => {
+            return KeyDispatch::Return(RunResult::ChangeModel {
+                name,
+                prompt_thinking_selection: true,
+            });
+        }
+        Some(CommandAction::ModelNoArg) => {
+            app.enter_model_selection_mode();
+            if app.should_fetch_models_for_selection() {
+                app.start_model_fetch(provider);
+            }
+        }
+        Some(CommandAction::Provider(name)) => {
+            return KeyDispatch::Return(RunResult::ChangeProvider(name));
+        }
+        Some(CommandAction::ProviderNoArg) => {
+            app.enter_provider_selection_mode(&config.providers);
+        }
+        Some(CommandAction::Thinking(raw)) => {
+            let thinking_supported = config
+                .find_provider(&app.current_provider)
+                .map(|inst| {
+                    thinking_support_for_instance(inst, &app.current_model)
+                        == ThinkingSupport::Applied
+                })
+                .unwrap_or(false);
+            if !thinking_supported {
+                return KeyDispatch::Continue;
+            }
+            match ThinkingLevel::parse(&raw) {
+                Some(level) => return KeyDispatch::Return(RunResult::ChangeThinking(level)),
+                None => {
+                    app.messages.push(llm::Message::assistant(format!(
+                        "[invalid thinking level: '{raw}' (use off|minimal|low|medium|high|xhigh)]"
+                    )));
+                    app.mark_log_dirty();
+                }
+            }
+        }
+        Some(CommandAction::ThinkingNoArg) => {
+            let thinking_supported = config
+                .find_provider(&app.current_provider)
+                .map(|inst| {
+                    thinking_support_for_instance(inst, &app.current_model)
+                        == ThinkingSupport::Applied
+                })
+                .unwrap_or(false);
+            if thinking_supported {
+                app.enter_thinking_selection_mode();
+            }
+        }
+        Some(CommandAction::Login(provider_name)) => {
+            app.start_login(&provider_name);
+        }
+        Some(CommandAction::LoginNoArg) => {
+            app.enter_login_selection_mode();
+        }
+        Some(CommandAction::Resume(session_id)) => {
+            app.resume_session_by_id(&session_id);
+        }
+        Some(CommandAction::ResumeNoArg) => {
+            app.enter_resume_selection_mode();
+        }
+        Some(CommandAction::Compact(instructions)) => {
+            app.trigger_manual_compaction(instructions, provider);
+        }
+        Some(CommandAction::Skill { name, args }) => {
+            match app.loaded_skills.iter().find(|s| s.name == name) {
+                Some(skill) => match skills::expand_skill(skill, &args) {
+                    Ok(expanded) => {
+                        app.submit_with_text(expanded, provider);
+                    }
+                    Err(e) => {
+                        app.messages
+                            .push(llm::Message::assistant(format!("[skill error: {e}]")));
+                        app.mark_log_dirty();
+                    }
+                },
+                None => {
+                    app.messages.push(llm::Message::assistant(format!(
+                        "[unknown skill: '{name}']"
+                    )));
+                    app.mark_log_dirty();
+                }
+            }
+        }
+        None => {}
+    }
+
+    KeyDispatch::Continue
+}
+
+fn cancel_ask_freeform_if_off_sentinel(app: &mut App) {
+    if app.ask_user_freeform_mode {
+        let on_sentinel = app
+            .selection
+            .items
+            .get(app.selection.selected)
+            .map(|i| i.complete_to == "/ask_user_freeform")
+            .unwrap_or(false);
+        if !on_sentinel {
+            app.cancel_ask_freeform_typing();
+        }
+    }
+}
+
+fn apply_paste(app: &mut App, provider: &Arc<dyn LlmProvider + Send + Sync>, text: &str) {
+    let normalized = normalize_paste_text(text);
+    if app.selection.active {
+        app.exit_selection_mode();
+    }
+    if app.input_mode == InputMode::Shell {
+        app.shell_textarea.insert_str(normalized);
+    } else {
+        app.textarea.insert_str(normalized);
+        app.update_completions();
+        if app.should_fetch_models() {
+            app.start_model_fetch(provider);
         }
     }
 }
