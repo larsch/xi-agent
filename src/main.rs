@@ -758,7 +758,7 @@ async fn run(
             }
 
             // ── Background app events ───────────────────────────────────────
-            Some(ev) = app.app_event_rx.recv() => {
+            Some(ev) = app.recv_app_event() => {
                 app.apply_app_event(ev);
                 if app.login.needs_rebuild {
                     app.login.needs_rebuild = false;
@@ -943,7 +943,7 @@ fn handle_selection_mode_key(app: &mut App, config: &TauConfig, key: KeyEvent) -
         KeyCode::PageDown => app.selection_page_down(),
         KeyCode::PageUp => app.selection_page_up(),
         KeyCode::Backspace => {
-            if app.ask_user_freeform_mode {
+            if app.ask_user_freeform_mode() {
                 app.textarea.delete_char();
                 if app.textarea.lines().iter().all(|l| l.is_empty()) {
                     app.cancel_ask_freeform_typing();
@@ -1080,7 +1080,7 @@ fn handle_selection_enter(app: &mut App) -> KeyDispatch {
             KeyDispatch::Continue
         }
         Some(SelectionResult::AskFreeform) => {
-            if app.ask_user_freeform_mode {
+            if app.ask_user_freeform_mode() {
                 app.submit_pending_ask_answer();
             } else {
                 app.enter_ask_freeform_mode();
@@ -1393,7 +1393,7 @@ fn handle_slash_submit(
 }
 
 fn cancel_ask_freeform_if_off_sentinel(app: &mut App) {
-    if app.ask_user_freeform_mode {
+    if app.ask_user_freeform_mode() {
         let on_sentinel = app
             .selection
             .items

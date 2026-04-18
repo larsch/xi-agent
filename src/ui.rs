@@ -67,7 +67,7 @@ fn style_textarea(app: &mut App) {
     // Both must carry the mode background so the panel is uniform.
     let bg = if app.input_mode == InputMode::Shell {
         SHELL_INPUT_BG
-    } else if app.ask_user_freeform_mode {
+    } else if app.ask_user_freeform_mode() {
         ASK_USER_INPUT_BG
     } else {
         INPUT_BG
@@ -267,7 +267,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             app.streaming_status,
             Some(crate::app::StreamingStatus::Message(_))
         ),
-        queued_steering_len: app.queued_steering.len(),
+        queued_steering_len: app.queued_steering().len(),
     });
 
     // Layout: chat log | completions | sel header | sel items
@@ -526,7 +526,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if !app.login.active && !app.ask_user_selection_no_freeform() {
         let panel_bg = if app.input_mode == InputMode::Shell {
             SHELL_INPUT_BG
-        } else if app.ask_user_freeform_mode {
+        } else if app.ask_user_freeform_mode() {
             ASK_USER_INPUT_BG
         } else {
             INPUT_BG
@@ -576,7 +576,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             .add_modifier(ratatui::style::Modifier::ITALIC);
 
         let steering_lines: Vec<Line<'static>> = app
-            .queued_steering
+            .queued_steering()
             .iter()
             .take(3)
             .map(|msg| Line::from(Span::styled(format!("🕹️ {msg}"), steering_style)))
@@ -592,7 +592,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         let is_shell = app.input_mode == InputMode::Shell;
         let panel_bg = if is_shell {
             SHELL_INPUT_BG
-        } else if app.ask_user_freeform_mode {
+        } else if app.ask_user_freeform_mode() {
             ASK_USER_INPUT_BG
         } else {
             INPUT_BG
@@ -640,7 +640,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 app.textarea.lines().to_vec(),
                 app.textarea.cursor(),
                 String::new(),
-                None,
+                app.ask_user_question().map(str::to_owned),
             )
         };
 

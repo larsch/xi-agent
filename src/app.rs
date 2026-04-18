@@ -82,6 +82,53 @@ struct PendingAsk {
     allow_freeform: bool,
 }
 
+struct AskUserState {
+    pending: Option<PendingAsk>,
+    reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
+    freeform_mode: bool,
+    question: Option<String>,
+}
+
+impl AskUserState {
+    fn new() -> Self {
+        Self {
+            pending: None,
+            reply: None,
+            freeform_mode: false,
+            question: None,
+        }
+    }
+}
+
+struct AgentRuntime {
+    /// Receives background app events forwarded from tasks targeting the UI.
+    app_event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    app_event_tx: AppEventTx,
+    steering_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// User steering messages queued while a loop is running; rendered pinned
+    /// at the bottom of the log with a 🕹️ icon until consumed.
+    queued_steering: Vec<String>,
+    /// JoinHandle for the currently running agent loop task (if any).
+    agent_task: Option<JoinHandle<()>>,
+    /// Cancellation sender for the active agent loop task.
+    /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
+    cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl AgentRuntime {
+    fn new() -> Self {
+        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            app_event_rx,
+            app_event_tx,
+            steering_tx: None,
+            queued_steering: Vec::new(),
+            agent_task: None,
+            cancel_tx: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupInputKind {
     Name,
@@ -409,15 +456,8 @@ pub struct App {
     /// Optional manual compaction instructions for the next launched compaction-only task.
     pending_manual_compaction_instructions: Option<String>,
 
-    // ── ask_user overlay state ───────────────────────────────────────────────
-    pending_ask: Option<PendingAsk>,
-    ask_reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
-    /// When true the textarea is used to type a freeform answer to an
-    /// ask_user question that has no predefined options.  The question text
-    /// is stored in `ask_user_question` and displayed as a hint in the UI.
-    pub ask_user_freeform_mode: bool,
-    /// The question text to display when `ask_user_freeform_mode` is active.
-    pub ask_user_question: Option<String>,
+    // ── Ask-user interaction state ──────────────────────────────────────────
+    ask_user: AskUserState,
 
     // ── Add-provider setup state ─────────────────────────────────────────────
     /// When set, the textarea is being used for a structured provider-setup prompt.
@@ -440,19 +480,8 @@ pub struct App {
     /// URL entered during Open WebUI setup (held while the user types the token).
     pub open_webui_pending_url: Option<String>,
 
-    // ── Async channels ────────────────────────────────────────────────────────
-    /// Receives background app events forwarded from tasks targeting the UI.
-    pub(crate) app_event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    app_event_tx: AppEventTx,
-    steering_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    /// User steering messages queued while a loop is running; rendered pinned
-    /// at the bottom of the log with a 🕹️ icon until consumed.
-    pub queued_steering: Vec<String>,
-    /// JoinHandle for the currently running agent loop task (if any).
-    agent_task: Option<JoinHandle<()>>,
-    /// Cancellation sender for the active agent loop task.
-    /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
-    cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
+    // ── Runtime/task state ───────────────────────────────────────────────────
+    runtime: AgentRuntime,
 }
 
 // Convenience alias used throughout this module.
@@ -542,7 +571,6 @@ impl App {
         initial_thinking: ThinkingLevel,
         agent_config: AgentLoopConfig,
     ) -> Self {
-        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let available_shells = shell::discover_available_shells();
         let selected_shell = available_shells.first().copied().unwrap_or(ShellKind::Bash);
         Self {
@@ -585,10 +613,7 @@ impl App {
             display_projection: DisplayProjection::new(),
             pending_turn_events: Vec::new(),
             pending_manual_compaction_instructions: None,
-            pending_ask: None,
-            ask_reply: None,
-            ask_user_freeform_mode: false,
-            ask_user_question: None,
+            ask_user: AskUserState::new(),
             setup_input_mode: None,
             pending_provider_setup: None,
             pending_provider_removal: None,
@@ -596,12 +621,7 @@ impl App {
             open_webui_url_input_mode: false,
             open_webui_token_input_mode: false,
             open_webui_pending_url: None,
-            app_event_rx,
-            app_event_tx,
-            steering_tx: None,
-            queued_steering: Vec::new(),
-            agent_task: None,
-            cancel_tx: None,
+            runtime: AgentRuntime::new(),
         }
     }
 
@@ -653,7 +673,7 @@ impl App {
             return false;
         }
         // The agent loop is paused waiting for user input — don't spin.
-        if self.has_pending_ask() || self.ask_user_freeform_mode {
+        if self.has_pending_ask() || self.ask_user_freeform_mode() {
             return false;
         }
         match self.last_output_at {
@@ -662,13 +682,29 @@ impl App {
         }
     }
 
+    pub fn ask_user_freeform_mode(&self) -> bool {
+        self.ask_user.freeform_mode
+    }
+
+    pub fn ask_user_question(&self) -> Option<&str> {
+        self.ask_user.question.as_deref()
+    }
+
+    pub fn queued_steering(&self) -> &[String] {
+        &self.runtime.queued_steering
+    }
+
     /// Toggle the info bar visibility.
     pub fn toggle_info(&mut self) {
         self.show_info = !self.show_info;
     }
 
+    pub async fn recv_app_event(&mut self) -> Option<AppEvent> {
+        self.runtime.app_event_rx.recv().await
+    }
+
     pub fn app_event_tx(&self) -> AppEventTx {
-        self.app_event_tx.clone()
+        self.runtime.app_event_tx.clone()
     }
 
     pub fn init_session_persistence(&mut self, cwd: String) {
@@ -2047,12 +2083,13 @@ impl App {
     }
 
     pub fn has_pending_ask(&self) -> bool {
-        self.pending_ask.is_some()
+        self.ask_user.pending.is_some()
     }
 
     /// Returns true when the current pending ask allows a free-form typed answer.
     pub fn pending_ask_allows_freeform(&self) -> bool {
-        self.pending_ask
+        self.ask_user
+            .pending
             .as_ref()
             .map(|p| p.allow_freeform)
             .unwrap_or(false)
@@ -2076,12 +2113,12 @@ impl App {
             reply,
         } = req;
 
-        self.pending_ask = Some(PendingAsk {
+        self.ask_user.pending = Some(PendingAsk {
             question: question.clone(),
             options: options.clone(),
             allow_freeform,
         });
-        self.ask_reply = Some(reply);
+        self.ask_user.reply = Some(reply);
 
         // Don't push an [ask_user] assistant message to app.messages — the
         // agent's ToolCall message already represents this in the conversation
@@ -2092,8 +2129,8 @@ impl App {
             // No options: go straight to freeform input so the user can type
             // their answer without an intermediate selection-menu step.
             // Store the question for display in the input area.
-            self.ask_user_freeform_mode = true;
-            self.ask_user_question = Some(question);
+            self.ask_user.freeform_mode = true;
+            self.ask_user.question = Some(question);
             self.exit_selection_mode();
             self.reset_textarea();
             return;
@@ -2135,14 +2172,15 @@ impl App {
     pub fn enter_ask_freeform_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        if self.pending_ask_allows_freeform() && !self.ask_user_freeform_mode {
+        if self.pending_ask_allows_freeform() && !self.ask_user.freeform_mode {
             let question = self
-                .pending_ask
+                .ask_user
+                .pending
                 .as_ref()
                 .map(|p| p.question.clone())
                 .unwrap_or_default();
-            self.ask_user_freeform_mode = true;
-            self.ask_user_question = Some(question);
+            self.ask_user.freeform_mode = true;
+            self.ask_user.question = Some(question);
         }
     }
 
@@ -2165,27 +2203,28 @@ impl App {
             self.ensure_selection_visible();
         }
         // Activate the brown input field and show the question as a hint.
-        if !self.ask_user_freeform_mode {
+        if !self.ask_user.freeform_mode {
             let question = self
-                .pending_ask
+                .ask_user
+                .pending
                 .as_ref()
                 .map(|p| p.question.clone())
                 .unwrap_or_default();
-            self.ask_user_freeform_mode = true;
-            self.ask_user_question = Some(question);
+            self.ask_user.freeform_mode = true;
+            self.ask_user.question = Some(question);
         }
     }
 
     /// Clear freeform typing state without dismissing the selection menu.
     /// Called when the user navigates away from the freeform sentinel.
     pub fn cancel_ask_freeform_typing(&mut self) {
-        self.ask_user_freeform_mode = false;
-        self.ask_user_question = None;
+        self.ask_user.freeform_mode = false;
+        self.ask_user.question = None;
         self.reset_textarea();
     }
 
     pub fn submit_pending_ask_answer(&mut self) {
-        let Some(pending) = self.pending_ask.as_ref() else {
+        let Some(pending) = self.ask_user.pending.as_ref() else {
             return;
         };
 
@@ -2204,7 +2243,7 @@ impl App {
     }
 
     pub fn select_pending_ask_option(&mut self, answer: String) {
-        if self.pending_ask.is_none() {
+        if self.ask_user.pending.is_none() {
             return;
         }
         // Don't push the answer as a plain user message — the agent's
@@ -2213,7 +2252,7 @@ impl App {
     }
 
     pub fn cancel_pending_ask(&mut self) {
-        if self.pending_ask.is_none() {
+        if self.ask_user.pending.is_none() {
             return;
         }
         self.finish_pending_ask(AskUserResponse::Cancelled);
@@ -2221,12 +2260,12 @@ impl App {
     }
 
     fn finish_pending_ask(&mut self, answer: AskUserResponse) {
-        if let Some(reply) = self.ask_reply.take() {
+        if let Some(reply) = self.ask_user.reply.take() {
             let _ = reply.send(answer);
         }
-        self.pending_ask = None;
-        self.ask_user_freeform_mode = false;
-        self.ask_user_question = None;
+        self.ask_user.pending = None;
+        self.ask_user.freeform_mode = false;
+        self.ask_user.question = None;
         self.exit_selection_mode();
         self.reset_textarea();
     }
@@ -2585,8 +2624,8 @@ impl App {
         self.event_log = None;
         self.display_projection = DisplayProjection::new();
         self.pending_turn_events.clear();
-        self.queued_steering.clear();
-        self.steering_tx = None;
+        self.runtime.queued_steering.clear();
+        self.runtime.steering_tx = None;
         self.latest_usage = None;
         self.reset_textarea();
         self.auto_scroll = true;
@@ -2621,16 +2660,16 @@ impl App {
             after_tool_call: None,
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.steering_tx = Some(steering_tx);
-        self.queued_steering.clear();
+        self.runtime.steering_tx = Some(steering_tx);
+        self.runtime.queued_steering.clear();
         self.bump_log_revision();
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        self.cancel_tx = Some(cancel_tx);
+        self.runtime.cancel_tx = Some(cancel_tx);
 
         let provider = Arc::clone(provider);
         let tx = self.app_event_tx();
-        self.agent_task = Some(tokio::spawn(async move {
+        self.runtime.agent_task = Some(tokio::spawn(async move {
             run_agent_loop(llm_messages, config, provider, tx, steering_rx, cancel_rx).await;
         }));
     }
@@ -2684,12 +2723,12 @@ impl App {
             return;
         }
 
-        let Some(tx) = self.steering_tx.as_ref() else {
+        let Some(tx) = self.runtime.steering_tx.as_ref() else {
             return;
         };
 
         if tx.send(trimmed.clone()).is_ok() {
-            self.queued_steering.push(trimmed);
+            self.runtime.queued_steering.push(trimmed);
             self.bump_log_revision();
             self.reset_textarea();
             self.auto_scroll = true;
@@ -2823,16 +2862,16 @@ impl App {
     }
 
     pub fn abort_agent_loop(&mut self) {
-        if let Some(handle) = self.agent_task.take() {
+        if let Some(handle) = self.runtime.agent_task.take() {
             // Signal cooperative cancellation first; hard-abort as fallback.
-            if let Some(tx) = self.cancel_tx.take() {
+            if let Some(tx) = self.runtime.cancel_tx.take() {
                 let _ = tx.send(true);
             }
             handle.abort();
             self.streaming_status = None;
             self.last_output_at = None;
-            self.steering_tx = None;
-            self.queued_steering.clear();
+            self.runtime.steering_tx = None;
+            self.runtime.queued_steering.clear();
             self.append_abort_results_for_pending_tool_calls();
             self.messages
                 .push(Message::assistant("[agent loop aborted]"));
@@ -2951,8 +2990,8 @@ impl App {
             AgentEvent::SteeringConsumed { text } => {
                 self.last_output_at = Some(std::time::Instant::now());
                 self.messages.push(Message::user(text.clone()));
-                if let Some(pos) = self.queued_steering.iter().position(|m| m == &text) {
-                    self.queued_steering.remove(pos);
+                if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
+                    self.runtime.queued_steering.remove(pos);
                 }
                 // Steering messages are user messages — append immediately.
                 self.append_event_immediate(SessionEvent::UserMessage {
@@ -3089,10 +3128,10 @@ impl App {
             AgentEvent::Done => {
                 self.streaming_status = None;
                 self.last_output_at = None;
-                self.agent_task = None;
-                self.cancel_tx = None;
-                self.steering_tx = None;
-                self.queued_steering.clear();
+                self.runtime.agent_task = None;
+                self.runtime.cancel_tx = None;
+                self.runtime.steering_tx = None;
+                self.runtime.queued_steering.clear();
                 self.bump_log_revision();
                 // The final TurnEnd already flushed the turn buffer.
                 // Done only cleans up live streaming state.
@@ -3101,10 +3140,10 @@ impl App {
             AgentEvent::Error(e) => {
                 self.streaming_status = None;
                 self.last_output_at = None;
-                self.agent_task = None;
-                self.cancel_tx = None;
-                self.steering_tx = None;
-                self.queued_steering.clear();
+                self.runtime.agent_task = None;
+                self.runtime.cancel_tx = None;
+                self.runtime.steering_tx = None;
+                self.runtime.queued_steering.clear();
                 self.bump_log_revision();
 
                 let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
@@ -3204,7 +3243,7 @@ impl App {
 
     pub fn drain_app_events(&mut self) {
         loop {
-            match self.app_event_rx.try_recv() {
+            match self.runtime.app_event_rx.try_recv() {
                 Ok(AppEvent::Agent(ev)) => self.apply_agent_event(ev),
                 Ok(other) => self.apply_app_event(other),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -3247,6 +3286,12 @@ mod tests {
                 after_tool_call: None,
             },
         )
+    }
+
+    fn install_test_agent_task(app: &mut App) {
+        app.runtime.agent_task = Some(tokio::spawn(async {
+            std::future::pending::<()>().await;
+        }));
     }
 
     #[test]
@@ -3698,9 +3743,12 @@ mod tests {
             !app.selection.active,
             "selection mode should NOT be active for no-options"
         );
-        assert!(app.ask_user_freeform_mode, "freeform mode should be active");
+        assert!(
+            app.ask_user_freeform_mode(),
+            "freeform mode should be active"
+        );
         assert_eq!(
-            app.ask_user_question.as_deref(),
+            app.ask_user_question(),
             Some("What is your name?"),
             "question should be stored for display"
         );
@@ -3820,9 +3868,7 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.streaming_status = Some(StreamingStatus::Waiting);
-            app.agent_task = Some(tokio::spawn(async {
-                std::future::pending::<()>().await;
-            }));
+            install_test_agent_task(&mut app);
             app.textarea.insert_str("/model gpt");
 
             app.handle_escape_in_chat_mode();
@@ -3832,7 +3878,7 @@ mod tests {
                 "streaming should remain active when ESC cancels slash input"
             );
             assert!(
-                app.agent_task.is_some(),
+                app.runtime.agent_task.is_some(),
                 "agent task should not be aborted when ESC cancels slash input"
             );
             assert!(
@@ -3849,7 +3895,7 @@ mod tests {
                 "ESC slash cancel should not append an abort notice"
             );
 
-            if let Some(handle) = app.agent_task.take() {
+            if let Some(handle) = app.runtime.agent_task.take() {
                 handle.abort();
             }
         });
@@ -3861,9 +3907,7 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.streaming_status = Some(StreamingStatus::Waiting);
-            app.agent_task = Some(tokio::spawn(async {
-                std::future::pending::<()>().await;
-            }));
+            install_test_agent_task(&mut app);
             app.textarea.insert_str("hello");
 
             app.handle_escape_in_chat_mode();
@@ -3873,7 +3917,7 @@ mod tests {
                 "streaming should stop when ESC is used outside slash mode"
             );
             assert!(
-                app.agent_task.is_none(),
+                app.runtime.agent_task.is_none(),
                 "agent task should be removed when stream is aborted"
             );
             assert!(
@@ -3891,9 +3935,7 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.streaming_status = Some(StreamingStatus::Waiting);
-            app.agent_task = Some(tokio::spawn(async {
-                std::future::pending::<()>().await;
-            }));
+            install_test_agent_task(&mut app);
             app.messages.push(Message::assistant(""));
             app.messages.push(Message::tool_call(
                 "call_1",
@@ -3919,9 +3961,7 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.streaming_status = Some(StreamingStatus::Waiting);
-            app.agent_task = Some(tokio::spawn(async {
-                std::future::pending::<()>().await;
-            }));
+            install_test_agent_task(&mut app);
             app.messages.push(Message::assistant(""));
             app.messages.push(Message::tool_call(
                 "call_1",
