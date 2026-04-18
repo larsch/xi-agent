@@ -45,7 +45,8 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
     {
-        let lines = build_log_lines(app.display_projection.messages(), app.streaming(), width);
+        let combined = app.display_messages_combined();
+        let lines = build_log_lines(&combined, app.streaming(), width);
         app.cached_log_lines = Some((app.log_revision, width, lines));
     }
     &app.cached_log_lines.as_ref().unwrap().2
@@ -1164,23 +1165,20 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.display_projection.clear();
-        app.display_projection
-            .messages_mut()
-            .extend(vec![Message::tool_result(
-                "1",
-                "tool output that used to be much longer",
-                false,
-            )]);
+        app.live_notices.clear();
+        app.live_notices.extend(vec![Message::tool_result(
+            "1",
+            "tool output that used to be much longer",
+            false,
+        )]);
         app.mark_log_dirty();
 
         terminal
             .draw(|f| draw(f, &mut app))
             .expect("first draw succeeds");
 
-        app.display_projection.clear();
-        app.display_projection
-            .messages_mut()
+        app.live_notices.clear();
+        app.live_notices
             .extend(vec![Message::tool_result("1", "short", false)]);
         app.mark_log_dirty();
 
@@ -1198,8 +1196,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.display_projection.clear();
-        app.display_projection.messages_mut().extend(vec![
+        app.live_notices.extend(vec![
             Message::user("one"),
             Message::user("two"),
             Message::user("three"),
@@ -1226,8 +1223,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.display_projection.clear();
-        app.display_projection.messages_mut().extend(vec![
+        app.live_notices.extend(vec![
             Message::user("one"),
             Message::user("two"),
             Message::user("three"),

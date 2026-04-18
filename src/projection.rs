@@ -314,9 +314,95 @@ impl DisplayProjection {
     /// Currently a full rebuild since `DisplayFilter` is not yet implemented.
     /// O(log length) for the walk; render caches (phase 2) will make this
     /// cheaper.
-    pub fn rebuild(&mut self, events: &[SessionEvent]) {
+    ///
+    /// # Access restriction
+    ///
+    /// This method must only be called from within `session_state` (load and
+    /// compaction paths). External callers should use `SessionState` ingestion
+    /// methods instead.
+    pub(crate) fn rebuild(&mut self, events: &[SessionEvent]) {
         self.messages = project_display_messages(events);
         self.processed = events.len();
+    }
+}
+
+// ── LlmProjection ─────────────────────────────────────────────────────────────
+
+/// Stateful incremental cache for the LLM-visible message list.
+///
+/// Maintains a lazily-validated view of [`project_llm_messages`] over the
+/// session event log. The cache is invalidated when a compaction event is
+/// ingested (because compaction changes what the LLM sees at the *start* of
+/// history); on all other events the cache is extended incrementally.
+#[derive(Debug, Default)]
+pub struct LlmProjection {
+    /// Cached message list.  `None` when the cache is invalid and must be
+    /// rebuilt before use.
+    messages: Option<Vec<Message>>,
+    /// Number of events reflected in the current cache, valid only when
+    /// `messages` is `Some`.
+    processed: usize,
+}
+
+impl LlmProjection {
+    /// Create a new, empty (invalid) projection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ensure the cache is current with respect to `events`.
+    ///
+    /// If the cache is invalid (e.g. after a compaction) a full rebuild is
+    /// performed. Otherwise only new events are projected.
+    pub fn ensure_current(&mut self, events: &[SessionEvent]) {
+        match &self.messages {
+            None => {
+                // Full rebuild.
+                self.messages = Some(project_llm_messages(events));
+                self.processed = events.len();
+            }
+            Some(_) if events.len() > self.processed => {
+                // Check whether any new events are compaction boundaries.
+                let new_events = &events[self.processed..];
+                let has_compaction = new_events
+                    .iter()
+                    .any(|e| matches!(e, SessionEvent::CompactionSummary { .. }));
+                if has_compaction {
+                    // Compaction changes what the LLM sees — full rebuild.
+                    self.messages = Some(project_llm_messages(events));
+                } else {
+                    // Incremental: append messages for the new events only.
+                    let msgs = self.messages.as_mut().unwrap();
+                    for ev in new_events {
+                        push_llm_message(msgs, ev);
+                    }
+                }
+                self.processed = events.len();
+            }
+            Some(_) => {
+                // Cache already up to date.
+            }
+        }
+    }
+
+    /// Invalidate the cache, forcing a full rebuild on next access.
+    pub fn invalidate(&mut self) {
+        self.messages = None;
+        self.processed = 0;
+    }
+
+    /// Return the cached messages, panicking if not current.
+    ///
+    /// Always call [`ensure_current`] before this.
+    pub fn messages(&self) -> &[Message] {
+        self.messages.as_deref().unwrap_or(&[])
+    }
+
+    /// Apply new events from the full event log, invalidating on compaction.
+    ///
+    /// This is the primary incremental update method for `SessionState`.
+    pub fn apply_new_events(&mut self, events: &[SessionEvent]) {
+        self.ensure_current(events);
     }
 }
 
