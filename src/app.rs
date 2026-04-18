@@ -2591,6 +2591,26 @@ impl App {
         self.refresh_resume_availability();
     }
 
+    /// Append a user-visible user message to the active session.
+    ///
+    /// When event-log persistence is available, writes the durable event and
+    /// lets the display projection update from that source of truth. When
+    /// persistence is unavailable, falls back to a transient visible message.
+    fn append_user_message(&mut self, content: String) {
+        self.ensure_event_log_for_submit();
+        if self.event_log.is_some() {
+            self.append_event_immediate(SessionEvent::UserMessage {
+                content,
+                timestamp: Self::now_ts(),
+            });
+        } else {
+            self.display_projection
+                .messages_mut()
+                .push(Message::user(content));
+            self.bump_log_revision();
+        }
+    }
+
     /// Export the current visible session to a standalone HTML file.
     pub fn export_session_html(&mut self, requested_path: Option<&str>) {
         let path = export::resolve_export_path(&self.current_cwd, requested_path);
@@ -2786,22 +2806,13 @@ impl App {
             return;
         }
 
-        self.display_projection
-            .messages_mut()
-            .push(Message::user(trimmed.clone()));
-        self.bump_log_revision();
-        // Append UserMessage to the event log immediately — it is a complete unit.
-        self.ensure_event_log_for_submit();
-        self.append_event_immediate(SessionEvent::UserMessage {
-            content: trimmed,
-            timestamp: Self::now_ts(),
-        });
+        self.append_user_message(trimmed);
         self.persist_messages();
         self.reset_textarea();
 
-        // Proactive token refresh check before starting the request
+        // Proactive token refresh check before starting the request.
         if self.check_token_preflight(RetryTarget::AgentTurn) {
-            // Refresh triggered; request will be retried after refresh completes
+            // Refresh triggered; request will be retried after refresh completes.
             return;
         }
 
@@ -2816,15 +2827,7 @@ impl App {
         }
 
         let trimmed = text.trim().to_string();
-        self.display_projection
-            .messages_mut()
-            .push(Message::user(trimmed.clone()));
-        self.bump_log_revision();
-        self.ensure_event_log_for_submit();
-        self.append_event_immediate(SessionEvent::UserMessage {
-            content: trimmed,
-            timestamp: Self::now_ts(),
-        });
+        self.append_user_message(trimmed);
         self.persist_messages();
         self.reset_textarea();
 
@@ -2946,7 +2949,9 @@ impl App {
             if let Err(e) = log.append_batch(&batch) {
                 log::debug!("failed to append turn events to event log: {e}");
             } else {
-                self.display_projection.apply_new_events(&log.events);
+                // Replace transient in-flight UI messages with the durable
+                // projection so assistant/tool output does not appear twice.
+                self.display_projection.rebuild(&log.events);
             }
         }
     }
@@ -3013,17 +3018,11 @@ impl App {
             }
             AgentEvent::SteeringConsumed { text } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.display_projection
-                    .messages_mut()
-                    .push(Message::user(text.clone()));
                 if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
                     self.runtime.queued_steering.remove(pos);
                 }
                 // Steering messages are user messages — append immediately.
-                self.append_event_immediate(SessionEvent::UserMessage {
-                    content: text,
-                    timestamp: Self::now_ts(),
-                });
+                self.append_user_message(text);
                 self.bump_log_revision();
             }
             AgentEvent::StatusUpdate(msg) => {
@@ -3133,17 +3132,9 @@ impl App {
                 notification,
             } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                // Mirror the notification into the UI message log so it appears
-                // in the conversation display, just as a user message would.
-                self.display_projection
-                    .messages_mut()
-                    .push(Message::user(notification.clone()));
                 // External file change notifications are user-visible context
                 // injected into the conversation — treat as UserMessage.
-                self.append_event_immediate(SessionEvent::UserMessage {
-                    content: notification,
-                    timestamp: Self::now_ts(),
-                });
+                self.append_user_message(notification);
                 self.bump_log_revision();
             }
             AgentEvent::TurnEnd => {
@@ -4031,6 +4022,96 @@ mod tests {
                 "should not append duplicate tool result"
             );
         });
+    }
+
+    #[test]
+    fn submit_does_not_duplicate_user_message_in_display_projection() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("session.jsonl");
+
+            let mut app = make_app();
+            app.event_log = Some(crate::event_log::EventLog::load(&path).expect("load event log"));
+            app.textarea.insert_str("hello");
+
+            let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+                std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+
+            app.submit(&provider);
+
+            let matching = app
+                .display_projection
+                .messages()
+                .iter()
+                .filter(|m| m.role == Role::User && m.content == "hello")
+                .count();
+            assert_eq!(matching, 1, "user message should appear once in display");
+
+            if let Some(handle) = app.runtime.agent_task.take() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
+    fn turn_end_rebuild_replaces_transient_output_without_duplication() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+
+        let mut app = make_app();
+        app.event_log = Some(crate::event_log::EventLog::load(&path).expect("load event log"));
+
+        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
+            content: "hello".to_string(),
+            timestamp: 1,
+        });
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
+            text: "hi".to_string(),
+            phase: crate::llm::AssistantPhase::Final,
+        });
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallStart {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+        });
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallEnd {
+            id: "call_1".to_string(),
+            result: crate::agent::types::ToolResult {
+                content: "ok".to_string(),
+                is_error: false,
+                is_truncated: false,
+                truncation: None,
+                raw_stdout: None,
+                raw_stderr: None,
+            },
+        });
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+
+        let assistant_matching = app
+            .display_projection
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Assistant && m.content == "hi")
+            .count();
+        assert_eq!(assistant_matching, 1, "assistant output should appear once");
+
+        let tool_call_matching = app
+            .display_projection
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::ToolCall && m.tool_call_id.as_deref() == Some("call_1"))
+            .count();
+        assert_eq!(tool_call_matching, 1, "tool call should appear once");
+
+        let tool_result_matching = app
+            .display_projection
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
+            .count();
+        assert_eq!(tool_result_matching, 1, "tool result should appear once");
     }
 
     #[test]
