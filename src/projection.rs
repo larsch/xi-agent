@@ -250,10 +250,10 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
 /// projection result so that incremental updates (new events appended to the
 /// log) are cheap.
 ///
-/// Render caching and the `DisplayItem` type (with per-item pre-rendered
-/// markdown) are deferred to step 4e / phase 2.  For now this struct provides
-/// the correct incremental interface so callers can be wired up without
-/// depending on the full render pipeline being in place.
+/// The current UI also mutates the rendered message list temporarily while a
+/// turn is still in flight. Once the corresponding session events are flushed,
+/// callers should rebuild from the event log to replace those transient edits
+/// with the durable projection.
 #[derive(Debug, Default)]
 pub struct DisplayProjection {
     /// Cached projection output.  Rebuilt on filter changes; extended
@@ -272,6 +272,29 @@ impl DisplayProjection {
     /// Return the current projected message list.
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Return mutable access to the current rendered message list.
+    ///
+    /// Used for transient in-flight UI state while a turn is streaming.
+    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+        &mut self.messages
+    }
+
+    /// True when no messages are currently rendered.
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// Number of currently rendered messages.
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Reset the projection to an empty state.
+    pub fn clear(&mut self) {
+        self.messages.clear();
+        self.processed = 0;
     }
 
     /// Extend the projection with newly appended events.
@@ -667,5 +690,19 @@ mod tests {
         proj.rebuild(&short);
         assert_eq!(proj.messages().len(), 1);
         assert_eq!(proj.messages()[0].content, "only this");
+    }
+
+    #[test]
+    fn display_projection_clear_resets_state() {
+        let mut proj = DisplayProjection::new();
+        proj.apply_new_events(&[user_ev("hello")]);
+        assert_eq!(proj.len(), 1);
+
+        proj.clear();
+        assert!(proj.is_empty());
+
+        proj.apply_new_events(&[assistant_ev("hi")]);
+        assert_eq!(proj.len(), 1);
+        assert_eq!(proj.messages()[0].content, "hi");
     }
 }

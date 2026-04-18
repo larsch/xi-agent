@@ -1,4 +1,3 @@
-use ratatui::text::Line;
 use ratatui_textarea::{CursorMove, TextArea};
 use std::sync::{
     Arc,
@@ -367,17 +366,11 @@ impl LoginState {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
-    pub messages: Vec<Message>,
     pub textarea: TextArea<'static>,
     pub shell_textarea: TextArea<'static>,
     pub input_mode: InputMode,
     pub selected_shell: ShellKind,
     pub available_shells: Vec<ShellKind>,
-    /// Monotonic revision bump for any visible log-content change.
-    /// Used to invalidate UI wrapping caches.
-    pub log_revision: u64,
-    /// Cached pre-wrapped log lines for the most recent `(log_revision, width)`.
-    pub cached_log_lines: Option<(u64, usize, Vec<Line<'static>>)>,
     pub log_scroll: usize,
     /// When true, the view always follows the bottom (auto-scrolls).
     pub auto_scroll: bool,
@@ -556,14 +549,9 @@ fn active_provider_display_name(
 }
 
 impl App {
-    fn bump_log_revision(&mut self) {
-        self.log_revision = self.log_revision.saturating_add(1);
-        self.cached_log_lines = None;
-    }
+    fn bump_log_revision(&mut self) {}
 
-    pub fn mark_log_dirty(&mut self) {
-        self.bump_log_revision();
-    }
+    pub fn mark_log_dirty(&mut self) {}
 
     pub fn new(
         initial_model: impl Into<String>,
@@ -574,14 +562,11 @@ impl App {
         let available_shells = shell::discover_available_shells();
         let selected_shell = available_shells.first().copied().unwrap_or(ShellKind::Bash);
         Self {
-            messages: Vec::new(),
             textarea: Self::make_textarea(),
             shell_textarea: Self::make_textarea(),
             input_mode: InputMode::Chat,
             selected_shell,
             available_shells,
-            log_revision: 0,
-            cached_log_lines: None,
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
@@ -716,9 +701,11 @@ impl App {
             }
             Err(e) => {
                 log::debug!("session persistence disabled: {}", e);
-                self.messages.push(Message::assistant(format!(
-                    "[session persistence unavailable: {e}]"
-                )));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[session persistence unavailable: {e}]"
+                    )));
                 self.bump_log_revision();
             }
         }
@@ -730,7 +717,7 @@ impl App {
 
     pub fn should_show_resume_hint(&self) -> bool {
         self.resume_available_for_cwd
-            && self.messages.is_empty()
+            && self.display_projection.is_empty()
             && !self.selection.active
             && !self.login.active
             && !self.streaming()
@@ -741,9 +728,11 @@ impl App {
             return;
         };
         let Some(meta) = store.latest_for_cwd(&self.current_cwd) else {
-            self.messages.push(Message::assistant(
-                "[no resumable session in this working folder]",
-            ));
+            self.display_projection
+                .messages_mut()
+                .push(Message::assistant(
+                    "[no resumable session in this working folder]",
+                ));
             self.bump_log_revision();
             return;
         };
@@ -758,7 +747,7 @@ impl App {
         match store.load_events(session_id) {
             Ok(log) => {
                 // Rebuild messages and display projection from the event log.
-                self.messages = crate::projection::project_display_messages(&log.events);
+                self.display_projection.rebuild(&log.events);
                 let mut proj = DisplayProjection::new();
                 proj.rebuild(&log.events);
                 self.display_projection = proj;
@@ -769,9 +758,11 @@ impl App {
                 self.bump_log_revision();
             }
             Err(e) => {
-                self.messages.push(Message::assistant(format!(
-                    "[failed to resume session: {e}]"
-                )));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[failed to resume session: {e}]"
+                    )));
                 self.bump_log_revision();
             }
         }
@@ -989,7 +980,7 @@ impl App {
             format!("{}{}", cwd, prompt)
         };
 
-        let call_id = format!("local-shell-{}", self.messages.len());
+        let call_id = format!("local-shell-{}", self.display_projection.len());
         let mut call_msg = Message::tool_call(
             call_id.clone(),
             "local_shell",
@@ -999,7 +990,7 @@ impl App {
             }),
         );
         call_msg.include_in_llm = false;
-        self.messages.push(call_msg);
+        self.display_projection.messages_mut().push(call_msg);
 
         let output = shell::run_shell_command_blocking(self.selected_shell, &cwd, &command);
         let mut body = String::new();
@@ -1021,7 +1012,7 @@ impl App {
 
         let mut out_msg = Message::tool_result(call_id, body, output.exit_code != 0);
         out_msg.include_in_llm = false;
-        self.messages.push(out_msg);
+        self.display_projection.messages_mut().push(out_msg);
         self.bump_log_revision();
 
         self.persist_messages();
@@ -2120,10 +2111,11 @@ impl App {
         });
         self.ask_user.reply = Some(reply);
 
-        // Don't push an [ask_user] assistant message to app.messages — the
-        // agent's ToolCall message already represents this in the conversation
-        // history and UI. Adding an extra assistant message here would corrupt
-        // the tool_use / tool_result pairing expected by the Anthropic API.
+        // Don't push an [ask_user] assistant message into the projected
+        // display log — the agent's ToolCall message already represents this
+        // in the conversation history and UI. Adding an extra assistant
+        // message here would corrupt the tool_use / tool_result pairing
+        // expected by the Anthropic API.
 
         if options.is_empty() {
             // No options: go straight to freeform input so the user can type
@@ -2465,18 +2457,22 @@ impl App {
             }
             LoginEvent::Success { provider } => {
                 log::debug!("login success: provider={provider}");
-                self.messages.push(Message::assistant(format!(
-                    "[login successful: {provider}]"
-                )));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[login successful: {provider}]"
+                    )));
                 self.bump_log_revision();
                 self.persist_messages();
                 self.login.needs_rebuild = true;
             }
             LoginEvent::Error { provider, message } => {
                 log::debug!("login error: provider={} err={}", provider, message);
-                self.messages.push(Message::assistant(format!(
-                    "[login failed for {provider}: {message}]"
-                )));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[login failed for {provider}: {message}]"
+                    )));
                 self.bump_log_revision();
                 self.persist_messages();
             }
@@ -2498,7 +2494,7 @@ impl App {
                     self.login.needs_rebuild = true;
                 } else {
                     self.login.retry_after_refresh = false;
-                    self.messages.push(Message::assistant(format!(
+                    self.display_projection.messages_mut().push(Message::assistant(format!(
                         "[token refresh failed for {provider}: {message}. Run /login {provider}]"
                     )));
                     self.bump_log_revision();
@@ -2576,9 +2572,9 @@ impl App {
         // a call-site placeholder so that callers do not need to be updated
         // individually; its only remaining job is to refresh the resume hint.
         //
-        // The legacy `save_messages` full-rewrite path is intentionally not
-        // called here any more.  It will be removed in the final cleanup once
-        // `app.messages` and `SessionStore::save_messages` are retired.
+        // The legacy full-rewrite path is intentionally not called here any
+        // more. It will be removed in the final cleanup once
+        // `SessionStore::save_messages` is retired.
         self.refresh_resume_availability();
     }
 
@@ -2591,7 +2587,7 @@ impl App {
             display_messages = crate::projection::project_display_messages(&log.events);
             &display_messages
         } else {
-            &self.messages
+            self.display_projection.messages()
         };
         let html = export::build_session_export_html(
             messages_ref,
@@ -2603,13 +2599,16 @@ impl App {
 
         match export::write_export_file(&path, &html) {
             Ok(()) => {
-                self.messages.push(Message::assistant(format!(
-                    "[session exported to {}]",
-                    path.display()
-                )));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[session exported to {}]",
+                        path.display()
+                    )));
             }
             Err(e) => {
-                self.messages
+                self.display_projection
+                    .messages_mut()
                     .push(Message::assistant(format!("[export failed: {e}]")));
             }
         }
@@ -2619,7 +2618,7 @@ impl App {
 
     /// Clear the conversation history and reset the input area.
     pub fn new_conversation(&mut self) {
-        self.messages.clear();
+        self.display_projection.clear();
         self.current_session_id = None;
         self.event_log = None;
         self.display_projection = DisplayProjection::new();
@@ -2688,7 +2687,13 @@ impl App {
             msgs.extend(crate::projection::project_llm_messages(&log.events));
         } else {
             // Legacy path: filter messages directly.
-            msgs.extend(self.messages.iter().filter(|m| m.include_in_llm).cloned());
+            msgs.extend(
+                self.display_projection
+                    .messages()
+                    .iter()
+                    .filter(|m| m.include_in_llm)
+                    .cloned(),
+            );
             // Drop a trailing empty assistant message (streaming artefact).
             if matches!(msgs.last().map(|m| &m.role), Some(Role::Assistant))
                 && msgs.last().map(|m| m.content.is_empty()).unwrap_or(false)
@@ -2768,7 +2773,9 @@ impl App {
             return;
         }
 
-        self.messages.push(Message::user(trimmed.clone()));
+        self.display_projection
+            .messages_mut()
+            .push(Message::user(trimmed.clone()));
         self.bump_log_revision();
         // Append UserMessage to the event log immediately — it is a complete unit.
         self.ensure_event_log_for_submit();
@@ -2796,7 +2803,9 @@ impl App {
         }
 
         let trimmed = text.trim().to_string();
-        self.messages.push(Message::user(trimmed.clone()));
+        self.display_projection
+            .messages_mut()
+            .push(Message::user(trimmed.clone()));
         self.bump_log_revision();
         self.ensure_event_log_for_submit();
         self.append_event_immediate(SessionEvent::UserMessage {
@@ -2820,11 +2829,11 @@ impl App {
             return;
         }
 
-        if let Some(last) = self.messages.last()
+        if let Some(last) = self.display_projection.messages().last()
             && last.role == Role::Assistant
             && (last.content.starts_with("[Error:") || last.content.starts_with("[token refresh"))
         {
-            self.messages.pop();
+            self.display_projection.messages_mut().pop();
             self.bump_log_revision();
             self.persist_messages();
         }
@@ -2835,7 +2844,7 @@ impl App {
     fn append_abort_results_for_pending_tool_calls(&mut self) {
         let mut pending_ids: Vec<String> = Vec::new();
 
-        for msg in &self.messages {
+        for msg in self.display_projection.messages() {
             match msg.role {
                 Role::ToolCall => {
                     if let Some(id) = msg.tool_call_id.as_ref()
@@ -2856,7 +2865,8 @@ impl App {
         }
 
         for id in pending_ids {
-            self.messages
+            self.display_projection
+                .messages_mut()
                 .push(Message::tool_result(id, "failure: aborted by user", true));
         }
     }
@@ -2873,7 +2883,8 @@ impl App {
             self.runtime.steering_tx = None;
             self.runtime.queued_steering.clear();
             self.append_abort_results_for_pending_tool_calls();
-            self.messages
+            self.display_projection
+                .messages_mut()
                 .push(Message::assistant("[agent loop aborted]"));
             self.bump_log_revision();
             self.persist_messages();
@@ -2957,7 +2968,7 @@ impl App {
             AgentEvent::ThinkingToken(token) => {
                 self.last_output_at = Some(std::time::Instant::now());
                 self.ensure_assistant_message();
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.display_projection.messages_mut().last_mut() {
                     last.thinking
                         .get_or_insert_with(String::new)
                         .push_str(&token);
@@ -2972,7 +2983,7 @@ impl App {
             AgentEvent::TextToken { text, phase } => {
                 self.last_output_at = Some(std::time::Instant::now());
                 self.ensure_assistant_message();
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.display_projection.messages_mut().last_mut() {
                     last.content.push_str(&text);
                     if phase != AssistantPhase::Unknown {
                         last.assistant_phase = Some(phase);
@@ -2982,14 +2993,16 @@ impl App {
             }
             AgentEvent::ToolIntentStart => {
                 self.ensure_assistant_message();
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.display_projection.messages_mut().last_mut() {
                     last.assistant_phase = Some(AssistantPhase::Provisional);
                 }
                 self.bump_log_revision();
             }
             AgentEvent::SteeringConsumed { text } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.messages.push(Message::user(text.clone()));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::user(text.clone()));
                 if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
                     self.runtime.queued_steering.remove(pos);
                 }
@@ -3041,7 +3054,7 @@ impl App {
                 };
                 self.append_event_immediate(ev);
                 if let Some(log) = &self.event_log {
-                    self.messages = crate::projection::project_display_messages(&log.events);
+                    self.display_projection.rebuild(&log.events);
                 }
                 self.latest_usage = Some(UsageStats {
                     input_tokens: Some(tokens_after),
@@ -3054,7 +3067,8 @@ impl App {
             }
             AgentEvent::ToolCallStart { id, name, args } => {
                 self.last_output_at = Some(std::time::Instant::now());
-                self.messages
+                self.display_projection
+                    .messages_mut()
                     .push(Message::tool_call(id.clone(), name.clone(), args.clone()));
                 // ToolCall is buffered; only flushed together with its result.
                 self.pending_turn_events.push(SessionEvent::ToolCall {
@@ -3076,7 +3090,7 @@ impl App {
                 if let Some(dr) = display_range.clone() {
                     msg = msg.with_display_range(dr);
                 }
-                self.messages.push(msg);
+                self.display_projection.messages_mut().push(msg);
                 // ToolResult completes the pair — buffered until TurnEnd/Done.
                 // Resolve tool name from the matching pending ToolCall.
                 let name = self
@@ -3108,7 +3122,9 @@ impl App {
                 self.last_output_at = Some(std::time::Instant::now());
                 // Mirror the notification into the UI message log so it appears
                 // in the conversation display, just as a user message would.
-                self.messages.push(Message::user(notification.clone()));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::user(notification.clone()));
                 // External file change notifications are user-visible context
                 // injected into the conversation — treat as UserMessage.
                 self.append_event_immediate(SessionEvent::UserMessage {
@@ -3168,7 +3184,8 @@ impl App {
                         &self.provider_instances,
                     );
                     let rendered = format_provider_error_for_display(&provider_label, &e);
-                    self.messages
+                    self.display_projection
+                        .messages_mut()
                         .push(Message::assistant(format!("[Error: {rendered}]")));
                     self.bump_log_revision();
                     self.streaming_status = None;
@@ -3186,10 +3203,12 @@ impl App {
     }
 
     fn ensure_assistant_message(&mut self) {
-        match self.messages.last().map(|m| &m.role) {
+        match self.display_projection.messages().last().map(|m| &m.role) {
             Some(Role::Assistant) => {}
             _ => {
-                self.messages.push(Message::assistant(""));
+                self.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(""));
                 self.bump_log_revision();
             }
         }
@@ -3202,9 +3221,10 @@ impl App {
     /// contains an `AssistantMessage` it is replaced; otherwise one is prepended
     /// before any tool events.
     fn finalise_assistant_turn_event(&mut self) {
-        // Find the in-progress assistant message (the last Role::Assistant in messages).
+        // Find the in-progress assistant message (the last Role::Assistant in the display projection).
         let asst = self
-            .messages
+            .display_projection
+            .messages()
             .iter()
             .rev()
             .find(|m| m.role == Role::Assistant)
@@ -3889,7 +3909,8 @@ mod tests {
                 "slash input should be cleared"
             );
             assert!(
-                !app.messages
+                !app.display_projection
+                    .messages()
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "ESC slash cancel should not append an abort notice"
@@ -3921,7 +3942,8 @@ mod tests {
                 "agent task should be removed when stream is aborted"
             );
             assert!(
-                app.messages
+                app.display_projection
+                    .messages_mut()
                     .iter()
                     .any(|m| m.content == "[agent loop aborted]"),
                 "abort should append user-visible abort notice"
@@ -3936,17 +3958,22 @@ mod tests {
             let mut app = make_app();
             app.streaming_status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
-            app.messages.push(Message::assistant(""));
-            app.messages.push(Message::tool_call(
-                "call_1",
-                "powershell",
-                serde_json::json!({"command": "git diff"}),
-            ));
+            app.display_projection
+                .messages_mut()
+                .push(Message::assistant(""));
+            app.display_projection
+                .messages_mut()
+                .push(Message::tool_call(
+                    "call_1",
+                    "powershell",
+                    serde_json::json!({"command": "git diff"}),
+                ));
 
             app.abort_agent_loop();
 
             let tool_result = app
-                .messages
+                .display_projection
+                .messages()
                 .iter()
                 .find(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
                 .expect("expected abort tool result");
@@ -3962,19 +3989,25 @@ mod tests {
             let mut app = make_app();
             app.streaming_status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
-            app.messages.push(Message::assistant(""));
-            app.messages.push(Message::tool_call(
-                "call_1",
-                "powershell",
-                serde_json::json!({"command": "git diff"}),
-            ));
-            app.messages
+            app.display_projection
+                .messages_mut()
+                .push(Message::assistant(""));
+            app.display_projection
+                .messages_mut()
+                .push(Message::tool_call(
+                    "call_1",
+                    "powershell",
+                    serde_json::json!({"command": "git diff"}),
+                ));
+            app.display_projection
+                .messages_mut()
                 .push(Message::tool_result("call_1", "done", false));
 
             app.abort_agent_loop();
 
             let matching_results = app
-                .messages
+                .display_projection
+                .messages()
                 .iter()
                 .filter(|m| {
                     m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1")
@@ -3996,7 +4029,9 @@ mod tests {
         app.event_log = Some(crate::event_log::EventLog::load(&path).expect("load event log"));
 
         // Seed a user message (normally appended on submit).
-        app.messages.push(Message::user("hello"));
+        app.display_projection
+            .messages_mut()
+            .push(Message::user("hello"));
         app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
             content: "hello".to_string(),
             timestamp: 1,
@@ -4030,7 +4065,9 @@ mod tests {
     fn prepare_llm_messages_prepends_system_prompt() {
         let mut app = make_app();
         app.system_prompt = Some("be helpful".to_string());
-        app.messages.push(Message::user("hello"));
+        app.display_projection
+            .messages_mut()
+            .push(Message::user("hello"));
         let msgs = app.prepare_llm_messages();
         assert_eq!(msgs[0].role, Role::System);
         assert_eq!(msgs[0].content, "be helpful");
@@ -4042,8 +4079,10 @@ mod tests {
         let mut app = make_app();
         let mut hidden = Message::user("hidden");
         hidden.include_in_llm = false;
-        app.messages.push(hidden);
-        app.messages.push(Message::user("visible"));
+        app.display_projection.messages_mut().push(hidden);
+        app.display_projection
+            .messages_mut()
+            .push(Message::user("visible"));
         let msgs = app.prepare_llm_messages();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "visible");
@@ -4053,10 +4092,12 @@ mod tests {
     fn prepare_llm_messages_pops_trailing_empty_assistant() {
         use crate::llm::AssistantPhase;
         let mut app = make_app();
-        app.messages.push(Message::user("hello"));
+        app.display_projection
+            .messages_mut()
+            .push(Message::user("hello"));
         let mut asst = Message::assistant("");
         asst.assistant_phase = Some(AssistantPhase::Provisional);
-        app.messages.push(asst);
+        app.display_projection.messages_mut().push(asst);
         let msgs = app.prepare_llm_messages();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::User);

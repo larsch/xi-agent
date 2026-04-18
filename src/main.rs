@@ -226,7 +226,9 @@ async fn main() -> io::Result<()> {
                         current_model,
                         e
                     );
-                    app.messages.push(llm::Message::assistant(msg.clone()));
+                    app.display_projection
+                        .messages_mut()
+                        .push(llm::Message::assistant(msg.clone()));
                     app.mark_log_dirty();
                     Arc::new(UnavailableProvider { message: msg })
                         as Arc<dyn LlmProvider + Send + Sync>
@@ -262,13 +264,15 @@ async fn main() -> io::Result<()> {
                 app.agent_config.tools = tools;
                 app.system_prompt = Some(system_prompt);
                 app.loaded_skills = loaded_skills;
-                app.messages.push(Message::assistant(format!(
-                    "[reloaded context: {} skill{}, {} custom tool{}]",
-                    skills_count,
-                    if skills_count == 1 { "" } else { "s" },
-                    custom_count,
-                    if custom_count == 1 { "" } else { "s" },
-                )));
+                app.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[reloaded context: {} skill{}, {} custom tool{}]",
+                        skills_count,
+                        if skills_count == 1 { "" } else { "s" },
+                        custom_count,
+                        if custom_count == 1 { "" } else { "s" },
+                    )));
                 app.mark_log_dirty();
                 app.available_models = None;
             }
@@ -354,9 +358,11 @@ async fn main() -> io::Result<()> {
                 config.provider = Some(instance_id);
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist new provider config: {e}");
-                    app.messages.push(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
+                    app.display_projection
+                        .messages_mut()
+                        .push(Message::assistant(format!(
+                            "[failed to persist config.toml: {e}]"
+                        )));
                     app.mark_log_dirty();
                 }
                 current_instance = config
@@ -378,11 +384,13 @@ async fn main() -> io::Result<()> {
                     &current_model,
                     current_thinking,
                 );
-                app.messages.push(Message::assistant(format!(
-                    "[added provider {} ({})]",
-                    current_instance.id,
-                    current_instance.backend_preset.label(),
-                )));
+                app.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[added provider {} ({})]",
+                        current_instance.id,
+                        current_instance.backend_preset.label(),
+                    )));
                 app.mark_log_dirty();
             }
 
@@ -402,9 +410,11 @@ async fn main() -> io::Result<()> {
                 config.provider = Some(instance_id);
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist updated provider config: {e}");
-                    app.messages.push(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
+                    app.display_projection
+                        .messages_mut()
+                        .push(Message::assistant(format!(
+                            "[failed to persist config.toml: {e}]"
+                        )));
                     app.mark_log_dirty();
                 }
                 current_instance = config
@@ -426,11 +436,13 @@ async fn main() -> io::Result<()> {
                     &current_model,
                     current_thinking,
                 );
-                app.messages.push(Message::assistant(format!(
-                    "[edited provider {} ({})]",
-                    current_instance.id,
-                    current_instance.backend_preset.label(),
-                )));
+                app.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[edited provider {} ({})]",
+                        current_instance.id,
+                        current_instance.backend_preset.label(),
+                    )));
                 app.mark_log_dirty();
             }
 
@@ -443,9 +455,11 @@ async fn main() -> io::Result<()> {
                     }
                     if let Err(e) = config.save() {
                         log::debug!("failed to persist provider removal: {e}");
-                        app.messages.push(Message::assistant(format!(
-                            "[failed to persist config.toml: {e}]"
-                        )));
+                        app.display_projection
+                            .messages_mut()
+                            .push(Message::assistant(format!(
+                                "[failed to persist config.toml: {e}]"
+                            )));
                         app.mark_log_dirty();
                     }
                     current_instance = resolve_default_provider_instance(&config);
@@ -464,7 +478,8 @@ async fn main() -> io::Result<()> {
                         &current_model,
                         current_thinking,
                     );
-                    app.messages
+                    app.display_projection
+                        .messages_mut()
                         .push(Message::assistant(format!("[removed provider {id}]")));
                     app.mark_log_dirty();
                 }
@@ -502,9 +517,11 @@ async fn main() -> io::Result<()> {
                 config.provider = Some(inst.id.clone());
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist ollama endpoint: {e}");
-                    app.messages.push(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
+                    app.display_projection
+                        .messages_mut()
+                        .push(Message::assistant(format!(
+                            "[failed to persist config.toml: {e}]"
+                        )));
                     app.mark_log_dirty();
                 }
                 current_instance = inst;
@@ -523,10 +540,12 @@ async fn main() -> io::Result<()> {
                     &current_model,
                     current_thinking,
                 );
-                app.messages.push(Message::assistant(format!(
-                    "[ollama provider {} endpoint set to {url}]",
-                    current_instance.id,
-                )));
+                app.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[ollama provider {} endpoint set to {url}]",
+                        current_instance.id,
+                    )));
                 app.mark_log_dirty();
             }
 
@@ -548,9 +567,11 @@ async fn main() -> io::Result<()> {
                 config.provider = Some(inst.id.clone());
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist open-webui config: {e}");
-                    app.messages.push(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
+                    app.display_projection
+                        .messages_mut()
+                        .push(Message::assistant(format!(
+                            "[failed to persist config.toml: {e}]"
+                        )));
                     app.mark_log_dirty();
                 }
                 current_instance = inst;
@@ -569,10 +590,12 @@ async fn main() -> io::Result<()> {
                     &current_model,
                     current_thinking,
                 );
-                app.messages.push(Message::assistant(format!(
-                    "[open-webui provider {} endpoint set to {url}]",
-                    current_instance.id,
-                )));
+                app.display_projection
+                    .messages_mut()
+                    .push(Message::assistant(format!(
+                        "[open-webui provider {} endpoint set to {url}]",
+                        current_instance.id,
+                    )));
                 app.mark_log_dirty();
             }
         }
@@ -1332,7 +1355,7 @@ fn handle_slash_submit(
             match ThinkingLevel::parse(&raw) {
                 Some(level) => return KeyDispatch::Return(RunResult::ChangeThinking(level)),
                 None => {
-                    app.messages.push(llm::Message::assistant(format!(
+                    app.display_projection.messages_mut().push(llm::Message::assistant(format!(
                         "[invalid thinking level: '{raw}' (use off|minimal|low|medium|high|xhigh)]"
                     )));
                     app.mark_log_dirty();
@@ -1373,15 +1396,18 @@ fn handle_slash_submit(
                         app.submit_with_text(expanded, provider);
                     }
                     Err(e) => {
-                        app.messages
+                        app.display_projection
+                            .messages_mut()
                             .push(llm::Message::assistant(format!("[skill error: {e}]")));
                         app.mark_log_dirty();
                     }
                 },
                 None => {
-                    app.messages.push(llm::Message::assistant(format!(
-                        "[unknown skill: '{name}']"
-                    )));
+                    app.display_projection
+                        .messages_mut()
+                        .push(llm::Message::assistant(format!(
+                            "[unknown skill: '{name}']"
+                        )));
                     app.mark_log_dirty();
                 }
             }
@@ -1513,9 +1539,11 @@ fn persist_provider_model_selection_v2(
 
     if let Err(e) = config.save() {
         log::debug!("failed to persist provider/model config: {}", e);
-        app.messages.push(Message::assistant(format!(
-            "[failed to persist config.toml: {e}]"
-        )));
+        app.display_projection
+            .messages_mut()
+            .push(Message::assistant(format!(
+                "[failed to persist config.toml: {e}]"
+            )));
         app.mark_log_dirty();
     }
 }

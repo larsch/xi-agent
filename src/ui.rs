@@ -7,6 +7,8 @@ mod menu;
 mod pending;
 mod status;
 
+use std::collections::HashMap;
+
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
@@ -42,13 +44,13 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
-fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
-    if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
-    {
-        let lines = build_log_lines(&app.messages, app.streaming(), width);
-        app.cached_log_lines = Some((app.log_revision, width, lines));
-    }
-    &app.cached_log_lines.as_ref().unwrap().2
+fn build_log_lines_cached(app: &App, width: usize) -> Vec<Line<'static>> {
+    let mut cache: HashMap<usize, Vec<Line<'static>>> = HashMap::new();
+    let messages = app.display_projection.messages();
+    cache
+        .entry(width)
+        .or_insert_with(|| build_log_lines(messages, app.streaming(), width))
+        .clone()
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -137,17 +139,17 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let has_scrollbar = total_lines > inner_height && !app.auto_scroll;
     let log_scroll = app.log_scroll;
+    let all_lines = build_log_lines_cached(app, log_width);
     let visible_lines: Vec<Line<'static>> = {
-        let all = build_log_lines_cached(app, log_width);
         if total_lines <= inner_height {
             let padding = inner_height - total_lines;
             let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
-            v.extend(all.iter().cloned());
+            v.extend(all_lines.iter().cloned());
             v
         } else {
             let start = log_scroll;
             let end = (start + inner_height).min(total_lines);
-            all[start..end].to_vec()
+            all_lines[start..end].to_vec()
         }
     };
 
@@ -1164,18 +1166,24 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.messages = vec![Message::tool_result(
-            "1",
-            "tool output that used to be much longer",
-            false,
-        )];
+        app.display_projection.clear();
+        app.display_projection
+            .messages_mut()
+            .extend(vec![Message::tool_result(
+                "1",
+                "tool output that used to be much longer",
+                false,
+            )]);
         app.mark_log_dirty();
 
         terminal
             .draw(|f| draw(f, &mut app))
             .expect("first draw succeeds");
 
-        app.messages = vec![Message::tool_result("1", "short", false)];
+        app.display_projection.clear();
+        app.display_projection
+            .messages_mut()
+            .extend(vec![Message::tool_result("1", "short", false)]);
         app.mark_log_dirty();
 
         terminal
@@ -1192,12 +1200,13 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.messages = vec![
+        app.display_projection.clear();
+        app.display_projection.messages_mut().extend(vec![
             Message::user("one"),
             Message::user("two"),
             Message::user("three"),
             Message::user("four"),
-        ];
+        ]);
         // Scrolled up: scrollbar should be visible, reserving the rightmost column.
         app.auto_scroll = false;
         app.log_scroll = 0;
@@ -1219,12 +1228,13 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(20, 8);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let mut app = make_app();
-        app.messages = vec![
+        app.display_projection.clear();
+        app.display_projection.messages_mut().extend(vec![
             Message::user("one"),
             Message::user("two"),
             Message::user("three"),
             Message::user("four"),
-        ];
+        ]);
         // Default: auto_scroll = true (pinned to bottom).
         assert!(app.auto_scroll);
 
