@@ -23,6 +23,13 @@ pub use system_prompt::build_system_prompt;
 pub use tool_output_log::ToolOutputLog;
 pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolBatchInterruption {
+    None,
+    Cancelled,
+    SteeringQueued,
+}
+
 fn drain_steering_messages(
     steering_rx: &mut UnboundedReceiver<String>,
     messages: &mut Vec<Message>,
@@ -37,6 +44,98 @@ fn drain_steering_messages(
         consumed = true;
     }
     consumed
+}
+
+fn record_tool_call_result(
+    messages: &mut Vec<Message>,
+    session_events: &mut Vec<SessionEvent>,
+    id: &str,
+    name: &str,
+    args: serde_json::Value,
+    result: ToolResult,
+) {
+    messages.push(Message::tool_call(id, name, args.clone()));
+    messages.push(Message::tool_result(id, &result.content, result.is_error));
+    session_events.push(SessionEvent::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        args,
+        timestamp: 0,
+    });
+    session_events.push(SessionEvent::ToolResult {
+        id: id.to_string(),
+        name: name.to_string(),
+        content: result.content,
+        is_error: result.is_error,
+        display_range: None,
+        timestamp: 0,
+    });
+}
+
+fn skip_remaining_tool_calls(
+    pending_tool_calls: &[(String, String, serde_json::Value)],
+    next_idx: usize,
+    tx: &UnboundedSender<AppEvent>,
+    messages: &mut Vec<Message>,
+    session_events: &mut Vec<SessionEvent>,
+    reason: &'static str,
+) {
+    for (skip_id, skip_name, skip_args) in pending_tool_calls.iter().skip(next_idx).cloned() {
+        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
+            id: skip_id.clone(),
+            name: skip_name.clone(),
+            args: skip_args.clone(),
+        }));
+        let skipped = ToolResult::err(reason);
+        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
+            id: skip_id.clone(),
+            result: skipped.clone(),
+        }));
+        record_tool_call_result(
+            messages,
+            session_events,
+            &skip_id,
+            &skip_name,
+            skip_args,
+            skipped,
+        );
+    }
+}
+
+fn resolve_tool_batch_interruption(
+    pending_tool_calls: &[(String, String, serde_json::Value)],
+    next_idx: usize,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+    steering_rx: &mut UnboundedReceiver<String>,
+    messages: &mut Vec<Message>,
+    session_events: &mut Vec<SessionEvent>,
+    tx: &UnboundedSender<AppEvent>,
+) -> ToolBatchInterruption {
+    if *cancel_rx.borrow() {
+        skip_remaining_tool_calls(
+            pending_tool_calls,
+            next_idx,
+            tx,
+            messages,
+            session_events,
+            "Interrupted by user",
+        );
+        return ToolBatchInterruption::Cancelled;
+    }
+
+    if drain_steering_messages(steering_rx, messages, tx) {
+        skip_remaining_tool_calls(
+            pending_tool_calls,
+            next_idx,
+            tx,
+            messages,
+            session_events,
+            "Skipped due to queued user message.",
+        );
+        return ToolBatchInterruption::SteeringQueued;
+    }
+
+    ToolBatchInterruption::None
 }
 
 async fn emit_compaction(
@@ -316,7 +415,7 @@ pub async fn run_agent_loop(
         }
 
         // ── Execute tool calls sequentially ───────────────────────────────────
-        let mut stop_after_turn_for_steering = false;
+        let mut tool_batch_interruption = ToolBatchInterruption::None;
         for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
             let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
                 id: id.clone(),
@@ -364,93 +463,18 @@ pub async fn run_agent_loop(
                 result: result.clone(),
             }));
 
-            // Append tool call + result to history for the next LLM turn.
-            messages.push(Message::tool_call(&id, &name, args.clone()));
-            messages.push(Message::tool_result(&id, &result.content, result.is_error));
-            session_events.push(SessionEvent::ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                args: args.clone(),
-                timestamp: 0,
-            });
-            session_events.push(SessionEvent::ToolResult {
-                id: id.clone(),
-                name: name.clone(),
-                content: result.content.clone(),
-                is_error: result.is_error,
-                display_range: None,
-                timestamp: 0,
-            });
+            record_tool_call_result(&mut messages, &mut session_events, &id, &name, args, result);
 
-            // ── Post-tool cancellation check ──────────────────────────────────
-            if *cancel_rx.borrow() {
-                for (skip_id, skip_name, skip_args) in
-                    pending_tool_calls.iter().skip(idx + 1).cloned()
-                {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
-                        id: skip_id.clone(),
-                        name: skip_name.clone(),
-                        args: skip_args.clone(),
-                    }));
-                    let interrupted = ToolResult::err("Interrupted by user");
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
-                        id: skip_id.clone(),
-                        result: interrupted.clone(),
-                    }));
-                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args.clone()));
-                    messages.push(Message::tool_result(&skip_id, &interrupted.content, true));
-                    session_events.push(SessionEvent::ToolCall {
-                        id: skip_id.clone(),
-                        name: skip_name.clone(),
-                        args: skip_args,
-                        timestamp: 0,
-                    });
-                    session_events.push(SessionEvent::ToolResult {
-                        id: skip_id,
-                        name: skip_name,
-                        content: interrupted.content,
-                        is_error: true,
-                        display_range: None,
-                        timestamp: 0,
-                    });
-                }
-                config.file_tracker.lock().unwrap().refresh_baselines();
-                let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
-                return;
-            }
-
-            if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
-                for (skip_id, skip_name, skip_args) in
-                    pending_tool_calls.iter().skip(idx + 1).cloned()
-                {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
-                        id: skip_id.clone(),
-                        name: skip_name.clone(),
-                        args: skip_args.clone(),
-                    }));
-                    let skipped = ToolResult::err("Skipped due to queued user message.");
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
-                        id: skip_id.clone(),
-                        result: skipped.clone(),
-                    }));
-                    messages.push(Message::tool_call(&skip_id, &skip_name, skip_args.clone()));
-                    messages.push(Message::tool_result(&skip_id, &skipped.content, true));
-                    session_events.push(SessionEvent::ToolCall {
-                        id: skip_id.clone(),
-                        name: skip_name.clone(),
-                        args: skip_args,
-                        timestamp: 0,
-                    });
-                    session_events.push(SessionEvent::ToolResult {
-                        id: skip_id,
-                        name: skip_name,
-                        content: skipped.content,
-                        is_error: true,
-                        display_range: None,
-                        timestamp: 0,
-                    });
-                }
-                stop_after_turn_for_steering = true;
+            tool_batch_interruption = resolve_tool_batch_interruption(
+                &pending_tool_calls,
+                idx + 1,
+                &cancel_rx,
+                &mut steering_rx,
+                &mut messages,
+                &mut session_events,
+                &tx,
+            );
+            if tool_batch_interruption != ToolBatchInterruption::None {
                 break;
             }
         }
@@ -459,8 +483,10 @@ pub async fn run_agent_loop(
 
         let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
 
-        if stop_after_turn_for_steering {
-            continue;
+        match tool_batch_interruption {
+            ToolBatchInterruption::None => {}
+            ToolBatchInterruption::Cancelled => return,
+            ToolBatchInterruption::SteeringQueued => continue,
         }
     }
 }

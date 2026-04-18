@@ -348,6 +348,91 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
 }
 
 #[tokio::test]
+async fn cancellation_beats_steering_at_same_tool_boundary() {
+    let provider = MockProvider::new(vec![vec![
+        LlmEvent::ToolCall {
+            id: "call_1".to_string(),
+            name: "slow_tool".to_string(),
+            args: serde_json::json!({"value": "a"}),
+        },
+        LlmEvent::ToolCall {
+            id: "call_2".to_string(),
+            name: "slow_tool".to_string(),
+            args: serde_json::json!({"value": "b"}),
+        },
+        LlmEvent::Done,
+    ]]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert("slow_tool".to_string(), Arc::new(SlowTool));
+
+    let config = AgentLoopConfig {
+        tools,
+        file_tracker: make_tracker(),
+        tool_output_log: make_log(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
+        before_tool_call: None,
+        after_tool_call: None,
+    };
+    let messages = vec![Message::user("hi")];
+
+    let handle = tokio::spawn(async move {
+        run_agent_loop(
+            messages,
+            config,
+            Arc::new(provider),
+            tx,
+            steering_rx,
+            cancel_rx,
+        )
+        .await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    steering_tx
+        .send("interrupt".to_string())
+        .expect("queue steering");
+    cancel_tx.send(true).expect("queue cancellation");
+
+    handle.await.expect("agent loop join");
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
+    }
+
+    let interrupted_second = events.iter().any(|e| {
+        matches!(
+            e,
+            AgentEvent::ToolCallEnd { id, result, .. }
+            if id == "call_2" && result.is_error && result.content.contains("Interrupted by user")
+        )
+    });
+    assert!(
+        interrupted_second,
+        "expected second tool call to be interrupted"
+    );
+
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SteeringConsumed { text } if text == "interrupt"
+        )),
+        "expected cancellation to win before steering is consumed"
+    );
+
+    assert!(matches!(events.last(), Some(AgentEvent::TurnEnd)));
+}
+
+#[tokio::test]
 async fn agent_loop_stream_error_is_reported() {
     use crate::llm::ProviderError;
     let err = ProviderError::other("test", "boom");
