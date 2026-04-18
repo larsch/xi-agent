@@ -1,9 +1,6 @@
 //! Committed session state: durable event log plus incrementally-maintained
 //! read models.
 //!
-// Suppress dead_code warnings for methods that will be used in later steps
-// of the session state refactor.
-#![allow(dead_code)]
 //! # Ownership boundaries
 //!
 //! [`SessionState`] owns:
@@ -99,13 +96,13 @@ impl SessionState {
         self.display.messages()
     }
 
-    /// Mutable access to committed display messages for transient UI state
-    /// that has not yet been committed as events.
+    /// Mutable access to committed display messages.
     ///
-    /// **Use sparingly.** This exists to support in-flight streaming output
-    /// that is not yet committed. Once a turn completes, the display state
-    /// should be driven by event ingestion, not direct mutation.
-    pub fn display_messages_mut(&mut self) -> &mut Vec<Message> {
+    /// Restricted to tests and the session_state module. External code must
+    /// not mutate committed display state directly — use event ingestion
+    /// methods instead.
+    #[cfg(test)]
+    pub(crate) fn display_messages_mut(&mut self) -> &mut Vec<Message> {
         self.display.messages_mut()
     }
 
@@ -119,11 +116,6 @@ impl SessionState {
         self.display.len()
     }
 
-    /// Clear committed display state (used by `new_conversation`).
-    pub fn clear_display(&mut self) {
-        self.display.clear();
-    }
-
     /// Export-friendly display projection built directly from durable events.
     ///
     /// Unlike `display_messages()`, this does not include any transient
@@ -132,10 +124,10 @@ impl SessionState {
         project_display_messages(&self.event_log.events)
     }
 
-    /// Current LLM-visible message list.
-    ///
-    /// Updated incrementally via `append_immediate` / `append_batch`.
-    pub fn llm_messages(&mut self) -> &[Message] {
+    /// Current LLM-visible message list (test-only; production code uses
+    /// `project_llm_messages` directly on `events()`).
+    #[cfg(test)]
+    pub(crate) fn llm_messages(&mut self) -> &[Message] {
         self.llm.ensure_current(&self.event_log.events);
         self.llm.messages()
     }
@@ -144,7 +136,11 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event_log::EventLog, llm::Role, session_event::CompactionTrigger};
+    use crate::{
+        event_log::EventLog,
+        llm::{Message, Role},
+        session_event::CompactionTrigger,
+    };
 
     fn ts() -> u64 {
         1_713_000_000
@@ -237,5 +233,180 @@ mod tests {
         let msgs = state.llm_messages();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[1].content, "new");
+    }
+
+    // ── Step 2: event-driven projection update tests ──────────────────────────
+
+    /// `append_immediate` must update display incrementally (no rebuild needed)
+    /// for ordinary conversation events.
+    #[test]
+    fn append_immediate_updates_display_incrementally() {
+        let path =
+            std::env::temp_dir().join(format!("tau-ss-incr-display-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
+
+        state.append_immediate(user_ev("a")).unwrap();
+        assert_eq!(state.display_messages().len(), 1);
+
+        state.append_immediate(assistant_ev("b")).unwrap();
+        assert_eq!(state.display_messages().len(), 2);
+
+        state.append_immediate(user_ev("c")).unwrap();
+        assert_eq!(state.display_messages().len(), 3);
+
+        // All messages are in order.
+        assert_eq!(state.display_messages()[0].content, "a");
+        assert_eq!(state.display_messages()[1].content, "b");
+        assert_eq!(state.display_messages()[2].content, "c");
+    }
+
+    /// `append_immediate` must update the LLM projection incrementally for
+    /// ordinary conversation events.
+    #[test]
+    fn append_immediate_updates_llm_incrementally() {
+        let path =
+            std::env::temp_dir().join(format!("tau-ss-incr-llm-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
+
+        state.append_immediate(user_ev("q1")).unwrap();
+        assert_eq!(state.llm_messages().len(), 1);
+
+        state.append_immediate(assistant_ev("a1")).unwrap();
+        assert_eq!(state.llm_messages().len(), 2);
+
+        // Messages are in order.
+        assert_eq!(state.llm_messages()[0].content, "q1");
+        assert_eq!(state.llm_messages()[1].content, "a1");
+    }
+
+    /// A `CompactionSummary` appended via `append_immediate` must cause the
+    /// LLM projection to reflect only the post-compaction tail (the compaction
+    /// boundary is respected).
+    #[test]
+    fn compaction_via_append_immediate_updates_llm_projection() {
+        let path =
+            std::env::temp_dir().join(format!("tau-ss-compact-llm-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
+        state.append_immediate(user_ev("old")).unwrap();
+        state.append_immediate(assistant_ev("reply")).unwrap();
+        state
+            .append_immediate(SessionEvent::CompactionSummary {
+                summary: "ctx".to_string(),
+                trigger_reason: CompactionTrigger::Threshold,
+                context_window: 200_000,
+                reserve_tokens: 16_000,
+                keep_recent_tokens: 20_000,
+                tokens_before: 10,
+                tokens_after: 5,
+                retained_event_count: None,
+                read_files: vec![],
+                modified_files: vec![],
+                timestamp: ts(),
+            })
+            .unwrap();
+        state.append_immediate(user_ev("new")).unwrap();
+
+        // LLM sees: compaction summary + "new".
+        let msgs = state.llm_messages();
+        assert_eq!(msgs.len(), 2, "expected summary + new message");
+        assert!(
+            msgs[0].content.contains("ctx"),
+            "first msg should be summary"
+        );
+        assert_eq!(msgs[1].content, "new");
+    }
+
+    /// A `CompactionSummary` appended via `append_immediate` must appear in
+    /// the display projection as a single notice message.
+    #[test]
+    fn compaction_via_append_immediate_appears_in_display() {
+        let path = std::env::temp_dir().join(format!(
+            "tau-ss-compact-display-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
+        state.append_immediate(user_ev("q")).unwrap();
+        state
+            .append_immediate(SessionEvent::CompactionSummary {
+                summary: "ctx".to_string(),
+                trigger_reason: CompactionTrigger::Threshold,
+                context_window: 200_000,
+                reserve_tokens: 16_000,
+                keep_recent_tokens: 20_000,
+                tokens_before: 50_000,
+                tokens_after: 5_000,
+                retained_event_count: None,
+                read_files: vec![],
+                modified_files: vec![],
+                timestamp: ts(),
+            })
+            .unwrap();
+
+        // Display has user message + compaction marker.
+        assert_eq!(state.display_messages().len(), 2);
+        let compaction_msg = &state.display_messages()[1];
+        assert!(
+            compaction_msg.content.contains("compacted:"),
+            "compaction display message should contain 'compacted:'"
+        );
+        assert!(!compaction_msg.include_in_llm);
+    }
+
+    /// `append_batch` (turn flush) must not leave transient turn entries
+    /// duplicated alongside the newly committed messages.
+    #[test]
+    fn append_batch_does_not_duplicate_committed_messages() {
+        let path =
+            std::env::temp_dir().join(format!("tau-ss-batch-dedup-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
+        state.append_immediate(user_ev("hello")).unwrap();
+
+        // Simulate transient in-flight assistant message shown before commit.
+        state.display_messages_mut().push(Message::assistant("hi"));
+        state.display_messages_mut().push(Message::tool_call(
+            "c1",
+            "read_file",
+            serde_json::json!({}),
+        ));
+
+        // Flush the turn as a batch.
+        state
+            .append_batch(&[
+                assistant_ev("hi"),
+                SessionEvent::ToolCall {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    args: serde_json::json!({}),
+                    timestamp: ts(),
+                },
+            ])
+            .unwrap();
+
+        let assistant_count = state
+            .display_messages()
+            .iter()
+            .filter(|m| m.role == Role::Assistant && m.content == "hi")
+            .count();
+        assert_eq!(
+            assistant_count, 1,
+            "assistant message must appear exactly once"
+        );
+
+        let tool_count = state
+            .display_messages()
+            .iter()
+            .filter(|m| m.role == Role::ToolCall)
+            .count();
+        assert_eq!(tool_count, 1, "tool call must appear exactly once");
     }
 }
