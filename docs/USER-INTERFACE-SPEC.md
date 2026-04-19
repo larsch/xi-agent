@@ -41,7 +41,7 @@
   - `❌` system/error (failure)
   - `✅` system/success (completed successfully)
 - Assistant output uses phase-aware icons:
-  - `🧠` for model thinking tokens
+  - `🧠` for model thinking tokens (rendered in dimmed style)
   - `💭` for provisional assistant output (tool intent/tool-calling turn)
   - `💬` for final assistant output
 - Streaming/status-row behavior:

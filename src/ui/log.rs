@@ -386,7 +386,9 @@ fn append_message_dim(
     suffix: &'static str,
     width: usize,
 ) {
-    let dim_style = Style::default().add_modifier(ratatui::style::Modifier::DIM);
+    let dim_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(ratatui::style::Modifier::DIM);
     let segments: Vec<&str> = if content.is_empty() {
         vec![""]
     } else {
@@ -422,10 +424,7 @@ fn append_message_dim(
             let show_suffix = !suffix.is_empty() && is_last_visible_seg && is_last_chunk;
             let mut spans: Vec<Span<'static>> = vec![Span::styled(chunk.clone(), dim_style)];
             if show_suffix {
-                spans.push(Span::styled(
-                    suffix,
-                    Style::default().add_modifier(ratatui::style::Modifier::DIM),
-                ));
+                spans.push(Span::styled(suffix, dim_style));
             }
             out.push(Line::from(spans));
         }
