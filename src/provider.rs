@@ -7,9 +7,7 @@ use crate::{
         LlmProvider,
         codex::{CodexProvider, DEFAULT_BASE_URL as CODEX_DEFAULT_BASE_URL},
         copilot::CopilotProvider,
-        gemini::{
-            DEFAULT_BASE_URL as GEMINI_DEFAULT_BASE_URL, GeminiProvider, GeminiThinkingLevel,
-        },
+        gemini::{DEFAULT_BASE_URL as GEMINI_DEFAULT_BASE_URL, GeminiProvider},
         ollama::OllamaProvider,
         openai::OpenAiProvider,
         test_provider::TestProvider,
@@ -280,15 +278,35 @@ pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport
 // ── Instance-based API ────────────────────────────────────────────────────────
 
 /// Return the thinking support level for a named provider instance.
-pub fn thinking_support_for_instance(instance: &ProviderInstance, _model: &str) -> ThinkingSupport {
+pub fn thinking_support_for_instance(instance: &ProviderInstance, model: &str) -> ThinkingSupport {
     match instance.api_type {
-        ApiType::OpenAiResponses => ThinkingSupport::Applied,
+        ApiType::OpenAiResponses => {
+            if instance.backend_preset == BackendPreset::Copilot {
+                match classify_copilot_route(model) {
+                    CopilotApiRoute::OpenAiResponses => ThinkingSupport::Applied,
+                    CopilotApiRoute::AnthropicMessages => ThinkingSupport::Ignored(
+                        "copilot anthropic route has no thinking mapping yet",
+                    ),
+                    CopilotApiRoute::OpenAiChatCompletions => ThinkingSupport::Ignored(
+                        "copilot chat-completions route does not expose reasoning.effort",
+                    ),
+                }
+            } else {
+                ThinkingSupport::Applied
+            }
+        }
         ApiType::GeminiNative => ThinkingSupport::Applied,
         ApiType::OpenAiCompatible => {
             if instance.backend_preset == BackendPreset::Copilot {
-                ThinkingSupport::Ignored(
-                    "copilot chat-completions route does not expose reasoning.effort",
-                )
+                match classify_copilot_route(model) {
+                    CopilotApiRoute::OpenAiResponses => ThinkingSupport::Applied,
+                    CopilotApiRoute::AnthropicMessages => ThinkingSupport::Ignored(
+                        "copilot anthropic route has no thinking mapping yet",
+                    ),
+                    CopilotApiRoute::OpenAiChatCompletions => ThinkingSupport::Ignored(
+                        "copilot chat-completions route does not expose reasoning.effort",
+                    ),
+                }
             } else {
                 ThinkingSupport::Ignored("openai-compatible provider does not map thinking levels")
             }
@@ -329,7 +347,7 @@ pub fn build_provider_for_instance(
                 &creds.access_token,
                 model,
                 creds.base_url.as_deref(),
-                thinking.to_reasoning_effort().map(ToString::to_string),
+                thinking.to_reasoning_effort_string(),
             );
             Ok(Arc::new(p))
         }
@@ -343,7 +361,7 @@ pub fn build_provider_for_instance(
                 .clone()
                 .unwrap_or_else(|| CODEX_DEFAULT_BASE_URL.to_string());
             let p = CodexProvider::new(base_url, model, creds.access_token, creds.account_id)
-                .with_reasoning_effort(thinking.to_reasoning_effort().map(ToString::to_string));
+                .with_reasoning_effort(thinking.to_reasoning_effort_string());
             Ok(Arc::new(p))
         }
         BackendPreset::Gemini => {
@@ -355,15 +373,8 @@ pub fn build_provider_for_instance(
                 .base_url
                 .clone()
                 .unwrap_or_else(|| GEMINI_DEFAULT_BASE_URL.to_string());
-            let mapped_thinking = match thinking {
-                ThinkingLevel::Off => None,
-                ThinkingLevel::Minimal => Some(GeminiThinkingLevel::Minimal),
-                ThinkingLevel::Low => Some(GeminiThinkingLevel::Low),
-                ThinkingLevel::Medium => Some(GeminiThinkingLevel::Medium),
-                ThinkingLevel::High | ThinkingLevel::XHigh => Some(GeminiThinkingLevel::High),
-            };
             let p = GeminiProvider::new(base_url, model, creds.access_token, creds.project_id)
-                .with_thinking_level(mapped_thinking);
+                .with_thinking_level(thinking.to_gemini_thinking_level());
             Ok(Arc::new(p))
         }
 
@@ -449,10 +460,12 @@ pub fn build_provider_for_instance(
 mod tests {
     use super::{
         CopilotApiRoute, ThinkingSupport, classify_copilot_route, context_window_for_model,
-        scaled_token_budget, thinking_support_for,
+        scaled_token_budget, thinking_support_for, thinking_support_for_instance,
     };
     use crate::llm::copilot::test_helpers;
     use crate::provider::ProviderKind;
+    use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
+    use crate::thinking::{GeminiThinkingLevel, ThinkingLevel};
 
     #[test]
     fn copilot_route_uses_responses_for_codex_models() {
@@ -500,6 +513,51 @@ mod tests {
             thinking_support_for(&ProviderKind::Gemini, "gemini-2.5-pro"),
             ThinkingSupport::Applied
         );
+    }
+
+    #[test]
+    fn shared_reasoning_effort_mapping_matches_responses_routes() {
+        assert_eq!(ThinkingLevel::Off.to_reasoning_effort_string(), None);
+        assert_eq!(
+            ThinkingLevel::Minimal.to_reasoning_effort_string(),
+            Some("minimal".to_string())
+        );
+        assert_eq!(
+            ThinkingLevel::XHigh.to_reasoning_effort_string(),
+            Some("xhigh".to_string())
+        );
+    }
+
+    #[test]
+    fn shared_gemini_mapping_preserves_provider_specific_clamp() {
+        assert_eq!(ThinkingLevel::Off.to_gemini_thinking_level(), None);
+        assert_eq!(
+            ThinkingLevel::Medium.to_gemini_thinking_level(),
+            Some(GeminiThinkingLevel::Medium)
+        );
+        assert_eq!(
+            ThinkingLevel::XHigh.to_gemini_thinking_level(),
+            Some(GeminiThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn instance_thinking_support_for_copilot_depends_on_model_route() {
+        let mut instance = ProviderInstance::new("copilot", BackendPreset::Copilot);
+        instance.api_type = ApiType::OpenAiCompatible;
+
+        assert_eq!(
+            thinking_support_for_instance(&instance, "gpt-5.3-codex"),
+            ThinkingSupport::Applied
+        );
+        assert!(matches!(
+            thinking_support_for_instance(&instance, "gpt-4o"),
+            ThinkingSupport::Ignored(_)
+        ));
+        assert!(matches!(
+            thinking_support_for_instance(&instance, "claude-sonnet-4.5"),
+            ThinkingSupport::Ignored(_)
+        ));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::thinking::GeminiThinkingLevel;
 use futures_util::StreamExt;
 
 use super::{
@@ -164,14 +165,6 @@ pub struct GeminiProvider {
     project_id: String,
     thinking_level: Option<GeminiThinkingLevel>,
     client: reqwest::Client,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum GeminiThinkingLevel {
-    Minimal,
-    Low,
-    Medium,
-    High,
 }
 
 impl GeminiThinkingLevel {
@@ -654,8 +647,9 @@ impl LlmProvider for GeminiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeminiThinkingLevel, build_request, extract_retry_delay_ms, to_gemini_contents};
+    use super::{build_request, extract_retry_delay_ms, to_gemini_contents};
     use crate::llm::{Message, ToolDefinition};
+    use crate::thinking::GeminiThinkingLevel;
 
     #[test]
     fn extract_retry_delay_parses_quota_reset_message() {

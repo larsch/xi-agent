@@ -577,6 +577,16 @@ mod tests {
     }
 
     #[test]
+    fn thinking_completions_visible_when_thinking_enabled() {
+        let cmd_items = completions_for("/t", None, false, None, &[], true, &[]);
+        assert!(
+            cmd_items
+                .iter()
+                .any(|i| i.complete_to.starts_with("/thinking"))
+        );
+    }
+
+    #[test]
     fn command_name_completion_includes_matching_commands_and_skills() {
         let skills = vec![skill("plan", "Planning"), skill("build", "Build things")];
 

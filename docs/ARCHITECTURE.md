@@ -249,9 +249,13 @@ excess blank-line collapsing are applied only at render time inside
 **Per-model thinking settings** — `ThinkingLevel` (Off/Minimal/Low/Medium/
 High/XHigh) is resolved at request time from `config.thinking_by_model`
 (per-model override) then `config.thinking` (global default). The `/thinking`
-command cycles levels at runtime and updates the active model's entry.
-Providers that support thinking (Copilot/OpenAI with `o*` models, Anthropic)
-translate the level to their respective API parameter; others ignore it.
+command updates the active model's entry and is shown only when the active
+provider/model pair reports mapped thinking support. Translation is centralized
+in `thinking.rs`: OpenAI-Responses-style backends use a shared reasoning-effort
+mapping, Gemini native uses a shared Gemini-specific mapping, and unsupported
+routes ignore the setting. For Copilot, support is model-dependent because the
+backend route is chosen per model (`gpt-5`/Codex-style models use Responses;
+chat-completions and Anthropic-routed models do not currently map thinking).
 
 **Custom user tools** — at startup (and on `/reload`), `load_custom_tools`
 scans three directories in order: `~/.tau/tools/`, `./.tau/tools/` (project-
