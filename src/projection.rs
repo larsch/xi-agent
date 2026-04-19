@@ -367,8 +367,30 @@ impl LlmProjection {
                 let has_compaction = new_events
                     .iter()
                     .any(|e| matches!(e, SessionEvent::CompactionSummary { .. }));
-                if has_compaction {
-                    // Compaction changes what the LLM sees — full rebuild.
+
+                // The trailing-empty-assistant rule is not purely append-only:
+                // an empty assistant that was previously dropped because it was
+                // trailing may need to become visible again once subsequent
+                // tool events arrive. Likewise, a newly-appended empty
+                // assistant may need to be dropped if it becomes the new tail.
+                // Rebuild whenever this rule could affect correctness.
+                let previous_tail_was_empty_assistant = self.processed > 0
+                    && matches!(
+                        events.get(self.processed - 1),
+                        Some(SessionEvent::AssistantMessage { content, .. }) if content.is_empty()
+                    );
+                let new_events_include_empty_assistant = new_events.iter().any(|e| {
+                    matches!(
+                        e,
+                        SessionEvent::AssistantMessage { content, .. } if content.is_empty()
+                    )
+                });
+
+                if has_compaction
+                    || previous_tail_was_empty_assistant
+                    || new_events_include_empty_assistant
+                {
+                    // These cases affect more than a simple append-only tail.
                     self.messages = Some(project_llm_messages(events));
                 } else {
                     // Incremental: append messages for the new events only.
@@ -558,6 +580,70 @@ mod tests {
         let events = vec![user_ev("hello"), assistant_ev("hi")];
         let msgs = project_llm_messages(&events);
         assert_eq!(msgs.len(), 2);
+    }
+
+    // ── LlmProjection incremental cache parity ───────────────────────────────
+
+    #[test]
+    fn llm_projection_rebuilds_when_new_empty_assistant_arrives() {
+        let mut proj = LlmProjection::new();
+        let events = vec![user_ev("hello")];
+        proj.apply_new_events(&events);
+        assert_eq!(proj.messages().len(), 1);
+
+        let events = vec![
+            user_ev("hello"),
+            SessionEvent::AssistantMessage {
+                content: String::new(),
+                thinking: None,
+                phase: AssistantPhase::Provisional,
+                usage: None,
+                timestamp: ts(),
+            },
+        ];
+        proj.apply_new_events(&events);
+        assert_eq!(
+            proj.messages().len(),
+            1,
+            "trailing empty assistant should be dropped"
+        );
+    }
+
+    #[test]
+    fn llm_projection_rebuilds_when_dropped_empty_assistant_gains_following_tool_call() {
+        let mut proj = LlmProjection::new();
+        let events = vec![
+            user_ev("hello"),
+            SessionEvent::AssistantMessage {
+                content: String::new(),
+                thinking: None,
+                phase: AssistantPhase::Provisional,
+                usage: None,
+                timestamp: ts(),
+            },
+        ];
+        proj.apply_new_events(&events);
+        assert_eq!(
+            proj.messages().len(),
+            1,
+            "trailing empty assistant should be dropped"
+        );
+
+        let events = vec![
+            user_ev("hello"),
+            SessionEvent::AssistantMessage {
+                content: String::new(),
+                thinking: None,
+                phase: AssistantPhase::Provisional,
+                usage: None,
+                timestamp: ts(),
+            },
+            tool_call_ev("c1", "bash"),
+        ];
+        proj.apply_new_events(&events);
+
+        let roles: Vec<_> = proj.messages().iter().map(|m| m.role.clone()).collect();
+        assert_eq!(roles, vec![Role::User, Role::Assistant, Role::ToolCall]);
     }
 
     #[test]

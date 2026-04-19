@@ -124,10 +124,11 @@ impl SessionState {
         project_display_messages(&self.event_log.events)
     }
 
-    /// Current LLM-visible message list (test-only; production code uses
-    /// `project_llm_messages` directly on `events()`).
-    #[cfg(test)]
-    pub(crate) fn llm_messages(&mut self) -> &[Message] {
+    /// Current LLM-visible message list.
+    ///
+    /// Production code should use this cached incremental read model rather
+    /// than rebuilding from `events()` directly.
+    pub fn llm_messages(&mut self) -> &[Message] {
         self.llm.ensure_current(&self.event_log.events);
         self.llm.messages()
     }
