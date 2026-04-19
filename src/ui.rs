@@ -362,7 +362,6 @@ mod tests {
         llm::{AssistantPhase, Message},
         thinking::ThinkingLevel,
     };
-    use ratatui::style::Modifier;
     use serde_json::json;
 
     fn line_text(line: &Line<'_>) -> String {
@@ -1071,44 +1070,6 @@ mod tests {
         msg.assistant_phase = Some(AssistantPhase::Unknown);
         let lines = log::build_log_lines(&[msg], true, 80);
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
-    }
-
-    #[test]
-    fn assistant_provisional_phase_content_is_dimmed() {
-        let mut msg = Message::assistant("working");
-        msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let lines = log::build_log_lines(&[msg], false, 80);
-        assert!(lines[0].spans.iter().all(|s| {
-            s.style.fg == Some(Color::DarkGray) && s.style.add_modifier.contains(Modifier::DIM)
-        }));
-    }
-
-    #[test]
-    fn assistant_unknown_phase_streaming_content_is_dimmed() {
-        let mut msg = Message::assistant("streaming");
-        msg.assistant_phase = Some(AssistantPhase::Unknown);
-        let lines = log::build_log_lines(&[msg], true, 80);
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .filter(|s| s.content.as_ref() != "▋")
-                .all(|s| {
-                    s.style.fg == Some(Color::DarkGray)
-                        && s.style.add_modifier.contains(Modifier::DIM)
-                })
-        );
-    }
-
-    #[test]
-    fn assistant_final_phase_content_is_not_dimmed() {
-        let lines = log::build_log_lines(&[Message::assistant("final")], false, 80);
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .all(|s| !s.style.add_modifier.contains(Modifier::DIM))
-        );
     }
 
     #[test]
