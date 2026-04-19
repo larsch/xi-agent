@@ -2589,6 +2589,12 @@ impl App {
     /// Ensure a [`SessionState`] exists for the current session before submitting
     /// a user message. Creates the session and loads (or initialises) the state
     /// if needed. No-op when session state is already populated.
+    ///
+    /// When persistent session storage is unavailable, falls back to an
+    /// ephemeral event log in the system temp directory so the refactored
+    /// ownership model still holds: committed conversation state always enters
+    /// through `SessionEvent` ingestion and `SessionState` is always present
+    /// before a turn launches.
     fn ensure_event_log_for_submit(&mut self) {
         if self.session_state.is_some() {
             return;
@@ -2598,10 +2604,23 @@ impl App {
             match store.load_events(&session_id) {
                 Ok(log) => {
                     self.session_state = Some(SessionState::from_event_log(log));
+                    return;
                 }
                 Err(e) => {
                     log::debug!("failed to load event log for session {session_id}: {e}");
                 }
+            }
+        }
+
+        // Persistence unavailable: create an ephemeral event log so all turn
+        // flows still operate through SessionState and SessionEvent ingestion.
+        let path = std::env::temp_dir().join(format!("tau-ephemeral-session-{session_id}.jsonl"));
+        match crate::event_log::EventLog::load(&path) {
+            Ok(log) => {
+                self.session_state = Some(SessionState::from_event_log(log));
+            }
+            Err(e) => {
+                log::debug!("failed to create ephemeral event log for session {session_id}: {e}");
             }
         }
     }
@@ -2625,15 +2644,14 @@ impl App {
     /// persistence is unavailable, falls back to a transient visible message.
     fn append_user_message(&mut self, content: String) {
         self.ensure_event_log_for_submit();
-        if self.session_state.is_some() {
-            self.append_event_immediate(SessionEvent::UserMessage {
-                content,
-                timestamp: Self::now_ts(),
-            });
-        } else {
-            self.live_turn.notices.push(Message::user(content));
-            self.bump_log_revision();
-        }
+        assert!(
+            self.session_state.is_some(),
+            "append_user_message called before session_state was initialised"
+        );
+        self.append_event_immediate(SessionEvent::UserMessage {
+            content,
+            timestamp: Self::now_ts(),
+        });
     }
 
     /// Export the current visible session to a standalone HTML file.
@@ -2698,15 +2716,17 @@ impl App {
         // remain accessible after the agent loop completes.
         self.agent_config.tool_output_log =
             Arc::new(std::sync::Mutex::new(ToolOutputLog::new(&session_id)));
+        let session_events = self
+            .session_state
+            .as_ref()
+            .expect("start_agent_task called before session_state was initialised")
+            .events()
+            .to_vec();
         let config = AgentLoopConfig {
             tools: self.agent_config.tools.clone(),
             file_tracker: Arc::clone(&self.agent_config.file_tracker),
             tool_output_log: Arc::clone(&self.agent_config.tool_output_log),
-            session_events: self
-                .session_state
-                .as_ref()
-                .map(|ss| ss.events().to_vec())
-                .unwrap_or_default(),
+            session_events,
             current_model: self.current_model.clone(),
             auto_compaction_enabled: true,
             manual_compaction_instructions: self.pending_manual_compaction_instructions.take(),
@@ -4261,5 +4281,123 @@ mod tests {
     fn prepare_llm_messages_panics_without_session_state() {
         let mut app = make_app();
         let _ = app.prepare_llm_messages();
+    }
+
+    // ── Step 6: resume/export/integration paths ─────────────────────────────
+
+    #[test]
+    fn submit_initialises_session_state_even_without_session_store() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.session_store = None; // persistence unavailable
+            app.textarea.insert_str("hello");
+
+            let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+                std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+
+            app.submit(&provider);
+
+            assert!(
+                app.session_state.is_some(),
+                "submit should always initialise session_state before launching a turn"
+            );
+
+            if let Some(handle) = app.runtime.agent_task.take() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
+    fn resume_clears_live_turn_overlay_and_notices() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().join("sessions"))
+            .expect("open session store");
+        let session_id = store.create_session(&cwd).expect("create session");
+        let mut log = store.load_events(&session_id).expect("load events");
+        log.append_batch(&[crate::session_event::SessionEvent::UserMessage {
+            content: "hello".to_string(),
+            timestamp: 1,
+        }])
+        .expect("append event");
+
+        let mut app = make_app();
+        app.session_store = Some(store);
+        app.live_turn.assistant_content = "streaming".to_string();
+        app.live_turn.notices.push(Message::assistant("[notice]"));
+
+        app.resume_session_by_id(&session_id);
+
+        assert!(app.live_turn.assistant_content.is_empty());
+        assert!(app.live_turn.tool_entries.is_empty());
+        assert!(app.live_turn.notices.is_empty());
+        let combined = app.display_messages_combined();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].content, "hello");
+    }
+
+    #[test]
+    fn export_uses_committed_state_not_live_overlay() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let export_path = tmp.path().join("export.html");
+
+        let mut app = make_app();
+        app.current_cwd = tmp.path().to_string_lossy().to_string();
+        app.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load event log"),
+        ));
+        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
+            content: "committed".to_string(),
+            timestamp: 1,
+        });
+        app.live_turn.assistant_content = "live assistant".to_string();
+        app.live_turn.notices.push(Message::assistant("[notice]"));
+
+        app.export_session_html(Some(export_path.to_str().expect("utf8 path")));
+
+        let html = std::fs::read_to_string(&export_path).expect("read export html");
+        assert!(html.contains("committed"));
+        assert!(!html.contains("live assistant"));
+        assert!(!html.contains("[notice]"));
+    }
+
+    #[test]
+    fn provider_error_clears_live_turn_and_commits_turn_error_event() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let mut app = make_app();
+        app.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load event log"),
+        ));
+        app.streaming_status = Some(StreamingStatus::Waiting);
+        app.live_turn.assistant_content = "partial".to_string();
+        app.pending_turn_events
+            .push(crate::session_event::SessionEvent::ToolCall {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "src/main.rs"}),
+                timestamp: 1,
+            });
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::Error(ProviderError {
+            message: "boom".to_string(),
+            kind: crate::llm::ProviderErrorKind::Other,
+            status_code: None,
+            source: "test".to_string(),
+        }));
+
+        assert!(app.live_turn.assistant_content.is_empty());
+        assert!(app.pending_turn_events.is_empty());
+
+        let events = app.session_state.as_ref().expect("session state").events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, crate::session_event::SessionEvent::TurnError { .. })),
+            "TurnError should be committed"
+        );
     }
 }

@@ -45,7 +45,7 @@ impl SessionStore {
         Self::open_at(sessions_dir)
     }
 
-    fn open_at(sessions_dir: PathBuf) -> anyhow::Result<Self> {
+    pub(crate) fn open_at(sessions_dir: PathBuf) -> anyhow::Result<Self> {
         fs::create_dir_all(&sessions_dir).with_context(|| {
             format!("Failed to create sessions dir: {}", sessions_dir.display())
         })?;
