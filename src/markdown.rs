@@ -832,16 +832,14 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                 }
             }
 
-            Event::SoftBreak
-                if !in_table && !in_code_block => {
-                    inline_spans.push((" ".to_string(), Style::default()));
-                }
+            Event::SoftBreak if !in_table && !in_code_block => {
+                inline_spans.push((" ".to_string(), Style::default()));
+            }
 
-            Event::HardBreak
-                if !in_table && !in_code_block => {
-                    let prefix = if in_blockquote { "│ " } else { "" };
-                    flush_inline!(prefix);
-                }
+            Event::HardBreak if !in_table && !in_code_block => {
+                let prefix = if in_blockquote { "│ " } else { "" };
+                flush_inline!(prefix);
+            }
 
             Event::Rule => {
                 // Horizontal rule: render as a row of dashes.

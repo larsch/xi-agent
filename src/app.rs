@@ -2897,10 +2897,9 @@ impl App {
         let mut pending_ids: Vec<String> = Vec::new();
         for ev in &self.pending_turn_events {
             match ev {
-                SessionEvent::ToolCall { id, .. }
-                    if !pending_ids.iter().any(|p| p == id) => {
-                        pending_ids.push(id.clone());
-                    }
+                SessionEvent::ToolCall { id, .. } if !pending_ids.iter().any(|p| p == id) => {
+                    pending_ids.push(id.clone());
+                }
                 SessionEvent::ToolResult { id, .. } => {
                     pending_ids.retain(|p| p != id);
                 }
