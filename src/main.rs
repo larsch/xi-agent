@@ -842,7 +842,7 @@ fn handle_key_event(
 
 fn handle_global_key_shortcuts(
     app: &mut App,
-    _provider: &Arc<dyn LlmProvider + Send + Sync>,
+    provider: &Arc<dyn LlmProvider + Send + Sync>,
     key: KeyEvent,
     #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
 ) -> KeyDispatch {
