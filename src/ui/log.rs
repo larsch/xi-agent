@@ -70,7 +70,10 @@ pub(super) fn build_log_lines(
 
                 if has_answer {
                     let prefix = format!("{answer_icon} ");
-                    let md_lines = crate::markdown::render(&content, width, &prefix);
+                    let mut md_lines = crate::markdown::render(&content, width, &prefix);
+                    if answer_icon == "💭" {
+                        dim_lines(&mut md_lines);
+                    }
                     append_markdown_answer(&mut lines, md_lines, is_streaming_last);
                 }
             }
@@ -427,6 +430,17 @@ fn append_message_dim(
                 spans.push(Span::styled(suffix, dim_style));
             }
             out.push(Line::from(spans));
+        }
+    }
+}
+
+fn dim_lines(lines: &mut [Line<'static>]) {
+    let dim_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(ratatui::style::Modifier::DIM);
+    for line in lines.iter_mut() {
+        for span in &mut line.spans {
+            span.style = span.style.patch(dim_style);
         }
     }
 }
