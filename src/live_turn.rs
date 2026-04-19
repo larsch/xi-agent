@@ -70,9 +70,9 @@ impl LiveTurnState {
         Self::default()
     }
 
-    /// True when there is any in-flight assistant content (text or thinking).
+    /// True when there is any in-flight assistant content (visible text or thinking).
     pub fn has_assistant_content(&self) -> bool {
-        !self.assistant_content.is_empty() || self.assistant_thinking.is_some()
+        !self.assistant_content.trim().is_empty() || self.assistant_thinking.is_some()
     }
 
     /// True when there are any active or completed tool entries.
@@ -178,6 +178,13 @@ mod tests {
     fn render_overlay_phase_only_stays_empty_without_visible_content() {
         let mut live = LiveTurnState::new();
         live.assistant_phase = AssistantPhase::Provisional;
+        assert!(live.render_overlay(true).is_empty());
+    }
+
+    #[test]
+    fn render_overlay_skips_whitespace_only_assistant_content() {
+        let mut live = LiveTurnState::new();
+        live.assistant_content = "\n   \n".to_string();
         assert!(live.render_overlay(true).is_empty());
     }
 

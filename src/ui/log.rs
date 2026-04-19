@@ -41,7 +41,8 @@ pub(super) fn build_log_lines(
             Role::Assistant => {
                 let thinking = msg.thinking.as_deref().unwrap_or("");
                 let is_streaming_last = streaming && is_last;
-                let has_answer = is_streaming_last || !msg.content.is_empty();
+                let content = trim_assistant_block_edges(&msg.content);
+                let has_answer = !content.is_empty();
 
                 if !thinking.is_empty() {
                     append_message_dim(
@@ -68,14 +69,9 @@ pub(super) fn build_log_lines(
                 };
 
                 if has_answer {
-                    if is_streaming_last && msg.content.is_empty() {
-                        let content = format!("{answer_icon} ▋");
-                        append_message(&mut lines, &content, "", width, false);
-                    } else {
-                        let prefix = format!("{answer_icon} ");
-                        let md_lines = crate::markdown::render(&msg.content, width, &prefix);
-                        append_markdown_answer(&mut lines, md_lines, is_streaming_last);
-                    }
+                    let prefix = format!("{answer_icon} ");
+                    let md_lines = crate::markdown::render(&content, width, &prefix);
+                    append_markdown_answer(&mut lines, md_lines, is_streaming_last);
                 }
             }
             Role::ToolCall => {
@@ -210,6 +206,38 @@ pub(super) fn build_log_lines(
     }
 
     lines
+}
+
+fn trim_assistant_block_edges(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .unwrap_or(start);
+
+    let mut out = String::new();
+    for (idx, line) in lines[start..=end].iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let is_first = idx == 0;
+        let is_last = start + idx == end;
+        let rendered = if is_first && is_last {
+            line.trim()
+        } else if is_first {
+            line.trim_start()
+        } else if is_last {
+            line.trim_end()
+        } else {
+            line
+        };
+        out.push_str(rendered);
+    }
+
+    out
 }
 
 fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
@@ -522,4 +550,31 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
         result.push('\n');
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_log_lines, trim_assistant_block_edges};
+    use crate::llm::{AssistantPhase, Message};
+
+    #[test]
+    fn trim_assistant_block_edges_hides_outer_whitespace() {
+        let rendered = trim_assistant_block_edges("\n  hello\n\n");
+        assert_eq!(rendered, "hello");
+    }
+
+    #[test]
+    fn trim_assistant_block_edges_preserves_interior_whitespace() {
+        let rendered = trim_assistant_block_edges("\n\nfirst\n\n\nlast\n\n");
+        assert_eq!(rendered, "first\n\n\nlast");
+    }
+
+    #[test]
+    fn build_log_lines_hides_whitespace_only_streaming_assistant() {
+        let mut msg = Message::assistant("\n   \n".to_string());
+        msg.assistant_phase = Some(AssistantPhase::Provisional);
+
+        let lines = build_log_lines(&[msg], true, 80);
+        assert!(lines.is_empty());
+    }
 }

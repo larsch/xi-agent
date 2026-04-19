@@ -943,9 +943,9 @@ mod tests {
     }
 
     #[test]
-    fn streaming_empty_assistant_message_shows_cursor() {
+    fn streaming_empty_assistant_message_is_not_rendered() {
         let lines = log::build_log_lines(&[Message::assistant("")], true, 80);
-        assert_eq!(line_text(&lines[0]), "💭 ▋");
+        assert!(lines.is_empty());
     }
 
     #[test]
