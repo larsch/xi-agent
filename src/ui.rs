@@ -80,14 +80,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
-        streaming: app.streaming(),
-        has_provider_status: matches!(
-            app.streaming_status,
-            Some(
-                crate::app::StreamingStatus::Message(_)
-                    | crate::app::StreamingStatus::CompletedMessage(_)
-            )
-        ),
+        has_activity: app.throbber_visible(),
+        has_provider_status: app.provider_status_visible(),
         queued_steering_len: app.queued_steering().len(),
     });
 
@@ -95,13 +89,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
+            Constraint::Length(layout.activity_height),
+            Constraint::Length(layout.pending_messages_height),
+            Constraint::Length(layout.provider_status_height),
             Constraint::Length(layout.completion_height),
             Constraint::Length(layout.selection_header_height),
             Constraint::Length(layout.selection_items_height),
             Constraint::Length(layout.login_header_height),
             Constraint::Length(layout.login_content_height),
-            Constraint::Length(layout.status_height),
-            Constraint::Length(layout.pending_messages_height),
             Constraint::Length(layout.halfblock_height),
             Constraint::Length(layout.input_height),
             Constraint::Length(layout.halfblock_height),
@@ -110,17 +105,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .split(f.area());
 
     let log_area = chunks[0];
-    let completion_area = chunks[1];
-    let sel_header_area = chunks[2];
-    let sel_items_area = chunks[3];
-    let login_hdr_area = chunks[4];
-    let login_body_area = chunks[5];
-    let status_area = chunks[6];
-    let pending_messages_area = chunks[7];
-    let top_hb_area = chunks[8];
-    let input_area = chunks[9];
-    let bot_hb_area = chunks[10];
-    let info_area = chunks[11];
+    let activity_area = chunks[1];
+    let pending_messages_area = chunks[2];
+    let provider_status_area = chunks[3];
+    let completion_area = chunks[4];
+    let sel_header_area = chunks[5];
+    let sel_items_area = chunks[6];
+    let login_hdr_area = chunks[7];
+    let login_body_area = chunks[8];
+    let top_hb_area = chunks[9];
+    let input_area = chunks[10];
+    let bot_hb_area = chunks[11];
+    let info_area = chunks[12];
 
     let inner_height = log_area.height as usize;
     let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
@@ -308,12 +304,16 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         );
     }
 
-    if layout.status_height > 0 {
-        status::render(f, status_area, app);
+    if layout.activity_height > 0 {
+        status::render_activity(f, activity_area, app);
     }
 
     if layout.pending_messages_height > 0 {
         pending::render(f, pending_messages_area, app);
+    }
+
+    if layout.provider_status_height > 0 {
+        status::render_provider_status(f, provider_status_area, app);
     }
 
     if !app.login.active && !app.ask_user_selection_no_freeform() {
@@ -470,7 +470,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -493,7 +493,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -519,7 +519,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -536,7 +536,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -560,7 +560,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -582,7 +582,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -609,7 +609,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -632,7 +632,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -649,7 +649,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -673,7 +673,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });

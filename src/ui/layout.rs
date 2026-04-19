@@ -6,14 +6,15 @@ use crate::app::MAX_SELECTION_VISIBLE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PanelHeights {
+    pub(super) activity_height: u16,
+    pub(super) pending_messages_height: u16,
+    pub(super) provider_status_height: u16,
     pub(super) completion_height: u16,
     pub(super) selection_header_height: u16,
     pub(super) selection_items_height: u16,
     pub(super) login_header_height: u16,
     pub(super) login_content_height: u16,
     pub(super) halfblock_height: u16,
-    pub(super) status_height: u16,
-    pub(super) pending_messages_height: u16,
     pub(super) input_height: u16,
     pub(super) info_height: u16,
 }
@@ -32,7 +33,7 @@ pub(super) struct PanelInputs<'a> {
     pub(super) ask_user_selection_no_freeform: bool,
     pub(super) login_url: Option<&'a str>,
     pub(super) has_login_code: bool,
-    pub(super) streaming: bool,
+    pub(super) has_activity: bool,
     pub(super) has_provider_status: bool,
     pub(super) queued_steering_len: usize,
 }
@@ -58,6 +59,24 @@ pub(super) fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
         .min((input.terminal_height * 40 / 100).max(1)) as u16;
 
     let info_height: u16 = if input.show_info { 1 } else { 0 };
+
+    let activity_height: u16 = if !input.login_active && input.has_activity {
+        1
+    } else {
+        0
+    };
+
+    let pending_messages_height: u16 = if input.queued_steering_len > 0 {
+        input.queued_steering_len.min(3) as u16
+    } else {
+        0
+    };
+
+    let provider_status_height: u16 = if !input.login_active && input.has_provider_status {
+        1
+    } else {
+        0
+    };
 
     let completion_height = if input.login_active || input.selection_mode {
         0
@@ -96,28 +115,17 @@ pub(super) fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
     let hide_input = input.login_active || input.ask_user_selection_no_freeform;
     let input_height = if hide_input { 0 } else { capped_input };
     let halfblock_height: u16 = if hide_input { 0 } else { 1 };
-    let status_height: u16 =
-        if !input.login_active && (input.streaming || input.has_provider_status) {
-            1
-        } else {
-            0
-        };
-
-    let pending_messages_height: u16 = if input.streaming && input.queued_steering_len > 0 {
-        input.queued_steering_len.min(3) as u16
-    } else {
-        0
-    };
 
     PanelHeights {
+        activity_height,
+        pending_messages_height,
+        provider_status_height,
         completion_height,
         selection_header_height,
         selection_items_height,
         login_header_height,
         login_content_height,
         halfblock_height,
-        status_height,
-        pending_messages_height,
         input_height,
         info_height,
     }
@@ -153,7 +161,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -176,7 +184,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -202,7 +210,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -219,7 +227,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -243,7 +251,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -265,7 +273,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -275,6 +283,56 @@ mod tests {
             heights.selection_items_height as usize,
             MAX_SELECTION_VISIBLE
         );
+    }
+
+    #[test]
+    fn layout_control_band_rows_follow_visibility_independently() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 30,
+            width: 100,
+            input_line_count: 1,
+            show_info: false,
+            login_active: false,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            ask_user_selection_no_freeform: false,
+            login_url: None,
+            has_login_code: false,
+            has_activity: true,
+            has_provider_status: true,
+            queued_steering_len: 2,
+        });
+
+        assert_eq!(heights.activity_height, 1);
+        assert_eq!(heights.pending_messages_height, 2);
+        assert_eq!(heights.provider_status_height, 1);
+    }
+
+    #[test]
+    fn layout_hides_activity_and_provider_status_rows_during_login() {
+        let heights = compute_panel_heights(PanelInputs {
+            terminal_height: 30,
+            width: 100,
+            input_line_count: 1,
+            show_info: false,
+            login_active: true,
+            selection_mode: false,
+            selection_items_len: 0,
+            completions_len: 0,
+            resume_hint_visible: false,
+            ask_user_selection_no_freeform: false,
+            login_url: None,
+            has_login_code: false,
+            has_activity: true,
+            has_provider_status: true,
+            queued_steering_len: 2,
+        });
+
+        assert_eq!(heights.activity_height, 0);
+        assert_eq!(heights.pending_messages_height, 2);
+        assert_eq!(heights.provider_status_height, 0);
     }
 
     #[test]
@@ -292,7 +350,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -315,7 +373,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -332,7 +390,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: None,
             has_login_code: false,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });
@@ -356,7 +414,7 @@ mod tests {
             ask_user_selection_no_freeform: false,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
-            streaming: false,
+            has_activity: false,
             has_provider_status: false,
             queued_steering_len: 0,
         });

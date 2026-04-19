@@ -12,6 +12,19 @@
 
 # Interactive UI
 
+- The primary chat interface is a vertical stack with fixed region order:
+  1. output viewport
+  2. control band
+  3. input area
+- The control band rows have a strict top-to-bottom order:
+  1. activity row (throbber / spinner)
+  2. pending steering rows
+  3. provider-status row (provider/system status text)
+  4. interactive rows
+- Interactive rows are mutually exclusive by mode:
+  - menu rows (completions / selection) in normal interaction mode
+  - login panel rows during `/login <provider>`
+- Any control-band row may be hidden when inactive, but relative ordering is invariant.
 - Render a scrollable, paginated view of the session history, with the most recent command at the bottom.
 - Tool invocations are rendered as "<icon> <args>", where <icon> is a visual representation of the tool (e.g. a terminal icon for `bash`, a pencil for `edit`, etc.).
   - Shell tool calls (`bash` / `cmd` / `powershell`) show the command with embedded newlines preserved, up to 5 lines. When truncated, the display shows `…` on its own line.
@@ -31,6 +44,16 @@
   - `🧠` for model thinking tokens
   - `💭` for provisional assistant output (tool intent/tool-calling turn)
   - `💬` for final assistant output
+- Streaming/status-row behavior:
+  - On turn start, the activity row is shown immediately to indicate the system is waiting for stream/tool activity.
+  - While visible assistant/tool output is actively arriving, the activity row is hidden.
+  - If a turn is still active but output is temporarily idle, the activity row may reappear after a short delay.
+  - The output viewport remains bottom-aligned at all times. The UI must not render trailing empty rows after the current output.
+  - Control-band row toggles (activity row, pending steering rows, provider-status row, interactive rows) should avoid abrupt one-line jumps at stream boundaries; transitions should preserve stable output positioning.
+- Assistant block rendering must be stable across streaming and committed states:
+  - Leading and trailing empty lines/whitespace are not rendered.
+  - If later chunks introduce non-whitespace text that makes previously hidden whitespace interior, that whitespace is rendered as part of the block.
+  - The same trimming/presentation rules apply during streaming and after commit.
 - User input is a text input field at the bottom of the screen, where users can type commands and submit them by pressing Enter.
 - `Ctrl+I` toggles a one-line info bar (provider, model, thinking level, and context window). When provider-reported token usage is available and the model context window is known, the context section shows utilization as `used / max (percent)`; otherwise it falls back to showing only max context (or `unknown`).
 - When automatic or manual compaction runs, the UI shows a visible `compacting…` status and then a `[compacted: Xk → Yk tokens]` marker in the session log.

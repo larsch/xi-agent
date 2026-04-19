@@ -105,14 +105,13 @@ impl LiveTurnState {
     /// in-flight progress during that period.
     ///
     /// Returns messages in display order:
-    /// 1. Assistant message (if any content/thinking/phase is present)
+    /// 1. Assistant message (if any content/thinking is present)
     /// 2. Tool call/result pairs (in insertion order)
     /// 3. UI-only notices
     pub fn render_overlay(&self, _streaming: bool) -> Vec<Message> {
         let mut msgs: Vec<Message> = Vec::new();
 
-        let show_assistant =
-            self.has_assistant_content() || self.assistant_phase != AssistantPhase::default();
+        let show_assistant = self.has_assistant_content();
 
         if show_assistant {
             let mut asst = Message::assistant(self.assistant_content.clone());
@@ -172,6 +171,13 @@ mod tests {
     #[test]
     fn render_overlay_stays_empty_while_streaming_before_first_output() {
         let live = LiveTurnState::new();
+        assert!(live.render_overlay(true).is_empty());
+    }
+
+    #[test]
+    fn render_overlay_phase_only_stays_empty_without_visible_content() {
+        let mut live = LiveTurnState::new();
+        live.assistant_phase = AssistantPhase::Provisional;
         assert!(live.render_overlay(true).is_empty());
     }
 

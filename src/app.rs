@@ -390,7 +390,7 @@ pub struct App {
     pub throbber_tick: u8,
     /// Instant of the last visible agent output (text/thinking tokens, tool
     /// calls, tool results, etc.); used to suppress the throbber while output
-    /// is actively arriving and re-show it after 1 s of idle time.
+    /// is actively arriving and re-show it after a short idle time.
     pub last_output_at: Option<std::time::Instant>,
     /// Optional system prompt prepended to every request.
     pub system_prompt: Option<String>,
@@ -685,6 +685,17 @@ impl App {
             None => true,
             Some(t) => t.elapsed() >= std::time::Duration::from_millis(240),
         }
+    }
+
+    /// Returns true when provider/system status text should be visible.
+    pub fn provider_status_visible(&self) -> bool {
+        if self.login.active {
+            return false;
+        }
+        matches!(
+            self.streaming_status,
+            Some(StreamingStatus::Message(_) | StreamingStatus::CompletedMessage(_))
+        )
     }
 
     pub fn ask_user_freeform_mode(&self) -> bool {
@@ -2703,6 +2714,7 @@ impl App {
         self.pending_turn_events.clear();
         self.runtime.queued_steering.clear();
         self.runtime.steering_tx = None;
+        self.streaming_status = None;
         self.latest_usage = None;
         self.reset_textarea();
         self.auto_scroll = true;
@@ -4537,6 +4549,18 @@ mod tests {
         ));
 
         assert!(!app.throbber_visible());
+    }
+
+    #[test]
+    fn provider_status_visibility_follows_status_messages() {
+        let mut app = make_app();
+        assert!(!app.provider_status_visible());
+
+        app.streaming_status = Some(StreamingStatus::Message("compacting…".to_string()));
+        assert!(app.provider_status_visible());
+
+        app.streaming_status = None;
+        assert!(!app.provider_status_visible());
     }
 
     #[test]
