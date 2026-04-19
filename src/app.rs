@@ -3074,7 +3074,9 @@ impl App {
     pub fn apply_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::ThinkingToken(token) => {
-                self.last_output_at = Some(std::time::Instant::now());
+                if !token.trim().is_empty() {
+                    self.last_output_at = Some(std::time::Instant::now());
+                }
                 self.live_turn
                     .assistant_thinking
                     .get_or_insert_with(String::new)
@@ -3085,7 +3087,9 @@ impl App {
                 self.latest_usage = Some(usage);
             }
             AgentEvent::TextToken { text, phase } => {
-                self.last_output_at = Some(std::time::Instant::now());
+                if !text.trim().is_empty() {
+                    self.last_output_at = Some(std::time::Instant::now());
+                }
                 self.live_turn.assistant_content.push_str(&text);
                 if phase != AssistantPhase::Unknown {
                     self.live_turn.assistant_phase = phase;
@@ -4549,6 +4553,33 @@ mod tests {
         ));
 
         assert!(!app.throbber_visible());
+    }
+
+    #[test]
+    fn whitespace_text_token_keeps_throbber_visible_while_waiting() {
+        let mut app = make_app();
+        app.streaming_status = Some(StreamingStatus::Waiting);
+        app.last_output_at = None;
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
+            text: "   \n".to_string(),
+            phase: crate::llm::AssistantPhase::Unknown,
+        });
+
+        assert!(app.throbber_visible());
+    }
+
+    #[test]
+    fn whitespace_thinking_token_keeps_throbber_visible_while_waiting() {
+        let mut app = make_app();
+        app.streaming_status = Some(StreamingStatus::Waiting);
+        app.last_output_at = None;
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::ThinkingToken(
+            "\n\n".to_string(),
+        ));
+
+        assert!(app.throbber_visible());
     }
 
     #[test]
