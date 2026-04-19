@@ -750,11 +750,10 @@ async fn run(
                         MouseEventKind::ScrollDown => app.scroll_down_lines(3),
                         _ => {}
                     },
-                    Event::Paste(text) => {
-                        if !app.login.active {
+                    Event::Paste(text)
+                        if !app.login.active => {
                             apply_paste(app, provider, &text);
-                        }
-                    },
+                        },
                     _ => {}
                 }
             }
@@ -843,7 +842,7 @@ fn handle_key_event(
 
 fn handle_global_key_shortcuts(
     app: &mut App,
-    provider: &Arc<dyn LlmProvider + Send + Sync>,
+    _provider: &Arc<dyn LlmProvider + Send + Sync>,
     key: KeyEvent,
     #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
 ) -> KeyDispatch {

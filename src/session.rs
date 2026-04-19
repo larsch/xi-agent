@@ -175,7 +175,7 @@ impl SessionStore {
         }
 
         let mut sessions = by_id.into_values().collect::<Vec<_>>();
-        sessions.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at_ms));
         sessions
     }
 
