@@ -80,7 +80,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
-        streaming: app.throbber_visible(),
+        streaming: app.streaming(),
         has_provider_status: matches!(
             app.streaming_status,
             Some(

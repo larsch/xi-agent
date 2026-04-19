@@ -99,20 +99,20 @@ impl LiveTurnState {
     /// Build the overlay messages to compose with committed display history
     /// at render time.
     ///
-    /// `streaming` should be `true` while an agent turn is active so that an
-    /// empty assistant entry is included even before the first token arrives
-    /// (this lets the UI render the waiting cursor `▋`).
+    /// `streaming` indicates whether an agent turn is currently active.
+    /// Empty assistant placeholders are intentionally not rendered while
+    /// waiting for first visible output; the status throbber communicates
+    /// in-flight progress during that period.
     ///
     /// Returns messages in display order:
-    /// 1. Assistant message (if any content/thinking present, or streaming)
+    /// 1. Assistant message (if any content/thinking/phase is present)
     /// 2. Tool call/result pairs (in insertion order)
     /// 3. UI-only notices
-    pub fn render_overlay(&self, streaming: bool) -> Vec<Message> {
+    pub fn render_overlay(&self, _streaming: bool) -> Vec<Message> {
         let mut msgs: Vec<Message> = Vec::new();
 
-        let show_assistant = self.has_assistant_content()
-            || self.assistant_phase != AssistantPhase::default()
-            || streaming;
+        let show_assistant =
+            self.has_assistant_content() || self.assistant_phase != AssistantPhase::default();
 
         if show_assistant {
             let mut asst = Message::assistant(self.assistant_content.clone());
@@ -167,6 +167,12 @@ mod tests {
     fn render_overlay_empty_when_nothing_active() {
         let live = LiveTurnState::new();
         assert!(live.render_overlay(false).is_empty());
+    }
+
+    #[test]
+    fn render_overlay_stays_empty_while_streaming_before_first_output() {
+        let live = LiveTurnState::new();
+        assert!(live.render_overlay(true).is_empty());
     }
 
     #[test]

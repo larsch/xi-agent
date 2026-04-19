@@ -669,9 +669,9 @@ impl App {
     /// Three-state model:
     /// - Machine waiting for **user** (`has_pending_ask` / `ask_user_freeform_mode`):
     ///   throbber hidden — the ball is in the user's court.
-    /// - Machine producing **output** (visible content added within the last second):
+    /// - Machine producing **output** (visible content added very recently):
     ///   throbber hidden — something is actively appearing on screen.
-    /// - Machine working **silently** (streaming, no output for ≥ 1 s):
+    /// - Machine working **silently** (streaming, no visible output for a short interval):
     ///   throbber visible — signals that work is in progress.
     pub fn throbber_visible(&self) -> bool {
         if !self.streaming() {
@@ -3094,7 +3094,9 @@ impl App {
                 self.bump_log_revision();
             }
             AgentEvent::StatusUpdate(msg) => {
-                self.last_output_at = Some(std::time::Instant::now());
+                if !msg.is_empty() {
+                    self.last_output_at = Some(std::time::Instant::now());
+                }
                 self.streaming_status = if msg.is_empty() {
                     Some(StreamingStatus::Waiting)
                 } else {
@@ -4507,6 +4509,34 @@ mod tests {
                 .any(|e| matches!(e, crate::session_event::SessionEvent::TurnError { .. })),
             "TurnError should be committed"
         );
+    }
+
+    #[test]
+    fn empty_status_update_keeps_throbber_visible_while_waiting() {
+        let mut app = make_app();
+        app.streaming_status = Some(StreamingStatus::Waiting);
+        app.last_output_at = None;
+
+        assert!(app.throbber_visible());
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::StatusUpdate(String::new()));
+
+        assert!(app.throbber_visible());
+    }
+
+    #[test]
+    fn non_empty_status_update_temporarily_hides_throbber() {
+        let mut app = make_app();
+        app.streaming_status = Some(StreamingStatus::Waiting);
+        app.last_output_at = None;
+
+        assert!(app.throbber_visible());
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::StatusUpdate(
+            "retrying in 1s…".to_string(),
+        ));
+
+        assert!(!app.throbber_visible());
     }
 
     #[test]
