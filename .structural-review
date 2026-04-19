@@ -29,6 +29,12 @@ Date: 2026-04-19
 - **Why it matters**: The two representations can silently diverge. If `push_llm_message` in `projection.rs` changes (e.g. to handle a new event type), the agent loop's manual push logic won't automatically follow. The design intent — event sourcing with an incremental projection — is sound; the abstraction just hasn't been fully wired up.
 - **Concrete fix**: Thread an `LlmProjection` through `run_agent_loop`. After appending any event to `session_events`, call `projection.ensure_current(&session_events)` and obtain `messages` from `projection.get()` at the top of each loop iteration. Remove the manual `messages.push(...)` calls. The compaction rebuild falls out for free via `LlmProjection`'s existing invalidation logic. Fix `timestamp: 0` as a follow-on by moving `now_ts()` to a shared utility and passing real timestamps into session events.
 
+### Resolution (commit 051cd88)
+
+**Fixed.** The parallel `messages` vec is eliminated. All helper functions (`drain_steering_messages`, `record_tool_call_result`, `skip_remaining_tool_calls`, `resolve_tool_batch_interruption`) now write only to `session_events`. `LlmProjection::ensure_current` is called at the top of each loop iteration and the result is used directly for the provider call. The compaction/overflow retry path is simplified to a bare `continue`. `system_prompt` moved into `AgentLoopConfig`. `prepare_llm_messages` removed from `App`.
+
+**Remaining gap — `timestamp: 0`:** Three sites in the updated loop still use `timestamp: 0` (steering messages, file-change notifications, compaction summary). Persisted `SessionEvent`s appended during an agent run will carry wrong timestamps. If timestamps are used for ordering, display, or export they will silently be incorrect. Fix: move `now_ts()` from `app.rs` to a shared utility and call it at each `session_events.push` site in the loop.
+
 ---
 
 ## Issue 3 — Duplication: Each LLM provider re-implements message serialization independently
