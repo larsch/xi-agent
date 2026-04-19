@@ -170,12 +170,17 @@ impl Tool for ReadFileTool {
 
             let mut result = ToolResult::ok_str(tr.content);
             if truncated {
+                let output_lines = if last_line >= first_line {
+                    last_line - first_line + 1
+                } else {
+                    0
+                };
                 result.truncation = Some(TruncationResult {
                     content: result.content.clone(),
                     truncated: true,
                     total_lines: total,
                     total_bytes: content.len(),
-                    output_lines: last_line - first_line + 1,
+                    output_lines,
                     first_kept_line: first_line,
                 });
                 result.is_truncated = true;
@@ -304,6 +309,26 @@ mod tests {
             "unexpected content: {}",
             result.content
         );
+    }
+
+    #[tokio::test]
+    async fn read_long_single_line_does_not_underflow_truncation_metadata() {
+        let long_line = "x".repeat(crate::agent::tools::truncate::DEFAULT_MAX_BYTES + 1);
+        let f = write_temp(&long_line);
+        let tool = make_tool();
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert!(
+            result.is_truncated,
+            "expected truncation for long single line"
+        );
+
+        let tr = result.truncation.expect("missing truncation metadata");
+        assert_eq!(tr.first_kept_line, 1);
+        assert_eq!(tr.output_lines, 0);
+        assert_eq!(tr.total_lines, 1);
     }
 
     #[tokio::test]
