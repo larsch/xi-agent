@@ -21,7 +21,9 @@ pub(super) fn render(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let frame = THROBBER_FRAMES[(app.throbber_tick as usize) % THROBBER_FRAMES.len()];
 
     let provider_message = match &app.streaming_status {
-        Some(StreamingStatus::Message(s)) => Some(s.as_str()),
+        Some(StreamingStatus::Message(s) | StreamingStatus::CompletedMessage(s)) => {
+            Some(s.as_str())
+        }
         _ => None,
     };
     let status_line = match (show_throbber, provider_message) {

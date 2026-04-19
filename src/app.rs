@@ -40,6 +40,8 @@ pub enum StreamingStatus {
     Waiting,
     /// Provider-supplied transient message (e.g. rate-limit countdown).
     Message(String),
+    /// A completed-turn status message that remains visible until the next turn starts.
+    CompletedMessage(String),
 }
 
 // ── Selection result ──────────────────────────────────────────────────────────
@@ -627,7 +629,10 @@ impl App {
 
     /// Returns true when an agent turn is active (streaming or waiting for first token).
     pub fn streaming(&self) -> bool {
-        self.streaming_status.is_some()
+        matches!(
+            self.streaming_status,
+            Some(StreamingStatus::Waiting | StreamingStatus::Message(_))
+        )
     }
 
     /// Advance the throbber animation frame.  Called on every UI tick.
@@ -2777,6 +2782,7 @@ impl App {
     /// Does **not** perform the pre-flight token check — callers are
     /// responsible for calling `check_token_preflight` before this.
     fn launch_turn(&mut self, provider: &DynProvider) {
+        self.clear_abort_status_notice();
         self.ensure_event_log_for_submit();
         assert!(
             self.session_state.is_some(),
@@ -2916,9 +2922,46 @@ impl App {
         }
 
         for id in pending_ids {
-            self.live_turn
-                .notices
-                .push(Message::tool_result(id, "failure: aborted by user", true));
+            if let Some(entry) = self.live_turn.find_tool_entry_mut(&id)
+                && entry.result.is_none()
+            {
+                entry.result = Some(LiveToolResult {
+                    content: "failure: aborted by user".to_string(),
+                    is_error: true,
+                    display_range: None,
+                });
+            }
+
+            let name = self
+                .pending_turn_events
+                .iter()
+                .rev()
+                .find_map(|e| {
+                    if let SessionEvent::ToolCall { id: cid, name, .. } = e {
+                        if cid == &id { Some(name.clone()) } else { None }
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            self.pending_turn_events.push(SessionEvent::ToolResult {
+                id,
+                name,
+                content: "failure: aborted by user".to_string(),
+                is_error: true,
+                display_range: None,
+                timestamp: Self::now_ts(),
+            });
+        }
+    }
+
+    fn clear_abort_status_notice(&mut self) {
+        if matches!(
+            self.streaming_status,
+            Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
+        ) {
+            self.streaming_status = None;
         }
     }
 
@@ -2929,14 +2972,15 @@ impl App {
                 let _ = tx.send(true);
             }
             handle.abort();
-            self.streaming_status = None;
+            self.streaming_status = Some(StreamingStatus::CompletedMessage(
+                "[agent loop aborted]".to_string(),
+            ));
             self.last_output_at = None;
             self.runtime.steering_tx = None;
             self.runtime.queued_steering.clear();
             self.append_abort_results_for_pending_tool_calls();
-            self.live_turn
-                .notices
-                .push(Message::assistant("[agent loop aborted]"));
+            self.finalise_assistant_turn_event();
+            self.flush_turn_events();
             self.bump_log_revision();
             self.persist_messages();
         }
@@ -3959,13 +4003,10 @@ mod tests {
                 app.runtime.agent_task.is_none(),
                 "agent task should be removed when stream is aborted"
             );
-            assert!(
-                app.live_turn
-                    .notices
-                    .iter()
-                    .any(|m| m.content == "[agent loop aborted]"),
-                "abort should append user-visible abort notice"
-            );
+            assert!(matches!(
+                app.streaming_status,
+                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
+            ));
         });
     }
 
@@ -3973,7 +4014,13 @@ mod tests {
     fn abort_agent_loop_appends_error_result_for_pending_tool_call() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("session.jsonl");
+
             let mut app = make_app();
+            app.session_state = Some(crate::session_state::SessionState::from_event_log(
+                crate::event_log::EventLog::load(&path).expect("load event log"),
+            ));
             app.streaming_status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             // Simulate an in-flight tool call via pending_turn_events.
@@ -3984,12 +4031,22 @@ mod tests {
                     args: serde_json::json!({"command": "git diff"}),
                     timestamp: 1,
                 });
+            app.live_turn
+                .tool_entries
+                .push(crate::live_turn::LiveToolEntry {
+                    id: "call_1".to_string(),
+                    name: "powershell".to_string(),
+                    args: serde_json::json!({"command": "git diff"}),
+                    result: None,
+                });
 
             app.abort_agent_loop();
 
             let tool_result = app
-                .live_turn
-                .notices
+                .session_state
+                .as_ref()
+                .expect("session state")
+                .display_messages()
                 .iter()
                 .find(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
                 .expect("expected abort tool result");
@@ -4002,7 +4059,13 @@ mod tests {
     fn abort_agent_loop_does_not_duplicate_existing_tool_result() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("session.jsonl");
+
             let mut app = make_app();
+            app.session_state = Some(crate::session_state::SessionState::from_event_log(
+                crate::event_log::EventLog::load(&path).expect("load event log"),
+            ));
             app.streaming_status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             // Simulate a ToolCall with its result already in pending_turn_events.
@@ -4026,17 +4089,62 @@ mod tests {
             app.abort_agent_loop();
 
             let matching_results = app
-                .live_turn
-                .notices
+                .session_state
+                .as_ref()
+                .expect("session state")
+                .display_messages()
                 .iter()
                 .filter(|m| {
                     m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1")
                 })
                 .count();
             assert_eq!(
-                matching_results, 0,
+                matching_results, 1,
                 "should not append abort result for already-completed tool call"
             );
+        });
+    }
+
+    #[test]
+    fn abort_agent_loop_commits_partial_turn_and_next_turn_clears_abort_status() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("session.jsonl");
+
+            let mut app = make_app();
+            app.session_state = Some(crate::session_state::SessionState::from_event_log(
+                crate::event_log::EventLog::load(&path).expect("load event log"),
+            ));
+            app.live_turn.assistant_content = "partial".to_string();
+            app.streaming_status = Some(StreamingStatus::Waiting);
+            install_test_agent_task(&mut app);
+
+            app.abort_agent_loop();
+
+            let display = app
+                .session_state
+                .as_ref()
+                .expect("session state")
+                .display_messages();
+            assert!(
+                display
+                    .iter()
+                    .any(|m| m.role == Role::Assistant && m.content == "partial")
+            );
+            assert!(matches!(
+                app.streaming_status,
+                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
+            ));
+
+            let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+                std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+            app.launch_turn(&provider);
+
+            assert!(matches!(
+                app.streaming_status,
+                Some(StreamingStatus::Waiting)
+            ));
         });
     }
 

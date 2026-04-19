@@ -83,7 +83,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         streaming: app.throbber_visible(),
         has_provider_status: matches!(
             app.streaming_status,
-            Some(crate::app::StreamingStatus::Message(_))
+            Some(
+                crate::app::StreamingStatus::Message(_)
+                    | crate::app::StreamingStatus::CompletedMessage(_)
+            )
         ),
         queued_steering_len: app.queued_steering().len(),
     });
