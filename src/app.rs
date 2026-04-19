@@ -4400,4 +4400,167 @@ mod tests {
             "TurnError should be committed"
         );
     }
+
+    #[test]
+    fn notices_survive_turn_boundary_but_are_not_committed_or_sent_to_llm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let mut app = make_app();
+        app.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load event log"),
+        ));
+
+        app.live_turn.notices.push(Message::assistant("[notice]"));
+        app.live_turn.assistant_content = "hi".to_string();
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+
+        assert_eq!(
+            app.live_turn.notices.len(),
+            1,
+            "notice should survive turn boundary"
+        );
+        assert_eq!(app.live_turn.notices[0].content, "[notice]");
+        assert!(
+            app.live_turn.assistant_content.is_empty(),
+            "turn content should clear"
+        );
+
+        let events = app.session_state.as_ref().expect("session state").events();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                crate::session_event::SessionEvent::AssistantMessage { content, .. } if content == "[notice]"
+            )),
+            "notice must not be committed as a session event"
+        );
+
+        let llm = app.prepare_llm_messages();
+        assert!(
+            !llm.iter().any(|m| m.content == "[notice]"),
+            "notice must not appear in LLM input"
+        );
+    }
+
+    #[test]
+    fn shell_output_is_ui_only_and_excluded_from_event_log_and_llm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let mut app = make_app();
+        app.current_cwd = tmp.path().to_string_lossy().to_string();
+        app.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load event log"),
+        ));
+        app.shell_textarea.insert_str("printf 'hello'");
+
+        app.submit_shell_command();
+
+        assert!(
+            app.live_turn
+                .notices
+                .iter()
+                .any(|m| m.role == Role::ToolCall && m.tool_call_id.as_deref().is_some()),
+            "shell tool call should appear in UI notices"
+        );
+        assert!(
+            app.live_turn
+                .notices
+                .iter()
+                .any(|m| m.role == Role::ToolResult && m.content.contains("hello")),
+            "shell tool result should appear in UI notices"
+        );
+
+        let events = app.session_state.as_ref().expect("session state").events();
+        assert!(
+            events.is_empty(),
+            "shell output must not enter the event log"
+        );
+
+        let llm = app.prepare_llm_messages();
+        assert!(llm.is_empty(), "shell output must not enter LLM history");
+    }
+
+    #[test]
+    fn finalise_assistant_turn_event_uses_live_turn_state_fields() {
+        let mut app = make_app();
+        app.live_turn.assistant_content = "answer".to_string();
+        app.live_turn.assistant_thinking = Some("thinking".to_string());
+        app.live_turn.assistant_phase = crate::llm::AssistantPhase::Provisional;
+        app.latest_usage = Some(crate::llm::UsageStats {
+            input_tokens: Some(1),
+            output_tokens: Some(2),
+            total_tokens: Some(3),
+        });
+
+        app.finalise_assistant_turn_event();
+
+        let ev = app
+            .pending_turn_events
+            .iter()
+            .find_map(|e| match e {
+                crate::session_event::SessionEvent::AssistantMessage {
+                    content,
+                    thinking,
+                    phase,
+                    usage,
+                    ..
+                } => Some((content, thinking, phase, usage)),
+                _ => None,
+            })
+            .expect("assistant event should be present");
+
+        assert_eq!(ev.0, "answer");
+        assert_eq!(ev.1.as_deref(), Some("thinking"));
+        assert_eq!(*ev.2, crate::llm::AssistantPhase::Provisional);
+        assert_eq!(
+            *ev.3,
+            Some(crate::llm::UsageStats {
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn live_overlay_does_not_mutate_committed_history() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let mut app = make_app();
+        app.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load event log"),
+        ));
+        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
+            content: "committed".to_string(),
+            timestamp: 1,
+        });
+
+        let committed_before = app
+            .session_state
+            .as_ref()
+            .expect("session state")
+            .display_messages()
+            .to_vec();
+
+        app.live_turn.assistant_content = "live".to_string();
+        app.live_turn.notices.push(Message::assistant("[notice]"));
+
+        let committed_after = app
+            .session_state
+            .as_ref()
+            .expect("session state")
+            .display_messages()
+            .to_vec();
+        let before_contents: Vec<_> = committed_before.iter().map(|m| m.content.clone()).collect();
+        let after_contents: Vec<_> = committed_after.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(
+            before_contents, after_contents,
+            "live overlay must not mutate committed history"
+        );
+
+        let combined = app.display_messages_combined();
+        assert!(
+            combined.len() > committed_after.len(),
+            "combined view should include live overlay"
+        );
+    }
 }

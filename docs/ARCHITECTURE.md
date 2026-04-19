@@ -19,7 +19,12 @@ src/
   config.rs            — config.toml loading (XDG + HOME fallback)
   provider.rs          — provider routing, thinking support, context-window fallback table
   provider_instance.rs — BackendPreset/ProviderInstance types and preset metadata catalog
-  session.rs           — persisted chat session storage/index
+  event_log.rs          — append-only durable session event log (JSONL, legacy message migration)
+  projection.rs         — pure and incremental projections from SessionEvent history to display/LLM messages
+  session_event.rs      — durable committed conversation/domain event types
+  session_state.rs      — committed session owner: EventLog + display/LLM read models
+  live_turn.rs          — transient in-flight assistant/tool/notices state for one active turn
+  session.rs            — persisted chat session storage/index
   tool_presentation.rs — tool call/result rendering helpers for the TUI
   auth/                — provider auth store + login/refresh flows + token-state preflight
   agent/
@@ -53,29 +58,39 @@ src/
 
 ```
 User keystroke → App::submit
-  └─ spawns tokio task: run_agent_loop(messages, config, provider, tx, steering_rx)
-       └─ drain steering_rx → insert queued user messages before each turn
-          for each turn:
-            check FileTracker for externally modified files
-              └─ if any: inject ⚠️ user message with unified diff (or warn-only if large)
-                         send AgentEvent::ExternalFileChange
-            provider.stream_chat_with_tools(messages, tool_defs)
-              └─ yields LlmEvent::{Token{..}, ThinkingToken, Usage,
-                                   ToolIntentStart, ToolCall, Done, Error}
-            if ToolCall → tool.execute(args) → ToolResult
-              └─ drain steering_rx after each tool → skip remaining tools if non-empty
-            loop until no tool calls
-            sends AgentEvent::{TextToken{..}, ThinkingToken, Usage,
-                               ToolIntentStart, SteeringConsumed,
-                               ToolCallStart, ToolCallEnd,
-                               ExternalFileChange,
-                               TurnEnd, Done, Error} on tx
+  └─ ensure SessionState exists
+     └─ append committed UserMessage event via SessionState ingestion
+        └─ spawns tokio task: run_agent_loop(messages, config, provider, tx, steering_rx)
+             └─ drain steering_rx → insert queued user messages before each turn
+                for each turn:
+                  check FileTracker for externally modified files
+                    └─ if any: inject ⚠️ user message with unified diff (or warn-only if large)
+                               send AgentEvent::ExternalFileChange
+                  provider.stream_chat_with_tools(messages, tool_defs)
+                    └─ yields LlmEvent::{Token{..}, ThinkingToken, Usage,
+                                         ToolIntentStart, ToolCall, Done, Error}
+                  if ToolCall → tool.execute(args) → ToolResult
+                    └─ drain steering_rx after each tool → skip remaining tools if non-empty
+                  loop until no tool calls
+                  sends AgentEvent::{TextToken{..}, ThinkingToken, Usage,
+                                     ToolIntentStart, SteeringConsumed,
+                                     ToolCallStart, ToolCallEnd,
+                                     ExternalFileChange,
+                                     TurnEnd, Done, Error} on tx
 
 User keystroke (while streaming) → App::enqueue_steering_from_input
   └─ pushes text onto queued_steering (for 🕹️ UI) + sends on steering_tx
 
-  App::apply_event drains tx on each draw tick → updates messages vec
-  ui::draw renders messages vec + queued_steering to terminal
+App::apply_event drains tx on each draw tick
+  ├─ committed events → SessionState ingestion
+  │   └─ updates committed display + committed LLM read models
+  └─ transient streaming/tool/notices → LiveTurnState
+      └─ ui::draw renders committed SessionState display + LiveTurnState overlay
+
+LLM input construction
+  └─ App::prepare_llm_messages
+      └─ system prompt + SessionState committed LLM projection only
+         (LiveTurnState content is excluded)
 ```
 
 ## Key Types
@@ -100,6 +115,22 @@ pub struct Message {
     pub tool_name: Option<String>,
     pub tool_args: Option<serde_json::Value>,
     pub is_error: bool,
+}
+
+// session_state.rs — committed session owner
+pub struct SessionState {
+    event_log: EventLog,
+    display: DisplayProjection,
+    llm: LlmProjection,
+}
+
+// live_turn.rs — transient in-flight turn state
+pub struct LiveTurnState {
+    pub assistant_content: String,
+    pub assistant_thinking: Option<String>,
+    pub assistant_phase: AssistantPhase,
+    pub tool_entries: Vec<LiveToolEntry>,
+    pub notices: Vec<Message>,
 }
 
 // llm/error.rs — typed provider failure
