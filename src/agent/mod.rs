@@ -5,6 +5,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::app_event::AppEvent;
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition};
+use crate::projection::LlmProjection;
 use crate::session_event::{CompactionTrigger, SessionEvent};
 use file_tracker::build_notification;
 
@@ -32,7 +33,7 @@ enum ToolBatchInterruption {
 
 fn drain_steering_messages(
     steering_rx: &mut UnboundedReceiver<String>,
-    messages: &mut Vec<Message>,
+    session_events: &mut Vec<SessionEvent>,
     tx: &UnboundedSender<AppEvent>,
 ) -> bool {
     let mut consumed = false;
@@ -40,22 +41,22 @@ fn drain_steering_messages(
         let _ = tx.send(AppEvent::Agent(AgentEvent::SteeringConsumed {
             text: text.clone(),
         }));
-        messages.push(Message::user(text));
+        session_events.push(SessionEvent::UserMessage {
+            content: text,
+            timestamp: 0,
+        });
         consumed = true;
     }
     consumed
 }
 
 fn record_tool_call_result(
-    messages: &mut Vec<Message>,
     session_events: &mut Vec<SessionEvent>,
     id: &str,
     name: &str,
     args: serde_json::Value,
     result: ToolResult,
 ) {
-    messages.push(Message::tool_call(id, name, args.clone()));
-    messages.push(Message::tool_result(id, &result.content, result.is_error));
     session_events.push(SessionEvent::ToolCall {
         id: id.to_string(),
         name: name.to_string(),
@@ -76,7 +77,6 @@ fn skip_remaining_tool_calls(
     pending_tool_calls: &[(String, String, serde_json::Value)],
     next_idx: usize,
     tx: &UnboundedSender<AppEvent>,
-    messages: &mut Vec<Message>,
     session_events: &mut Vec<SessionEvent>,
     reason: &'static str,
 ) {
@@ -91,14 +91,7 @@ fn skip_remaining_tool_calls(
             id: skip_id.clone(),
             result: skipped.clone(),
         }));
-        record_tool_call_result(
-            messages,
-            session_events,
-            &skip_id,
-            &skip_name,
-            skip_args,
-            skipped,
-        );
+        record_tool_call_result(session_events, &skip_id, &skip_name, skip_args, skipped);
     }
 }
 
@@ -107,7 +100,6 @@ fn resolve_tool_batch_interruption(
     next_idx: usize,
     cancel_rx: &tokio::sync::watch::Receiver<bool>,
     steering_rx: &mut UnboundedReceiver<String>,
-    messages: &mut Vec<Message>,
     session_events: &mut Vec<SessionEvent>,
     tx: &UnboundedSender<AppEvent>,
 ) -> ToolBatchInterruption {
@@ -116,19 +108,17 @@ fn resolve_tool_batch_interruption(
             pending_tool_calls,
             next_idx,
             tx,
-            messages,
             session_events,
             "Interrupted by user",
         );
         return ToolBatchInterruption::Cancelled;
     }
 
-    if drain_steering_messages(steering_rx, messages, tx) {
+    if drain_steering_messages(steering_rx, session_events, tx) {
         skip_remaining_tool_calls(
             pending_tool_calls,
             next_idx,
             tx,
-            messages,
             session_events,
             "Skipped due to queued user message.",
         );
@@ -175,7 +165,6 @@ async fn emit_compaction(
 ///
 /// All activity is reported back to `App` via `AppEvent::Agent(...)` values sent on `tx`.
 pub async fn run_agent_loop(
-    mut messages: Vec<Message>,
     config: AgentLoopConfig,
     provider: Arc<dyn LlmProvider>,
     tx: UnboundedSender<AppEvent>,
@@ -194,6 +183,7 @@ pub async fn run_agent_loop(
         .collect();
 
     let mut session_events = config.session_events.clone();
+    let mut projection = LlmProjection::new();
     let mut overflow_retry_remaining = 1usize;
 
     if config.manual_compaction_instructions.is_some() {
@@ -232,7 +222,6 @@ pub async fn run_agent_loop(
         if !changes.is_empty() {
             let paths: Vec<std::path::PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
             let notification = build_notification(&changes);
-            messages.push(Message::user(notification.clone()));
             session_events.push(SessionEvent::UserMessage {
                 content: notification.clone(),
                 timestamp: 0,
@@ -244,13 +233,18 @@ pub async fn run_agent_loop(
         }
 
         // Insert queued steering messages before the next assistant turn.
-        let _ = drain_steering_messages(&mut steering_rx, &mut messages, &tx);
+        let _ = drain_steering_messages(&mut steering_rx, &mut session_events, &tx);
+
+        // ── Build the message list for this turn via LlmProjection ────────────
+        projection.ensure_current(&session_events);
+        let mut messages: Vec<Message> = config.system_prompt.iter().map(Message::system).collect();
+        messages.extend_from_slice(projection.messages());
 
         // ── Stream the assistant response ─────────────────────────────────────
-        let mut stream = provider.stream_chat_with_tools(messages.clone(), tool_defs.clone());
+        let mut stream = provider.stream_chat_with_tools(messages, tool_defs.clone());
 
         // Accumulate text/thinking for the assistant message we'll push to
-        // the display and to `messages` for history.
+        // the display and to `session_events` for history.
         let mut assistant_text = String::new();
         let mut assistant_thinking: Option<String> = None;
         let mut assistant_phase = AssistantPhase::Unknown;
@@ -328,7 +322,8 @@ pub async fn run_agent_loop(
                             modified_files: outcome.modified_files,
                             timestamp: 0,
                         });
-                        messages = crate::projection::project_llm_messages(&session_events);
+                        // LlmProjection will rebuild on next loop iteration when it
+                        // sees the CompactionSummary event.
                         continue;
                     }
                     Err(compaction_error) => {
@@ -358,9 +353,7 @@ pub async fn run_agent_loop(
             return;
         }
 
-        // Append assistant message to history (even if empty when tools were called).
-        let mut asst_msg = Message::assistant(&assistant_text);
-        asst_msg.thinking = assistant_thinking.clone();
+        // Append assistant message to session events.
         let final_phase = if pending_tool_calls.is_empty() {
             AssistantPhase::Final
         } else if assistant_phase == AssistantPhase::Unknown {
@@ -368,8 +361,6 @@ pub async fn run_agent_loop(
         } else {
             assistant_phase
         };
-        asst_msg.assistant_phase = Some(final_phase);
-        messages.push(asst_msg);
         session_events.push(SessionEvent::AssistantMessage {
             content: assistant_text.clone(),
             thinking: assistant_thinking.clone(),
@@ -386,7 +377,7 @@ pub async fn run_agent_loop(
             // Check for steering messages that arrived while the LLM was
             // generating its final response. If any are present, keep the
             // loop alive so they are processed rather than silently dropped.
-            if drain_steering_messages(&mut steering_rx, &mut messages, &tx) {
+            if drain_steering_messages(&mut steering_rx, &mut session_events, &tx) {
                 let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
                 continue;
             }
@@ -473,14 +464,13 @@ pub async fn run_agent_loop(
                 result: result.clone(),
             }));
 
-            record_tool_call_result(&mut messages, &mut session_events, &id, &name, args, result);
+            record_tool_call_result(&mut session_events, &id, &name, args, result);
 
             tool_batch_interruption = resolve_tool_batch_interruption(
                 &pending_tool_calls,
                 idx + 1,
                 &cancel_rx,
                 &mut steering_rx,
-                &mut messages,
                 &mut session_events,
                 &tx,
             );

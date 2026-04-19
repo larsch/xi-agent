@@ -126,8 +126,9 @@ impl SessionState {
 
     /// Current LLM-visible message list.
     ///
-    /// Production code should use this cached incremental read model rather
-    /// than rebuilding from `events()` directly.
+    /// Used in tests to verify the LLM projection without going through
+    /// the agent loop.
+    #[cfg(test)]
     pub fn llm_messages(&mut self) -> &[Message] {
         self.llm.ensure_current(&self.event_log.events);
         self.llm.messages()

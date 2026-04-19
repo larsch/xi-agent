@@ -2724,7 +2724,7 @@ impl App {
 
     // ── LLM submission ────────────────────────────────────────────────────────
 
-    fn start_agent_task(&mut self, llm_messages: Vec<Message>, provider: &DynProvider) {
+    fn start_agent_task(&mut self, provider: &DynProvider) {
         // Ensure the session ID is assigned before creating the log so the
         // output directory uses the real session key, not the "init" placeholder.
         let session_id = self.ensure_session_id();
@@ -2749,6 +2749,7 @@ impl App {
             manual_compaction_instructions: self.pending_manual_compaction_instructions.take(),
             before_tool_call: None,
             after_tool_call: None,
+            system_prompt: self.system_prompt.clone(),
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.steering_tx = Some(steering_tx);
@@ -2761,31 +2762,8 @@ impl App {
         let provider = Arc::clone(provider);
         let tx = self.app_event_tx();
         self.runtime.agent_task = Some(tokio::spawn(async move {
-            run_agent_loop(llm_messages, config, provider, tx, steering_rx, cancel_rx).await;
+            run_agent_loop(config, provider, tx, steering_rx, cancel_rx).await;
         }));
-    }
-
-    /// Build the message list to send to the LLM from the committed session history.
-    ///
-    /// Prepends the system prompt (if set) and then appends the committed LLM
-    /// projection from `SessionState`. Live-turn state (streaming assistant text,
-    /// in-flight tools, notices, shell output) is deliberately excluded.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called before `session_state` has been initialised. This is a
-    /// programming error: all turn-launch paths must ensure committed session
-    /// state exists first.
-    fn prepare_llm_messages(&mut self) -> Vec<Message> {
-        let mut msgs: Vec<Message> = self.system_prompt.iter().map(Message::system).collect();
-
-        let ss = self
-            .session_state
-            .as_mut()
-            .expect("prepare_llm_messages called before session_state was initialised");
-        msgs.extend(ss.llm_messages().iter().cloned());
-
-        msgs
     }
 
     /// Set streaming flags and spawn the agent task using the current history.
@@ -2804,8 +2782,7 @@ impl App {
         self.login.auth_retry_budget = 1;
         self.latest_usage = None;
         self.auto_scroll = true;
-        let llm_messages = self.prepare_llm_messages();
-        self.start_agent_task(llm_messages, provider);
+        self.start_agent_task(provider);
     }
 
     /// Queue a user steering message while the agent loop is running.
@@ -2849,8 +2826,7 @@ impl App {
         self.streaming_status = Some(StreamingStatus::Waiting);
         self.login.auth_retry_budget = 1;
         self.auto_scroll = true;
-        let llm_messages = self.prepare_llm_messages();
-        self.start_agent_task(llm_messages, provider);
+        self.start_agent_task(provider);
     }
 
     /// Take the textarea content and start the agent loop.
@@ -3384,6 +3360,7 @@ mod tests {
                 manual_compaction_instructions: None,
                 before_tool_call: None,
                 after_tool_call: None,
+                system_prompt: None,
             },
         )
     }
@@ -4296,119 +4273,6 @@ mod tests {
         assert_eq!(assistant_count, 1, "assistant turn should be written once");
     }
 
-    // ── prepare_llm_messages ─────────────────────────────────────────────────
-
-    #[test]
-    fn prepare_llm_messages_prepends_system_prompt() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("session.jsonl");
-        let mut app = make_app();
-        app.system_prompt = Some("be helpful".to_string());
-        app.session_state = Some(crate::session_state::SessionState::from_event_log(
-            crate::event_log::EventLog::load(&path).expect("load event log"),
-        ));
-        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
-            content: "hello".to_string(),
-            timestamp: 1,
-        });
-        let msgs = app.prepare_llm_messages();
-        assert_eq!(msgs[0].role, Role::System);
-        assert_eq!(msgs[0].content, "be helpful");
-        assert_eq!(msgs[1].role, Role::User);
-    }
-
-    #[test]
-    fn prepare_llm_messages_filters_include_in_llm_false() {
-        // TurnError events are not included in LLM messages.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("session.jsonl");
-        let mut app = make_app();
-        app.session_state = Some(crate::session_state::SessionState::from_event_log(
-            crate::event_log::EventLog::load(&path).expect("load event log"),
-        ));
-        app.append_event_immediate(crate::session_event::SessionEvent::TurnError {
-            message: "[Error: rate limit]".to_string(),
-            timestamp: 1,
-        });
-        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
-            content: "visible".to_string(),
-            timestamp: 2,
-        });
-        let msgs = app.prepare_llm_messages();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].content, "visible");
-    }
-
-    #[test]
-    fn prepare_llm_messages_pops_trailing_empty_assistant() {
-        use crate::llm::AssistantPhase;
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("session.jsonl");
-        let mut app = make_app();
-        app.session_state = Some(crate::session_state::SessionState::from_event_log(
-            crate::event_log::EventLog::load(&path).expect("load event log"),
-        ));
-        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
-            content: "hello".to_string(),
-            timestamp: 1,
-        });
-        app.append_event_immediate(crate::session_event::SessionEvent::AssistantMessage {
-            content: String::new(),
-            thinking: None,
-            phase: AssistantPhase::Provisional,
-            usage: None,
-            timestamp: 2,
-        });
-        let msgs = app.prepare_llm_messages();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::User);
-    }
-
-    #[test]
-    fn prepare_llm_messages_excludes_live_turn_assistant_and_tools() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("session.jsonl");
-        let mut app = make_app();
-        app.session_state = Some(crate::session_state::SessionState::from_event_log(
-            crate::event_log::EventLog::load(&path).expect("load event log"),
-        ));
-        app.append_event_immediate(crate::session_event::SessionEvent::UserMessage {
-            content: "committed".to_string(),
-            timestamp: 1,
-        });
-
-        // Live turn state should not reach the LLM.
-        app.live_turn.assistant_content = "live assistant".to_string();
-        app.live_turn
-            .tool_entries
-            .push(crate::live_turn::LiveToolEntry {
-                id: "c1".to_string(),
-                name: "read_file".to_string(),
-                args: serde_json::json!({"path": "src/main.rs"}),
-                result: Some(crate::live_turn::LiveToolResult {
-                    content: "tool output".to_string(),
-                    is_error: false,
-                    display_range: None,
-                }),
-            });
-        app.live_turn.notices.push(Message::assistant("[notice]"));
-
-        let msgs = app.prepare_llm_messages();
-        assert_eq!(
-            msgs.len(),
-            1,
-            "only committed user message should be present"
-        );
-        assert_eq!(msgs[0].content, "committed");
-    }
-
-    #[test]
-    #[should_panic(expected = "prepare_llm_messages called before session_state was initialised")]
-    fn prepare_llm_messages_panics_without_session_state() {
-        let mut app = make_app();
-        let _ = app.prepare_llm_messages();
-    }
-
     // ── Step 6: resume/export/integration paths ─────────────────────────────
 
     #[test]
@@ -4627,7 +4491,9 @@ mod tests {
             "notice must not be committed as a session event"
         );
 
-        let llm = app.prepare_llm_messages();
+        let llm = crate::projection::project_llm_messages(
+            app.session_state.as_ref().expect("session state").events(),
+        );
         assert!(
             !llm.iter().any(|m| m.content == "[notice]"),
             "notice must not appear in LLM input"
@@ -4668,7 +4534,9 @@ mod tests {
             "shell output must not enter the event log"
         );
 
-        let llm = app.prepare_llm_messages();
+        let llm = crate::projection::project_llm_messages(
+            app.session_state.as_ref().expect("session state").events(),
+        );
         assert!(llm.is_empty(), "shell output must not enter LLM history");
     }
 

@@ -390,6 +390,7 @@ mod tests {
                 manual_compaction_instructions: None,
                 before_tool_call: None,
                 after_tool_call: None,
+                system_prompt: None,
             },
         )
     }

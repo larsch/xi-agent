@@ -283,6 +283,9 @@ pub struct AgentLoopConfig {
     /// Optional hook called after each tool execution.
     /// Return `Some(result)` to override the tool's result.
     pub after_tool_call: Option<AfterToolCall>,
+    /// System prompt prepended to all LLM requests.  When `None`, no system
+    /// message is added.
+    pub system_prompt: Option<String>,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -112,17 +112,9 @@ async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt: None,
     };
-    let messages = vec![Message::user("hi")];
-    run_agent_loop(
-        messages,
-        config,
-        Arc::new(provider),
-        tx,
-        steering_rx,
-        cancel_rx,
-    )
-    .await;
+    run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if let AppEvent::Agent(agent_ev) = ev {
@@ -299,19 +291,11 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt: None,
     };
-    let messages = vec![Message::user("hi")];
 
     let handle = tokio::spawn(async move {
-        run_agent_loop(
-            messages,
-            config,
-            Arc::new(provider),
-            tx,
-            steering_rx,
-            cancel_rx,
-        )
-        .await;
+        run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -379,19 +363,11 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt: None,
     };
-    let messages = vec![Message::user("hi")];
 
     let handle = tokio::spawn(async move {
-        run_agent_loop(
-            messages,
-            config,
-            Arc::new(provider),
-            tx,
-            steering_rx,
-            cancel_rx,
-        )
-        .await;
+        run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -479,19 +455,11 @@ async fn agent_loop_before_hook_blocks_tool() {
         manual_compaction_instructions: None,
         before_tool_call: Some(Box::new(|_name, _args| false)), // block everything
         after_tool_call: None,
+        system_prompt: None,
     };
-    let messages = vec![Message::user("hi")];
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    run_agent_loop(
-        messages,
-        config,
-        Arc::new(provider),
-        tx,
-        steering_rx,
-        cancel_rx,
-    )
-    .await;
+    run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -633,18 +601,11 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt: None,
     };
 
     let handle = tokio::spawn(async move {
-        run_agent_loop(
-            vec![Message::user("hi")],
-            config,
-            Arc::new(provider),
-            tx,
-            steering_rx,
-            cancel_rx,
-        )
-        .await;
+        run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
     });
 
     // Simulate the UI: receive the ask request and reply with a freeform answer.
@@ -721,17 +682,10 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt: None,
     };
 
-    run_agent_loop(
-        vec![Message::user("hi")],
-        config,
-        Arc::new(PanicProvider),
-        tx,
-        steering_rx,
-        cancel_rx,
-    )
-    .await;
+    run_agent_loop(config, Arc::new(PanicProvider), tx, steering_rx, cancel_rx).await;
 
     // No events should have been emitted.
     let mut events = Vec::new();
@@ -791,17 +745,10 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
             let _ = cancel_tx.send(true);
             None
         })),
+        system_prompt: None,
     };
 
-    run_agent_loop(
-        vec![Message::user("hi")],
-        config,
-        Arc::new(provider),
-        tx,
-        steering_rx,
-        cancel_rx,
-    )
-    .await;
+    run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {

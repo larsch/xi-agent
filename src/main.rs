@@ -188,6 +188,7 @@ async fn main() -> io::Result<()> {
             manual_compaction_instructions: None,
             before_tool_call: None,
             after_tool_call: None,
+            system_prompt: None,
         },
     );
 
@@ -1642,18 +1643,22 @@ async fn run_print_mode(
     let headless_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless")));
     let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
 
-    let messages: Vec<Message> = vec![Message::system(&system_prompt), Message::user(&prompt)];
+    let session_events = vec![crate::session_event::SessionEvent::UserMessage {
+        content: prompt.clone(),
+        timestamp: 0,
+    }];
 
     let loop_config = AgentLoopConfig {
         tools,
         file_tracker: headless_tracker,
         tool_output_log: headless_log,
-        session_events: vec![],
+        session_events,
         current_model: current_instance.effective_model().to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt: Some(system_prompt),
     };
 
     let provider_ctx = PrintModeProviderCtx {
@@ -1663,7 +1668,7 @@ async fn run_print_mode(
         name: &provider_name,
     };
 
-    let exit_code = run_print_mode_loop(messages, loop_config, provider, &provider_ctx).await;
+    let exit_code = run_print_mode_loop(loop_config, provider, &provider_ctx).await;
 
     std::process::exit(exit_code);
 }
@@ -1671,20 +1676,20 @@ async fn run_print_mode(
 /// Drive the agent event loop for `--print` mode, handling one reactive token
 /// refresh + retry on a 401 Unauthorized error. Returns the process exit code.
 async fn run_print_mode_loop(
-    messages: Vec<Message>,
     config: AgentLoopConfig,
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
     ctx: &PrintModeProviderCtx<'_>,
 ) -> i32 {
-    // Keep a clone of messages so we can retry the agent loop once on 401.
-    let messages_for_retry = messages.clone();
+    // Keep a copy of what we need for the retry path.
+    let session_events_for_retry = config.session_events.clone();
+    let system_prompt_for_retry = config.system_prompt.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     tokio::spawn(async move {
-        agent::run_agent_loop(messages, config, provider, tx, steering_rx, cancel_rx).await;
+        agent::run_agent_loop(config, provider, tx, steering_rx, cancel_rx).await;
     });
 
     while let Some(ev) = rx.recv().await {
@@ -1765,7 +1770,8 @@ async fn run_print_mode_loop(
                                     // Run the loop a second time with the refreshed provider.
                                     // `retried = true` prevents further recursive retries.
                                     return run_print_mode_loop_inner(
-                                        messages_for_retry,
+                                        session_events_for_retry,
+                                        system_prompt_for_retry,
                                         new_provider,
                                         &provider_display_name(ctx.instance),
                                     )
@@ -1808,7 +1814,8 @@ async fn run_print_mode_loop(
 /// Identical event handling to `run_print_mode_loop` but without a further
 /// retry on 401 (budget is exhausted after one attempt).
 async fn run_print_mode_loop_inner(
-    messages: Vec<Message>,
+    session_events: Vec<crate::session_event::SessionEvent>,
+    system_prompt: Option<String>,
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
     provider_label: &str,
 ) -> i32 {
@@ -1825,16 +1832,17 @@ async fn run_print_mode_loop_inner(
         tools: retry_tools,
         file_tracker: retry_tracker,
         tool_output_log: retry_log,
-        session_events: vec![],
+        session_events,
         current_model: String::new(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
         before_tool_call: None,
         after_tool_call: None,
+        system_prompt,
     };
 
     tokio::spawn(async move {
-        agent::run_agent_loop(messages, retry_config, provider, tx, steering_rx, cancel_rx).await;
+        agent::run_agent_loop(retry_config, provider, tx, steering_rx, cancel_rx).await;
     });
 
     while let Some(ev) = rx.recv().await {
