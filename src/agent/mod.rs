@@ -211,7 +211,11 @@ pub async fn run_agent_loop(
                 let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
+                let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
+                    "compaction failed: {}; continuing without compaction.",
+                    e.message
+                ))));
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
             }
         }
         return;
@@ -328,7 +332,11 @@ pub async fn run_agent_loop(
                         continue;
                     }
                     Err(compaction_error) => {
-                        let _ = tx.send(AppEvent::Agent(AgentEvent::Error(compaction_error)));
+                        let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
+                            "compaction failed: {}; continuing without compaction.",
+                            compaction_error.message
+                        ))));
+                        let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
                         return;
                     }
                 }
@@ -403,8 +411,10 @@ pub async fn run_agent_loop(
                     {
                         Ok(_) => {}
                         Err(e) => {
-                            let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
-                            return;
+                            let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
+                                "compaction failed: {}; continuing without compaction.",
+                                e.message
+                            ))));
                         }
                     }
                 }
