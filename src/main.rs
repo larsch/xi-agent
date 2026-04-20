@@ -842,7 +842,7 @@ fn handle_key_event(
 
 fn handle_global_key_shortcuts(
     app: &mut App,
-    provider: &Arc<dyn LlmProvider + Send + Sync>,
+    _provider: &Arc<dyn LlmProvider + Send + Sync>,
     key: KeyEvent,
     #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
 ) -> KeyDispatch {
@@ -892,7 +892,7 @@ fn handle_global_key_shortcuts(
         && !app.login.active
     {
         if let Some(text) = read_clipboard_text() {
-            apply_paste(app, provider, &text);
+            apply_paste(app, _provider, &text);
         }
         return KeyDispatch::Continue;
     }

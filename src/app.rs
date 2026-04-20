@@ -2912,7 +2912,7 @@ impl App {
                 && entry.result.is_none()
             {
                 entry.result = Some(LiveToolResult {
-                    content: "failure: aborted by user".to_string(),
+                    content: "Interrupted by user".to_string(),
                     is_error: true,
                     display_range: None,
                 });
@@ -2934,7 +2934,7 @@ impl App {
             self.pending_turn_events.push(SessionEvent::ToolResult {
                 id,
                 name,
-                content: "failure: aborted by user".to_string(),
+                content: "Interrupted by user".to_string(),
                 is_error: true,
                 display_range: None,
                 timestamp: Self::now_ts(),
@@ -4044,7 +4044,65 @@ mod tests {
                 .find(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
                 .expect("expected abort tool result");
             assert!(tool_result.is_error, "abort tool result should be an error");
-            assert_eq!(tool_result.content, "failure: aborted by user");
+            assert_eq!(tool_result.content, "Interrupted by user");
+        });
+    }
+
+    #[test]
+    fn abort_agent_loop_flushes_error_result_for_pending_tool_call_to_event_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.session_state = Some(crate::session_state::SessionState::from_event_log(
+                crate::event_log::EventLog::load(&path).expect("load event log"),
+            ));
+            app.streaming_status = Some(StreamingStatus::Waiting);
+            install_test_agent_task(&mut app);
+            app.pending_turn_events
+                .push(crate::session_event::SessionEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "ask_user".to_string(),
+                    args: serde_json::json!({"question": "Continue?"}),
+                    timestamp: 1,
+                });
+            app.live_turn
+                .tool_entries
+                .push(crate::live_turn::LiveToolEntry {
+                    id: "call_1".to_string(),
+                    name: "ask_user".to_string(),
+                    args: serde_json::json!({"question": "Continue?"}),
+                    result: None,
+                });
+
+            app.abort_agent_loop();
+
+            let events = app.session_state.as_ref().expect("session state").events();
+            let tool_results: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::session_event::SessionEvent::ToolResult {
+                        id,
+                        name,
+                        content,
+                        is_error,
+                        ..
+                    } if id == "call_1" => Some((name.clone(), content.clone(), *is_error)),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(tool_results.len(), 1, "expected exactly one tool result");
+            assert_eq!(
+                tool_results[0],
+                (
+                    "ask_user".to_string(),
+                    "Interrupted by user".to_string(),
+                    true
+                )
+            );
         });
     }
 
