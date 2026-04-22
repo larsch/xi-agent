@@ -22,18 +22,6 @@ pub struct SessionMeta {
     pub first_prompt: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct LegacySessionMeta {
-    id: String,
-    cwd: String,
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-struct LegacySessionIndex {
-    #[serde(default)]
-    sessions: Vec<LegacySessionMeta>,
-}
-
 pub struct SessionStore {
     sessions_dir: PathBuf,
 }
@@ -51,7 +39,6 @@ impl SessionStore {
         })?;
 
         let store = Self { sessions_dir };
-        store.migrate_legacy_index_if_present()?;
         Ok(store)
     }
 
@@ -260,13 +247,6 @@ impl SessionStore {
                 continue;
             };
 
-            if file_type.is_file() {
-                if is_session_jsonl_file(&path) {
-                    out.push((path, None));
-                }
-                continue;
-            }
-
             if !file_type.is_dir() {
                 continue;
             }
@@ -303,84 +283,6 @@ impl SessionStore {
         }
 
         Ok(out)
-    }
-
-    fn migrate_legacy_index_if_present(&self) -> anyhow::Result<()> {
-        let index_path = self.sessions_dir.join("index.json");
-        if !index_path.exists() {
-            return Ok(());
-        }
-
-        let raw = match fs::read_to_string(&index_path) {
-            Ok(raw) => raw,
-            Err(e) => {
-                log::debug!(
-                    "Could not read legacy session index {}: {}",
-                    index_path.display(),
-                    e
-                );
-                return Ok(());
-            }
-        };
-
-        let index = match serde_json::from_str::<LegacySessionIndex>(&raw) {
-            Ok(index) => index,
-            Err(e) => {
-                log::debug!(
-                    "Could not parse legacy session index {}: {}",
-                    index_path.display(),
-                    e
-                );
-                return Ok(());
-            }
-        };
-
-        for meta in index.sessions {
-            let old_path = self.sessions_dir.join(format!("{}.jsonl", meta.id));
-            if !old_path.exists() {
-                continue;
-            }
-
-            let new_path = self.session_file_path(&meta.cwd, &meta.id);
-            if let Some(parent) = new_path.parent() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create migrated session dir: {}",
-                        parent.display()
-                    )
-                })?;
-            }
-
-            if new_path.exists() {
-                if let Err(e) = fs::remove_file(&old_path) {
-                    log::debug!(
-                        "Failed to remove legacy session file {} after migration (target already exists {}): {}",
-                        old_path.display(),
-                        new_path.display(),
-                        e
-                    );
-                }
-                continue;
-            }
-
-            fs::rename(&old_path, &new_path).with_context(|| {
-                format!(
-                    "Failed to migrate session file {} -> {}",
-                    old_path.display(),
-                    new_path.display()
-                )
-            })?;
-        }
-
-        if let Err(e) = fs::remove_file(&index_path) {
-            log::debug!(
-                "Failed to remove legacy session index {}: {}",
-                index_path.display(),
-                e
-            );
-        }
-
-        Ok(())
     }
 }
 
@@ -462,12 +364,6 @@ fn count_non_empty_lines(path: &Path) -> anyhow::Result<usize> {
 
 /// Read the first line of the first user prompt in a session file.
 fn read_first_user_prompt(path: &Path) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct LegacyMessage {
-        role: String,
-        content: String,
-    }
-
     let file = fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     for line in reader.lines() {
@@ -487,21 +383,7 @@ fn read_first_user_prompt(path: &Path) -> Option<String> {
             if first_line.is_some() {
                 return first_line;
             }
-            continue;
         }
-
-        let Ok(msg) = serde_json::from_str::<LegacyMessage>(line) else {
-            continue;
-        };
-        if msg.role.to_lowercase() != "user" {
-            continue;
-        }
-        let first_line = msg
-            .content
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string());
-        return first_line;
     }
     None
 }
@@ -640,33 +522,5 @@ mod tests {
             .expect("session metadata");
 
         assert_eq!(meta.first_prompt.as_deref(), Some("First prompt line"));
-    }
-
-    #[test]
-    fn migrates_legacy_index_flat_files_into_cwd_dirs() {
-        let tmp = tempdir().expect("tempdir");
-        let root = tmp.path();
-
-        let legacy_id = "20260328T120000-12345678";
-        fs::write(
-            root.join(format!("{legacy_id}.jsonl")),
-            format!(
-                "{}\n",
-                serde_json::to_string(&Message::user("hello")).expect("json")
-            ),
-        )
-        .expect("write legacy file");
-
-        fs::write(
-            root.join("index.json"),
-            r#"{"sessions":[{"id":"20260328T120000-12345678","cwd":"/legacy/cwd"}]}"#,
-        )
-        .expect("write legacy index");
-
-        let store = SessionStore::open_at(root.to_path_buf()).expect("open store");
-
-        let migrated = store.session_file_path("/legacy/cwd", legacy_id);
-        assert!(migrated.exists());
-        assert!(!root.join("index.json").exists());
     }
 }

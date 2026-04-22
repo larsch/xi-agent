@@ -810,7 +810,6 @@ impl App {
         let Some(store) = self.session_store.as_ref() else {
             return;
         };
-        // Load the event log; fall back to legacy messages path for old sessions.
         match store.load_events(session_id) {
             Ok(log) => {
                 self.session_state = Some(SessionState::from_event_log(log));
@@ -2646,10 +2645,6 @@ impl App {
         // `append_event_immediate` via the event log.  This method is kept as
         // a call-site placeholder so that callers do not need to be updated
         // individually; its only remaining job is to refresh the resume hint.
-        //
-        // The legacy full-rewrite path is intentionally not called here any
-        // more. It will be removed in the final cleanup once
-        // `SessionStore::save_messages` is retired.
         self.refresh_resume_availability();
     }
 
