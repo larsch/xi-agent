@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::app_event::AppEvent;
-use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition};
+use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition, UsageStats};
 use crate::projection::LlmProjection;
 use crate::session_event::{CompactionTrigger, SessionEvent};
 use file_tracker::build_notification;
@@ -24,12 +24,49 @@ pub use system_prompt::build_system_prompt;
 pub use tool_output_log::ToolOutputLog;
 pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
 
+// ── TurnOutcome ───────────────────────────────────────────────────────────────
+
+/// The result of one LLM streaming turn.
+#[derive(Debug)]
+enum TurnOutcome {
+    /// The model produced a final answer with no tool calls.
+    FinalAnswer {
+        text: String,
+        thinking: Option<String>,
+        phase: AssistantPhase,
+        usage: Option<UsageStats>,
+    },
+    /// The model produced tool calls that must be executed.
+    ToolCalls {
+        text: String,
+        thinking: Option<String>,
+        phase: AssistantPhase,
+        usage: Option<UsageStats>,
+        calls: Vec<(String, String, serde_json::Value)>,
+    },
+    /// The stream failed with a context-overflow error eligible for retry.
+    ContextOverflow(crate::llm::ProviderError),
+    /// The stream failed with a non-recoverable error.
+    Error(crate::llm::ProviderError),
+    /// The model indicated a tool call was coming but no call arrived
+    /// (e.g. truncated by max_tokens).
+    ToolIntentWithNoCall,
+}
+
+// ── BatchOutcome ──────────────────────────────────────────────────────────────
+
+/// The result of executing a batch of tool calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolBatchInterruption {
-    None,
+enum BatchOutcome {
+    /// All tool calls completed normally; continue the loop.
+    Completed,
+    /// The user cancelled; the loop should stop.
     Cancelled,
+    /// A steering message arrived; the loop should continue from the top.
     SteeringQueued,
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn drain_steering_messages(
     steering_rx: &mut UnboundedReceiver<String>,
@@ -95,37 +132,10 @@ fn skip_remaining_tool_calls(
     }
 }
 
-fn resolve_tool_batch_interruption(
-    pending_tool_calls: &[(String, String, serde_json::Value)],
-    next_idx: usize,
-    cancel_rx: &tokio::sync::watch::Receiver<bool>,
-    steering_rx: &mut UnboundedReceiver<String>,
-    session_events: &mut Vec<SessionEvent>,
-    tx: &UnboundedSender<AppEvent>,
-) -> ToolBatchInterruption {
-    if *cancel_rx.borrow() {
-        skip_remaining_tool_calls(
-            pending_tool_calls,
-            next_idx,
-            tx,
-            session_events,
-            "Interrupted by user",
-        );
-        return ToolBatchInterruption::Cancelled;
-    }
-
-    if drain_steering_messages(steering_rx, session_events, tx) {
-        skip_remaining_tool_calls(
-            pending_tool_calls,
-            next_idx,
-            tx,
-            session_events,
-            "Skipped due to queued user message.",
-        );
-        return ToolBatchInterruption::SteeringQueued;
-    }
-
-    ToolBatchInterruption::None
+fn send_compaction_failed_status(tx: &UnboundedSender<AppEvent>, message: &str) {
+    let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
+        "compaction failed: {message}; continuing without compaction."
+    ))));
 }
 
 async fn emit_compaction(
@@ -160,6 +170,191 @@ async fn emit_compaction(
     Ok(outcome)
 }
 
+// ── stream_assistant_turn ─────────────────────────────────────────────────────
+
+/// Drive one LLM streaming turn and return a typed [`TurnOutcome`].
+///
+/// Streams all events from the provider, accumulates text/thinking/tool-calls,
+/// and returns the appropriate outcome variant. No session state is mutated.
+async fn stream_assistant_turn(
+    provider: Arc<dyn LlmProvider>,
+    messages: Vec<Message>,
+    tool_defs: Vec<ToolDefinition>,
+    tx: &UnboundedSender<AppEvent>,
+    overflow_retry_remaining: usize,
+) -> TurnOutcome {
+    let mut stream = provider.stream_chat_with_tools(messages, tool_defs);
+
+    let mut assistant_text = String::new();
+    let mut assistant_thinking: Option<String> = None;
+    let mut assistant_phase = AssistantPhase::Unknown;
+    let mut pending_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
+    let mut tool_intent_seen = false;
+    let mut latest_usage = None;
+
+    while let Some(ev) = stream.next().await {
+        match ev {
+            LlmEvent::Token { text, phase } => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::TextToken {
+                    text: text.clone(),
+                    phase,
+                }));
+                assistant_text.push_str(&text);
+                if phase != AssistantPhase::Unknown {
+                    assistant_phase = phase;
+                }
+            }
+            LlmEvent::ThinkingToken(t) => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::ThinkingToken(t.clone())));
+                assistant_thinking
+                    .get_or_insert_with(String::new)
+                    .push_str(&t);
+            }
+            LlmEvent::Usage(usage) => {
+                latest_usage = Some(usage);
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Usage(usage)));
+            }
+            LlmEvent::ToolIntentStart => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::ToolIntentStart));
+                assistant_phase = AssistantPhase::Provisional;
+                tool_intent_seen = true;
+            }
+            LlmEvent::ToolCall { id, name, args } => {
+                pending_tool_calls.push((id, name, args));
+            }
+            LlmEvent::Done => break,
+            LlmEvent::Error(e) => {
+                if overflow_retry_remaining > 0 && compaction::is_context_overflow_error(&e) {
+                    return TurnOutcome::ContextOverflow(e);
+                }
+                return TurnOutcome::Error(e);
+            }
+            LlmEvent::StatusUpdate(msg) => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(msg)));
+            }
+        }
+    }
+
+    if tool_intent_seen && pending_tool_calls.is_empty() {
+        return TurnOutcome::ToolIntentWithNoCall;
+    }
+
+    let final_phase = if pending_tool_calls.is_empty() {
+        AssistantPhase::Final
+    } else if assistant_phase == AssistantPhase::Unknown {
+        AssistantPhase::Provisional
+    } else {
+        assistant_phase
+    };
+
+    if pending_tool_calls.is_empty() {
+        TurnOutcome::FinalAnswer {
+            text: assistant_text,
+            thinking: assistant_thinking,
+            phase: final_phase,
+            usage: latest_usage,
+        }
+    } else {
+        TurnOutcome::ToolCalls {
+            text: assistant_text,
+            thinking: assistant_thinking,
+            phase: final_phase,
+            usage: latest_usage,
+            calls: pending_tool_calls,
+        }
+    }
+}
+
+// ── execute_tool_batch ────────────────────────────────────────────────────────
+
+/// Execute a batch of tool calls sequentially and return a [`BatchOutcome`].
+///
+/// Sends `ToolCallStart`/`ToolCallEnd` events and appends `ToolCall`/`ToolResult`
+/// entries to `session_events` for each call.  Checks for cancellation and
+/// steering interruptions between calls.
+async fn execute_tool_batch(
+    config: &AgentLoopConfig,
+    pending_tool_calls: &[(String, String, serde_json::Value)],
+    tx: &UnboundedSender<AppEvent>,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+    steering_rx: &mut UnboundedReceiver<String>,
+    session_events: &mut Vec<SessionEvent>,
+) -> BatchOutcome {
+    for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
+        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
+            id: id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+        }));
+
+        let blocked = config
+            .before_tool_call
+            .as_ref()
+            .map(|f| !f(&name, &args))
+            .unwrap_or(false);
+
+        let mut result = if blocked {
+            ToolResult::err(format!("Tool call '{name}' was blocked"))
+        } else {
+            match config.tools.get(&name) {
+                Some(tool) => {
+                    let r = tool.execute(args.clone()).await;
+                    if tool.saves_output() {
+                        let cmd_summary = args.get("command").and_then(|v| v.as_str());
+                        r.with_log_notice(
+                            &id,
+                            cmd_summary,
+                            &mut config.tool_output_log.lock().unwrap(),
+                        )
+                    } else {
+                        r
+                    }
+                }
+                None => ToolResult::err(format!("Unknown tool: '{name}'")),
+            }
+        };
+
+        if let Some(f) = &config.after_tool_call
+            && let Some(override_result) = f(&name, &result)
+        {
+            result = override_result;
+        }
+
+        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
+            id: id.clone(),
+            result: result.clone(),
+        }));
+        record_tool_call_result(session_events, &id, &name, args, result);
+
+        // Check for cancellation / steering interruption before next call.
+        if *cancel_rx.borrow() {
+            skip_remaining_tool_calls(
+                pending_tool_calls,
+                idx + 1,
+                tx,
+                session_events,
+                "Interrupted by user",
+            );
+            return BatchOutcome::Cancelled;
+        }
+
+        if drain_steering_messages(steering_rx, session_events, tx) {
+            skip_remaining_tool_calls(
+                pending_tool_calls,
+                idx + 1,
+                tx,
+                session_events,
+                "Skipped due to queued user message.",
+            );
+            return BatchOutcome::SteeringQueued;
+        }
+    }
+
+    BatchOutcome::Completed
+}
+
+// ── run_agent_loop ────────────────────────────────────────────────────────────
+
 /// Run the agent loop: call the LLM, execute tool calls, repeat until the
 /// model gives a final text answer.
 ///
@@ -171,7 +366,6 @@ pub async fn run_agent_loop(
     mut steering_rx: UnboundedReceiver<String>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    // Build the tool definitions once from the registry.
     let tool_defs: Vec<ToolDefinition> = config
         .tools
         .values()
@@ -186,6 +380,7 @@ pub async fn run_agent_loop(
     let mut projection = LlmProjection::new();
     let mut overflow_retry_remaining = 1usize;
 
+    // ── Manual compaction shortcut ────────────────────────────────────────────
     if config.manual_compaction_instructions.is_some() {
         match emit_compaction(
             Arc::clone(&provider),
@@ -197,17 +392,10 @@ pub async fn run_agent_loop(
         )
         .await
         {
-            Ok(_) => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
-                    "compaction failed: {}; continuing without compaction.",
-                    e.message
-                ))));
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
-            }
+            Ok(_) => {}
+            Err(e) => send_compaction_failed_status(&tx, &e.message),
         }
+        let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
         return;
     }
 
@@ -232,71 +420,42 @@ pub async fn run_agent_loop(
             }));
         }
 
-        // Insert queued steering messages before the next assistant turn.
+        // ── Insert queued steering messages ───────────────────────────────────
         let _ = drain_steering_messages(&mut steering_rx, &mut session_events, &tx);
 
-        // ── Build the message list for this turn via LlmProjection ────────────
+        // ── Build message list ────────────────────────────────────────────────
         projection.ensure_current(&session_events);
         let mut messages: Vec<Message> = config.system_prompt.iter().map(Message::system).collect();
         messages.extend_from_slice(projection.messages());
 
-        // ── Stream the assistant response ─────────────────────────────────────
-        let mut stream = provider.stream_chat_with_tools(messages, tool_defs.clone());
+        // ── Stream assistant turn ─────────────────────────────────────────────
+        let turn = stream_assistant_turn(
+            Arc::clone(&provider),
+            messages,
+            tool_defs.clone(),
+            &tx,
+            overflow_retry_remaining,
+        )
+        .await;
 
-        // Accumulate text/thinking for the assistant message we'll push to
-        // the display and to `session_events` for history.
-        let mut assistant_text = String::new();
-        let mut assistant_thinking: Option<String> = None;
-        let mut assistant_phase = AssistantPhase::Unknown;
-        let mut pending_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, args)
-        let mut tool_intent_seen = false;
-
-        let mut latest_usage = None;
-        let mut stream_error: Option<crate::llm::ProviderError> = None;
-
-        while let Some(ev) = stream.next().await {
-            match ev {
-                LlmEvent::Token { text, phase } => {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::TextToken {
-                        text: text.clone(),
-                        phase,
-                    }));
-                    assistant_text.push_str(&text);
-                    if phase != AssistantPhase::Unknown {
-                        assistant_phase = phase;
-                    }
-                }
-                LlmEvent::ThinkingToken(t) => {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::ThinkingToken(t.clone())));
-                    assistant_thinking
-                        .get_or_insert_with(String::new)
-                        .push_str(&t);
-                }
-                LlmEvent::Usage(usage) => {
-                    latest_usage = Some(usage);
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::Usage(usage)));
-                }
-                LlmEvent::ToolIntentStart => {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::ToolIntentStart));
-                    assistant_phase = AssistantPhase::Provisional;
-                    tool_intent_seen = true;
-                }
-                LlmEvent::ToolCall { id, name, args } => {
-                    pending_tool_calls.push((id, name, args));
-                }
-                LlmEvent::Done => break,
-                LlmEvent::Error(e) => {
-                    stream_error = Some(e);
-                    break;
-                }
-                LlmEvent::StatusUpdate(msg) => {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(msg)));
-                }
+        match turn {
+            TurnOutcome::Error(e) => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
+                return;
             }
-        }
 
-        if let Some(e) = stream_error {
-            if overflow_retry_remaining > 0 && compaction::is_context_overflow_error(&e) {
+            TurnOutcome::ToolIntentWithNoCall => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Error(
+                    crate::llm::ProviderError::other(
+                        "agent",
+                        "Tool call was indicated but not completed \
+                         (response may have been truncated).",
+                    ),
+                )));
+                return;
+            }
+
+            TurnOutcome::ContextOverflow(e) => {
                 overflow_retry_remaining -= 1;
                 match emit_compaction(
                     Arc::clone(&provider),
@@ -322,171 +481,104 @@ pub async fn run_agent_loop(
                             modified_files: outcome.modified_files,
                             timestamp: 0,
                         });
-                        // LlmProjection will rebuild on next loop iteration when it
-                        // sees the CompactionSummary event.
                         continue;
                     }
                     Err(compaction_error) => {
-                        let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
-                            "compaction failed: {}; continuing without compaction.",
-                            compaction_error.message
-                        ))));
+                        send_compaction_failed_status(&tx, &compaction_error.message);
                         let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
                         return;
                     }
                 }
             }
-            let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
-            return;
-        }
 
-        // Guard: if the model signalled a tool call was coming but no complete
-        // tool call arrived (e.g. truncated by max_tokens), treat it as an
-        // error rather than silently accepting an empty assistant turn.
-        if tool_intent_seen && pending_tool_calls.is_empty() {
-            let _ = tx.send(AppEvent::Agent(AgentEvent::Error(
-                crate::llm::ProviderError::other(
-                    "agent",
-                    "Tool call was indicated but not completed (response may have been truncated).",
-                ),
-            )));
-            return;
-        }
+            TurnOutcome::FinalAnswer {
+                text,
+                thinking,
+                phase,
+                usage,
+            } => {
+                session_events.push(SessionEvent::AssistantMessage {
+                    content: text,
+                    thinking,
+                    phase,
+                    usage,
+                    timestamp: 0,
+                });
 
-        // Append assistant message to session events.
-        let final_phase = if pending_tool_calls.is_empty() {
-            AssistantPhase::Final
-        } else if assistant_phase == AssistantPhase::Unknown {
-            AssistantPhase::Provisional
-        } else {
-            assistant_phase
-        };
-        session_events.push(SessionEvent::AssistantMessage {
-            content: assistant_text.clone(),
-            thinking: assistant_thinking.clone(),
-            phase: final_phase,
-            usage: latest_usage,
-            timestamp: 0,
-        });
+                config.file_tracker.lock().unwrap().refresh_baselines();
 
-        // ── No tool calls → final answer ──────────────────────────────────────
-        if pending_tool_calls.is_empty() {
-            // Refresh baselines before returning to user input so that any
-            // file changes the agent made during this run are absorbed.
-            config.file_tracker.lock().unwrap().refresh_baselines();
-            // Check for steering messages that arrived while the LLM was
-            // generating its final response. If any are present, keep the
-            // loop alive so they are processed rather than silently dropped.
-            if drain_steering_messages(&mut steering_rx, &mut session_events, &tx) {
+                // If a steering message arrived while the LLM was generating,
+                // keep the loop alive so it is processed.
+                if drain_steering_messages(&mut steering_rx, &mut session_events, &tx) {
+                    let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
+                    continue;
+                }
+
                 let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
-                continue;
-            }
-            let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
 
-            if config.auto_compaction_enabled {
-                let (context_window, reserve_tokens, _keep_recent_tokens) =
-                    compaction::context_window_and_budgets(&config.current_model);
-                let used_tokens = latest_usage
-                    .and_then(|u| u.used_tokens())
-                    .unwrap_or_else(|| compaction::estimate_session_tokens(&session_events));
-                if used_tokens > context_window.saturating_sub(reserve_tokens) {
-                    match emit_compaction(
-                        Arc::clone(&provider),
-                        &tx,
-                        &session_events,
-                        &config.current_model,
-                        CompactionTrigger::Threshold,
-                        None,
-                    )
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(e) => {
-                            let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
-                                "compaction failed: {}; continuing without compaction.",
-                                e.message
-                            ))));
+                // Threshold-based auto-compaction after a completed turn.
+                if config.auto_compaction_enabled {
+                    let (context_window, reserve_tokens, _keep_recent_tokens) =
+                        compaction::context_window_and_budgets(&config.current_model);
+                    let used_tokens = usage
+                        .and_then(|u| u.used_tokens())
+                        .unwrap_or_else(|| compaction::estimate_session_tokens(&session_events));
+                    if used_tokens > context_window.saturating_sub(reserve_tokens) {
+                        match emit_compaction(
+                            Arc::clone(&provider),
+                            &tx,
+                            &session_events,
+                            &config.current_model,
+                            CompactionTrigger::Threshold,
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(_) => {}
+                            Err(e) => send_compaction_failed_status(&tx, &e.message),
                         }
                     }
                 }
+
+                let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
+                return;
             }
 
-            let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
-            return;
-        }
+            TurnOutcome::ToolCalls {
+                text,
+                thinking,
+                phase,
+                usage,
+                calls,
+            } => {
+                session_events.push(SessionEvent::AssistantMessage {
+                    content: text,
+                    thinking,
+                    phase,
+                    usage,
+                    timestamp: 0,
+                });
 
-        // ── Execute tool calls sequentially ───────────────────────────────────
-        let mut tool_batch_interruption = ToolBatchInterruption::None;
-        for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
-            let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
-                id: id.clone(),
-                name: name.clone(),
-                args: args.clone(),
-            }));
+                // ── Execute tool batch ────────────────────────────────────────
+                let batch_outcome = execute_tool_batch(
+                    &config,
+                    &calls,
+                    &tx,
+                    &cancel_rx,
+                    &mut steering_rx,
+                    &mut session_events,
+                )
+                .await;
 
-            // before_tool_call hook
-            let blocked = config
-                .before_tool_call
-                .as_ref()
-                .map(|f| !f(&name, &args))
-                .unwrap_or(false);
+                config.file_tracker.lock().unwrap().refresh_baselines();
+                let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
 
-            let mut result = if blocked {
-                ToolResult::err(format!("Tool call '{name}' was blocked"))
-            } else {
-                match config.tools.get(&name) {
-                    Some(tool) => {
-                        let r = tool.execute(args.clone()).await;
-                        if tool.saves_output() {
-                            let cmd_summary = args.get("command").and_then(|v| v.as_str());
-                            r.with_log_notice(
-                                &id,
-                                cmd_summary,
-                                &mut config.tool_output_log.lock().unwrap(),
-                            )
-                        } else {
-                            r
-                        }
-                    }
-                    None => ToolResult::err(format!("Unknown tool: '{name}'")),
+                match batch_outcome {
+                    BatchOutcome::Completed => {}
+                    BatchOutcome::Cancelled => return,
+                    BatchOutcome::SteeringQueued => continue,
                 }
-            };
-
-            // after_tool_call hook
-            if let Some(f) = &config.after_tool_call
-                && let Some(override_result) = f(&name, &result)
-            {
-                result = override_result;
             }
-
-            let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
-                id: id.clone(),
-                result: result.clone(),
-            }));
-
-            record_tool_call_result(&mut session_events, &id, &name, args, result);
-
-            tool_batch_interruption = resolve_tool_batch_interruption(
-                &pending_tool_calls,
-                idx + 1,
-                &cancel_rx,
-                &mut steering_rx,
-                &mut session_events,
-                &tx,
-            );
-            if tool_batch_interruption != ToolBatchInterruption::None {
-                break;
-            }
-        }
-
-        config.file_tracker.lock().unwrap().refresh_baselines();
-
-        let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
-
-        match tool_batch_interruption {
-            ToolBatchInterruption::None => {}
-            ToolBatchInterruption::Cancelled => return,
-            ToolBatchInterruption::SteeringQueued => continue,
         }
     }
 }
