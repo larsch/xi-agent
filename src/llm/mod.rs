@@ -229,6 +229,7 @@ pub enum Role {
 }
 
 impl Role {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::System => "system",
@@ -322,6 +323,7 @@ pub mod copilot;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod provider_format;
 pub mod test_provider;
 
 #[cfg(test)]

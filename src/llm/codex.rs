@@ -5,6 +5,7 @@ use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
     common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
+    provider_format::to_codex_wire,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
@@ -70,7 +71,7 @@ impl CodexProvider {
                 .find(|m| m.role == Role::System)
                 .map(|m| m.content.clone());
 
-            let input: Vec<serde_json::Value> = convert_messages(&messages);
+            let input: Vec<serde_json::Value> = to_codex_wire(&messages);
 
             let mut body = serde_json::json!({
                 "model": model,
@@ -365,65 +366,6 @@ fn resolve_codex_url(base_url: &str) -> String {
 }
 
 // ── Message conversion ────────────────────────────────────────────────────────
-
-/// Convert tau `Message` history to the Responses API `input` array.
-/// System messages are excluded (they go in `instructions`).
-fn convert_messages(messages: &[Message]) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
-    let mut msg_idx = 0usize;
-
-    for msg in messages {
-        match msg.role {
-            Role::System => {} // handled as `instructions`
-
-            Role::User => {
-                out.push(serde_json::json!({
-                    "role": "user",
-                    "content": [{ "type": "input_text", "text": msg.content }]
-                }));
-                msg_idx += 1;
-            }
-
-            Role::Assistant => {
-                out.push(serde_json::json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "id": format!("msg_{msg_idx}"),
-                    "content": [{ "type": "output_text", "text": msg.content, "annotations": [] }]
-                }));
-                msg_idx += 1;
-            }
-
-            Role::ToolCall => {
-                let call_id = msg.tool_call_id.as_deref().unwrap_or("call_0");
-                let name = msg.tool_name.as_deref().unwrap_or("");
-                let args = msg
-                    .tool_args
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "{}".to_string());
-                out.push(serde_json::json!({
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": args,
-                }));
-            }
-
-            Role::ToolResult => {
-                let call_id = msg.tool_call_id.as_deref().unwrap_or("call_0");
-                out.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": msg.content,
-                }));
-            }
-        }
-    }
-
-    out
-}
 
 fn convert_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools

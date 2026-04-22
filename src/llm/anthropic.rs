@@ -4,10 +4,8 @@ use std::collections::HashMap;
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{
-        SseLineDecoder, build_http_client, infer_initiator, normalize_tool_name,
-        send_streaming_request,
-    },
+    common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
+    provider_format::to_anthropic_wire,
 };
 use crate::provider::{context_window_for_model, scaled_token_budget};
 
@@ -54,7 +52,7 @@ impl AnthropicProvider {
                 .find(|m| m.role == Role::System)
                 .map(|m| m.content.clone());
 
-            let anthropic_messages = to_anthropic_messages(&messages);
+            let anthropic_messages = to_anthropic_wire(&messages);
 
             let context_window = context_window_for_model(&model).unwrap_or(200_000);
             let max_tokens = scaled_token_budget(context_window, 8_000, 8_000);
@@ -376,120 +374,6 @@ fn known_models() -> Vec<String> {
 }
 
 // ── Message conversion ────────────────────────────────────────────────────────
-
-/// Convert tau `Message` history into the Anthropic Messages API format.
-///
-/// Key differences from OpenAI:
-/// - System messages are excluded (sent as a separate `system` top-level field).
-/// - Tool calls live in `tool_use` content blocks inside the assistant turn.
-/// - Tool results live in `tool_result` content blocks inside a user turn.
-fn to_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
-    let mut result: Vec<serde_json::Value> = Vec::new();
-    let mut i = 0;
-
-    while i < messages.len() {
-        let msg = &messages[i];
-
-        match msg.role {
-            Role::System => {
-                i += 1;
-            }
-
-            Role::User => {
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": msg.content,
-                }));
-                i += 1;
-            }
-
-            Role::Assistant => {
-                let mut content: Vec<serde_json::Value> = Vec::new();
-
-                if !msg.content.is_empty() {
-                    content.push(serde_json::json!({
-                        "type": "text",
-                        "text": msg.content,
-                    }));
-                }
-
-                i += 1;
-
-                // Collect tool calls and their results from this turn.
-                let mut tool_results: Vec<serde_json::Value> = Vec::new();
-                while i < messages.len() && messages[i].role == Role::ToolCall {
-                    let tc = &messages[i];
-                    content.push(serde_json::json!({
-                        "type": "tool_use",
-                        "id": tc.tool_call_id.as_deref().unwrap_or("call_0"),
-                        "name": normalize_tool_name(tc.tool_name.as_deref().unwrap_or("")),
-                        "input": tc.tool_args.clone().unwrap_or_default(),
-                    }));
-                    i += 1;
-
-                    if i < messages.len() && messages[i].role == Role::ToolResult {
-                        let tr = &messages[i];
-                        tool_results.push(serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": tr.tool_call_id.as_deref().unwrap_or("call_0"),
-                            "content": tr.content,
-                            "is_error": tr.is_error,
-                        }));
-                        i += 1;
-                    }
-                }
-
-                if content.is_empty() {
-                    continue;
-                }
-
-                result.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": content,
-                }));
-
-                if !tool_results.is_empty() {
-                    result.push(serde_json::json!({
-                        "role": "user",
-                        "content": tool_results,
-                    }));
-                }
-            }
-
-            // Standalone ToolCall without a preceding assistant turn.
-            Role::ToolCall => {
-                let tc = msg;
-                result.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": tc.tool_call_id.as_deref().unwrap_or("call_0"),
-                        "name": normalize_tool_name(tc.tool_name.as_deref().unwrap_or("")),
-                        "input": tc.tool_args.clone().unwrap_or_default(),
-                    }],
-                }));
-                i += 1;
-            }
-
-            // Standalone ToolResult without a preceding tool call in this pass.
-            Role::ToolResult => {
-                let tr = msg;
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tr.tool_call_id.as_deref().unwrap_or("call_0"),
-                        "content": tr.content,
-                        "is_error": tr.is_error,
-                    }],
-                }));
-                i += 1;
-            }
-        }
-    }
-
-    result
-}
 
 fn convert_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools

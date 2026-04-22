@@ -5,6 +5,7 @@ use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
     common::{SseLineDecoder, build_http_client},
+    provider_format::to_gemini_wire,
 };
 
 const MAX_RETRIES: u32 = 3;
@@ -459,7 +460,7 @@ fn build_request(
         })
     });
 
-    let contents = to_gemini_contents(messages);
+    let contents = to_gemini_wire(messages);
 
     let mut request = serde_json::json!({
         "project": project_id,
@@ -535,82 +536,6 @@ fn thinking_budget_for(level: GeminiThinkingLevel) -> usize {
     }
 }
 
-fn to_gemini_contents(messages: &[Message]) -> Vec<serde_json::Value> {
-    let mut contents = Vec::new();
-    let mut tool_names_by_id: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-
-    for msg in messages {
-        match msg.role {
-            Role::System => {}
-            Role::User => {
-                contents.push(serde_json::json!({
-                    "role": "user",
-                    "parts": [{ "text": msg.content }],
-                }));
-            }
-            Role::Assistant => {
-                if msg.content.trim().is_empty() {
-                    continue;
-                }
-                contents.push(serde_json::json!({
-                    "role": "model",
-                    "parts": [{ "text": msg.content }],
-                }));
-            }
-            Role::ToolCall => {
-                let name = msg.tool_name.clone().unwrap_or_default();
-                let id = msg
-                    .tool_call_id
-                    .clone()
-                    .unwrap_or_else(|| "call_0".to_string());
-                let args = msg
-                    .tool_args
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                tool_names_by_id.insert(id.clone(), name.clone());
-                contents.push(serde_json::json!({
-                    "role": "model",
-                    "parts": [{
-                        "functionCall": {
-                            "name": name,
-                            "id": id,
-                            "args": args,
-                        }
-                    }],
-                }));
-            }
-            Role::ToolResult => {
-                let tool_call_id = msg
-                    .tool_call_id
-                    .clone()
-                    .unwrap_or_else(|| "call_0".to_string());
-                let tool_name = msg
-                    .tool_name
-                    .clone()
-                    .or_else(|| tool_names_by_id.get(&tool_call_id).cloned())
-                    .unwrap_or_else(|| "tool".to_string());
-                contents.push(serde_json::json!({
-                    "role": "user",
-                    "parts": [{
-                        "functionResponse": {
-                            "name": tool_name,
-                            "id": tool_call_id,
-                            "response": if msg.is_error {
-                                serde_json::json!({"error": msg.content})
-                            } else {
-                                serde_json::json!({"output": msg.content})
-                            },
-                        }
-                    }],
-                }));
-            }
-        }
-    }
-
-    contents
-}
-
 impl LlmProvider for GeminiProvider {
     fn stream_chat(&self, messages: Vec<Message>) -> LlmStream {
         self.stream_inner(messages, vec![])
@@ -647,7 +572,8 @@ impl LlmProvider for GeminiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_request, extract_retry_delay_ms, to_gemini_contents};
+    use super::{build_request, extract_retry_delay_ms};
+    use crate::llm::provider_format::to_gemini_wire;
     use crate::llm::{Message, ToolDefinition};
     use crate::thinking::GeminiThinkingLevel;
 
@@ -744,7 +670,7 @@ mod tests {
             Message::tool_call("call_1", "read_file", serde_json::json!({"path":"a.txt"})),
             Message::tool_result("call_1", "ok", false),
         ];
-        let contents = to_gemini_contents(&messages);
+        let contents = to_gemini_wire(&messages);
         assert_eq!(
             contents[1]["parts"][0]["functionResponse"]["name"],
             "read_file"

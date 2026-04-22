@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
-    Role, ToolDefinition, UsageStats,
+    ToolDefinition, UsageStats,
     common::{build_http_client, send_streaming_request},
+    provider_format::to_ollama_wire,
 };
 
 // ── Model context-window cache ────────────────────────────────────────────────
@@ -52,44 +53,16 @@ impl OllamaProvider {
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
-    messages: Vec<OllamaMessage>,
+    messages: Vec<serde_json::Value>,
     stream: bool,
 }
 
 #[derive(Serialize)]
 struct ChatRequestWithTools {
     model: String,
-    messages: Vec<OllamaMessage>,
+    messages: Vec<serde_json::Value>,
     tools: Vec<OllamaToolDef>,
     stream: bool,
-}
-
-#[derive(Serialize)]
-struct OllamaMessage {
-    role: &'static str,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<String>,
-    /// Populated for Role::ToolCall messages (assistant turn with tool calls).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<OllamaToolCallItem>>,
-    /// Populated for Role::ToolResult messages so the model can match results
-    /// back to the originating call.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-}
-
-/// A single tool call entry inside an assistant message.
-#[derive(Serialize)]
-struct OllamaToolCallItem {
-    function: OllamaToolCallFunction,
-}
-
-#[derive(Serialize)]
-struct OllamaToolCallFunction {
-    name: String,
-    arguments: serde_json::Value,
 }
 
 /// Tool definition sent in the request.
@@ -173,38 +146,6 @@ struct ShowResponse {
 
 // ── History serialisation ─────────────────────────────────────────────────────
 
-/// Convert a `Message` to an `OllamaMessage` for inclusion in a chat request.
-fn to_ollama_message(msg: &Message) -> OllamaMessage {
-    match msg.role {
-        Role::ToolCall => OllamaMessage {
-            role: "assistant",
-            content: String::new(),
-            thinking: None,
-            tool_calls: Some(vec![OllamaToolCallItem {
-                function: OllamaToolCallFunction {
-                    name: msg.tool_name.clone().unwrap_or_default(),
-                    arguments: msg.tool_args.clone().unwrap_or(serde_json::Value::Null),
-                },
-            }]),
-            tool_call_id: None,
-        },
-        Role::ToolResult => OllamaMessage {
-            role: "tool",
-            content: msg.content.clone(),
-            thinking: None,
-            tool_calls: None,
-            tool_call_id: msg.tool_call_id.clone(),
-        },
-        _ => OllamaMessage {
-            role: msg.role.as_str(),
-            content: msg.content.clone(),
-            thinking: msg.thinking.clone().filter(|t| !t.is_empty()),
-            tool_calls: None,
-            tool_call_id: None,
-        },
-    }
-}
-
 // ── NDJSON helper ─────────────────────────────────────────────────────────────
 //
 // Parses an Ollama NDJSON chunk and emits the corresponding LlmEvents.
@@ -284,7 +225,7 @@ impl LlmProvider for OllamaProvider {
         Box::pin(async_stream::stream! {
             let body = ChatRequest {
                 model,
-                messages: messages.iter().map(to_ollama_message).collect(),
+                messages: to_ollama_wire(&messages),
                 stream: true,
             };
 
@@ -293,7 +234,9 @@ impl LlmProvider for OllamaProvider {
             }
 
             let mut req = client.post(&url).json(&body);
-            if let Some(key) = &api_key { req = req.bearer_auth(key); }
+            if let Some(key) = &api_key {
+                req = req.bearer_auth(key);
+            }
 
             let response = match send_streaming_request(req, "Ollama").await {
                 Ok(r) => r,
@@ -352,7 +295,7 @@ impl LlmProvider for OllamaProvider {
 
             let body = ChatRequestWithTools {
                 model,
-                messages: messages.iter().map(to_ollama_message).collect(),
+                messages: to_ollama_wire(&messages),
                 tools: ollama_tools,
                 stream: true,
             };
@@ -362,7 +305,9 @@ impl LlmProvider for OllamaProvider {
             }
 
             let mut req = client.post(&url).json(&body);
-            if let Some(key) = &api_key { req = req.bearer_auth(key); }
+            if let Some(key) = &api_key {
+                req = req.bearer_auth(key);
+            }
 
             let response = match send_streaming_request(req, "Ollama").await {
                 Ok(r) => r,
