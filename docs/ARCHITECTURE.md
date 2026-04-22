@@ -15,7 +15,9 @@ src/
   app.rs               — App state, event handling, submission, scroll
   ui.rs                — all ratatui rendering, pre-wrapping, scroll logic
   markdown.rs          — markdown → ratatui Lines renderer (paragraphs, headings, code, tables, lists)
-  commands.rs          — slash-command registry and completion items
+  commands/
+    mod.rs             — slash-command registry (COMMANDS, SlashCommand, CommandAction, parse)
+  completion.rs        — CompletionItem and completions_for (completion popup logic)
   config.rs            — config.toml loading (XDG + HOME fallback)
   provider.rs          — provider routing, thinking support, context-window fallback table
   provider_instance.rs — BackendPreset/ProviderInstance types and preset metadata catalog

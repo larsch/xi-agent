@@ -25,6 +25,7 @@ mod app;
 mod app_event;
 mod auth;
 mod commands;
+mod completion;
 mod config;
 mod debug_log;
 mod dirs;

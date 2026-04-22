@@ -358,7 +358,7 @@ mod tests {
     use crate::{
         agent::AgentLoopConfig,
         auth::AuthFlow,
-        commands::CompletionItem,
+        completion::CompletionItem,
         llm::{AssistantPhase, Message},
         thinking::ThinkingLevel,
     };

@@ -13,7 +13,7 @@ use crate::{
     },
     app_event::{AppEvent, AppEventTx},
     auth::{self, AuthFlow, LoginEvent},
-    commands::{self, CompletionItem},
+    completion::{self, CompletionItem},
     live_turn::{LiveToolEntry, LiveToolResult, LiveTurnState, compose_display},
     llm::{
         AssistantPhase, DisplayRange, LlmProvider, Message, ProviderErrorKind, Role, UsageStats,
@@ -1160,7 +1160,7 @@ impl App {
         let loading = self.models_loading;
         let fetch_error = self.model_fetch_error.as_deref();
         let thinking_enabled = self.thinking_supported;
-        let new = commands::completions_for(
+        let new = completion::completions_for(
             &input,
             available,
             loading,
@@ -1233,7 +1233,7 @@ impl App {
 
         if self.selection.active && self.selection.kind == Some(SelectionKind::Model) {
             if let Some(err) = &self.model_fetch_error {
-                let items = vec![commands::CompletionItem::error_indicator(err)];
+                let items = vec![completion::CompletionItem::error_indicator(err)];
                 self.set_selection_items(items);
             } else {
                 let items: Vec<_> = self
@@ -1241,7 +1241,7 @@ impl App {
                     .as_deref()
                     .unwrap_or(&[])
                     .iter()
-                    .map(|m| commands::CompletionItem::from_model(m))
+                    .map(|m| completion::CompletionItem::from_model(m))
                     .collect();
                 if !items.is_empty() {
                     self.set_selection_items(items);
