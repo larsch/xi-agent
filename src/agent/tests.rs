@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::agent::tools::ask_user::AskUserTool;
 use crate::agent::types::{AgentEvent, AskUserResponse, Tool};
-use crate::agent::{AgentLoopConfig, run_agent_loop};
+use crate::agent::{AgentLoopConfig, DefaultToolExecutor, run_agent_loop};
 use crate::app_event::AppEvent;
 use crate::llm::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ToolDefinition,
@@ -87,14 +87,20 @@ impl Tool for SlowTool {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn make_tracker() -> Arc<Mutex<crate::agent::file_tracker::FileTracker>> {
-    Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new()))
+fn make_tracker() -> std::sync::Arc<std::sync::Mutex<crate::agent::file_tracker::FileTracker>> {
+    std::sync::Arc::new(std::sync::Mutex::new(
+        crate::agent::file_tracker::FileTracker::new(),
+    ))
 }
 
-fn make_log() -> Arc<Mutex<crate::agent::tool_output_log::ToolOutputLog>> {
-    Arc::new(Mutex::new(
+fn make_log() -> std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>> {
+    std::sync::Arc::new(std::sync::Mutex::new(
         crate::agent::tool_output_log::ToolOutputLog::new("test"),
     ))
+}
+
+fn make_executor() -> std::sync::Arc<DefaultToolExecutor> {
+    std::sync::Arc::new(DefaultToolExecutor::new())
 }
 
 /// Run the agent loop with the given provider and collect all emitted agent events.
@@ -106,12 +112,11 @@ async fn run_and_collect(provider: MockProvider) -> Vec<AgentEvent> {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: make_executor(),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
         system_prompt: None,
     };
     run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
@@ -285,12 +290,11 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: make_executor(),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
         system_prompt: None,
     };
 
@@ -357,12 +361,11 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: make_executor(),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
         system_prompt: None,
     };
 
@@ -449,12 +452,14 @@ async fn agent_loop_before_hook_blocks_tool() {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: std::sync::Arc::new(crate::agent::types::DefaultToolExecutor::with_hooks(
+            Some(Box::new(|_name, _args| false)), // block everything
+            None,
+        )),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: Some(Box::new(|_name, _args| false)), // block everything
-        after_tool_call: None,
         system_prompt: None,
     };
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
@@ -595,12 +600,11 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: make_executor(),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
         system_prompt: None,
     };
 
@@ -676,12 +680,11 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: make_executor(),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
         system_prompt: None,
     };
 
@@ -735,16 +738,18 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
         tools,
         file_tracker: make_tracker(),
         tool_output_log: make_log(),
+        executor: std::sync::Arc::new(crate::agent::types::DefaultToolExecutor::with_hooks(
+            None,
+            // Cancel via the watch channel as soon as the tool call finishes.
+            Some(Box::new(move |_name, _result| {
+                let _ = cancel_tx.send(true);
+                None
+            })),
+        )),
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        // Cancel via the watch channel as soon as the tool call finishes.
-        after_tool_call: Some(Box::new(move |_name, _result| {
-            let _ = cancel_tx.send(true);
-            None
-        })),
         system_prompt: None,
     };
 

@@ -22,7 +22,7 @@ mod tests;
 pub use file_tracker::FileTracker;
 pub use system_prompt::build_system_prompt;
 pub use tool_output_log::ToolOutputLog;
-pub use types::{AgentEvent, AgentLoopConfig, ToolResult};
+pub use types::{AgentEvent, AgentLoopConfig, DefaultToolExecutor, ToolExecutor, ToolResult};
 
 // ── TurnOutcome ───────────────────────────────────────────────────────────────
 
@@ -287,38 +287,16 @@ async fn execute_tool_batch(
             args: args.clone(),
         }));
 
-        let blocked = config
-            .before_tool_call
-            .as_ref()
-            .map(|f| !f(&name, &args))
-            .unwrap_or(false);
-
-        let mut result = if blocked {
-            ToolResult::err(format!("Tool call '{name}' was blocked"))
-        } else {
-            match config.tools.get(&name) {
-                Some(tool) => {
-                    let r = tool.execute(args.clone()).await;
-                    if tool.saves_output() {
-                        let cmd_summary = args.get("command").and_then(|v| v.as_str());
-                        r.with_log_notice(
-                            &id,
-                            cmd_summary,
-                            &mut config.tool_output_log.lock().unwrap(),
-                        )
-                    } else {
-                        r
-                    }
-                }
-                None => ToolResult::err(format!("Unknown tool: '{name}'")),
-            }
-        };
-
-        if let Some(f) = &config.after_tool_call
-            && let Some(override_result) = f(&name, &result)
-        {
-            result = override_result;
-        }
+        let result = config
+            .executor
+            .execute_tool(
+                &id,
+                &name,
+                args.clone(),
+                &config.tools,
+                &config.tool_output_log,
+            )
+            .await;
 
         let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
             id: id.clone(),

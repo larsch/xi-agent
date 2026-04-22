@@ -187,8 +187,7 @@ async fn main() -> io::Result<()> {
             current_model: current_model.clone(),
             auto_compaction_enabled: true,
             manual_compaction_instructions: None,
-            before_tool_call: None,
-            after_tool_call: None,
+            executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
             system_prompt: None,
         },
     );
@@ -1656,8 +1655,7 @@ async fn run_print_mode(
         current_model: current_instance.effective_model().to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
+        executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
         system_prompt: Some(system_prompt),
     };
 
@@ -1836,8 +1834,7 @@ async fn run_print_mode_loop_inner(
         current_model: String::new(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
-        before_tool_call: None,
-        after_tool_call: None,
+        executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
         system_prompt,
     };
 

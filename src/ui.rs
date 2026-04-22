@@ -388,8 +388,7 @@ mod tests {
                 current_model: "gpt-4o".to_string(),
                 auto_compaction_enabled: true,
                 manual_compaction_instructions: None,
-                before_tool_call: None,
-                after_tool_call: None,
+                executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
                 system_prompt: None,
             },
         )

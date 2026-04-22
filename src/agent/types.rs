@@ -164,6 +164,117 @@ pub trait Tool: Send + Sync {
 /// A registry mapping tool names to their implementations.
 pub type ToolRegistry = HashMap<String, Arc<dyn Tool>>;
 
+// ── ToolExecutor ──────────────────────────────────────────────────────────────
+
+/// Abstraction over the execution of a single tool call.
+///
+/// Implementors decide whether to allow, block, override, or log the call.
+/// The agent loop calls [`ToolExecutor::execute_tool`] instead of invoking the
+/// `Tool` trait directly, so test doubles can inject controlled behaviour
+/// without constructing shared-state wrappers.
+pub trait ToolExecutor: Send + Sync {
+    /// Execute the named tool with the given arguments.
+    ///
+    /// `id` is the opaque call identifier (used for log-file keying).
+    /// `name` is the tool name.
+    /// `args` is the JSON argument object.
+    /// `tools` is the registry used to look up the implementation.
+    /// `log` is the output log used to persist truncated output.
+    fn execute_tool<'a>(
+        &'a self,
+        id: &'a str,
+        name: &'a str,
+        args: serde_json::Value,
+        tools: &'a ToolRegistry,
+        log: &'a std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>>;
+}
+
+/// The default [`ToolExecutor`] used in production.
+///
+/// Runs the optional `before_tool_call` guard (returning an error result when
+/// it returns `false`), dispatches to the matching [`Tool`], applies the log
+/// notice for tools that save output, then runs the optional `after_tool_call`
+/// override.
+pub struct DefaultToolExecutor {
+    /// Optional hook called before each tool execution. Return `false` to block.
+    pub before_tool_call: Option<BeforeToolCall>,
+    /// Optional hook called after each tool execution. Return `Some(result)` to override.
+    pub after_tool_call: Option<AfterToolCall>,
+}
+
+impl DefaultToolExecutor {
+    /// Create a new executor with no hooks.
+    pub fn new() -> Self {
+        Self {
+            before_tool_call: None,
+            after_tool_call: None,
+        }
+    }
+
+    /// Create a new executor with the given hooks.
+    #[allow(dead_code)]
+    pub fn with_hooks(
+        before_tool_call: Option<BeforeToolCall>,
+        after_tool_call: Option<AfterToolCall>,
+    ) -> Self {
+        Self {
+            before_tool_call,
+            after_tool_call,
+        }
+    }
+}
+
+impl Default for DefaultToolExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ToolExecutor for DefaultToolExecutor {
+    fn execute_tool<'a>(
+        &'a self,
+        id: &'a str,
+        name: &'a str,
+        args: serde_json::Value,
+        tools: &'a ToolRegistry,
+        log: &'a std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+        Box::pin(async move {
+            let blocked = self
+                .before_tool_call
+                .as_ref()
+                .map(|f| !f(name, &args))
+                .unwrap_or(false);
+
+            let mut result = if blocked {
+                ToolResult::err(format!("Tool call '{name}' was blocked"))
+            } else {
+                match tools.get(name) {
+                    Some(tool) => {
+                        let r = tool.execute(args.clone()).await;
+                        if tool.saves_output() {
+                            let cmd_summary = args.get("command").and_then(|v| v.as_str());
+                            r.with_log_notice(id, cmd_summary, &mut log.lock().unwrap())
+                        } else {
+                            r
+                        }
+                    }
+                    None => ToolResult::err(format!("Unknown tool: '{name}'")),
+                }
+            };
+
+            if let Some(f) = &self.after_tool_call
+                && let Some(override_result) = f(name, &result)
+            {
+                result = override_result;
+            }
+
+            result
+        })
+    }
+}
+
 // ── ask_user request/response bridge ─────────────────────────────────────────
 
 /// One selectable option for the `ask_user` tool.
@@ -268,6 +379,9 @@ pub struct AgentLoopConfig {
     /// Log that persists full tool output to temp files for the session.
     pub tool_output_log:
         std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+    /// Executor responsible for dispatching individual tool calls.
+    /// Wraps the before/after hooks and any override logic.
+    pub executor: std::sync::Arc<dyn ToolExecutor>,
     /// Current session event log snapshot used for compaction decisions.
     pub session_events: Vec<crate::session_event::SessionEvent>,
     /// Active model name used for context window lookup and summary requests.
@@ -277,12 +391,6 @@ pub struct AgentLoopConfig {
     /// Optional manual compaction instructions to apply immediately when the
     /// loop starts, before any normal assistant turn is requested.
     pub manual_compaction_instructions: Option<String>,
-    /// Optional hook called before each tool execution.
-    /// Return `false` to block the tool call (an error result is returned instead).
-    pub before_tool_call: Option<BeforeToolCall>,
-    /// Optional hook called after each tool execution.
-    /// Return `Some(result)` to override the tool's result.
-    pub after_tool_call: Option<AfterToolCall>,
     /// System prompt prepended to all LLM requests.  When `None`, no system
     /// message is added.
     pub system_prompt: Option<String>,
