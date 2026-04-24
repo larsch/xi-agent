@@ -46,6 +46,7 @@ mod provider_manager;
 mod selection_state;
 mod session;
 mod session_event;
+mod session_manager;
 mod session_state;
 mod shell;
 mod skills;

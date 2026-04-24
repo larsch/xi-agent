@@ -261,10 +261,10 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
     let input_width = area.width as usize;
 
     let (input_lines, cursor, prefix, hint) = if is_shell {
-        let cwd = if app.current_cwd().is_empty() {
+        let cwd = if app.session.current_cwd.is_empty() {
             ".".to_string()
         } else {
-            app.current_cwd().to_string()
+            app.session.current_cwd.clone()
         };
         let prefix = if app.available_shells.len() > 1 {
             format!(
