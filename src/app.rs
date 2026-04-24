@@ -18,7 +18,7 @@ use crate::{
     llm::{
         AssistantPhase, DisplayRange, LlmProvider, Message, ProviderErrorKind, Role, UsageStats,
     },
-    provider_instance::{ApiType, AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
+    provider_instance::{ApiType, AuthMode, BackendPreset, ProviderInstance},
     session::SessionStore,
     session_state::SessionState,
     shell::{self, ShellKind},
@@ -86,16 +86,13 @@ impl SetupInputKind {
         match self {
             Self::Name => "provider instance name: ".to_string(),
             Self::BaseUrl => match instance {
-                Some(p) => match p.backend_preset.def().endpoint_behavior {
-                    EndpointBehavior::UserSupplied => match p.backend_preset {
-                        BackendPreset::Ollama => "ollama URL: ".to_string(),
-                        BackendPreset::OpenWebUi => "open-webui URL: ".to_string(),
-                        BackendPreset::OpenAiCompatible => "URL: ".to_string(),
-                        _ => "URL: ".to_string(),
-                    },
-                    EndpointBehavior::Overrideable => "URL override: ".to_string(),
-                    _ => "URL: ".to_string(),
-                },
+                Some(p) => p
+                    .backend_preset
+                    .def()
+                    .url_normalization
+                    .as_ref()
+                    .map(|n| n.endpoint_label.to_string())
+                    .unwrap_or_else(|| "URL: ".to_string()),
                 None => "URL: ".to_string(),
             },
             Self::ApiKey => match instance {
@@ -118,20 +115,17 @@ impl SetupInputKind {
     pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
         match self {
             Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
-            Self::BaseUrl => match instance.map(|p| p.backend_preset.clone()) {
-                Some(BackendPreset::Ollama) => {
-                    "http://host:11434   Enter confirm   Esc cancel".to_string()
-                }
-                Some(BackendPreset::OpenWebUi) => {
-                    "https://my-webui.example.com   Enter confirm   Esc cancel".to_string()
-                }
-                Some(BackendPreset::OpenAiCompatible) => {
-                    "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel".to_string()
-                }
-                Some(BackendPreset::OpenRouter) => {
-                    "https://openrouter.ai/api/v1   Enter confirm   Esc cancel".to_string()
-                }
-                _ => "https://example.com   Enter confirm   Esc cancel".to_string(),
+            Self::BaseUrl => match instance {
+                Some(p) => p
+                    .backend_preset
+                    .def()
+                    .url_normalization
+                    .as_ref()
+                    .map(|n| n.endpoint_hint.to_string())
+                    .unwrap_or_else(|| {
+                        "https://example.com   Enter confirm   Esc cancel".to_string()
+                    }),
+                None => "https://example.com   Enter confirm   Esc cancel".to_string(),
             },
             Self::ApiKey => match instance {
                 Some(p) if p.api_key.is_some() => "Enter keep current   Esc cancel".to_string(),
@@ -147,6 +141,19 @@ impl SetupInputKind {
             },
         }
     }
+}
+
+/// Tracks which step of the provider setup input flow is currently active.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ProviderSetupStep {
+    #[default]
+    Idle,
+    /// User is typing an endpoint URL (covers Ollama, Open WebUI, generic endpoints).
+    Endpoint,
+    /// User is typing an API key / token. Holds the URL captured in a prior `Endpoint` step.
+    ApiKey { pending_url: Option<String> },
+    /// User is typing a provider instance name.
+    Name,
 }
 
 #[derive(Debug, Clone)]
@@ -293,25 +300,12 @@ pub struct App {
     ask_user: AskUserState,
 
     // ── Add-provider setup state ─────────────────────────────────────────────
-    /// When set, the textarea is being used for a structured provider-setup prompt.
-    pub setup_input_mode: Option<SetupInputKind>,
+    /// Tracks which step of the provider setup input flow is active.
+    pub(crate) provider_setup_step: ProviderSetupStep,
     /// Pending provider instance being configured through the add-provider flow.
     pub pending_provider_setup: Option<PendingProviderSetup>,
     /// Pending custom provider instance being confirmed for removal.
     pub pending_provider_removal: Option<PendingProviderRemoval>,
-
-    // ── Ollama endpoint input mode ────────────────────────────────────────────
-    /// When true the textarea is used to type a custom Ollama endpoint URL
-    /// rather than a regular chat message.
-    pub ollama_endpoint_input_mode: bool,
-
-    // ── Open WebUI setup input modes ──────────────────────────────────────────
-    /// When true the textarea is used to type the Open WebUI base URL.
-    pub open_webui_url_input_mode: bool,
-    /// When true the textarea is used to type the Open WebUI API key/token.
-    pub open_webui_token_input_mode: bool,
-    /// URL entered during Open WebUI setup (held while the user types the token).
-    pub open_webui_pending_url: Option<String>,
 
     // ── Runtime/task state ───────────────────────────────────────────────────
     runtime: AgentRuntime,
@@ -442,13 +436,9 @@ impl App {
             pending_turn_events: Vec::new(),
             pending_manual_compaction_instructions: None,
             ask_user: AskUserState::new(),
-            setup_input_mode: None,
+            provider_setup_step: ProviderSetupStep::Idle,
             pending_provider_setup: None,
             pending_provider_removal: None,
-            ollama_endpoint_input_mode: false,
-            open_webui_url_input_mode: false,
-            open_webui_token_input_mode: false,
-            open_webui_pending_url: None,
             runtime: AgentRuntime::new(),
         }
     }
@@ -956,14 +946,8 @@ impl App {
         } else if self.selection.kind == Some(SelectionKind::ConfirmProviderRemoval) {
             self.exit_selection_mode();
             self.clear_pending_provider_removal();
-        } else if self.setup_input_mode.is_some() {
+        } else if self.provider_setup_step != ProviderSetupStep::Idle {
             self.cancel_setup_input();
-        } else if self.ollama_endpoint_input_mode {
-            self.cancel_ollama_endpoint_input();
-        } else if self.open_webui_url_input_mode {
-            self.cancel_open_webui_url_input();
-        } else if self.open_webui_token_input_mode {
-            self.cancel_open_webui_token_input();
         } else if self.login.active {
             self.cancel_login();
         } else if self.streaming() {
@@ -1286,29 +1270,10 @@ impl App {
         self.exit_selection_mode();
         self.pending_provider_removal = None;
         self.pending_provider_setup = Some(PendingProviderSetup::from_instance(instance));
-        match instance.backend_preset {
-            BackendPreset::Ollama => {
-                self.enter_ollama_endpoint_freeform_mode();
-                self.textarea = Self::make_textarea();
-                if let Some(base_url) = instance.base_url.as_deref() {
-                    self.textarea.insert_str(base_url);
-                }
-            }
-            BackendPreset::OpenWebUi | BackendPreset::OpenAiCompatible => {
-                self.enter_provider_base_url_input_mode();
-                self.textarea = Self::make_textarea();
-                if let Some(base_url) = instance.base_url.as_deref() {
-                    self.textarea.insert_str(base_url);
-                }
-                self.open_webui_url_input_mode = false;
-                self.ollama_endpoint_input_mode = false;
-            }
-            _ => {
-                self.enter_provider_base_url_input_mode();
-                if let Some(base_url) = instance.base_url.as_deref() {
-                    self.textarea.insert_str(base_url);
-                }
-            }
+        self.enter_provider_endpoint_input_mode();
+        self.textarea = Self::make_textarea();
+        if let Some(base_url) = instance.base_url.as_deref() {
+            self.textarea.insert_str(base_url);
         }
     }
 
@@ -1329,7 +1294,7 @@ impl App {
     pub fn begin_new_provider_setup(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.setup_input_mode = None;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         self.pending_provider_setup = Some(PendingProviderSetup::new(String::new()));
         self.pending_provider_removal = None;
     }
@@ -1338,7 +1303,7 @@ impl App {
     pub fn enter_provider_name_input_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.setup_input_mode = Some(SetupInputKind::Name);
+        self.provider_setup_step = ProviderSetupStep::Name;
         self.pending_provider_removal = None;
         if let Some(existing_id) = self
             .pending_provider_setup
@@ -1353,22 +1318,38 @@ impl App {
     }
 
     /// Enter freeform input mode for a provider endpoint / base URL.
-    pub fn enter_provider_base_url_input_mode(&mut self) {
+    /// This is the unified entry point that replaces `enter_ollama_endpoint_freeform_mode`,
+    /// `enter_open_webui_url_input_mode`, and `enter_provider_base_url_input_mode`.
+    pub fn enter_provider_endpoint_input_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.setup_input_mode = Some(SetupInputKind::BaseUrl);
+        self.provider_setup_step = ProviderSetupStep::Endpoint;
+        // Pre-fill with the default endpoint hint for Ollama when adding a new instance.
+        if !self.pending_provider_setup_is_edit()
+            && self
+                .pending_provider_instance()
+                .is_some_and(|i| i.backend_preset == BackendPreset::Ollama)
+        {
+            self.textarea.insert_str(DEFAULT_OLLAMA_ENDPOINT);
+        }
     }
 
     /// Enter freeform input mode for a provider API key / token.
     pub fn enter_provider_api_key_input_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.setup_input_mode = Some(SetupInputKind::ApiKey);
+        let pending_url =
+            if let ProviderSetupStep::ApiKey { pending_url } = &self.provider_setup_step {
+                pending_url.clone()
+            } else {
+                None
+            };
+        self.provider_setup_step = ProviderSetupStep::ApiKey { pending_url };
     }
 
     /// Cancel the active provider setup input and clear pending state.
     pub fn cancel_setup_input(&mut self) {
-        self.setup_input_mode = None;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         self.pending_provider_setup = None;
         self.pending_provider_removal = None;
         self.reset_textarea();
@@ -1446,7 +1427,7 @@ impl App {
         {
             return None;
         }
-        self.setup_input_mode = None;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         setup.id = id.clone();
         self.reset_textarea();
         Some(id)
@@ -1455,14 +1436,9 @@ impl App {
     pub fn submit_pending_provider_base_url(&mut self) -> Option<String> {
         let instance = self.pending_provider_instance()?;
         let raw = self.textarea.lines().join("");
-        let url = match instance.backend_preset {
-            BackendPreset::Ollama => Self::normalize_ollama_endpoint(&raw)?,
-            BackendPreset::OpenWebUi
-            | BackendPreset::OpenAiCompatible
-            | BackendPreset::OpenRouter => Self::normalize_open_webui_url(&raw)?,
-            _ => return None,
-        };
-        self.setup_input_mode = None;
+        let norm = instance.backend_preset.def().url_normalization.as_ref()?;
+        let url = norm.normalize(&raw)?;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         if let Some(setup) = self.pending_provider_setup.as_mut() {
             setup.base_url = Some(url.clone());
         }
@@ -1480,7 +1456,7 @@ impl App {
         if token.is_empty() && !keep_existing {
             return None;
         }
-        self.setup_input_mode = None;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         if let Some(setup) = self.pending_provider_setup.as_mut()
             && !keep_existing
         {
@@ -1619,113 +1595,35 @@ impl App {
         self.pending_provider_removal = None;
     }
 
-    /// Switch the textarea into Ollama endpoint input mode.
-    pub fn enter_ollama_endpoint_freeform_mode(&mut self) {
-        self.exit_selection_mode();
-        self.reset_textarea();
-        self.setup_input_mode = Some(SetupInputKind::BaseUrl);
-        self.ollama_endpoint_input_mode = true;
-        if !self.pending_provider_setup_is_edit() {
-            self.textarea.insert_str(DEFAULT_OLLAMA_ENDPOINT);
-        }
-    }
-
-    /// Cancel Ollama endpoint input and return to normal mode.
-    pub fn cancel_ollama_endpoint_input(&mut self) {
-        self.ollama_endpoint_input_mode = false;
-        self.cancel_setup_input();
-    }
-
-    /// Normalize a user-entered Ollama endpoint.
-    ///
-    /// Accepted shorthand forms:
-    /// - `host`               → `http://host:11434`
-    /// - `host:1234`          → `http://host:1234`
-    /// - `http://host`        → `http://host:11434`
-    /// - `https://host`       → `https://host:11434`
-    /// - `http://host:1234`   → unchanged
-    /// - `https://host:1234`  → unchanged
-    ///
-    /// Returns `None` for empty input or values that still do not parse as an
-    /// absolute HTTP(S) URL after normalization.
-    fn normalize_ollama_endpoint(raw: &str) -> Option<String> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            trimmed.to_string()
-        } else {
-            format!("http://{trimmed}")
-        };
-
-        let mut url = reqwest::Url::parse(&with_scheme).ok()?;
-
-        match url.scheme() {
-            "http" | "https" => {}
-            _ => return None,
-        }
-
-        url.host_str()?;
-
-        if url.port().is_none() {
-            url.set_port(Some(11434)).ok()?;
-        }
-
-        Some(url.to_string().trim_end_matches('/').to_string())
-    }
-
     /// Read the textarea as an Ollama endpoint URL, normalize shorthand
     /// forms, and return `Some(url)` if it looks valid, `None` otherwise.
     pub fn take_ollama_endpoint_input(&mut self) -> Option<String> {
         let raw = self.textarea.lines().join("");
-        let url = Self::normalize_ollama_endpoint(&raw)?;
-        self.ollama_endpoint_input_mode = false;
-        self.setup_input_mode = None;
+        let norm = BackendPreset::Ollama.def().url_normalization.as_ref()?;
+        let url = norm.normalize(&raw)?;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         self.reset_textarea();
         Some(url)
     }
 
     // ── Open WebUI interactive setup ──────────────────────────────────────────
 
-    /// Enter URL input mode for Open WebUI setup.
-    pub fn enter_open_webui_url_input_mode(&mut self) {
-        self.enter_provider_base_url_input_mode();
-        self.open_webui_url_input_mode = true;
-    }
-
-    /// Cancel Open WebUI URL input mode.
-    pub fn cancel_open_webui_url_input(&mut self) {
-        self.open_webui_url_input_mode = false;
-        self.open_webui_pending_url = None;
-        self.cancel_setup_input();
-    }
-
-    /// Normalize a user-entered Open WebUI URL (must be http/https, no default port).
-    pub fn normalize_open_webui_url(raw: &str) -> Option<String> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            trimmed.to_string()
-        } else {
-            format!("https://{trimmed}")
-        };
-        // Basic parse check — just ensure host is present.
-        let url = reqwest::Url::parse(&with_scheme).ok()?;
-        url.host_str()?;
-        Some(with_scheme.trim_end_matches('/').to_string())
-    }
-
     /// Submit the URL typed in Open WebUI URL input mode.
     /// Returns the normalised URL if valid, and transitions to token input mode.
     pub fn submit_open_webui_url_input(&mut self) -> Option<String> {
-        let url = self.submit_pending_provider_base_url()?;
-        self.open_webui_url_input_mode = false;
-        self.open_webui_pending_url = Some(url.clone());
-        self.enter_provider_api_key_input_mode();
+        let instance = self.pending_provider_instance()?;
+        let raw = self.textarea.lines().join("");
+        let norm = instance.backend_preset.def().url_normalization.as_ref()?;
+        let url = norm.normalize(&raw)?;
+        if let Some(setup) = self.pending_provider_setup.as_mut() {
+            setup.base_url = Some(url.clone());
+        }
+        // Transition to ApiKey step, carrying the URL forward.
+        self.provider_setup_step = ProviderSetupStep::ApiKey {
+            pending_url: Some(url.clone()),
+        };
+        self.exit_selection_mode();
+        self.reset_textarea();
         if let Some(existing_token) = self
             .pending_provider_setup
             .as_ref()
@@ -1733,23 +1631,26 @@ impl App {
         {
             self.textarea.insert_str(existing_token);
         }
-        self.open_webui_token_input_mode = true;
         Some(url)
-    }
-
-    /// Cancel Open WebUI token input mode.
-    pub fn cancel_open_webui_token_input(&mut self) {
-        self.open_webui_token_input_mode = false;
-        self.open_webui_pending_url = None;
-        self.cancel_setup_input();
     }
 
     /// Submit the token typed in Open WebUI token input mode.
     /// Returns `Some((url, token))` if a pending URL exists and the token is non-empty.
     pub fn take_open_webui_token_input(&mut self) -> Option<(String, String)> {
         let token = self.submit_pending_provider_api_key()?;
-        let url = self.open_webui_pending_url.take()?;
-        self.open_webui_token_input_mode = false;
+        let url = if let ProviderSetupStep::ApiKey { pending_url } = &self.provider_setup_step {
+            pending_url.clone()
+        } else {
+            None
+        };
+        // pending_url may already have been cleared by submit_pending_provider_api_key
+        // so fall back to setup.base_url if needed
+        let url = url.or_else(|| {
+            self.pending_provider_setup
+                .as_ref()
+                .and_then(|s| s.base_url.clone())
+        })?;
+        self.provider_setup_step = ProviderSetupStep::Idle;
         Some((url, token))
     }
 
@@ -3362,7 +3263,7 @@ mod tests {
         app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));
         app.set_pending_provider_backend_preset(BackendPreset::OpenAiCompatible);
         app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
-        app.enter_provider_base_url_input_mode();
+        app.enter_provider_endpoint_input_mode();
         app.textarea.insert_str("test");
 
         let url = app
@@ -3383,7 +3284,7 @@ mod tests {
         app.pending_provider_setup = Some(super::PendingProviderSetup::new("router".to_string()));
         app.set_pending_provider_backend_preset(BackendPreset::OpenRouter);
         app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
-        app.enter_provider_base_url_input_mode();
+        app.enter_provider_endpoint_input_mode();
         app.textarea.insert_str("openrouter.ai/api/v1");
 
         let url = app
@@ -3441,7 +3342,7 @@ mod tests {
         app.begin_new_provider_setup();
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
 
-        app.enter_ollama_endpoint_freeform_mode();
+        app.enter_provider_endpoint_input_mode();
 
         assert_eq!(
             app.textarea.lines().join(""),
@@ -3589,31 +3490,51 @@ mod tests {
 
     #[test]
     fn normalize_ollama_endpoint_adds_default_scheme_only_when_port_present() {
+        let norm = BackendPreset::Ollama
+            .def()
+            .url_normalization
+            .as_ref()
+            .unwrap();
         assert_eq!(
-            App::normalize_ollama_endpoint("gpu-box:8080"),
+            norm.normalize("gpu-box:8080"),
             Some("http://gpu-box:8080".to_string())
         );
     }
 
     #[test]
     fn normalize_ollama_endpoint_adds_default_port_when_scheme_present() {
+        let norm = BackendPreset::Ollama
+            .def()
+            .url_normalization
+            .as_ref()
+            .unwrap();
         assert_eq!(
-            App::normalize_ollama_endpoint("https://gpu-box"),
+            norm.normalize("https://gpu-box"),
             Some("https://gpu-box:11434".to_string())
         );
     }
 
     #[test]
     fn normalize_ollama_endpoint_keeps_existing_scheme_and_port() {
+        let norm = BackendPreset::Ollama
+            .def()
+            .url_normalization
+            .as_ref()
+            .unwrap();
         assert_eq!(
-            App::normalize_ollama_endpoint("http://gpu-box:8080"),
+            norm.normalize("http://gpu-box:8080"),
             Some("http://gpu-box:8080".to_string())
         );
     }
 
     #[test]
     fn normalize_ollama_endpoint_rejects_empty_input() {
-        assert_eq!(App::normalize_ollama_endpoint("   "), None);
+        let norm = BackendPreset::Ollama
+            .def()
+            .url_normalization
+            .as_ref()
+            .unwrap();
+        assert_eq!(norm.normalize("   "), None);
     }
 
     // ── receive_ask_request ───────────────────────────────────────────────────

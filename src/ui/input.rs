@@ -7,7 +7,7 @@ use ratatui::{
 use ratatui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, ProviderSetupStep, SetupInputKind};
 
 /// Background colour of the input panel.
 pub(super) const INPUT_BG: Color = Color::Rgb(30, 30, 40);
@@ -282,11 +282,14 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
             prefix,
             (app.available_shells.len() > 1).then_some("Ctrl+S switch".to_string()),
         )
-    } else if app.setup_input_mode.is_some() {
+    } else if app.provider_setup_step != ProviderSetupStep::Idle {
         let instance = app.pending_provider_instance();
-        let kind = app
-            .setup_input_mode
-            .expect("setup_input_mode checked above");
+        let kind = match &app.provider_setup_step {
+            ProviderSetupStep::Endpoint => SetupInputKind::BaseUrl,
+            ProviderSetupStep::ApiKey { .. } => SetupInputKind::ApiKey,
+            ProviderSetupStep::Name => SetupInputKind::Name,
+            ProviderSetupStep::Idle => unreachable!(),
+        };
         (
             app.textarea.lines().to_vec(),
             app.textarea.cursor(),

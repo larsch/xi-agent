@@ -57,7 +57,7 @@ use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
-use app::{App, InputMode, SelectionResult, format_provider_error_for_display};
+use app::{App, InputMode, ProviderSetupStep, SelectionResult, format_provider_error_for_display};
 use app_event::AppEvent;
 use commands::CommandAction;
 use config::TauConfig;
@@ -497,47 +497,7 @@ async fn main() -> io::Result<()> {
                 );
             }
 
-            Ok(RunResult::ChangeOllamaEndpoint { instance, url }) => {
-                app.clear_pending_provider_setup();
-                let mut inst = config
-                    .find_provider(&instance.id)
-                    .cloned()
-                    .unwrap_or(instance);
-                inst.base_url = Some(url.clone());
-                config.ollama.record_endpoint(url.clone()); // keep legacy in sync
-                config.upsert_provider(inst.clone());
-                config.provider = Some(inst.id.clone());
-                if let Err(e) = config.save() {
-                    log::debug!("failed to persist ollama endpoint: {e}");
-                    app.push_notice(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
-                    app.mark_log_dirty();
-                }
-                current_instance = inst;
-                app.provider_instances = config.providers.clone();
-                current_model = resolve_model_for_instance(None, &current_instance);
-                app.current_model = current_model.clone();
-                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                app.current_thinking = current_thinking;
-                app.current_provider = current_instance.id.clone();
-                app.record_model_changed();
-                app.record_thinking_level_changed();
-                app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
-                app.push_notice(Message::assistant(format!(
-                    "[ollama provider {} endpoint set to {url}]",
-                    current_instance.id,
-                )));
-                app.mark_log_dirty();
-            }
-
-            Ok(RunResult::ChangeOpenWebUi {
+            Ok(RunResult::ConfigureProvider {
                 instance,
                 url,
                 api_key,
@@ -547,14 +507,29 @@ async fn main() -> io::Result<()> {
                     .find_provider(&instance.id)
                     .cloned()
                     .unwrap_or(instance);
-                inst.base_url = Some(url.clone());
-                inst.api_key = Some(api_key.clone());
-                config.open_webui.record_endpoint(url.clone()); // keep legacy in sync
-                config.open_webui.api_key = Some(api_key);
+                if let Some(url) = url.as_deref() {
+                    inst.base_url = Some(url.to_string());
+                    // Keep legacy per-preset config in sync.
+                    match inst.backend_preset {
+                        provider_instance::BackendPreset::Ollama => {
+                            config.ollama.record_endpoint(url.to_string());
+                        }
+                        provider_instance::BackendPreset::OpenWebUi => {
+                            config.open_webui.record_endpoint(url.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(api_key) = api_key {
+                    inst.api_key = Some(api_key.clone());
+                    if inst.backend_preset == provider_instance::BackendPreset::OpenWebUi {
+                        config.open_webui.api_key = Some(api_key);
+                    }
+                }
                 config.upsert_provider(inst.clone());
                 config.provider = Some(inst.id.clone());
                 if let Err(e) = config.save() {
-                    log::debug!("failed to persist open-webui config: {e}");
+                    log::debug!("failed to persist provider config: {e}");
                     app.push_notice(Message::assistant(format!(
                         "[failed to persist config.toml: {e}]"
                     )));
@@ -576,8 +551,11 @@ async fn main() -> io::Result<()> {
                     &current_model,
                     current_thinking,
                 );
+                let endpoint_msg = url
+                    .map(|u| format!(" endpoint set to {u}"))
+                    .unwrap_or_default();
                 app.push_notice(Message::assistant(format!(
-                    "[open-webui provider {} endpoint set to {url}]",
+                    "[provider {}{endpoint_msg}]",
                     current_instance.id,
                 )));
                 app.mark_log_dirty();
@@ -618,16 +596,11 @@ enum RunResult {
     },
     RemoveProvider(String),
     ChangeThinking(ThinkingLevel),
-    /// Switch to (or stay on) a specific Ollama instance with a new base URL.
-    ChangeOllamaEndpoint {
+    /// Switch to (or stay on) a specific provider instance with optional new base URL and API key.
+    ConfigureProvider {
         instance: ProviderInstance,
-        url: String,
-    },
-    /// Switch to a specific Open WebUI instance with a new base URL and API key.
-    ChangeOpenWebUi {
-        instance: ProviderInstance,
-        url: String,
-        api_key: String,
+        url: Option<String>,
+        api_key: Option<String>,
     },
 }
 
@@ -646,12 +619,8 @@ fn provider_setup_requires_api_key(instance: &ProviderInstance) -> bool {
     instance.backend_preset.def().auth_mode == AuthMode::ApiKey
 }
 
-fn enter_provider_endpoint_input(app: &mut App, instance: &ProviderInstance) {
-    match instance.backend_preset {
-        provider_instance::BackendPreset::Ollama => app.enter_ollama_endpoint_freeform_mode(),
-        provider_instance::BackendPreset::OpenWebUi => app.enter_open_webui_url_input_mode(),
-        _ => app.enter_provider_base_url_input_mode(),
-    }
+fn enter_provider_endpoint_input(app: &mut App, _instance: &ProviderInstance) {
+    app.enter_provider_endpoint_input_mode();
 }
 
 /// Read text from the system clipboard, or return `None` on error.
@@ -1189,91 +1158,103 @@ fn handle_chat_submit(
     provider: &Arc<dyn LlmProvider + Send + Sync>,
     config: &TauConfig,
 ) -> KeyDispatch {
-    if app.ollama_endpoint_input_mode {
-        if let Some(url) = app.take_ollama_endpoint_input() {
-            if app.pending_provider_setup_is_edit() {
+    match app.provider_setup_step.clone() {
+        ProviderSetupStep::Endpoint => {
+            // Determine whether this is the two-step URL→token flow (e.g. OpenWebUI)
+            // or a single-step URL entry (e.g. Ollama, generic endpoint).
+            let needs_api_key = app
+                .pending_provider_instance()
+                .as_ref()
+                .map(provider_setup_requires_api_key)
+                .unwrap_or(false);
+
+            let is_two_step = needs_api_key
+                && app
+                    .pending_provider_instance()
+                    .as_ref()
+                    .map(|i| {
+                        matches!(
+                            i.backend_preset.def().endpoint_behavior,
+                            provider_instance::EndpointBehavior::UserSupplied
+                        )
+                    })
+                    .unwrap_or(false);
+
+            if is_two_step {
+                // Submit URL and transition to ApiKey step (carries pending_url).
+                app.submit_open_webui_url_input();
+                return KeyDispatch::Continue;
+            }
+
+            // Single-step: for Ollama use the Ollama-specific normalizer, otherwise generic.
+            let url_opt = {
+                let instance_opt = app.pending_provider_instance();
+                let is_ollama = instance_opt
+                    .as_ref()
+                    .map(|i| i.backend_preset == provider_instance::BackendPreset::Ollama)
+                    .unwrap_or(false);
+                if is_ollama {
+                    app.take_ollama_endpoint_input()
+                } else {
+                    app.submit_pending_provider_base_url()
+                }
+            };
+
+            if let Some(url) = url_opt {
+                if app.pending_provider_setup_is_edit() {
+                    let instance = app
+                        .pending_provider_instance()
+                        .unwrap_or_else(|| resolve_current_run_instance(app, config));
+                    return KeyDispatch::Return(RunResult::ConfigureProvider {
+                        instance,
+                        url: Some(url),
+                        api_key: None,
+                    });
+                }
+                if let Some(setup) = app.pending_provider_setup.as_mut() {
+                    setup.base_url = Some(url);
+                }
+                app.enter_provider_name_input_mode();
+            }
+            return KeyDispatch::Continue;
+        }
+
+        ProviderSetupStep::ApiKey { .. } => {
+            if let Some((url, token)) = app.take_open_webui_token_input() {
                 let instance = app
                     .pending_provider_instance()
                     .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                return KeyDispatch::Return(RunResult::ChangeOllamaEndpoint { instance, url });
-            }
-            if let Some(setup) = app.pending_provider_setup.as_mut() {
-                setup.base_url = Some(url);
-            }
-            app.enter_provider_name_input_mode();
-        }
-        return KeyDispatch::Continue;
-    }
-
-    if app.open_webui_url_input_mode {
-        app.submit_open_webui_url_input();
-        return KeyDispatch::Continue;
-    }
-
-    if app.open_webui_token_input_mode {
-        if let Some((url, token)) = app.take_open_webui_token_input() {
-            let instance = app
-                .pending_provider_instance()
-                .unwrap_or_else(|| resolve_current_run_instance(app, config));
-            return KeyDispatch::Return(RunResult::ChangeOpenWebUi {
-                instance,
-                url,
-                api_key: token,
-            });
-        }
-        return KeyDispatch::Continue;
-    }
-
-    if app.setup_input_mode == Some(app::SetupInputKind::BaseUrl) {
-        if let Some(url) = app.submit_pending_provider_base_url() {
-            let instance = app
-                .pending_provider_instance()
-                .unwrap_or_else(|| resolve_current_run_instance(app, config));
-            if app.pending_provider_setup_is_edit()
-                && instance.backend_preset == provider_instance::BackendPreset::Ollama
-            {
-                return KeyDispatch::Return(RunResult::ChangeOllamaEndpoint { instance, url });
-            }
-            if app.pending_provider_setup_is_edit() {
-                if provider_setup_requires_api_key(&instance) {
-                    app.enter_provider_api_key_input_mode();
-                    if let Some(existing_token) = instance.api_key.as_deref() {
-                        app.textarea.insert_str(existing_token);
-                    }
-                } else {
-                    app.enter_provider_name_input_mode();
-                }
-            } else if provider_setup_requires_api_key(&instance) {
-                app.enter_provider_api_key_input_mode();
-            } else {
-                app.enter_provider_name_input_mode();
-            }
-        }
-        return KeyDispatch::Continue;
-    }
-
-    if app.setup_input_mode == Some(app::SetupInputKind::ApiKey) {
-        if app.submit_pending_provider_api_key().is_some() {
-            app.enter_provider_name_input_mode();
-        }
-        return KeyDispatch::Continue;
-    }
-
-    if app.setup_input_mode == Some(app::SetupInputKind::Name) {
-        let was_edit = app.pending_provider_setup_is_edit();
-        let original_id = app.pending_provider_original_id().map(ToOwned::to_owned);
-        if app.submit_provider_name_input(&config.providers).is_some()
-            && let Some(instance) = app.finish_pending_provider_setup()
-        {
-            if was_edit {
-                return KeyDispatch::Return(RunResult::UpdateProvider {
-                    original_id,
+                return KeyDispatch::Return(RunResult::ConfigureProvider {
                     instance,
+                    url: Some(url),
+                    api_key: Some(token),
                 });
             }
-            return KeyDispatch::Return(RunResult::AddProvider(instance));
+            // Generic ApiKey step (edit flow without two-step URL→token).
+            if app.submit_pending_provider_api_key().is_some() {
+                app.enter_provider_name_input_mode();
+            }
+            return KeyDispatch::Continue;
         }
-        return KeyDispatch::Continue;
+
+        ProviderSetupStep::Name => {
+            let was_edit = app.pending_provider_setup_is_edit();
+            let original_id = app.pending_provider_original_id().map(ToOwned::to_owned);
+            if app.submit_provider_name_input(&config.providers).is_some()
+                && let Some(instance) = app.finish_pending_provider_setup()
+            {
+                if was_edit {
+                    return KeyDispatch::Return(RunResult::UpdateProvider {
+                        original_id,
+                        instance,
+                    });
+                }
+                return KeyDispatch::Return(RunResult::AddProvider(instance));
+            }
+            return KeyDispatch::Continue;
+        }
+
+        ProviderSetupStep::Idle => {}
     }
 
     if app.has_pending_ask() {

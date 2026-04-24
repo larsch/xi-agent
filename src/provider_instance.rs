@@ -85,6 +85,46 @@ pub enum EndpointBehavior {
     Internal,
 }
 
+/// URL normalization parameters for a backend preset that accepts a user-supplied URL.
+pub struct UrlNormalization {
+    /// Default scheme to prepend when none is present (e.g. `"http"` or `"https"`).
+    pub default_scheme: &'static str,
+    /// Default port to apply when none is present (e.g. `Some(11434)` for Ollama).
+    pub default_port: Option<u16>,
+    /// Example URL hint shown to the user in the textarea.
+    pub endpoint_hint: &'static str,
+    /// Input label shown next to the textarea (e.g. `"ollama URL: "`).
+    pub endpoint_label: &'static str,
+}
+
+impl UrlNormalization {
+    /// Normalize a raw user-entered URL string using this preset's parameters.
+    ///
+    /// Returns `None` for empty/blank input or URLs that are still invalid after
+    /// normalization.
+    pub fn normalize(&self, raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            format!("{}://{}", self.default_scheme, trimmed)
+        };
+        let mut url = reqwest::Url::parse(&with_scheme).ok()?;
+        match url.scheme() {
+            "http" | "https" => {}
+            _ => return None,
+        }
+        url.host_str()?;
+        if let Some(port) = self.default_port.filter(|_| url.port().is_none()) {
+            url.set_port(Some(port)).ok()?;
+        }
+        Some(url.to_string().trim_end_matches('/').to_string())
+    }
+}
+
 /// Metadata tau keeps about a backend preset.
 pub struct BackendPresetDef {
     /// Machine-readable id (matches `BackendPreset` serialisation).
@@ -106,6 +146,9 @@ pub struct BackendPresetDef {
     pub endpoint_behavior: EndpointBehavior,
     /// Which authentication mode this preset requires.
     pub auth_mode: AuthMode,
+    /// URL normalization parameters for presets that accept a user-supplied URL.
+    /// `None` for presets with predetermined or internal endpoints.
+    pub url_normalization: Option<UrlNormalization>,
 }
 
 /// Static catalog of all supported backend presets.
@@ -124,6 +167,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
+        url_normalization: None,
     },
     BackendPresetDef {
         id: "openai",
@@ -135,6 +179,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::ApiKey,
+        url_normalization: None,
     },
     BackendPresetDef {
         id: "openrouter",
@@ -146,6 +191,12 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: true,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::ApiKey,
+        url_normalization: Some(UrlNormalization {
+            default_scheme: "https",
+            default_port: None,
+            endpoint_label: "URL: ",
+            endpoint_hint: "https://openrouter.ai/api/v1   Enter confirm   Esc cancel",
+        }),
     },
     BackendPresetDef {
         id: "codex",
@@ -157,6 +208,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
+        url_normalization: None,
     },
     BackendPresetDef {
         id: "gemini",
@@ -168,6 +220,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
+        url_normalization: None,
     },
     BackendPresetDef {
         id: "ollama",
@@ -183,6 +236,12 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: true,
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::None,
+        url_normalization: Some(UrlNormalization {
+            default_scheme: "http",
+            default_port: Some(11434),
+            endpoint_label: "ollama URL: ",
+            endpoint_hint: "http://host:11434   Enter confirm   Esc cancel",
+        }),
     },
     BackendPresetDef {
         id: "ollama-com",
@@ -194,6 +253,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::None,
+        url_normalization: None,
     },
     BackendPresetDef {
         id: "open-webui",
@@ -205,6 +265,12 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: true,
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::ApiKey,
+        url_normalization: Some(UrlNormalization {
+            default_scheme: "https",
+            default_port: None,
+            endpoint_label: "open-webui URL: ",
+            endpoint_hint: "https://my-webui.example.com   Enter confirm   Esc cancel",
+        }),
     },
     BackendPresetDef {
         id: "openai-compatible",
@@ -216,6 +282,12 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: true,
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::ApiKey,
+        url_normalization: Some(UrlNormalization {
+            default_scheme: "https",
+            default_port: None,
+            endpoint_label: "URL: ",
+            endpoint_hint: "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel",
+        }),
     },
     BackendPresetDef {
         id: "test",
@@ -227,6 +299,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         multi_instance: false,
         endpoint_behavior: EndpointBehavior::Internal,
         auth_mode: AuthMode::None,
+        url_normalization: None,
     },
 ];
 
