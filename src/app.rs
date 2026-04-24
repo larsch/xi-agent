@@ -31,6 +31,7 @@ use crate::ask_user_state::{AskUserState, PendingAsk};
 use crate::completion_state::CompletionState;
 use crate::export;
 use crate::login_state::{LoginActionKind, LoginState};
+use crate::provider_manager::ProviderManager;
 use crate::selection_state::{MAX_SELECTION_VISIBLE, SelectionKind, SelectionState};
 use crate::session_event::SessionEvent;
 
@@ -242,18 +243,9 @@ pub struct App {
     pub last_output_at: Option<std::time::Instant>,
     /// Optional system prompt prepended to every request.
     pub system_prompt: Option<String>,
-    /// Currently active model name (mirrors the provider; updated on `/model`).
-    pub current_model: String,
-    /// Currently active provider name (e.g. `"copilot"`).
-    pub current_provider: String,
-    /// Currently active thinking / reasoning level.
-    pub current_thinking: ThinkingLevel,
-    /// Whether the current provider+model combination supports thinking.
-    /// Updated by main.rs whenever provider or model changes.
-    pub thinking_supported: bool,
-    /// Snapshot of configured provider instances for completions and selection.
-    /// Updated by main.rs whenever the provider list changes.
-    pub provider_instances: Vec<crate::provider_instance::ProviderInstance>,
+    /// All provider-related state: instances, active instance/model/thinking,
+    /// and transient setup-flow state.
+    pub(crate) provider: ProviderManager,
     /// Agent loop configuration (tools, hooks).
     pub agent_config: AgentLoopConfig,
     /// Skills loaded from all supported skill roots.
@@ -300,13 +292,6 @@ pub struct App {
     ask_user: AskUserState,
 
     // ── Add-provider setup state ─────────────────────────────────────────────
-    /// Tracks which step of the provider setup input flow is active.
-    pub(crate) provider_setup_step: ProviderSetupStep,
-    /// Pending provider instance being configured through the add-provider flow.
-    pub pending_provider_setup: Option<PendingProviderSetup>,
-    /// Pending custom provider instance being confirmed for removal.
-    pub pending_provider_removal: Option<PendingProviderRemoval>,
-
     // ── Runtime/task state ───────────────────────────────────────────────────
     runtime: AgentRuntime,
 }
@@ -393,11 +378,12 @@ impl App {
     }
 
     pub fn new(
+        initial_instance: ProviderInstance,
         initial_model: impl Into<String>,
-        initial_provider: &str,
         initial_thinking: ThinkingLevel,
         agent_config: AgentLoopConfig,
     ) -> Self {
+        let initial_model = initial_model.into();
         let available_shells = shell::discover_available_shells();
         let selected_shell = available_shells.first().copied().unwrap_or(ShellKind::Bash);
         Self {
@@ -415,11 +401,7 @@ impl App {
             throbber_tick: 0,
             last_output_at: None,
             system_prompt: None,
-            current_model: initial_model.into(),
-            current_provider: initial_provider.to_string(),
-            current_thinking: initial_thinking,
-            thinking_supported: false, // updated by main.rs after construction
-            provider_instances: Vec::new(), // updated by main.rs after construction
+            provider: ProviderManager::new(initial_instance, initial_model, initial_thinking),
             agent_config,
             loaded_skills: Vec::new(),
             completion: CompletionState::new(),
@@ -436,9 +418,6 @@ impl App {
             pending_turn_events: Vec::new(),
             pending_manual_compaction_instructions: None,
             ask_user: AskUserState::new(),
-            provider_setup_step: ProviderSetupStep::Idle,
-            pending_provider_setup: None,
-            pending_provider_removal: None,
             runtime: AgentRuntime::new(),
         }
     }
@@ -464,8 +443,8 @@ impl App {
     /// that the change is preserved in the session history.
     pub fn record_model_changed(&mut self) {
         self.append_event_immediate(SessionEvent::ModelChanged {
-            model: self.current_model.clone(),
-            provider: self.current_provider.clone(),
+            model: self.provider.current_model.clone(),
+            provider: self.provider.current_instance.id.clone(),
             timestamp: Self::now_ts(),
         });
     }
@@ -475,7 +454,7 @@ impl App {
     /// Call this whenever `current_thinking` is updated.
     pub fn record_thinking_level_changed(&mut self) {
         self.append_event_immediate(SessionEvent::ThinkingLevelChanged {
-            level: self.current_thinking,
+            level: self.provider.current_thinking,
             timestamp: Self::now_ts(),
         });
     }
@@ -715,7 +694,7 @@ impl App {
 
     fn provider_supports_token_refresh(&self) -> bool {
         matches!(
-            self.current_provider.as_str(),
+            self.provider.current_instance.id.as_str(),
             "copilot" | "codex" | "gemini"
         )
     }
@@ -731,7 +710,7 @@ impl App {
 
         log::debug!(
             "triggering token refresh: provider={} target={:?}",
-            self.current_provider,
+            self.provider.current_instance.id,
             target
         );
 
@@ -746,7 +725,7 @@ impl App {
             }
         }
 
-        let provider = self.current_provider.clone();
+        let provider = self.provider.current_instance.id.clone();
         let tx = self.app_event_tx();
         tokio::spawn(async move {
             auth::refresh_provider(&provider, tx).await;
@@ -774,7 +753,7 @@ impl App {
             .as_secs() as i64;
 
         let state = match auth::token_state(
-            &self.current_provider,
+            &self.provider.current_instance.id,
             now_secs,
             auth::AUTH_REFRESH_LEEWAY_SECS,
         ) {
@@ -946,7 +925,7 @@ impl App {
         } else if self.selection.kind == Some(SelectionKind::ConfirmProviderRemoval) {
             self.exit_selection_mode();
             self.clear_pending_provider_removal();
-        } else if self.provider_setup_step != ProviderSetupStep::Idle {
+        } else if self.provider.setup_step != ProviderSetupStep::Idle {
             self.cancel_setup_input();
         } else if self.login.active {
             self.cancel_login();
@@ -969,7 +948,7 @@ impl App {
         let available = self.completion.available_models.as_deref();
         let loading = self.completion.models_loading;
         let fetch_error = self.completion.model_fetch_error.as_deref();
-        let thinking_enabled = self.thinking_supported;
+        let thinking_enabled = self.provider.thinking_supported;
         let new = completion::completions_for(
             &input,
             available,
@@ -977,7 +956,7 @@ impl App {
             fetch_error,
             &self.loaded_skills,
             thinking_enabled,
-            &self.provider_instances,
+            &self.provider.instances,
         );
 
         if new.len() != self.completion.completions.len() {
@@ -1031,8 +1010,8 @@ impl App {
                     // Refresh triggered; retry will happen automatically after refresh completes
                 } else {
                     let provider_label = active_provider_display_name(
-                        &self.current_provider,
-                        &self.provider_instances,
+                        &self.provider.current_instance.id,
+                        &self.provider.instances,
                     );
                     self.completion.model_fetch_error =
                         Some(format_provider_error_for_display(&provider_label, &e));
@@ -1102,11 +1081,14 @@ impl App {
 
     fn select_current_default(&mut self) {
         let target = match self.selection.kind {
-            Some(SelectionKind::Model) => Some(format!("/model {}", self.current_model)),
-            Some(SelectionKind::Thinking) => {
-                Some(format!("/thinking {}", self.current_thinking.as_str()))
+            Some(SelectionKind::Model) => Some(format!("/model {}", self.provider.current_model)),
+            Some(SelectionKind::Thinking) => Some(format!(
+                "/thinking {}",
+                self.provider.current_thinking.as_str()
+            )),
+            Some(SelectionKind::Provider) => {
+                Some(format!("/provider {}", self.provider.current_instance.id))
             }
-            Some(SelectionKind::Provider) => Some(format!("/provider {}", self.current_provider)),
             Some(SelectionKind::LoginProvider)
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
@@ -1268,8 +1250,8 @@ impl App {
     /// Start editing an existing custom provider instance.
     pub fn enter_provider_edit_mode(&mut self, instance: &ProviderInstance) {
         self.exit_selection_mode();
-        self.pending_provider_removal = None;
-        self.pending_provider_setup = Some(PendingProviderSetup::from_instance(instance));
+        self.provider.pending_removal = None;
+        self.provider.pending_setup = Some(PendingProviderSetup::from_instance(instance));
         self.enter_provider_endpoint_input_mode();
         self.textarea = Self::make_textarea();
         if let Some(base_url) = instance.base_url.as_deref() {
@@ -1278,14 +1260,16 @@ impl App {
     }
 
     pub fn pending_provider_setup_is_edit(&self) -> bool {
-        self.pending_provider_setup
+        self.provider
+            .pending_setup
             .as_ref()
             .map(|setup| setup.editing_existing)
             .unwrap_or(false)
     }
 
     pub fn pending_provider_original_id(&self) -> Option<&str> {
-        self.pending_provider_setup
+        self.provider
+            .pending_setup
             .as_ref()
             .and_then(|setup| setup.editing_existing.then_some(setup.original_id.as_str()))
     }
@@ -1294,19 +1278,20 @@ impl App {
     pub fn begin_new_provider_setup(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.provider_setup_step = ProviderSetupStep::Idle;
-        self.pending_provider_setup = Some(PendingProviderSetup::new(String::new()));
-        self.pending_provider_removal = None;
+        self.provider.setup_step = ProviderSetupStep::Idle;
+        self.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
+        self.provider.pending_removal = None;
     }
 
     /// Enter freeform input mode for the new provider instance name.
     pub fn enter_provider_name_input_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.provider_setup_step = ProviderSetupStep::Name;
-        self.pending_provider_removal = None;
+        self.provider.setup_step = ProviderSetupStep::Name;
+        self.provider.pending_removal = None;
         if let Some(existing_id) = self
-            .pending_provider_setup
+            .provider
+            .pending_setup
             .as_ref()
             .filter(|setup| setup.editing_existing)
             .map(|setup| setup.id.clone())
@@ -1323,7 +1308,7 @@ impl App {
     pub fn enter_provider_endpoint_input_mode(&mut self) {
         self.exit_selection_mode();
         self.reset_textarea();
-        self.provider_setup_step = ProviderSetupStep::Endpoint;
+        self.provider.setup_step = ProviderSetupStep::Endpoint;
         // Pre-fill with the default endpoint hint for Ollama when adding a new instance.
         if !self.pending_provider_setup_is_edit()
             && self
@@ -1339,19 +1324,19 @@ impl App {
         self.exit_selection_mode();
         self.reset_textarea();
         let pending_url =
-            if let ProviderSetupStep::ApiKey { pending_url } = &self.provider_setup_step {
+            if let ProviderSetupStep::ApiKey { pending_url } = &self.provider.setup_step {
                 pending_url.clone()
             } else {
                 None
             };
-        self.provider_setup_step = ProviderSetupStep::ApiKey { pending_url };
+        self.provider.setup_step = ProviderSetupStep::ApiKey { pending_url };
     }
 
     /// Cancel the active provider setup input and clear pending state.
     pub fn cancel_setup_input(&mut self) {
-        self.provider_setup_step = ProviderSetupStep::Idle;
-        self.pending_provider_setup = None;
-        self.pending_provider_removal = None;
+        self.provider.setup_step = ProviderSetupStep::Idle;
+        self.provider.pending_setup = None;
+        self.provider.pending_removal = None;
         self.reset_textarea();
     }
 
@@ -1394,7 +1379,7 @@ impl App {
     }
 
     fn suggested_pending_provider_id(&self) -> Option<String> {
-        let setup = self.pending_provider_setup.as_ref()?;
+        let setup = self.provider.pending_setup.as_ref()?;
         if setup.editing_existing {
             return Some(setup.id.clone());
         }
@@ -1420,14 +1405,14 @@ impl App {
     ) -> Option<String> {
         let raw = self.textarea.lines().join(" ");
         let id = Self::normalize_provider_id(&raw)?;
-        let setup = self.pending_provider_setup.as_mut()?;
+        let setup = self.provider.pending_setup.as_mut()?;
         if existing_instances
             .iter()
             .any(|p| p.id == id && (!setup.editing_existing || p.id != setup.original_id))
         {
             return None;
         }
-        self.provider_setup_step = ProviderSetupStep::Idle;
+        self.provider.setup_step = ProviderSetupStep::Idle;
         setup.id = id.clone();
         self.reset_textarea();
         Some(id)
@@ -1438,8 +1423,8 @@ impl App {
         let raw = self.textarea.lines().join("");
         let norm = instance.backend_preset.def().url_normalization.as_ref()?;
         let url = norm.normalize(&raw)?;
-        self.provider_setup_step = ProviderSetupStep::Idle;
-        if let Some(setup) = self.pending_provider_setup.as_mut() {
+        self.provider.setup_step = ProviderSetupStep::Idle;
+        if let Some(setup) = self.provider.pending_setup.as_mut() {
             setup.base_url = Some(url.clone());
         }
         self.reset_textarea();
@@ -1449,15 +1434,16 @@ impl App {
     pub fn submit_pending_provider_api_key(&mut self) -> Option<String> {
         let token = self.textarea.lines().join("").trim().to_string();
         let existing_token = self
-            .pending_provider_setup
+            .provider
+            .pending_setup
             .as_ref()
             .and_then(|setup| setup.api_key.clone());
         let keep_existing = token.is_empty() && self.pending_provider_setup_is_edit();
         if token.is_empty() && !keep_existing {
             return None;
         }
-        self.provider_setup_step = ProviderSetupStep::Idle;
-        if let Some(setup) = self.pending_provider_setup.as_mut()
+        self.provider.setup_step = ProviderSetupStep::Idle;
+        if let Some(setup) = self.provider.pending_setup.as_mut()
             && !keep_existing
         {
             setup.api_key = Some(token.clone());
@@ -1515,20 +1501,20 @@ impl App {
     }
 
     pub fn set_pending_provider_backend_preset(&mut self, backend_preset: BackendPreset) {
-        if let Some(setup) = self.pending_provider_setup.as_mut() {
+        if let Some(setup) = self.provider.pending_setup.as_mut() {
             setup.backend_preset = Some(backend_preset);
             setup.api_type = None;
         }
     }
 
     pub fn set_pending_provider_api_type(&mut self, api_type: ApiType) {
-        if let Some(setup) = self.pending_provider_setup.as_mut() {
+        if let Some(setup) = self.provider.pending_setup.as_mut() {
             setup.api_type = Some(api_type);
         }
     }
 
     pub fn pending_provider_instance(&self) -> Option<ProviderInstance> {
-        let setup = self.pending_provider_setup.as_ref()?;
+        let setup = self.provider.pending_setup.as_ref()?;
         let backend_preset = setup.backend_preset.clone()?;
         let api_type = setup
             .api_type
@@ -1548,14 +1534,14 @@ impl App {
 
     pub fn finish_pending_provider_setup(&mut self) -> Option<ProviderInstance> {
         let instance = self.pending_provider_instance()?;
-        self.pending_provider_setup = None;
-        self.pending_provider_removal = None;
+        self.provider.pending_setup = None;
+        self.provider.pending_removal = None;
         Some(instance)
     }
 
     pub fn clear_pending_provider_setup(&mut self) {
-        self.pending_provider_setup = None;
-        self.pending_provider_removal = None;
+        self.provider.pending_setup = None;
+        self.provider.pending_removal = None;
     }
 
     pub fn enter_provider_removal_confirmation_mode(&mut self, instance: &ProviderInstance) {
@@ -1564,8 +1550,8 @@ impl App {
         self.selection.kind = Some(SelectionKind::ConfirmProviderRemoval);
         self.selection.title = "  Remove provider?  ";
         self.selection.query.clear();
-        self.pending_provider_setup = None;
-        self.pending_provider_removal = Some(PendingProviderRemoval {
+        self.provider.pending_setup = None;
+        self.provider.pending_removal = Some(PendingProviderRemoval {
             id: instance.id.clone(),
         });
         self.set_selection_items(vec![
@@ -1592,7 +1578,7 @@ impl App {
     }
 
     pub fn clear_pending_provider_removal(&mut self) {
-        self.pending_provider_removal = None;
+        self.provider.pending_removal = None;
     }
 
     /// Read the textarea as an Ollama endpoint URL, normalize shorthand
@@ -1601,7 +1587,7 @@ impl App {
         let raw = self.textarea.lines().join("");
         let norm = BackendPreset::Ollama.def().url_normalization.as_ref()?;
         let url = norm.normalize(&raw)?;
-        self.provider_setup_step = ProviderSetupStep::Idle;
+        self.provider.setup_step = ProviderSetupStep::Idle;
         self.reset_textarea();
         Some(url)
     }
@@ -1615,17 +1601,18 @@ impl App {
         let raw = self.textarea.lines().join("");
         let norm = instance.backend_preset.def().url_normalization.as_ref()?;
         let url = norm.normalize(&raw)?;
-        if let Some(setup) = self.pending_provider_setup.as_mut() {
+        if let Some(setup) = self.provider.pending_setup.as_mut() {
             setup.base_url = Some(url.clone());
         }
         // Transition to ApiKey step, carrying the URL forward.
-        self.provider_setup_step = ProviderSetupStep::ApiKey {
+        self.provider.setup_step = ProviderSetupStep::ApiKey {
             pending_url: Some(url.clone()),
         };
         self.exit_selection_mode();
         self.reset_textarea();
         if let Some(existing_token) = self
-            .pending_provider_setup
+            .provider
+            .pending_setup
             .as_ref()
             .and_then(|setup| setup.api_key.as_deref())
         {
@@ -1638,7 +1625,7 @@ impl App {
     /// Returns `Some((url, token))` if a pending URL exists and the token is non-empty.
     pub fn take_open_webui_token_input(&mut self) -> Option<(String, String)> {
         let token = self.submit_pending_provider_api_key()?;
-        let url = if let ProviderSetupStep::ApiKey { pending_url } = &self.provider_setup_step {
+        let url = if let ProviderSetupStep::ApiKey { pending_url } = &self.provider.setup_step {
             pending_url.clone()
         } else {
             None
@@ -1646,11 +1633,12 @@ impl App {
         // pending_url may already have been cleared by submit_pending_provider_api_key
         // so fall back to setup.base_url if needed
         let url = url.or_else(|| {
-            self.pending_provider_setup
+            self.provider
+                .pending_setup
                 .as_ref()
                 .and_then(|s| s.base_url.clone())
         })?;
-        self.provider_setup_step = ProviderSetupStep::Idle;
+        self.provider.setup_step = ProviderSetupStep::Idle;
         Some((url, token))
     }
 
@@ -1796,7 +1784,8 @@ impl App {
                 }),
             Some(SelectionKind::ConfirmProviderRemoval) => match item.complete_to.as_str() {
                 "/provider_remove_confirm" => self
-                    .pending_provider_removal
+                    .provider
+                    .pending_removal
                     .as_ref()
                     .map(|pending| SelectionResult::RemoveProvider(pending.id.clone())),
                 "/provider_remove_cancel" => Some(SelectionResult::CancelProviderRemoval),
@@ -1811,7 +1800,8 @@ impl App {
                 .complete_to
                 .strip_prefix("/provider_api ")
                 .and_then(|label| {
-                    self.pending_provider_setup
+                    self.provider
+                        .pending_setup
                         .as_ref()?
                         .backend_preset
                         .as_ref()?
@@ -2406,8 +2396,8 @@ impl App {
         let html = export::build_session_export_html(
             messages_ref,
             &self.current_cwd,
-            &self.current_provider,
-            &self.current_model,
+            &self.provider.current_instance.id,
+            &self.provider.current_model,
             self.current_session_id.as_deref(),
         );
 
@@ -2466,7 +2456,7 @@ impl App {
             file_tracker: Arc::clone(&self.agent_config.file_tracker),
             tool_output_log: Arc::clone(&self.agent_config.tool_output_log),
             session_events,
-            current_model: self.current_model.clone(),
+            current_model: self.provider.current_model.clone(),
             auto_compaction_enabled: true,
             manual_compaction_instructions: self.pending_manual_compaction_instructions.take(),
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
@@ -2958,7 +2948,7 @@ impl App {
                 {
                     log::debug!(
                         "received 401, refresh triggered: provider={} remaining_budget= {}",
-                        self.current_provider,
+                        self.provider.current_instance.id,
                         self.login.auth_retry_budget
                     );
                     self.login.auth_retry_budget -= 1;
@@ -2969,8 +2959,8 @@ impl App {
                     self.live_turn.clear_turn();
                 } else {
                     let provider_label = active_provider_display_name(
-                        &self.current_provider,
-                        &self.provider_instances,
+                        &self.provider.current_instance.id,
+                        &self.provider.instances,
                     );
                     let rendered = format_provider_error_for_display(&provider_label, &e);
                     self.live_turn
@@ -3061,9 +3051,11 @@ mod tests {
     };
 
     fn make_app() -> App {
+        let instance =
+            crate::provider_instance::ProviderInstance::new("openai", BackendPreset::OpenAi);
         App::new(
+            instance,
             "gpt-4o",
-            "openai",
             ThinkingLevel::Off,
             AgentLoopConfig {
                 tools: Default::default(),
@@ -3174,7 +3166,8 @@ mod tests {
         );
         assert_eq!(app.selection.title, "  Remove provider?  ");
         assert_eq!(
-            app.pending_provider_removal
+            app.provider
+                .pending_removal
                 .as_ref()
                 .map(|pending| pending.id.as_str()),
             Some("gpu-box")
@@ -3229,7 +3222,7 @@ mod tests {
 
         app.clear_pending_provider_setup();
 
-        assert!(app.pending_provider_removal.is_none());
+        assert!(app.provider.pending_removal.is_none());
     }
 
     #[test]
@@ -3260,7 +3253,7 @@ mod tests {
     #[test]
     fn submit_pending_provider_base_url_stores_openai_compatible_endpoint() {
         let mut app = make_app();
-        app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));
+        app.provider.pending_setup = Some(super::PendingProviderSetup::new("test".to_string()));
         app.set_pending_provider_backend_preset(BackendPreset::OpenAiCompatible);
         app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
         app.enter_provider_endpoint_input_mode();
@@ -3281,7 +3274,7 @@ mod tests {
     #[test]
     fn submit_pending_provider_base_url_stores_openrouter_endpoint() {
         let mut app = make_app();
-        app.pending_provider_setup = Some(super::PendingProviderSetup::new("router".to_string()));
+        app.provider.pending_setup = Some(super::PendingProviderSetup::new("router".to_string()));
         app.set_pending_provider_backend_preset(BackendPreset::OpenRouter);
         app.set_pending_provider_api_type(ApiType::OpenAiCompatible);
         app.enter_provider_endpoint_input_mode();
@@ -3302,7 +3295,7 @@ mod tests {
     #[test]
     fn submit_pending_provider_api_key_stores_token() {
         let mut app = make_app();
-        app.pending_provider_setup = Some(super::PendingProviderSetup::new("test".to_string()));
+        app.provider.pending_setup = Some(super::PendingProviderSetup::new("test".to_string()));
         app.enter_provider_api_key_input_mode();
         app.textarea.insert_str("sk-test");
 
@@ -3311,7 +3304,8 @@ mod tests {
             .expect("provider token");
         assert_eq!(token, "sk-test");
         assert_eq!(
-            app.pending_provider_setup
+            app.provider
+                .pending_setup
                 .as_ref()
                 .and_then(|p| p.api_key.as_deref()),
             Some("sk-test")
@@ -3367,7 +3361,7 @@ mod tests {
         let mut app = make_app();
         let mut instance = ProviderInstance::new("work-webui", BackendPreset::OpenWebUi);
         instance.api_key = Some("sk-existing".to_string());
-        app.pending_provider_setup = Some(super::PendingProviderSetup::from_instance(&instance));
+        app.provider.pending_setup = Some(super::PendingProviderSetup::from_instance(&instance));
         app.enter_provider_api_key_input_mode();
 
         let token = app
@@ -3375,7 +3369,8 @@ mod tests {
             .expect("provider token");
         assert_eq!(token, "sk-existing");
         assert_eq!(
-            app.pending_provider_setup
+            app.provider
+                .pending_setup
                 .as_ref()
                 .and_then(|p| p.api_key.as_deref()),
             Some("sk-existing")
@@ -3392,7 +3387,7 @@ mod tests {
 
         app.begin_new_provider_setup();
         app.set_pending_provider_backend_preset(BackendPreset::OpenWebUi);
-        if let Some(setup) = app.pending_provider_setup.as_mut() {
+        if let Some(setup) = app.provider.pending_setup.as_mut() {
             setup.base_url = Some("https://work.example.com".to_string());
         }
         app.enter_provider_name_input_mode();
@@ -3409,7 +3404,7 @@ mod tests {
             .expect("new provider id");
         assert_eq!(id, "gpu-box");
         assert_eq!(
-            app.pending_provider_setup.as_ref().map(|p| p.id.as_str()),
+            app.provider.pending_setup.as_ref().map(|p| p.id.as_str()),
             Some("gpu-box")
         );
     }
@@ -3420,7 +3415,7 @@ mod tests {
         app.begin_new_provider_setup();
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
         app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
-        if let Some(setup) = app.pending_provider_setup.as_mut() {
+        if let Some(setup) = app.provider.pending_setup.as_mut() {
             setup.base_url = Some("http://mydomain.com:11434".to_string());
         }
 
@@ -3438,7 +3433,7 @@ mod tests {
         let mut instance = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
         instance.base_url = Some("http://gpu-box:11434".to_string());
 
-        app.pending_provider_setup = Some(super::PendingProviderSetup::from_instance(&instance));
+        app.provider.pending_setup = Some(super::PendingProviderSetup::from_instance(&instance));
         app.enter_provider_name_input_mode();
 
         assert_eq!(app.textarea.lines().join(""), "gpu-box");
@@ -3449,7 +3444,7 @@ mod tests {
         let mut app = make_app();
         app.begin_new_provider_setup();
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
-        if let Some(setup) = app.pending_provider_setup.as_mut() {
+        if let Some(setup) = app.provider.pending_setup.as_mut() {
             setup.base_url = Some("http://localhost:11434".to_string());
         }
 
@@ -3476,7 +3471,7 @@ mod tests {
     #[test]
     fn pending_provider_instance_uses_selected_service_and_api() {
         let mut app = make_app();
-        app.pending_provider_setup = Some(super::PendingProviderSetup::new("gpu-box".to_string()));
+        app.provider.pending_setup = Some(super::PendingProviderSetup::new("gpu-box".to_string()));
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
         app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
 

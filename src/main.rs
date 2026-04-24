@@ -42,6 +42,7 @@ mod process;
 mod projection;
 mod provider;
 mod provider_instance;
+mod provider_manager;
 mod selection_state;
 mod session;
 mod session_event;
@@ -138,12 +139,12 @@ async fn main() -> io::Result<()> {
     }
 
     // Priority: --provider flag > config.toml > default.
-    let mut current_instance = resolve_provider_instance(cli.provider.as_deref(), &config)
+    let initial_instance = resolve_provider_instance(cli.provider.as_deref(), &config)
         .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
 
     // Priority: --model flag > config.toml > provider default.
-    let mut current_model = resolve_model_for_instance(cli.model.as_deref(), &current_instance);
-    let mut current_thinking = resolve_thinking_level_for_model(&config, &current_model);
+    let initial_model = resolve_model_for_instance(cli.model.as_deref(), &initial_instance);
+    let initial_thinking = resolve_thinking_level_for_model(&config, &initial_model);
     let window_folder = std::env::current_dir()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -181,15 +182,15 @@ async fn main() -> io::Result<()> {
     let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
 
     let mut app = App::new(
-        &current_model,
-        &current_instance.id,
-        current_thinking,
+        initial_instance,
+        &initial_model,
+        initial_thinking,
         AgentLoopConfig {
             tools: std::collections::HashMap::new(),
             file_tracker: Arc::clone(&file_tracker),
             tool_output_log: Arc::clone(&tool_output_log),
             session_events: vec![],
-            current_model: current_model.clone(),
+            current_model: initial_model.clone(),
             auto_compaction_enabled: true,
             manual_compaction_instructions: None,
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
@@ -213,33 +214,30 @@ async fn main() -> io::Result<()> {
     app.agent_config.tools = tools;
     app.system_prompt = Some(system_prompt);
     app.loaded_skills = loaded_skills;
-    app.provider_instances = config.providers.clone();
-    maybe_warn_thinking_unsupported(
-        &mut app,
-        &current_instance,
-        &current_model,
-        current_thinking,
-    );
+    app.provider.instances = config.providers.clone();
+    maybe_warn_thinking_unsupported(&mut app);
 
     loop {
         // Build (or re-build) the provider for the current instance.
-        let provider =
-            match build_provider_for_instance(&current_instance, current_thinking, &config) {
-                Ok(p) => p,
-                Err(e) => {
-                    let msg = format!("[provider unavailable: {e}]");
-                    log::debug!(
-                        "provider build failed: provider={} model={} err={}",
-                        current_instance.id,
-                        current_model,
-                        e
-                    );
-                    app.push_notice(llm::Message::assistant(msg.clone()));
-                    app.mark_log_dirty();
-                    Arc::new(UnavailableProvider { message: msg })
-                        as Arc<dyn LlmProvider + Send + Sync>
-                }
-            };
+        let provider = match build_provider_for_instance(
+            &app.provider.current_instance,
+            app.provider.current_thinking,
+            &config,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("[provider unavailable: {e}]");
+                log::debug!(
+                    "provider build failed: provider={} model={} err={}",
+                    app.provider.current_instance.id,
+                    app.provider.current_model,
+                    e
+                );
+                app.push_notice(llm::Message::assistant(msg.clone()));
+                app.mark_log_dirty();
+                Arc::new(UnavailableProvider { message: msg }) as Arc<dyn LlmProvider + Send + Sync>
+            }
+        };
 
         if app.login.retry_after_refresh {
             app.login.retry_after_refresh = false;
@@ -286,32 +284,23 @@ async fn main() -> io::Result<()> {
                 prompt_thinking_selection,
             }) => {
                 // Update the current instance's model.
-                current_instance.model = Some(name.clone());
-                app.current_model = name.clone();
-                current_model = name;
-                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                app.current_thinking = current_thinking;
+                app.provider.current_instance.model = Some(name.clone());
+                app.provider.current_model = name.clone();
+                app.provider.current_model = name;
+                app.provider.current_thinking =
+                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
                 app.record_model_changed();
                 app.record_thinking_level_changed();
                 // Invalidate cached model list so the next fetch is fresh.
                 app.completion.available_models = None;
-                persist_provider_model_selection_v2(
-                    &mut config,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                    &mut app,
-                );
-                app.provider_instances = config.providers.clone();
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
+                persist_provider_model_selection_v2(&mut config, &mut app);
+                app.provider.instances = config.providers.clone();
+                maybe_warn_thinking_unsupported(&mut app);
                 if prompt_thinking_selection
-                    && thinking_support_for_instance(&current_instance, &current_model)
-                        == ThinkingSupport::Applied
+                    && thinking_support_for_instance(
+                        &app.provider.current_instance,
+                        &app.provider.current_model,
+                    ) == ThinkingSupport::Applied
                 {
                     app.enter_thinking_selection_mode();
                 }
@@ -321,35 +310,23 @@ async fn main() -> io::Result<()> {
                 if let Some(inst) = config.find_provider(&id).cloned() {
                     let requires_api_key = provider_setup_requires_api_key(&inst);
                     if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
-                        app.pending_provider_setup =
+                        app.provider.pending_setup =
                             Some(app::PendingProviderSetup::from_instance(&inst));
                         app.enter_provider_api_key_input_mode();
                         continue;
                     }
 
-                    current_instance = inst;
-                    current_model = resolve_model_for_instance(None, &current_instance);
-                    app.current_model = current_model.clone();
-                    current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                    app.current_thinking = current_thinking;
-                    app.current_provider = current_instance.id.clone();
+                    app.provider.current_instance = inst;
+                    app.provider.current_model =
+                        resolve_model_for_instance(None, &app.provider.current_instance);
+                    app.provider.current_thinking =
+                        resolve_thinking_level_for_model(&config, &app.provider.current_model);
                     app.record_model_changed();
                     app.record_thinking_level_changed();
                     app.completion.available_models = None;
-                    persist_provider_model_selection_v2(
-                        &mut config,
-                        &current_instance,
-                        &current_model,
-                        current_thinking,
-                        &mut app,
-                    );
-                    app.provider_instances = config.providers.clone();
-                    maybe_warn_thinking_unsupported(
-                        &mut app,
-                        &current_instance,
-                        &current_model,
-                        current_thinking,
-                    );
+                    persist_provider_model_selection_v2(&mut config, &mut app);
+                    app.provider.instances = config.providers.clone();
+                    maybe_warn_thinking_unsupported(&mut app);
                 }
                 // Unknown id: silently ignore and loop (provider unchanged).
             }
@@ -367,29 +344,22 @@ async fn main() -> io::Result<()> {
                     )));
                     app.mark_log_dirty();
                 }
-                current_instance = config
+                app.provider.current_instance = config
                     .find_provider(&instance.id)
                     .cloned()
                     .unwrap_or(instance);
-                current_model = current_model_for_instance;
-                app.current_model = current_model.clone();
-                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                app.current_thinking = current_thinking;
-                app.current_provider = current_instance.id.clone();
+                app.provider.current_model = current_model_for_instance;
+                app.provider.current_thinking =
+                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
                 app.record_model_changed();
                 app.record_thinking_level_changed();
-                app.provider_instances = config.providers.clone();
+                app.provider.instances = config.providers.clone();
                 app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
+                maybe_warn_thinking_unsupported(&mut app);
                 app.push_notice(Message::assistant(format!(
                     "[added provider {} ({})]",
-                    current_instance.id,
-                    current_instance.backend_preset.label(),
+                    app.provider.current_instance.id,
+                    app.provider.current_instance.backend_preset.label(),
                 )));
                 app.mark_log_dirty();
             }
@@ -415,29 +385,22 @@ async fn main() -> io::Result<()> {
                     )));
                     app.mark_log_dirty();
                 }
-                current_instance = config
+                app.provider.current_instance = config
                     .find_provider(&instance.id)
                     .cloned()
                     .unwrap_or(instance);
-                current_model = current_model_for_instance;
-                app.current_model = current_model.clone();
-                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                app.current_thinking = current_thinking;
-                app.current_provider = current_instance.id.clone();
+                app.provider.current_model = current_model_for_instance;
+                app.provider.current_thinking =
+                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
                 app.record_model_changed();
                 app.record_thinking_level_changed();
-                app.provider_instances = config.providers.clone();
+                app.provider.instances = config.providers.clone();
                 app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
+                maybe_warn_thinking_unsupported(&mut app);
                 app.push_notice(Message::assistant(format!(
                     "[edited provider {} ({})]",
-                    current_instance.id,
-                    current_instance.backend_preset.label(),
+                    app.provider.current_instance.id,
+                    app.provider.current_instance.backend_preset.label(),
                 )));
                 app.mark_log_dirty();
             }
@@ -456,45 +419,28 @@ async fn main() -> io::Result<()> {
                         )));
                         app.mark_log_dirty();
                     }
-                    current_instance = resolve_default_provider_instance(&config);
-                    current_model = resolve_model_for_instance(None, &current_instance);
-                    app.current_model = current_model.clone();
-                    current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                    app.current_thinking = current_thinking;
-                    app.current_provider = current_instance.id.clone();
+                    app.provider.current_instance = resolve_default_provider_instance(&config);
+                    app.provider.current_model =
+                        resolve_model_for_instance(None, &app.provider.current_instance);
+                    app.provider.current_thinking =
+                        resolve_thinking_level_for_model(&config, &app.provider.current_model);
                     app.record_model_changed();
                     app.record_thinking_level_changed();
-                    app.provider_instances = config.providers.clone();
+                    app.provider.instances = config.providers.clone();
                     app.completion.available_models = None;
-                    maybe_warn_thinking_unsupported(
-                        &mut app,
-                        &current_instance,
-                        &current_model,
-                        current_thinking,
-                    );
+                    maybe_warn_thinking_unsupported(&mut app);
                     app.push_notice(Message::assistant(format!("[removed provider {id}]")));
                     app.mark_log_dirty();
                 }
             }
 
             Ok(RunResult::ChangeThinking(level)) => {
-                current_thinking = level;
-                app.current_thinking = level;
+                app.provider.current_thinking = level;
+                app.provider.current_thinking = level;
                 app.record_thinking_level_changed();
-                persist_provider_model_selection_v2(
-                    &mut config,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                    &mut app,
-                );
-                app.provider_instances = config.providers.clone();
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
+                persist_provider_model_selection_v2(&mut config, &mut app);
+                app.provider.instances = config.providers.clone();
+                maybe_warn_thinking_unsupported(&mut app);
             }
 
             Ok(RunResult::ConfigureProvider {
@@ -535,28 +481,22 @@ async fn main() -> io::Result<()> {
                     )));
                     app.mark_log_dirty();
                 }
-                current_instance = inst;
-                app.provider_instances = config.providers.clone();
-                current_model = resolve_model_for_instance(None, &current_instance);
-                app.current_model = current_model.clone();
-                current_thinking = resolve_thinking_level_for_model(&config, &current_model);
-                app.current_thinking = current_thinking;
-                app.current_provider = current_instance.id.clone();
+                app.provider.current_instance = inst;
+                app.provider.instances = config.providers.clone();
+                app.provider.current_model =
+                    resolve_model_for_instance(None, &app.provider.current_instance);
+                app.provider.current_thinking =
+                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
                 app.record_model_changed();
                 app.record_thinking_level_changed();
                 app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(
-                    &mut app,
-                    &current_instance,
-                    &current_model,
-                    current_thinking,
-                );
+                maybe_warn_thinking_unsupported(&mut app);
                 let endpoint_msg = url
                     .map(|u| format!(" endpoint set to {u}"))
                     .unwrap_or_default();
                 app.push_notice(Message::assistant(format!(
                     "[provider {}{endpoint_msg}]",
-                    current_instance.id,
+                    app.provider.current_instance.id,
                 )));
                 app.mark_log_dirty();
             }
@@ -1158,7 +1098,7 @@ fn handle_chat_submit(
     provider: &Arc<dyn LlmProvider + Send + Sync>,
     config: &TauConfig,
 ) -> KeyDispatch {
-    match app.provider_setup_step.clone() {
+    match app.provider.setup_step.clone() {
         ProviderSetupStep::Endpoint => {
             // Determine whether this is the two-step URL→token flow (e.g. OpenWebUI)
             // or a single-step URL entry (e.g. Ollama, generic endpoint).
@@ -1211,7 +1151,7 @@ fn handle_chat_submit(
                         api_key: None,
                     });
                 }
-                if let Some(setup) = app.pending_provider_setup.as_mut() {
+                if let Some(setup) = app.provider.pending_setup.as_mut() {
                     setup.base_url = Some(url);
                 }
                 app.enter_provider_name_input_mode();
@@ -1307,9 +1247,9 @@ fn handle_slash_submit(
         }
         Some(CommandAction::Thinking(raw)) => {
             let thinking_supported = config
-                .find_provider(&app.current_provider)
+                .find_provider(&app.provider.current_instance.id)
                 .map(|inst| {
-                    thinking_support_for_instance(inst, &app.current_model)
+                    thinking_support_for_instance(inst, &app.provider.current_model)
                         == ThinkingSupport::Applied
                 })
                 .unwrap_or(false);
@@ -1328,9 +1268,9 @@ fn handle_slash_submit(
         }
         Some(CommandAction::ThinkingNoArg) => {
             let thinking_supported = config
-                .find_provider(&app.current_provider)
+                .find_provider(&app.provider.current_instance.id)
                 .map(|inst| {
-                    thinking_support_for_instance(inst, &app.current_model)
+                    thinking_support_for_instance(inst, &app.provider.current_model)
                         == ThinkingSupport::Applied
                 })
                 .unwrap_or(false);
@@ -1459,7 +1399,7 @@ fn resolve_provider_instance(
 
 fn resolve_current_run_instance(app: &App, config: &TauConfig) -> ProviderInstance {
     config
-        .find_provider(&app.current_provider)
+        .find_provider(&app.provider.current_instance.id)
         .cloned()
         .unwrap_or_else(|| resolve_default_provider_instance(config))
 }
@@ -1475,13 +1415,10 @@ fn resolve_model_for_instance(cli_override: Option<&str>, instance: &ProviderIns
 /// Instance-based variant of `persist_provider_model_selection`.
 ///
 /// Updates the named instance's model in the providers list and persists config.
-fn persist_provider_model_selection_v2(
-    config: &mut TauConfig,
-    instance: &ProviderInstance,
-    model: &str,
-    thinking: ThinkingLevel,
-    app: &mut App,
-) {
+fn persist_provider_model_selection_v2(config: &mut TauConfig, app: &mut App) {
+    let instance = &app.provider.current_instance;
+    let model = &app.provider.current_model;
+    let thinking = app.provider.current_thinking;
     // Never persist the test provider.
     if instance.backend_preset == provider_instance::BackendPreset::Test {
         return;
@@ -1515,14 +1452,12 @@ fn resolve_thinking_level_for_model(config: &TauConfig, model: &str) -> Thinking
         .unwrap_or(ThinkingLevel::Off)
 }
 
-fn maybe_warn_thinking_unsupported(
-    app: &mut App,
-    instance: &ProviderInstance,
-    model: &str,
-    thinking: ThinkingLevel,
-) {
-    // Always keep app.thinking_supported in sync regardless of the level.
-    app.thinking_supported =
+fn maybe_warn_thinking_unsupported(app: &mut App) {
+    let instance = &app.provider.current_instance;
+    let model = &app.provider.current_model;
+    let thinking = app.provider.current_thinking;
+    // Always keep app.provider.thinking_supported in sync regardless of the level.
+    app.provider.thinking_supported =
         thinking_support_for_instance(instance, model) == ThinkingSupport::Applied;
 
     if thinking == ThinkingLevel::Off {

@@ -333,14 +333,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     if app.show_info {
-        let context_window = context_window_for_model(&app.current_model);
+        let context_window = context_window_for_model(&app.provider.current_model);
         let used_tokens = app.latest_usage.and_then(|u| u.used_tokens());
         let thinking = app
+            .provider
             .thinking_supported
-            .then_some(app.current_thinking.as_str());
+            .then_some(app.provider.current_thinking.as_str());
         let info_line = build_info_line(
-            &app.current_provider,
-            &app.current_model,
+            &app.provider.current_instance.id,
+            &app.provider.current_model,
             thinking,
             context_window,
             used_tokens,
@@ -376,9 +377,13 @@ mod tests {
     }
 
     fn make_app() -> App {
-        App::new(
-            "gpt-4o",
+        let instance = crate::provider_instance::ProviderInstance::new(
             "copilot",
+            crate::provider_instance::BackendPreset::Copilot,
+        );
+        App::new(
+            instance,
+            "gpt-4o",
             ThinkingLevel::Medium,
             AgentLoopConfig {
                 tools: HashMap::new(),

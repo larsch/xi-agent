@@ -282,9 +282,9 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
             prefix,
             (app.available_shells.len() > 1).then_some("Ctrl+S switch".to_string()),
         )
-    } else if app.provider_setup_step != ProviderSetupStep::Idle {
+    } else if app.provider.setup_step != ProviderSetupStep::Idle {
         let instance = app.pending_provider_instance();
-        let kind = match &app.provider_setup_step {
+        let kind = match &app.provider.setup_step {
             ProviderSetupStep::Endpoint => SetupInputKind::BaseUrl,
             ProviderSetupStep::ApiKey { .. } => SetupInputKind::ApiKey,
             ProviderSetupStep::Name => SetupInputKind::Name,
