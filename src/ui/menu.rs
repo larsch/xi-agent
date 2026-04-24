@@ -4,7 +4,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::{app::MAX_SELECTION_VISIBLE, completion::CompletionItem};
+use crate::{completion::CompletionItem, selection_state::MAX_SELECTION_VISIBLE};
 
 /// Background colour of the completion popup (unselected rows).
 const COMPLETION_BG: Color = Color::Rgb(22, 22, 38);

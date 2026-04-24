@@ -28,6 +28,7 @@ use crate::{
 
 use crate::completion_state::CompletionState;
 use crate::export;
+use crate::selection_state::{MAX_SELECTION_VISIBLE, SelectionKind, SelectionState};
 use crate::session_event::SessionEvent;
 
 // ── Streaming status ──────────────────────────────────────────────────────────
@@ -258,63 +259,10 @@ enum RetryTarget {
     ModelFetch,
 }
 
-/// Maximum number of rows shown in the selection menu before scrolling.
-pub const MAX_SELECTION_VISIBLE: usize = 12;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SelectionKind {
-    Model,
-    Thinking,
-    Provider,
-    ProviderBackendPreset,
-    ProviderApiType,
-    LoginProvider,
-    ResumeSession,
-    AskUser,
-    LoginAction,
-    ConfirmProviderRemoval,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
     Chat,
     Shell,
-}
-
-// ── Selection state ───────────────────────────────────────────────────────────
-
-/// All state for the selection menu panel.
-pub struct SelectionState {
-    /// True when the selection picker is active.
-    pub active: bool,
-    /// Header title shown in the selection menu.
-    pub title: &'static str,
-    /// Items currently visible (after filtering).
-    pub items: Vec<CompletionItem>,
-    /// Unfiltered source items for search filtering.
-    all_items: Vec<CompletionItem>,
-    /// Current free-text search query.
-    pub query: String,
-    /// Kind of selection currently being displayed.
-    kind: Option<SelectionKind>,
-    /// Index of the currently highlighted row.
-    pub selected: usize,
-    /// First visible item index (scroll offset).
-    pub scroll: usize,
-}
-
-impl SelectionState {
-    fn new() -> Self {
-        Self {
-            active: false,
-            title: "",
-            items: Vec::new(),
-            all_items: Vec::new(),
-            query: String::new(),
-            kind: None,
-            selected: 0,
-            scroll: 0,
-        }
-    }
 }
 
 // ── Login state ───────────────────────────────────────────────────────────────

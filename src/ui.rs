@@ -16,8 +16,9 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, InputMode, MAX_SELECTION_VISIBLE},
+    app::{App, InputMode},
     provider::context_window_for_model,
+    selection_state::MAX_SELECTION_VISIBLE,
 };
 
 use self::{

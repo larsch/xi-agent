@@ -39,6 +39,7 @@ mod process;
 mod projection;
 mod provider;
 mod provider_instance;
+mod selection_state;
 mod session;
 mod session_event;
 mod session_state;

@@ -2,7 +2,7 @@ use super::{
     input::{normalize_terminal_segment, wrap_input_line, wrap_str},
     login::LOGIN_URL_INDENT,
 };
-use crate::app::MAX_SELECTION_VISIBLE;
+use crate::selection_state::MAX_SELECTION_VISIBLE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PanelHeights {
@@ -134,7 +134,7 @@ pub(super) fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
 #[cfg(test)]
 mod tests {
     use super::{PanelInputs, compute_panel_heights, input_visual_line_count};
-    use crate::app::MAX_SELECTION_VISIBLE;
+    use crate::selection_state::MAX_SELECTION_VISIBLE;
 
     #[test]
     fn input_visual_line_count_wraps_long_lines() {

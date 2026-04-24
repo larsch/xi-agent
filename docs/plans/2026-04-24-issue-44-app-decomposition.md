@@ -57,7 +57,7 @@ side-effects. Easy to unit-test in isolation.
 
 ---
 
-### Step 2 — Move `SelectionState` to `src/selection_state.rs`
+### Step 2 — Move `SelectionState` to `src/selection_state.rs` ✅ DONE
 
 `SelectionState` is already a named struct in `app.rs`. Move it (and its
 `impl`, `SelectionKind`, and related private helpers) to its own module.
