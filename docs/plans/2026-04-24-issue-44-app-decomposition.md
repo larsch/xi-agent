@@ -106,7 +106,7 @@ touch session state or agent runtime. Ideal isolation for unit tests.
 
 ---
 
-### Step 5 — Move `AgentRuntime` to `src/agent_runtime.rs`
+### Step 5 — Move `AgentRuntime` to `src/agent_runtime.rs` ✅ DONE
 
 `AgentRuntime` is already a named struct. Move it and expose a cleaner API:
 - `new() -> Self`

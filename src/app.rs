@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{sync::mpsc::error::TryRecvError, task::JoinHandle};
+use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::{
     agent::{
@@ -26,6 +26,7 @@ use crate::{
     thinking::ThinkingLevel,
 };
 
+use crate::agent_runtime::AgentRuntime;
 use crate::ask_user_state::{AskUserState, PendingAsk};
 use crate::completion_state::CompletionState;
 use crate::export;
@@ -71,35 +72,6 @@ pub enum SelectionResult {
     ProviderBackendPreset(BackendPreset),
     /// A provider API type was chosen during add-provider setup.
     ProviderApiType(ApiType),
-}
-
-struct AgentRuntime {
-    /// Receives background app events forwarded from tasks targeting the UI.
-    app_event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    app_event_tx: AppEventTx,
-    steering_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    /// User steering messages queued while a loop is running; rendered pinned
-    /// at the bottom of the log with a 🕹️ icon until consumed.
-    queued_steering: Vec<String>,
-    /// JoinHandle for the currently running agent loop task (if any).
-    agent_task: Option<JoinHandle<()>>,
-    /// Cancellation sender for the active agent loop task.
-    /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
-    cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
-}
-
-impl AgentRuntime {
-    fn new() -> Self {
-        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Self {
-            app_event_rx,
-            app_event_tx,
-            steering_tx: None,
-            queued_steering: Vec::new(),
-            agent_task: None,
-            cancel_tx: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,7 +533,7 @@ impl App {
     }
 
     pub fn queued_steering(&self) -> &[String] {
-        &self.runtime.queued_steering
+        self.runtime.queued_steering()
     }
 
     /// Toggle the info bar visibility.
@@ -570,11 +542,11 @@ impl App {
     }
 
     pub async fn recv_app_event(&mut self) -> Option<AppEvent> {
-        self.runtime.app_event_rx.recv().await
+        self.runtime.recv_app_event().await
     }
 
     pub fn app_event_tx(&self) -> AppEventTx {
-        self.runtime.app_event_tx.clone()
+        self.runtime.app_event_tx()
     }
 
     pub fn init_session_persistence(&mut self, cwd: String) {
@@ -3165,7 +3137,7 @@ impl App {
 
     pub fn drain_app_events(&mut self) {
         loop {
-            match self.runtime.app_event_rx.try_recv() {
+            match self.runtime.try_recv_app_event() {
                 Ok(AppEvent::Agent(ev)) => self.apply_agent_event(ev),
                 Ok(other) => self.apply_app_event(other),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -3801,7 +3773,7 @@ mod tests {
                 "streaming should remain active when ESC cancels slash input"
             );
             assert!(
-                app.runtime.agent_task.is_some(),
+                app.runtime.is_running(),
                 "agent task should not be aborted when ESC cancels slash input"
             );
             assert!(

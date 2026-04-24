@@ -22,6 +22,7 @@ src/
   selection_state.rs   — SelectionState, SelectionKind, MAX_SELECTION_VISIBLE
   login_state.rs       — LoginState, LoginActionKind: auth panel state and login action menu enum
   ask_user_state.rs    — AskUserState, PendingAsk: pending agent ask-user request state
+  agent_runtime.rs     — AgentRuntime: agent task handle, event channels, steering queue, cancellation
   config.rs            — config.toml loading (XDG + HOME fallback)
   provider.rs          — provider routing, thinking support, context-window fallback table
   provider_instance.rs — BackendPreset/ProviderInstance types and preset metadata catalog

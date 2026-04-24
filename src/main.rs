@@ -21,6 +21,7 @@ use std::{
 };
 
 mod agent;
+mod agent_runtime;
 mod app;
 mod app_event;
 mod ask_user_state;
