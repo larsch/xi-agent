@@ -82,7 +82,7 @@ lifecycle and clipboard ownership — good isolation target.
 
 ---
 
-### Step 4 — Move `AskUserState` to `src/ask_user_state.rs`
+### Step 4 — Move `AskUserState` to `src/ask_user_state.rs` ✅ DONE
 
 `AskUserState` + `PendingAsk` are already local structs. Move them to a new
 module along with all ask-user methods currently on `App`:

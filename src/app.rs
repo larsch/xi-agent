@@ -9,7 +9,7 @@ use tokio::{sync::mpsc::error::TryRecvError, task::JoinHandle};
 use crate::{
     agent::{
         AgentLoopConfig, ToolOutputLog, run_agent_loop,
-        types::{AgentEvent, AskRequest, AskUserOption, AskUserResponse},
+        types::{AgentEvent, AskRequest, AskUserResponse},
     },
     app_event::{AppEvent, AppEventTx},
     auth::{self, LoginEvent},
@@ -26,6 +26,7 @@ use crate::{
     thinking::ThinkingLevel,
 };
 
+use crate::ask_user_state::{AskUserState, PendingAsk};
 use crate::completion_state::CompletionState;
 use crate::export;
 use crate::login_state::{LoginActionKind, LoginState};
@@ -70,30 +71,6 @@ pub enum SelectionResult {
     ProviderBackendPreset(BackendPreset),
     /// A provider API type was chosen during add-provider setup.
     ProviderApiType(ApiType),
-}
-
-struct PendingAsk {
-    question: String,
-    options: Vec<AskUserOption>,
-    allow_freeform: bool,
-}
-
-struct AskUserState {
-    pending: Option<PendingAsk>,
-    reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
-    freeform_mode: bool,
-    question: Option<String>,
-}
-
-impl AskUserState {
-    fn new() -> Self {
-        Self {
-            pending: None,
-            reply: None,
-            freeform_mode: false,
-            question: None,
-        }
-    }
 }
 
 struct AgentRuntime {

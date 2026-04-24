@@ -23,6 +23,7 @@ use std::{
 mod agent;
 mod app;
 mod app_event;
+mod ask_user_state;
 mod auth;
 mod commands;
 mod completion;
