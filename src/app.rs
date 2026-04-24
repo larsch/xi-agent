@@ -26,6 +26,7 @@ use crate::{
     thinking::ThinkingLevel,
 };
 
+use crate::completion_state::CompletionState;
 use crate::export;
 use crate::session_event::SessionEvent;
 
@@ -411,19 +412,8 @@ pub struct App {
     /// Skills loaded from all supported skill roots.
     pub loaded_skills: Vec<SkillMeta>,
 
-    // ── Completion popup ──────────────────────────────────────────────────────
-    /// Items to display in the completion popup (empty = popup hidden).
-    pub completions: Vec<CompletionItem>,
-    /// Index of the currently highlighted completion row.
-    pub completion_selected: usize,
-
-    // ── Available models (for /model completions) ─────────────────────────────
-    /// Cached model list from the provider; `None` until first successful fetch.
-    pub available_models: Option<Vec<String>>,
-    /// True while a `list_models` task is in flight.
-    pub models_loading: bool,
-    /// Set to the error message when the last model fetch failed.
-    pub model_fetch_error: Option<String>,
+    // ── Completion popup + model fetch ────────────────────────────────────────
+    pub completion: CompletionState,
 
     // ── Generic selection menu ────────────────────────────────────────────────
     pub selection: SelectionState,
@@ -598,11 +588,7 @@ impl App {
             provider_instances: Vec::new(), // updated by main.rs after construction
             agent_config,
             loaded_skills: Vec::new(),
-            completions: Vec::new(),
-            completion_selected: 0,
-            available_models: None,
-            models_loading: false,
-            model_fetch_error: None,
+            completion: CompletionState::new(),
             selection: SelectionState::new(),
             show_info: false,
             latest_usage: None,
@@ -985,8 +971,7 @@ impl App {
     /// Also clears any active completion state.
     pub fn reset_textarea(&mut self) {
         self.textarea = Self::make_textarea();
-        self.completions.clear();
-        self.completion_selected = 0;
+        self.completion.clear();
     }
 
     pub fn shell_input_is_empty(&self) -> bool {
@@ -999,8 +984,7 @@ impl App {
     pub fn enter_shell_mode(&mut self) {
         self.input_mode = InputMode::Shell;
         self.shell_textarea = Self::make_textarea();
-        self.completions.clear();
-        self.completion_selected = 0;
+        self.completion.clear();
     }
 
     pub fn exit_shell_mode(&mut self) {
@@ -1101,7 +1085,10 @@ impl App {
             return None;
         }
 
-        if let Some(item) = self.completions.get(self.completion_selected)
+        if let Some(item) = self
+            .completion
+            .completions
+            .get(self.completion.completion_selected)
             && !item.loading
             && !item.complete_to.is_empty()
         {
@@ -1155,9 +1142,9 @@ impl App {
         } else {
             String::new()
         };
-        let available = self.available_models.as_deref();
-        let loading = self.models_loading;
-        let fetch_error = self.model_fetch_error.as_deref();
+        let available = self.completion.available_models.as_deref();
+        let loading = self.completion.models_loading;
+        let fetch_error = self.completion.model_fetch_error.as_deref();
         let thinking_enabled = self.thinking_supported;
         let new = completion::completions_for(
             &input,
@@ -1169,17 +1156,17 @@ impl App {
             &self.provider_instances,
         );
 
-        if new.len() != self.completions.len() {
-            self.completion_selected = 0;
+        if new.len() != self.completion.completions.len() {
+            self.completion.completion_selected = 0;
         }
-        self.completions = new;
+        self.completion.completions = new;
     }
 
     /// Returns true if a model-list fetch should be triggered now.
     pub fn should_fetch_models(&self) -> bool {
-        if self.available_models.is_some()
-            || self.models_loading
-            || self.model_fetch_error.is_some()
+        if self.completion.available_models.is_some()
+            || self.completion.models_loading
+            || self.completion.model_fetch_error.is_some()
         {
             return false;
         }
@@ -1195,8 +1182,8 @@ impl App {
             return;
         }
 
-        self.models_loading = true;
-        self.model_fetch_error = None;
+        self.completion.models_loading = true;
+        self.completion.model_fetch_error = None;
         let future = provider.list_models();
         let tx = self.app_event_tx();
         tokio::spawn(async move {
@@ -1207,11 +1194,11 @@ impl App {
 
     /// Store a freshly fetched model list (or error) and refresh completions.
     pub fn apply_model_list(&mut self, result: Result<Vec<String>, crate::llm::ProviderError>) {
-        self.models_loading = false;
+        self.completion.models_loading = false;
         match result {
             Ok(models) => {
-                self.available_models = Some(models);
-                self.model_fetch_error = None;
+                self.completion.available_models = Some(models);
+                self.completion.model_fetch_error = None;
             }
             Err(e) => {
                 let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
@@ -1223,7 +1210,7 @@ impl App {
                         &self.current_provider,
                         &self.provider_instances,
                     );
-                    self.model_fetch_error =
+                    self.completion.model_fetch_error =
                         Some(format_provider_error_for_display(&provider_label, &e));
                 }
             }
@@ -1231,11 +1218,12 @@ impl App {
         self.update_completions();
 
         if self.selection.active && self.selection.kind == Some(SelectionKind::Model) {
-            if let Some(err) = &self.model_fetch_error {
+            if let Some(err) = &self.completion.model_fetch_error {
                 let items = vec![completion::CompletionItem::error_indicator(err)];
                 self.set_selection_items(items);
             } else {
                 let items: Vec<_> = self
+                    .completion
                     .available_models
                     .as_deref()
                     .unwrap_or(&[])
@@ -1254,24 +1242,22 @@ impl App {
 
     /// Navigate the completion selection down (wraps around).
     pub fn completion_select_next(&mut self) {
-        let len = self.completions.len();
-        if len > 0 {
-            self.completion_selected = (self.completion_selected + 1) % len;
-        }
+        self.completion.select_next();
     }
 
     /// Navigate the completion selection up (wraps around).
     pub fn completion_select_prev(&mut self) {
-        let len = self.completions.len();
-        if len > 0 {
-            self.completion_selected = (self.completion_selected + len - 1) % len;
-        }
+        self.completion.select_prev();
     }
 
     /// Replace the textarea with the selected item's `complete_to` text and
     /// move the cursor to the end of the line. No-ops on loading indicators.
     pub fn apply_completion(&mut self) {
-        let item = match self.completions.get(self.completion_selected) {
+        let item = match self
+            .completion
+            .completions
+            .get(self.completion.completion_selected)
+        {
             Some(i) if !i.loading && !i.complete_to.is_empty() => i,
             _ => return,
         };
@@ -1370,9 +1356,9 @@ impl App {
         self.selection.kind = Some(SelectionKind::Model);
         self.selection.title = "  Select model  ";
         self.selection.query.clear();
-        let items = if let Some(err) = &self.model_fetch_error {
+        let items = if let Some(err) = &self.completion.model_fetch_error {
             vec![CompletionItem::error_indicator(err)]
-        } else if let Some(models) = &self.available_models {
+        } else if let Some(models) = &self.completion.available_models {
             models
                 .iter()
                 .map(|m| CompletionItem::from_model(m))
@@ -1966,7 +1952,7 @@ impl App {
         self.selection.active
             && self.selection.kind == Some(SelectionKind::Model)
             && self.selection.items.iter().any(|i| i.loading)
-            && !self.models_loading
+            && !self.completion.models_loading
     }
 
     /// Returns true if the active selection menu supports free-text filtering.
@@ -3913,8 +3899,9 @@ mod tests {
         app.update_completions();
 
         let selected = app
+            .completion
             .completions
-            .get(app.completion_selected)
+            .get(app.completion.completion_selected)
             .expect("expected at least one completion");
         assert_eq!(selected.complete_to, "/model ");
         assert_eq!(app.slash_submit_text().as_deref(), Some("/model"));
@@ -3925,7 +3912,7 @@ mod tests {
         let mut app = make_app();
         app.textarea.insert_str("/unknown");
         app.update_completions();
-        assert!(app.completions.is_empty());
+        assert!(app.completion.completions.is_empty());
 
         assert_eq!(app.slash_submit_text().as_deref(), Some("/unknown"));
     }

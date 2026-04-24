@@ -26,6 +26,7 @@ mod app_event;
 mod auth;
 mod commands;
 mod completion;
+mod completion_state;
 mod config;
 mod debug_log;
 mod dirs;
@@ -273,7 +274,7 @@ async fn main() -> io::Result<()> {
                     if custom_count == 1 { "" } else { "s" },
                 )));
                 app.mark_log_dirty();
-                app.available_models = None;
+                app.completion.available_models = None;
             }
 
             Ok(RunResult::ChangeModel {
@@ -289,7 +290,7 @@ async fn main() -> io::Result<()> {
                 app.record_model_changed();
                 app.record_thinking_level_changed();
                 // Invalidate cached model list so the next fetch is fresh.
-                app.available_models = None;
+                app.completion.available_models = None;
                 persist_provider_model_selection_v2(
                     &mut config,
                     &current_instance,
@@ -330,7 +331,7 @@ async fn main() -> io::Result<()> {
                     app.current_provider = current_instance.id.clone();
                     app.record_model_changed();
                     app.record_thinking_level_changed();
-                    app.available_models = None;
+                    app.completion.available_models = None;
                     persist_provider_model_selection_v2(
                         &mut config,
                         &current_instance,
@@ -374,7 +375,7 @@ async fn main() -> io::Result<()> {
                 app.record_model_changed();
                 app.record_thinking_level_changed();
                 app.provider_instances = config.providers.clone();
-                app.available_models = None;
+                app.completion.available_models = None;
                 maybe_warn_thinking_unsupported(
                     &mut app,
                     &current_instance,
@@ -422,7 +423,7 @@ async fn main() -> io::Result<()> {
                 app.record_model_changed();
                 app.record_thinking_level_changed();
                 app.provider_instances = config.providers.clone();
-                app.available_models = None;
+                app.completion.available_models = None;
                 maybe_warn_thinking_unsupported(
                     &mut app,
                     &current_instance,
@@ -460,7 +461,7 @@ async fn main() -> io::Result<()> {
                     app.record_model_changed();
                     app.record_thinking_level_changed();
                     app.provider_instances = config.providers.clone();
-                    app.available_models = None;
+                    app.completion.available_models = None;
                     maybe_warn_thinking_unsupported(
                         &mut app,
                         &current_instance,
@@ -518,7 +519,7 @@ async fn main() -> io::Result<()> {
                 app.current_provider = current_instance.id.clone();
                 app.record_model_changed();
                 app.record_thinking_level_changed();
-                app.available_models = None;
+                app.completion.available_models = None;
                 maybe_warn_thinking_unsupported(
                     &mut app,
                     &current_instance,
@@ -564,7 +565,7 @@ async fn main() -> io::Result<()> {
                 app.current_provider = current_instance.id.clone();
                 app.record_model_changed();
                 app.record_thinking_level_changed();
-                app.available_models = None;
+                app.completion.available_models = None;
                 maybe_warn_thinking_unsupported(
                     &mut app,
                     &current_instance,
@@ -1133,21 +1134,21 @@ fn handle_chat_mode_key(
         KeyCode::PageUp => app.scroll_up(),
         KeyCode::PageDown => app.scroll_down(),
         KeyCode::Up => {
-            if !app.completions.is_empty() {
+            if !app.completion.completions.is_empty() {
                 app.completion_select_prev();
             } else {
                 app.textarea.input(Event::Key(key));
             }
         }
         KeyCode::Down => {
-            if !app.completions.is_empty() {
+            if !app.completion.completions.is_empty() {
                 app.completion_select_next();
             } else {
                 app.textarea.input(Event::Key(key));
             }
         }
         KeyCode::Tab => {
-            if !app.completions.is_empty() {
+            if !app.completion.completions.is_empty() {
                 app.apply_completion();
             }
         }

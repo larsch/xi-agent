@@ -75,7 +75,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         login_active: app.login.active,
         selection_mode: app.selection.active,
         selection_items_len: app.selection.items.len(),
-        completions_len: app.completions.len(),
+        completions_len: app.completion.completions.len(),
         resume_hint_visible,
         ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
         login_url: app.login.url.as_deref(),
@@ -167,9 +167,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     if layout.completion_height > 0 {
-        if !app.completions.is_empty() {
-            let popup_lines =
-                build_completion_lines(&app.completions, app.completion_selected, width);
+        if !app.completion.completions.is_empty() {
+            let popup_lines = build_completion_lines(
+                &app.completion.completions,
+                app.completion.completion_selected,
+                width,
+            );
             f.render_widget(Paragraph::new(popup_lines), completion_area);
         } else if resume_hint_visible {
             let hint = Line::from(vec![
