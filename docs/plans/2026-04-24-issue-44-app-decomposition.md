@@ -70,7 +70,7 @@ selection state machine.
 
 ---
 
-### Step 3 — Move `LoginState` to `src/login_state.rs`
+### Step 3 — Move `LoginState` to `src/login_state.rs` ✅ DONE
 
 `LoginState` is already a named struct in `app.rs`. Move it (and `impl
 LoginState`, `LoginActionKind`, `AuthFlow` re-export) to its own module.

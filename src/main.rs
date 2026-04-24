@@ -34,6 +34,7 @@ mod event_log;
 mod export;
 mod live_turn;
 mod llm;
+mod login_state;
 mod markdown;
 mod process;
 mod projection;

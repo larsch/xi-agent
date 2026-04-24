@@ -12,7 +12,7 @@ use crate::{
         types::{AgentEvent, AskRequest, AskUserOption, AskUserResponse},
     },
     app_event::{AppEvent, AppEventTx},
-    auth::{self, AuthFlow, LoginEvent},
+    auth::{self, LoginEvent},
     completion::{self, CompletionItem},
     live_turn::{LiveToolEntry, LiveToolResult, LiveTurnState, compose_display},
     llm::{
@@ -28,6 +28,7 @@ use crate::{
 
 use crate::completion_state::CompletionState;
 use crate::export;
+use crate::login_state::{LoginActionKind, LoginState};
 use crate::selection_state::{MAX_SELECTION_VISIBLE, SelectionKind, SelectionState};
 use crate::session_event::SessionEvent;
 
@@ -69,15 +70,6 @@ pub enum SelectionResult {
     ProviderBackendPreset(BackendPreset),
     /// A provider API type was chosen during add-provider setup.
     ProviderApiType(ApiType),
-}
-
-/// Actions available in the login action menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoginActionKind {
-    OpenBrowser,
-    CopyUrl,
-    CopyCode,
-    Cancel,
 }
 
 struct PendingAsk {
@@ -266,55 +258,6 @@ pub enum InputMode {
 }
 
 // ── Login state ───────────────────────────────────────────────────────────────
-
-/// All state for the login/authentication panel.
-pub struct LoginState {
-    pub active: bool,
-    pub provider: Option<String>,
-    pub info: String,
-    pub url: Option<String>,
-    pub code: Option<String>,
-    /// Which OAuth flow is in use; drives the UI's instruction text and
-    /// available keyboard actions.
-    pub auth_flow: Option<AuthFlow>,
-    pub needs_rebuild: bool,
-    pub refresh_in_progress: bool,
-    pub retry_after_refresh: bool,
-    /// Set when a `list_models` call fails with a 401 so the fetch is
-    /// re-issued automatically once the token refresh completes.
-    pub retry_model_fetch_after_refresh: bool,
-    auth_retry_budget: u8,
-    cancel: Option<Arc<AtomicBool>>,
-    /// Persistent clipboard instance used during the login flow.
-    ///
-    /// On Linux the clipboard is owned by the process: dropping the
-    /// `arboard::Clipboard` instance releases ownership and the text
-    /// disappears from other applications.  We therefore keep it alive for
-    /// the entire duration of the login panel and only drop it once login
-    /// finishes.
-    clipboard: Option<arboard::Clipboard>,
-}
-
-impl LoginState {
-    fn new() -> Self {
-        Self {
-            active: false,
-            provider: None,
-            info: String::new(),
-            url: None,
-            code: None,
-            auth_flow: None,
-            needs_rebuild: false,
-            refresh_in_progress: false,
-            retry_after_refresh: false,
-            retry_model_fetch_after_refresh: false,
-            auth_retry_budget: 0,
-            cancel: None,
-            clipboard: None,
-        }
-    }
-}
-
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
