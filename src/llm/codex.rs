@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use super::{
@@ -7,6 +8,91 @@ use super::{
     common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
     provider_format::to_codex_wire,
 };
+
+// ── Typed SSE event structs ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CodexEvent {
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta { delta: String },
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ReasoningSummaryTextDelta { delta: String },
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded { item: OutputItem },
+    #[serde(rename = "response.function_call_arguments.delta")]
+    FunctionCallArgumentsDelta { item_id: String, delta: String },
+    #[serde(rename = "response.output_item.done")]
+    OutputItemDone { item: OutputItem },
+    #[serde(rename = "response.completed")]
+    ResponseCompleted { response: Option<CodexResponse> },
+    #[serde(rename = "response.done")]
+    ResponseDone { response: Option<CodexResponse> },
+    #[serde(rename = "response.incomplete")]
+    ResponseIncomplete { response: Option<CodexResponse> },
+    #[serde(rename = "response.failed")]
+    ResponseFailed { response: Option<CodexResponse> },
+    #[serde(rename = "error")]
+    Error {
+        message: Option<String>,
+        code: Option<String>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OutputItem {
+    FunctionCall {
+        id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+struct CodexResponse {
+    usage: Option<CodexUsage>,
+    error: Option<CodexError>,
+}
+
+#[derive(Deserialize)]
+struct CodexUsage {
+    input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    total_tokens: Option<usize>,
+    // Fallback field names used by some proxy versions.
+    prompt_tokens: Option<usize>,
+    completion_tokens: Option<usize>,
+}
+
+impl From<CodexUsage> for UsageStats {
+    fn from(u: CodexUsage) -> Self {
+        let input = u.input_tokens.or(u.prompt_tokens);
+        let output = u.output_tokens.or(u.completion_tokens);
+        let total = u.total_tokens.or_else(|| {
+            let i = input?;
+            let o = output?;
+            Some(i.saturating_add(o))
+        });
+        Self {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: total,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CodexError {
+    message: Option<String>,
+}
+
+// ── Provider ──────────────────────────────────────────────────────────────────
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
@@ -146,7 +232,7 @@ impl CodexProvider {
 
             let mut byte_stream = response.bytes_stream();
             let mut sse = SseLineDecoder::new();
-            // Track pending function calls keyed by item index or call_id.
+            // Track pending function calls keyed by item id.
             let mut pending_calls: HashMap<String, PendingCall> = HashMap::new();
             let mut current_call_item_id: Option<String> = None;
             let mut emitted_tool_intent = false;
@@ -168,98 +254,80 @@ impl CodexProvider {
                     log::debug!("[TAU_DEBUG] ← chunk {line_num}: {data}");
                     line_num += 1;
 
-                    let ev: serde_json::Value = match serde_json::from_str(&data) {
+                    let ev: CodexEvent = match serde_json::from_str(&data) {
                         Ok(v) => v,
-                        Err(e) => { yield LlmEvent::Error(ProviderError::other("Codex", format!("Parse error: {e}"))); return; }
+                        Err(e) => {
+                            yield LlmEvent::Error(ProviderError::other("Codex", format!("Parse error: {e}")));
+                            return;
+                        }
                     };
 
-                    let ev_type = ev["type"].as_str().unwrap_or("");
-
-                    match ev_type {
+                    match ev {
                         // ── Text token ────────────────────────────────────────
-                        "response.output_text.delta" => {
-                            if let Some(delta) = ev["delta"].as_str()
-                                && !delta.is_empty() {
-                                    yield LlmEvent::Token {
-                                        text: delta.to_string(),
-                                        phase: if emitted_tool_intent {
-                                            AssistantPhase::Provisional
-                                        } else {
-                                            AssistantPhase::Unknown
-                                        },
-                                    };
-                                }
+                        CodexEvent::OutputTextDelta { delta } if !delta.is_empty() => {
+                            yield LlmEvent::Token {
+                                text: delta,
+                                phase: if emitted_tool_intent {
+                                    AssistantPhase::Provisional
+                                } else {
+                                    AssistantPhase::Unknown
+                                },
+                            };
                         }
 
                         // ── Thinking / reasoning token ────────────────────────
-                        "response.reasoning_summary_text.delta" => {
-                            if let Some(delta) = ev["delta"].as_str()
-                                && !delta.is_empty() {
-                                    yield LlmEvent::ThinkingToken(delta.to_string());
-                                }
+                        CodexEvent::ReasoningSummaryTextDelta { delta } if !delta.is_empty() => {
+                            yield LlmEvent::ThinkingToken(delta);
                         }
 
                         // ── Function call started ─────────────────────────────
-                        "response.output_item.added" => {
-                            let item = &ev["item"];
-                            if item["type"].as_str() == Some("function_call") {
-                                if !emitted_tool_intent {
-                                    emitted_tool_intent = true;
-                                    yield LlmEvent::ToolIntentStart;
-                                }
-                                let item_id = item["id"].as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                pending_calls.insert(item_id.clone(), PendingCall {
-                                    arguments: String::new(),
-                                });
-                                current_call_item_id = Some(item_id);
+                        CodexEvent::OutputItemAdded {
+                            item: OutputItem::FunctionCall { id, .. },
+                        } => {
+                            if !emitted_tool_intent {
+                                emitted_tool_intent = true;
+                                yield LlmEvent::ToolIntentStart;
                             }
+                            pending_calls.insert(id.clone(), PendingCall { arguments: String::new() });
+                            current_call_item_id = Some(id);
                         }
 
                         // ── Function call arguments delta ─────────────────────
-                        "response.function_call_arguments.delta" => {
-                            let item_id = ev["item_id"].as_str().unwrap_or("");
-                            if let Some(call) = pending_calls.get_mut(item_id) {
-                                if let Some(delta) = ev["delta"].as_str() {
-                                    call.arguments.push_str(delta);
-                                }
-                            } else if let Some(ref id) = current_call_item_id.clone()
-                                && let Some(call) = pending_calls.get_mut(id)
-                                    && let Some(delta) = ev["delta"].as_str() {
-                                        call.arguments.push_str(delta);
-                                    }
-                        }
-
-                        // ── Item completed ────────────────────────────────────
-                        "response.output_item.done" => {
-                            let item = &ev["item"];
-                            if item["type"].as_str() == Some("function_call") {
-                                let call_id = item["call_id"].as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = item["name"].as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let args_str = item["arguments"].as_str()
-                                    .unwrap_or("{}");
-                                let args: serde_json::Value = serde_json::from_str(args_str)
-                                    .unwrap_or(serde_json::Value::Object(Default::default()));
-
-                                // Remove from pending.
-                                let item_id = item["id"].as_str().unwrap_or("");
-                                pending_calls.remove(item_id);
-                                if current_call_item_id.as_deref() == Some(item_id) {
-                                    current_call_item_id = None;
-                                }
-
-                                yield LlmEvent::ToolCall { id: call_id, name, args };
+                        CodexEvent::FunctionCallArgumentsDelta { item_id, delta } => {
+                            let key = if pending_calls.contains_key(&item_id) {
+                                Some(item_id.clone())
+                            } else {
+                                current_call_item_id.clone()
+                            };
+                            if let Some(k) = key
+                                && let Some(call) = pending_calls.get_mut(&k)
+                            {
+                                call.arguments.push_str(&delta);
                             }
                         }
 
+                        // ── Item completed ────────────────────────────────────
+                        CodexEvent::OutputItemDone {
+                            item: OutputItem::FunctionCall { id, call_id, name, arguments },
+                        } => {
+                            let args: serde_json::Value = serde_json::from_str(&arguments)
+                                .unwrap_or(serde_json::Value::Object(Default::default()));
+                            pending_calls.remove(&id);
+                            if current_call_item_id.as_deref() == Some(&id) {
+                                current_call_item_id = None;
+                            }
+                            yield LlmEvent::ToolCall { id: call_id, name, args };
+                        }
+
                         // ── Stream complete ───────────────────────────────────
-                        "response.completed" | "response.done" | "response.incomplete" => {
-                            if let Some(usage) = extract_usage_stats(&ev) {
+                        CodexEvent::ResponseCompleted { response }
+                        | CodexEvent::ResponseDone { response }
+                        | CodexEvent::ResponseIncomplete { response } => {
+                            if let Some(usage) = response.and_then(|r| r.usage).map(UsageStats::from)
+                                && (usage.input_tokens.is_some()
+                                    || usage.output_tokens.is_some()
+                                    || usage.total_tokens.is_some())
+                            {
                                 yield LlmEvent::Usage(usage);
                             }
                             yield LlmEvent::Done;
@@ -267,63 +335,28 @@ impl CodexProvider {
                         }
 
                         // ── Errors ────────────────────────────────────────────
-                        "response.failed" => {
-                            let msg = ev["response"]["error"]["message"]
-                                .as_str()
-                                .unwrap_or("Codex response failed")
-                                .to_string();
+                        CodexEvent::ResponseFailed { response } => {
+                            let msg = response
+                                .and_then(|r| r.error)
+                                .and_then(|e| e.message)
+                                .unwrap_or_else(|| "Codex response failed".to_string());
                             yield LlmEvent::Error(ProviderError::other("Codex", msg));
                             return;
                         }
-                        "error" => {
-                            let msg = ev["message"].as_str()
-                                .or_else(|| ev["code"].as_str())
-                                .unwrap_or("Unknown error")
-                                .to_string();
+                        CodexEvent::Error { message, code } => {
+                            let msg = message
+                                .or(code)
+                                .unwrap_or_else(|| "Unknown error".to_string());
                             yield LlmEvent::Error(ProviderError::other("Codex", format!("Codex error: {msg}")));
                             return;
                         }
 
-                        _ => {} // ignore other event types
+                        _ => {} // ignore other/empty variants
                     }
                 }
             }
 
             yield LlmEvent::Done;
-        })
-    }
-}
-
-fn extract_usage_stats(ev: &serde_json::Value) -> Option<UsageStats> {
-    let usage = ev
-        .get("response")
-        .and_then(|r| r.get("usage"))
-        .or_else(|| ev.get("usage"))?;
-
-    let input = usage
-        .get("input_tokens")
-        .or_else(|| usage.get("prompt_tokens"))
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-
-    let output = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-
-    if input.is_none() && output.is_none() && total.is_none() {
-        None
-    } else {
-        Some(UsageStats {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: total,
         })
     }
 }
@@ -427,5 +460,193 @@ impl LlmProvider for CodexProvider {
     fn list_models(&self) -> ModelListFuture {
         let models = known_models();
         Box::pin(async move { Ok(models) })
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> CodexEvent {
+        serde_json::from_str(json).expect("parse failed")
+    }
+
+    #[test]
+    fn output_text_delta_parses() {
+        let ev = parse(r#"{"type":"response.output_text.delta","delta":"hello"}"#);
+        let CodexEvent::OutputTextDelta { delta } = ev else {
+            panic!()
+        };
+        assert_eq!(delta, "hello");
+    }
+
+    #[test]
+    fn reasoning_summary_text_delta_parses() {
+        let ev = parse(r#"{"type":"response.reasoning_summary_text.delta","delta":"think"}"#);
+        let CodexEvent::ReasoningSummaryTextDelta { delta } = ev else {
+            panic!()
+        };
+        assert_eq!(delta, "think");
+    }
+
+    #[test]
+    fn output_item_added_function_call_parses() {
+        let ev = parse(
+            r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"read_file","arguments":""}}"#,
+        );
+        let CodexEvent::OutputItemAdded {
+            item: OutputItem::FunctionCall {
+                id, call_id, name, ..
+            },
+        } = ev
+        else {
+            panic!("wrong variant")
+        };
+        assert_eq!(id, "item_1");
+        assert_eq!(call_id, "call_1");
+        assert_eq!(name, "read_file");
+    }
+
+    #[test]
+    fn output_item_added_non_function_parses_as_other() {
+        let ev = parse(r#"{"type":"response.output_item.added","item":{"type":"text","id":"x"}}"#);
+        assert!(matches!(
+            ev,
+            CodexEvent::OutputItemAdded {
+                item: OutputItem::Other
+            }
+        ));
+    }
+
+    #[test]
+    fn function_call_arguments_delta_parses() {
+        let ev = parse(
+            r#"{"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\"k\":"}"#,
+        );
+        let CodexEvent::FunctionCallArgumentsDelta { item_id, delta } = ev else {
+            panic!()
+        };
+        assert_eq!(item_id, "item_1");
+        assert_eq!(delta, "{\"k\":");
+    }
+
+    #[test]
+    fn output_item_done_function_call_parses() {
+        let ev = parse(
+            r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}"#,
+        );
+        let CodexEvent::OutputItemDone {
+            item:
+                OutputItem::FunctionCall {
+                    id,
+                    call_id,
+                    name,
+                    arguments,
+                },
+        } = ev
+        else {
+            panic!()
+        };
+        assert_eq!(id, "item_1");
+        assert_eq!(call_id, "call_1");
+        assert_eq!(name, "read_file");
+        assert_eq!(arguments, r#"{"path":"a.txt"}"#);
+    }
+
+    #[test]
+    fn response_completed_with_usage_parses() {
+        let ev = parse(
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}"#,
+        );
+        let CodexEvent::ResponseCompleted { response } = ev else {
+            panic!()
+        };
+        let usage = UsageStats::from(response.unwrap().usage.unwrap());
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(30));
+    }
+
+    #[test]
+    fn response_completed_without_response_parses() {
+        let ev = parse(r#"{"type":"response.completed"}"#);
+        let CodexEvent::ResponseCompleted { response } = ev else {
+            panic!()
+        };
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn response_failed_parses_error_message() {
+        let ev =
+            parse(r#"{"type":"response.failed","response":{"error":{"message":"Rate limited"}}}"#);
+        let CodexEvent::ResponseFailed { response } = ev else {
+            panic!()
+        };
+        let msg = response.unwrap().error.unwrap().message.unwrap();
+        assert_eq!(msg, "Rate limited");
+    }
+
+    #[test]
+    fn error_event_parses_message_and_code() {
+        let ev = parse(r#"{"type":"error","message":"oops","code":"E42"}"#);
+        let CodexEvent::Error { message, code } = ev else {
+            panic!()
+        };
+        assert_eq!(message.as_deref(), Some("oops"));
+        assert_eq!(code.as_deref(), Some("E42"));
+    }
+
+    #[test]
+    fn unknown_event_type_parses_as_unknown() {
+        let ev = parse(r#"{"type":"response.audio.delta","delta":"..."}"#);
+        assert!(matches!(ev, CodexEvent::Unknown));
+    }
+
+    #[test]
+    fn usage_fallback_field_names() {
+        let usage = CodexUsage {
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            prompt_tokens: Some(5),
+            completion_tokens: Some(10),
+        };
+        let stats = UsageStats::from(usage);
+        assert_eq!(stats.input_tokens, Some(5));
+        assert_eq!(stats.output_tokens, Some(10));
+        assert_eq!(stats.total_tokens, Some(15));
+    }
+
+    #[test]
+    fn resolve_codex_url_appends_path() {
+        assert_eq!(
+            resolve_codex_url("https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            resolve_codex_url("https://proxy.example.com/codex"),
+            "https://proxy.example.com/codex/responses"
+        );
+        assert_eq!(
+            resolve_codex_url("https://proxy.example.com/v1/responses"),
+            "https://proxy.example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_minimal_fallback() {
+        // gpt-5.1 doesn't support "minimal" → falls back to "low"
+        assert_eq!(
+            clamp_reasoning_effort_for_model("gpt-5.1", "minimal"),
+            "low"
+        );
+        // gpt-5.2 supports "minimal"
+        assert_eq!(
+            clamp_reasoning_effort_for_model("gpt-5.2", "minimal"),
+            "minimal"
+        );
     }
 }
