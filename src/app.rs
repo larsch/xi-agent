@@ -4329,13 +4329,13 @@ mod tests {
             "notice must not be committed as a session event"
         );
 
-        let llm = crate::projection::project_llm_messages(
-            app.session
-                .session_state
-                .as_ref()
-                .expect("session state")
-                .events(),
-        );
+        let llm = app
+            .session
+            .session_state
+            .as_mut()
+            .expect("session state")
+            .llm_messages()
+            .to_vec();
         assert!(
             !llm.iter().any(|m| m.content == "[notice]"),
             "notice must not appear in LLM input"
@@ -4383,13 +4383,13 @@ mod tests {
             "shell output must not enter the event log"
         );
 
-        let llm = crate::projection::project_llm_messages(
-            app.session
-                .session_state
-                .as_ref()
-                .expect("session state")
-                .events(),
-        );
+        let llm = app
+            .session
+            .session_state
+            .as_mut()
+            .expect("session state")
+            .llm_messages()
+            .to_vec();
         assert!(llm.is_empty(), "shell output must not enter LLM history");
     }
 

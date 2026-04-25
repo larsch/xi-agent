@@ -8,7 +8,8 @@
 //! |---|---|---|
 //! | [`project_llm_messages`] | LLM provider requests | `Vec<Message>` |
 //! | [`project_display_messages`] | UI chat log / export | `Vec<Message>` |
-//! | [`DisplayProjection`] | stateful incremental UI renderer | (future) |
+//! | [`DisplayProjection`] | `SessionState` committed display state | `Vec<Message>` |
+//! | [`LlmProjection`] | `SessionState` committed LLM state | `Vec<Message>` |
 //!
 //! # Compaction boundary
 //!
@@ -19,11 +20,8 @@
 //! `retained_event_count`; legacy summaries fall back to events after the
 //! summary line.
 //!
-//! This stub behaviour is correct and complete for phase 1 (no compaction
-//! events will appear in the log yet).  Phase 2 will exercise the boundary
-//! logic.
-
-#![allow(dead_code)]
+//! The compaction boundary logic is fully exercised; both `retained_event_count`
+//! (new sessions) and the legacy fallback (post-summary tail only) are handled.
 
 use crate::{
     llm::{Message, Role},
@@ -277,6 +275,7 @@ impl DisplayProjection {
     /// Return mutable access to the current rendered message list.
     ///
     /// Used for transient in-flight UI state while a turn is streaming.
+    #[cfg(test)]
     pub fn messages_mut(&mut self) -> &mut Vec<Message> {
         &mut self.messages
     }
@@ -292,6 +291,7 @@ impl DisplayProjection {
     }
 
     /// Reset the projection to an empty state.
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.messages.clear();
         self.processed = 0;
@@ -405,12 +405,6 @@ impl LlmProjection {
                 // Cache already up to date.
             }
         }
-    }
-
-    /// Invalidate the cache, forcing a full rebuild on next access.
-    pub fn invalidate(&mut self) {
-        self.messages = None;
-        self.processed = 0;
     }
 
     /// Return the cached messages, panicking if not current.
