@@ -160,18 +160,18 @@ pub(crate) enum ProviderSetupStep {
 
 #[derive(Debug, Clone)]
 pub struct PendingProviderSetup {
-    pub original_id: String,
-    pub id: String,
-    pub backend_preset: Option<BackendPreset>,
-    pub api_type: Option<ApiType>,
-    pub base_url: Option<String>,
-    pub api_key: Option<String>,
-    pub editing_existing: bool,
+    pub(crate) original_id: String,
+    pub(crate) id: String,
+    pub(crate) backend_preset: Option<BackendPreset>,
+    pub(crate) api_type: Option<ApiType>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) api_key: Option<String>,
+    pub(crate) editing_existing: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct PendingProviderRemoval {
-    pub id: String,
+    pub(crate) id: String,
 }
 
 impl PendingProviderSetup {
@@ -219,54 +219,54 @@ pub enum InputMode {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
-    pub textarea: TextArea<'static>,
-    pub shell_textarea: TextArea<'static>,
-    pub input_mode: InputMode,
-    pub selected_shell: ShellKind,
-    pub available_shells: Vec<ShellKind>,
+    pub(crate) textarea: TextArea<'static>,
+    pub(crate) shell_textarea: TextArea<'static>,
+    pub(crate) input_mode: InputMode,
+    pub(crate) selected_shell: ShellKind,
+    pub(crate) available_shells: Vec<ShellKind>,
     /// Monotonic revision bump for any visible log-content change.
     /// Used to invalidate cached wrapped log lines.
-    pub log_revision: u64,
+    pub(crate) log_revision: u64,
     /// Cached pre-wrapped log lines for the most recent `(log_revision, width)`.
-    pub cached_log_lines: Option<(u64, usize, Vec<Line<'static>>)>,
-    pub log_scroll: usize,
+    pub(crate) cached_log_lines: Option<(u64, usize, Vec<Line<'static>>)>,
+    pub(crate) log_scroll: usize,
     /// When true, the view always follows the bottom (auto-scrolls).
-    pub auto_scroll: bool,
+    pub(crate) auto_scroll: bool,
     /// Height of the log pane from the last draw — used as page-size scrolling.
-    pub last_log_height: usize,
+    pub(crate) last_log_height: usize,
     /// Current streaming state; `None` when no turn is active.
-    pub streaming_status: Option<StreamingStatus>,
+    pub(crate) streaming_status: Option<StreamingStatus>,
     /// Throbber animation frame index, advanced on every UI tick while streaming.
-    pub throbber_tick: u8,
+    pub(crate) throbber_tick: u8,
     /// Instant of the last visible agent output (text/thinking tokens, tool
     /// calls, tool results, etc.); used to suppress the throbber while output
     /// is actively arriving and re-show it after a short idle time.
-    pub last_output_at: Option<std::time::Instant>,
+    pub(crate) last_output_at: Option<std::time::Instant>,
     /// Optional system prompt prepended to every request.
-    pub system_prompt: Option<String>,
+    pub(crate) system_prompt: Option<String>,
     /// All provider-related state: instances, active instance/model/thinking,
     /// and transient setup-flow state.
     pub(crate) provider: ProviderManager,
     /// Agent loop configuration (tools, hooks).
-    pub agent_config: AgentLoopConfig,
+    pub(crate) agent_config: AgentLoopConfig,
     /// Skills loaded from all supported skill roots.
-    pub loaded_skills: Vec<SkillMeta>,
+    pub(crate) loaded_skills: Vec<SkillMeta>,
 
     // ── Completion popup + model fetch ────────────────────────────────────────
-    pub completion: CompletionState,
+    pub(crate) completion: CompletionState,
 
     // ── Generic selection menu ────────────────────────────────────────────────
-    pub selection: SelectionState,
+    pub(crate) selection: SelectionState,
 
     // ── Info bar ──────────────────────────────────────────────────────────────
     /// When true, the info bar (provider / model / context window) is shown
     /// below the input panel.  Toggled by Ctrl+I.
-    pub show_info: bool,
+    pub(crate) show_info: bool,
     /// Best-effort token usage reported for the latest completed turn.
-    pub latest_usage: Option<UsageStats>,
+    pub(crate) latest_usage: Option<UsageStats>,
 
     // ── Login panel ───────────────────────────────────────────────────────────
-    pub login: LoginState,
+    pub(crate) login: LoginState,
 
     // ── Session persistence + state ───────────────────────────────────────────
     /// All session-related state: persistence store, committed state, live
@@ -488,7 +488,7 @@ impl App {
         self.show_info = !self.show_info;
     }
 
-    pub async fn recv_app_event(&mut self) -> Option<AppEvent> {
+    pub(crate) async fn recv_app_event(&mut self) -> Option<AppEvent> {
         self.runtime.recv_app_event().await
     }
 
