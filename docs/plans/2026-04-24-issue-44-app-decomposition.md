@@ -1,6 +1,8 @@
 # Plan: App decomposition — incremental sub-struct extraction (Issue #44)
 
 **Date:** 2026-04-24  
+**Status:** INCOMPLETE — data extraction (steps 1–5) done; methods were not moved; app.rs target (~3,000 lines) not reached. Issue #44 reopened.  
+**Continued in:** `2026-04-25-app-behaviour-extraction.md` (behaviour/method migration).  
 **Issue:** https://gitea.belunktum.dk/larsch/tau/issues/44  
 **Objective:** Improve encapsulation, testability, and derisk new features by
 decomposing `App` into coherent sub-structs. Each step is independently

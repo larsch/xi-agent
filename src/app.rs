@@ -216,6 +216,40 @@ pub enum InputMode {
 }
 
 // ── Login state ───────────────────────────────────────────────────────────────
+// ── Log cache ─────────────────────────────────────────────────────────────────
+
+/// Tracks the monotonic log revision and its pre-wrapped line cache.
+///
+/// Call `invalidate()` whenever log content changes. Call `ensure_cached()` in
+/// the render path to populate or reuse the wrapped-line cache.
+pub struct LogCache {
+    /// Monotonic counter bumped on every log-content change.
+    pub(crate) revision: u64,
+    /// Pre-wrapped lines: `(revision, width, lines)`. Invalidated on bump.
+    pub(crate) cached_lines: Option<(u64, usize, Vec<Line<'static>>)>,
+}
+
+impl LogCache {
+    pub fn new() -> Self {
+        Self {
+            revision: 0,
+            cached_lines: None,
+        }
+    }
+
+    /// Bump the revision counter and drop the cached lines.
+    pub fn invalidate(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.cached_lines = None;
+    }
+}
+
+impl Default for LogCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -224,11 +258,9 @@ pub struct App {
     pub(crate) input_mode: InputMode,
     pub(crate) selected_shell: ShellKind,
     pub(crate) available_shells: Vec<ShellKind>,
-    /// Monotonic revision bump for any visible log-content change.
-    /// Used to invalidate cached wrapped log lines.
-    pub(crate) log_revision: u64,
-    /// Cached pre-wrapped log lines for the most recent `(log_revision, width)`.
-    pub(crate) cached_log_lines: Option<(u64, usize, Vec<Line<'static>>)>,
+    /// Tracks log-revision and pre-wrapped line cache; call `log_cache.invalidate()`
+    /// whenever visible log content changes.
+    pub(crate) log_cache: LogCache,
     pub(crate) log_scroll: usize,
     /// When true, the view always follows the bottom (auto-scrolls).
     pub(crate) auto_scroll: bool,
@@ -354,12 +386,11 @@ fn active_provider_display_name(
 
 impl App {
     fn bump_log_revision(&mut self) {
-        self.log_revision = self.log_revision.wrapping_add(1);
-        self.cached_log_lines = None;
+        self.log_cache.invalidate();
     }
 
     pub fn mark_log_dirty(&mut self) {
-        self.bump_log_revision();
+        self.log_cache.invalidate();
     }
 
     pub fn new(
@@ -377,8 +408,7 @@ impl App {
             input_mode: InputMode::Chat,
             selected_shell,
             available_shells,
-            log_revision: 0,
-            cached_log_lines: None,
+            log_cache: LogCache::new(),
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
@@ -609,66 +639,62 @@ impl App {
 
     pub fn enter_resume_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::ResumeSession);
-        self.selection.title = "  Resume session  ";
-        self.selection.query.clear();
 
-        let Some(store) = self.session.session_store.as_ref() else {
-            self.set_selection_items(vec![CompletionItem {
+        let items = if let Some(store) = self.session.session_store.as_ref() {
+            let mut sessions = store.list_sessions();
+            sessions.sort_by(|a, b| {
+                let a_local = a.cwd == self.session.current_cwd;
+                let b_local = b.cwd == self.session.current_cwd;
+                b_local
+                    .cmp(&a_local)
+                    .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
+            });
+
+            if sessions.is_empty() {
+                vec![CompletionItem {
+                    label: "no saved sessions yet".to_string(),
+                    detail: String::new(),
+                    complete_to: String::new(),
+                    loading: true,
+                    error: false,
+                    match_range: None,
+                }]
+            } else {
+                sessions
+                    .iter()
+                    .map(|meta| {
+                        let is_local = meta.cwd == self.session.current_cwd;
+                        let scope = if is_local { "local" } else { "foreign" };
+                        let when = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                            meta.updated_at_ms,
+                        )
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "unknown time".to_string());
+                        let prompt_hint = meta.first_prompt.as_deref().unwrap_or(&meta.id);
+
+                        CompletionItem {
+                            label: format!("[{scope}] {when}  —  {prompt_hint}"),
+                            detail: format!("{} msgs • {}", meta.message_count, meta.cwd),
+                            complete_to: format!("/resume_session {}", meta.id),
+                            loading: false,
+                            error: false,
+                            match_range: None,
+                        }
+                    })
+                    .collect()
+            }
+        } else {
+            vec![CompletionItem {
                 label: "session persistence unavailable".to_string(),
                 detail: String::new(),
                 complete_to: String::new(),
                 loading: true,
                 error: false,
                 match_range: None,
-            }]);
-            return;
+            }]
         };
-
-        let mut sessions = store.list_sessions();
-        sessions.sort_by(|a, b| {
-            let a_local = a.cwd == self.session.current_cwd;
-            let b_local = b.cwd == self.session.current_cwd;
-            b_local
-                .cmp(&a_local)
-                .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
-        });
-
-        if sessions.is_empty() {
-            self.set_selection_items(vec![CompletionItem {
-                label: "no saved sessions yet".to_string(),
-                detail: String::new(),
-                complete_to: String::new(),
-                loading: true,
-                error: false,
-                match_range: None,
-            }]);
-            return;
-        }
-
-        let items = sessions
-            .iter()
-            .map(|meta| {
-                let is_local = meta.cwd == self.session.current_cwd;
-                let scope = if is_local { "local" } else { "foreign" };
-                let when =
-                    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(meta.updated_at_ms)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "unknown time".to_string());
-                let prompt_hint = meta.first_prompt.as_deref().unwrap_or(&meta.id);
-
-                CompletionItem {
-                    label: format!("[{scope}] {when}  —  {prompt_hint}"),
-                    detail: format!("{} msgs • {}", meta.message_count, meta.cwd),
-                    complete_to: format!("/resume_session {}", meta.id),
-                    loading: false,
-                    error: false,
-                    match_range: None,
-                }
-            })
-            .collect();
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::ResumeSession, "  Resume session  ", items);
     }
 
     fn make_textarea() -> TextArea<'static> {
@@ -922,30 +948,12 @@ impl App {
     /// Recompute the completion list from the current textarea content and
     /// cached model list. Call this after every keystroke.
     pub fn update_completions(&mut self) {
-        let lines = self.textarea.lines().to_vec();
-        let input = if lines.len() == 1 {
-            lines[0].trim().to_string()
-        } else {
-            String::new()
-        };
-        let available = self.completion.available_models.as_deref();
-        let loading = self.completion.models_loading;
-        let fetch_error = self.completion.model_fetch_error.as_deref();
-        let thinking_enabled = self.provider.thinking_supported;
-        let new = completion::completions_for(
-            &input,
-            available,
-            loading,
-            fetch_error,
+        self.completion.update(
+            &self.textarea,
             &self.loaded_skills,
-            thinking_enabled,
+            self.provider.thinking_supported,
             &self.provider.instances,
         );
-
-        if new.len() != self.completion.completions.len() {
-            self.completion.completion_selected = 0;
-        }
-        self.completion.completions = new;
     }
 
     /// Returns true if a model-list fetch should be triggered now.
@@ -1056,10 +1064,7 @@ impl App {
     // ── Selection menu ────────────────────────────────────────────────────────
 
     fn set_selection_items(&mut self, items: Vec<CompletionItem>) {
-        self.selection.all_items = items;
-        self.selection.selected = 0;
-        self.selection.scroll = 0;
-        self.apply_selection_filter();
+        self.selection.set_items(items);
     }
 
     fn select_current_default(&mut self) {
@@ -1090,61 +1095,22 @@ impl App {
                 .position(|item| item.complete_to == target)
         {
             self.selection.selected = idx;
-            self.ensure_selection_visible();
+            self.selection.ensure_visible();
         }
     }
 
     fn apply_selection_filter(&mut self) {
-        let query = self.selection.query.trim();
-        if query.is_empty() {
-            self.selection.items = self.selection.all_items.clone();
-        } else {
-            let needle = query.to_lowercase();
-            self.selection.items = self
-                .selection
-                .all_items
-                .iter()
-                .filter(|item| {
-                    item.label.to_lowercase().contains(&needle)
-                        || item.detail.to_lowercase().contains(&needle)
-                })
-                .cloned()
-                .collect();
-        }
-
-        if self.selection.items.is_empty() {
-            self.selection.selected = 0;
-            self.selection.scroll = 0;
-            return;
-        }
-
-        if self.selection.selected >= self.selection.items.len() {
-            self.selection.selected = 0;
-        }
-        self.ensure_selection_visible();
+        self.selection.apply_filter();
     }
 
     fn ensure_selection_visible(&mut self) {
-        if self.selection.items.is_empty() {
-            self.selection.scroll = 0;
-            return;
-        }
-        if self.selection.selected < self.selection.scroll {
-            self.selection.scroll = self.selection.selected;
-        }
-        if self.selection.selected >= self.selection.scroll + MAX_SELECTION_VISIBLE {
-            self.selection.scroll = self.selection.selected + 1 - MAX_SELECTION_VISIBLE;
-        }
+        self.selection.ensure_visible();
     }
 
     /// Open the model selection menu, pre-populating from cache or showing a
     /// loading indicator when the list hasn't been fetched yet.
     pub fn enter_model_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::Model);
-        self.selection.title = "  Select model  ";
-        self.selection.query.clear();
         let items = if let Some(err) = &self.completion.model_fetch_error {
             vec![CompletionItem::error_indicator(err)]
         } else if let Some(models) = &self.completion.available_models {
@@ -1155,7 +1121,8 @@ impl App {
         } else {
             vec![CompletionItem::loading_indicator()]
         };
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::Model, "  Select model  ", items);
         self.select_current_default();
     }
 
@@ -1184,10 +1151,6 @@ impl App {
     /// Open the thinking-level selection menu.
     pub fn enter_thinking_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::Thinking);
-        self.selection.title = "  Select thinking  ";
-        self.selection.query.clear();
         let items = ThinkingLevel::all()
             .iter()
             .map(|lvl| CompletionItem {
@@ -1199,19 +1162,17 @@ impl App {
                 match_range: None,
             })
             .collect();
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::Thinking, "  Select thinking  ", items);
         self.select_current_default();
     }
 
     /// Open the provider selection menu with the configured instances plus an
     /// explicit action to add a new instance.
+    /// Open the provider selection menu with the configured instances plus an
+    /// explicit action to add a new instance.
     pub fn enter_provider_selection_mode(&mut self, instances: &[ProviderInstance]) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::Provider);
-        self.selection.title = "  Select provider  ";
-        self.selection.query.clear();
-
         let mut items = Vec::with_capacity(instances.len() + 1);
         items.push(CompletionItem {
             label: "Add provider…".to_string(),
@@ -1226,7 +1187,8 @@ impl App {
                 .iter()
                 .map(|p| CompletionItem::from_provider(&p.id, &p.label())),
         );
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::Provider, "  Select provider  ", items);
         self.select_current_default();
     }
 
@@ -1243,18 +1205,11 @@ impl App {
     }
 
     pub fn pending_provider_setup_is_edit(&self) -> bool {
-        self.provider
-            .pending_setup
-            .as_ref()
-            .map(|setup| setup.editing_existing)
-            .unwrap_or(false)
+        self.provider.pending_setup_is_edit()
     }
 
     pub fn pending_provider_original_id(&self) -> Option<&str> {
-        self.provider
-            .pending_setup
-            .as_ref()
-            .and_then(|setup| setup.editing_existing.then_some(setup.original_id.as_str()))
+        self.provider.pending_original_id()
     }
 
     /// Begin setup for a new custom provider instance.
@@ -1323,61 +1278,8 @@ impl App {
         self.reset_textarea();
     }
 
-    fn normalize_provider_id(raw: &str) -> Option<String> {
-        let mut out = String::new();
-        let mut prev_sep = false;
-        for ch in raw.trim().chars() {
-            let mapped = match ch {
-                'a'..='z' | '0'..='9' | '.' => Some(ch),
-                'A'..='Z' => Some(ch.to_ascii_lowercase()),
-                _ => None,
-            };
-            if let Some(c) = mapped {
-                out.push(c);
-                prev_sep = false;
-            } else if !out.is_empty() && !prev_sep {
-                out.push('-');
-                prev_sep = true;
-            }
-        }
-        while out.ends_with(['-', '.']) {
-            out.pop();
-        }
-        if out.is_empty() { None } else { Some(out) }
-    }
-
-    fn provider_type_suffix(backend_preset: &BackendPreset) -> &'static str {
-        match backend_preset {
-            BackendPreset::Ollama => "ollama",
-            BackendPreset::OpenWebUi => "open-webui",
-            BackendPreset::OpenAiCompatible => "openai-compatible",
-            BackendPreset::Copilot => "copilot",
-            BackendPreset::OpenAi => "openai",
-            BackendPreset::OpenRouter => "openrouter",
-            BackendPreset::Codex => "codex",
-            BackendPreset::Gemini => "gemini",
-            BackendPreset::OllamaCom => "ollama-com",
-            BackendPreset::Test => "test",
-        }
-    }
-
     fn suggested_pending_provider_id(&self) -> Option<String> {
-        let setup = self.provider.pending_setup.as_ref()?;
-        if setup.editing_existing {
-            return Some(setup.id.clone());
-        }
-        let backend_preset = setup.backend_preset.as_ref()?;
-        let host = setup
-            .base_url
-            .as_deref()
-            .and_then(|base| reqwest::Url::parse(base).ok())
-            .and_then(|url| url.host_str().map(ToOwned::to_owned))
-            .unwrap_or_else(|| backend_preset.id().to_string());
-        let raw = match backend_preset {
-            BackendPreset::Ollama => format!("ollama-{host}"),
-            _ => format!("{}-{}", host, Self::provider_type_suffix(backend_preset)),
-        };
-        Self::normalize_provider_id(&raw)
+        self.provider.suggested_id()
     }
 
     /// Read the typed provider name, normalize it into a stable id, and store
@@ -1387,65 +1289,28 @@ impl App {
         existing_instances: &[ProviderInstance],
     ) -> Option<String> {
         let raw = self.textarea.lines().join(" ");
-        let id = Self::normalize_provider_id(&raw)?;
-        let setup = self.provider.pending_setup.as_mut()?;
-        if existing_instances
-            .iter()
-            .any(|p| p.id == id && (!setup.editing_existing || p.id != setup.original_id))
-        {
-            return None;
-        }
-        self.provider.setup_step = ProviderSetupStep::Idle;
-        setup.id = id.clone();
+        let id = self.provider.submit_name_input(&raw, existing_instances)?;
         self.reset_textarea();
         Some(id)
     }
 
     pub fn submit_pending_provider_base_url(&mut self) -> Option<String> {
-        let instance = self.pending_provider_instance()?;
         let raw = self.textarea.lines().join("");
-        let norm = instance.backend_preset.def().url_normalization.as_ref()?;
-        let url = norm.normalize(&raw)?;
-        self.provider.setup_step = ProviderSetupStep::Idle;
-        if let Some(setup) = self.provider.pending_setup.as_mut() {
-            setup.base_url = Some(url.clone());
-        }
+        let url = self.provider.submit_base_url(&raw)?;
         self.reset_textarea();
         Some(url)
     }
 
     pub fn submit_pending_provider_api_key(&mut self) -> Option<String> {
-        let token = self.textarea.lines().join("").trim().to_string();
-        let existing_token = self
-            .provider
-            .pending_setup
-            .as_ref()
-            .and_then(|setup| setup.api_key.clone());
-        let keep_existing = token.is_empty() && self.pending_provider_setup_is_edit();
-        if token.is_empty() && !keep_existing {
-            return None;
-        }
-        self.provider.setup_step = ProviderSetupStep::Idle;
-        if let Some(setup) = self.provider.pending_setup.as_mut()
-            && !keep_existing
-        {
-            setup.api_key = Some(token.clone());
-        }
+        let raw = self.textarea.lines().join("");
+        let token = self.provider.submit_api_key(&raw)?;
         self.reset_textarea();
-        if keep_existing {
-            existing_token
-        } else {
-            Some(token)
-        }
+        Some(token)
     }
 
     /// Show the backend-type menu for the pending provider instance.
     pub fn enter_provider_backend_preset_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::ProviderBackendPreset);
-        self.selection.title = "  Select backend type  ";
-        self.selection.query.clear();
         let items = BackendPreset::user_visible()
             .iter()
             .map(|service| CompletionItem {
@@ -1457,16 +1322,16 @@ impl App {
                 match_range: None,
             })
             .collect();
-        self.set_selection_items(items);
+        self.selection.activate(
+            SelectionKind::ProviderBackendPreset,
+            "  Select backend type  ",
+            items,
+        );
     }
 
     /// Show the API-type menu for the pending provider instance.
     pub fn enter_provider_api_type_selection_mode(&mut self, backend_preset: &BackendPreset) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::ProviderApiType);
-        self.selection.title = "  Select API type  ";
-        self.selection.query.clear();
         let items = backend_preset
             .def()
             .allowed_apis
@@ -1480,64 +1345,37 @@ impl App {
                 match_range: None,
             })
             .collect();
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::ProviderApiType, "  Select API type  ", items);
     }
 
     pub fn set_pending_provider_backend_preset(&mut self, backend_preset: BackendPreset) {
-        if let Some(setup) = self.provider.pending_setup.as_mut() {
-            setup.backend_preset = Some(backend_preset);
-            setup.api_type = None;
-        }
+        self.provider.set_pending_backend_preset(backend_preset);
     }
 
     pub fn set_pending_provider_api_type(&mut self, api_type: ApiType) {
-        if let Some(setup) = self.provider.pending_setup.as_mut() {
-            setup.api_type = Some(api_type);
-        }
+        self.provider.set_pending_api_type(api_type);
     }
 
     pub fn pending_provider_instance(&self) -> Option<ProviderInstance> {
-        let setup = self.provider.pending_setup.as_ref()?;
-        let backend_preset = setup.backend_preset.clone()?;
-        let api_type = setup
-            .api_type
-            .clone()
-            .unwrap_or_else(|| backend_preset.def().default_api.clone());
-        let id = if setup.id.is_empty() {
-            self.suggested_pending_provider_id()?
-        } else {
-            setup.id.clone()
-        };
-        let mut instance = ProviderInstance::new(id, backend_preset);
-        instance.api_type = api_type;
-        instance.base_url = setup.base_url.clone();
-        instance.api_key = setup.api_key.clone();
-        Some(instance)
+        self.provider.pending_instance()
     }
 
     pub fn finish_pending_provider_setup(&mut self) -> Option<ProviderInstance> {
-        let instance = self.pending_provider_instance()?;
-        self.provider.pending_setup = None;
-        self.provider.pending_removal = None;
-        Some(instance)
+        self.provider.finish_setup()
     }
 
     pub fn clear_pending_provider_setup(&mut self) {
-        self.provider.pending_setup = None;
-        self.provider.pending_removal = None;
+        self.provider.clear_setup();
     }
 
     pub fn enter_provider_removal_confirmation_mode(&mut self, instance: &ProviderInstance) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::ConfirmProviderRemoval);
-        self.selection.title = "  Remove provider?  ";
-        self.selection.query.clear();
         self.provider.pending_setup = None;
         self.provider.pending_removal = Some(PendingProviderRemoval {
             id: instance.id.clone(),
         });
-        self.set_selection_items(vec![
+        let items = vec![
             CompletionItem {
                 label: format!("Remove {}", instance.id),
                 detail: format!(
@@ -1557,11 +1395,16 @@ impl App {
                 error: false,
                 match_range: None,
             },
-        ]);
+        ];
+        self.selection.activate(
+            SelectionKind::ConfirmProviderRemoval,
+            "  Remove provider?  ",
+            items,
+        );
     }
 
     pub fn clear_pending_provider_removal(&mut self) {
-        self.provider.pending_removal = None;
+        self.provider.clear_removal();
     }
 
     /// Read the textarea as an Ollama endpoint URL, normalize shorthand
@@ -1628,10 +1471,6 @@ impl App {
     /// Open provider picker for `/login` command.
     pub fn enter_login_selection_mode(&mut self) {
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::LoginProvider);
-        self.selection.title = "  Login provider  ";
-        self.selection.query.clear();
         let items = ["copilot", "codex", "gemini"]
             .iter()
             .map(|p| CompletionItem {
@@ -1643,18 +1482,13 @@ impl App {
                 match_range: None,
             })
             .collect();
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::LoginProvider, "  Login provider  ", items);
     }
 
     /// Dismiss the selection menu without applying a choice.
     pub fn exit_selection_mode(&mut self) {
-        self.selection.active = false;
-        self.selection.kind = None;
-        self.selection.items.clear();
-        self.selection.all_items.clear();
-        self.selection.query.clear();
-        self.selection.selected = 0;
-        self.selection.scroll = 0;
+        self.selection.reset();
     }
 
     /// Returns true when a model fetch should be triggered for the model
@@ -1834,16 +1668,12 @@ impl App {
     }
 
     pub fn has_pending_ask(&self) -> bool {
-        self.ask_user.pending.is_some()
+        self.ask_user.has_pending()
     }
 
     /// Returns true when the current pending ask allows a free-form typed answer.
     pub fn pending_ask_allows_freeform(&self) -> bool {
-        self.ask_user
-            .pending
-            .as_ref()
-            .map(|p| p.allow_freeform)
-            .unwrap_or(false)
+        self.ask_user.allows_freeform()
     }
 
     /// Returns true when a pending ask is showing its selection menu and does
@@ -1889,11 +1719,6 @@ impl App {
         }
 
         self.reset_textarea();
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::AskUser);
-        self.selection.title = "  Ask user  ";
-        self.selection.query.clear();
-
         let mut items: Vec<CompletionItem> = options
             .iter()
             .map(|opt| CompletionItem {
@@ -1918,7 +1743,8 @@ impl App {
             });
         }
 
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::AskUser, "  Ask user  ", items);
     }
 
     pub fn enter_ask_freeform_mode(&mut self) {
@@ -2079,11 +1905,8 @@ impl App {
             Self::LOGIN_ACTION_CANCEL,
         ));
 
-        self.selection.active = true;
-        self.selection.kind = Some(SelectionKind::LoginAction);
-        self.selection.title = "  Login actions  ";
-        self.selection.query.clear();
-        self.set_selection_items(items);
+        self.selection
+            .activate(SelectionKind::LoginAction, "  Login actions  ", items);
     }
 
     /// Execute a login action chosen from the action menu.
@@ -2280,32 +2103,13 @@ impl App {
     // ── Conversation management ───────────────────────────────────────────────
 
     fn refresh_resume_availability(&mut self) {
-        self.session.resume_available_for_cwd = self
-            .session
-            .session_store
-            .as_ref()
-            .and_then(|s| s.latest_for_cwd(&self.session.current_cwd))
-            .is_some();
+        self.session.refresh_resume_availability();
     }
 
     /// Return the current session ID, creating a new session if one does not
     /// yet exist.  Falls back to `"unknown"` if persistence is unavailable.
     fn ensure_session_id(&mut self) -> String {
-        if let Some(ref id) = self.session.current_session_id {
-            return id.clone();
-        }
-        if let Some(ref mut store) = self.session.session_store {
-            match store.create_session(&self.session.current_cwd) {
-                Ok(id) => {
-                    self.session.current_session_id = Some(id.clone());
-                    return id;
-                }
-                Err(e) => {
-                    log::debug!("failed to create session for tool output log: {e}");
-                }
-            }
-        }
-        "unknown".to_string()
+        self.session.ensure_session_id()
     }
 
     /// Ensure a [`SessionState`] exists for the current session before submitting
@@ -2318,33 +2122,7 @@ impl App {
     /// through `SessionEvent` ingestion and `SessionState` is always present
     /// before a turn launches.
     fn ensure_event_log_for_submit(&mut self) {
-        if self.session.session_state.is_some() {
-            return;
-        }
-        let session_id = self.ensure_session_id();
-        if let Some(store) = &self.session.session_store {
-            match store.load_events(&session_id) {
-                Ok(log) => {
-                    self.session.session_state = Some(SessionState::from_event_log(log));
-                    return;
-                }
-                Err(e) => {
-                    log::debug!("failed to load event log for session {session_id}: {e}");
-                }
-            }
-        }
-
-        // Persistence unavailable: create an ephemeral event log so all turn
-        // flows still operate through SessionState and SessionEvent ingestion.
-        let path = std::env::temp_dir().join(format!("tau-ephemeral-session-{session_id}.jsonl"));
-        match crate::event_log::EventLog::load(&path) {
-            Ok(log) => {
-                self.session.session_state = Some(SessionState::from_event_log(log));
-            }
-            Err(e) => {
-                log::debug!("failed to create ephemeral event log for session {session_id}: {e}");
-            }
-        }
+        self.session.ensure_event_log_for_submit();
     }
 
     fn persist_messages(&mut self) {
@@ -2352,7 +2130,7 @@ impl App {
         // `append_event_immediate` via the event log.  This method is kept as
         // a call-site placeholder so that callers do not need to be updated
         // individually; its only remaining job is to refresh the resume hint.
-        self.refresh_resume_availability();
+        self.session.refresh_persistence();
     }
 
     /// Append a user-visible user message to the active session.
@@ -2361,15 +2139,7 @@ impl App {
     /// lets the display projection update from that source of truth. When
     /// persistence is unavailable, falls back to a transient visible message.
     fn append_user_message(&mut self, content: String) {
-        self.ensure_event_log_for_submit();
-        assert!(
-            self.session.session_state.is_some(),
-            "append_user_message called before session_state was initialised"
-        );
-        self.append_event_immediate(SessionEvent::UserMessage {
-            content,
-            timestamp: Self::now_ts(),
-        });
+        self.session.append_user_message(content, Self::now_ts());
     }
 
     /// Export the current visible session to a standalone HTML file.
@@ -2718,31 +2488,14 @@ impl App {
     ///
     /// Called at every turn-completion boundary (`TurnEnd`, `Done`, `Error`).
     fn flush_turn_events(&mut self) {
-        if self.session.pending_turn_events.is_empty() {
-            return;
-        }
-        let batch: Vec<SessionEvent> = std::mem::take(&mut self.session.pending_turn_events);
-        if let Some(ss) = self.session.session_state.as_mut() {
-            if let Err(e) = ss.append_batch(&batch) {
-                log::debug!("failed to append turn events to session state: {e}");
-            }
-            // append_batch rebuilds the committed display projection from durable events.
-            // Clear the in-flight turn fields (assistant content, tool entries) from
-            // LiveTurnState — they are now represented in committed display state.
-            // Notices are preserved (they survive turn boundaries).
-            self.session.live_turn.clear_turn();
-        }
+        self.session.flush_turn_events();
     }
 
     /// Append a single event to the event log immediately (for events that are
     /// complete units on their own: `UserMessage`, `ModelChanged`,
     /// `ThinkingLevelChanged`).
     fn append_event_immediate(&mut self, ev: SessionEvent) {
-        if let Some(ss) = self.session.session_state.as_mut()
-            && let Err(e) = ss.append_immediate(ev)
-        {
-            log::debug!("failed to append event to session state: {e}");
-        }
+        self.session.append_event_immediate(ev);
     }
 
     pub fn apply_app_event(&mut self, ev: AppEvent) {
@@ -2757,61 +2510,18 @@ impl App {
         }
     }
 
+    // ── AgentEvent handlers ───────────────────────────────────────────────────
+
+    /// Dispatch an `AgentEvent` to the appropriate named handler.
     pub fn apply_agent_event(&mut self, ev: AgentEvent) {
         match ev {
-            AgentEvent::ThinkingToken(token) => {
-                if !token.trim().is_empty() {
-                    self.last_output_at = Some(std::time::Instant::now());
-                }
-                self.session
-                    .live_turn
-                    .assistant_thinking
-                    .get_or_insert_with(String::new)
-                    .push_str(&token);
-                self.bump_log_revision();
-            }
-            AgentEvent::Usage(usage) => {
-                self.latest_usage = Some(usage);
-            }
-            AgentEvent::TextToken { text, phase } => {
-                if !text.trim().is_empty() {
-                    self.last_output_at = Some(std::time::Instant::now());
-                }
-                self.session.live_turn.assistant_content.push_str(&text);
-                if phase != AssistantPhase::Unknown {
-                    self.session.live_turn.assistant_phase = phase;
-                }
-                self.bump_log_revision();
-            }
-            AgentEvent::ToolIntentStart => {
-                self.session.live_turn.assistant_phase = AssistantPhase::Provisional;
-                self.bump_log_revision();
-            }
-            AgentEvent::SteeringConsumed { text } => {
-                self.last_output_at = Some(std::time::Instant::now());
-                if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
-                    self.runtime.queued_steering.remove(pos);
-                }
-                // Steering messages are user messages — append immediately.
-                self.append_user_message(text);
-                self.bump_log_revision();
-            }
-            AgentEvent::StatusUpdate(msg) => {
-                if !msg.is_empty() {
-                    self.last_output_at = Some(std::time::Instant::now());
-                }
-                self.streaming_status = if msg.is_empty() {
-                    Some(StreamingStatus::Waiting)
-                } else {
-                    Some(StreamingStatus::Message(msg))
-                };
-                self.bump_log_revision();
-            }
-            AgentEvent::Compacting => {
-                self.last_output_at = Some(std::time::Instant::now());
-                self.streaming_status = Some(StreamingStatus::Message("compacting…".to_string()));
-                self.bump_log_revision();
-            }
+            AgentEvent::ThinkingToken(token) => self.on_thinking_token(token),
+            AgentEvent::Usage(usage) => self.on_usage(usage),
+            AgentEvent::TextToken { text, phase } => self.on_text_token(text, phase),
+            AgentEvent::ToolIntentStart => self.on_tool_intent_start(),
+            AgentEvent::SteeringConsumed { text } => self.on_steering_consumed(text),
+            AgentEvent::StatusUpdate(msg) => self.on_status_update(msg),
+            AgentEvent::Compacting => self.on_compacting(),
             AgentEvent::CompactionDone {
                 summary,
                 trigger_reason,
@@ -2823,170 +2533,268 @@ impl App {
                 retained_event_count,
                 read_files,
                 modified_files,
-            } => {
-                let ev = SessionEvent::CompactionSummary {
-                    summary,
-                    trigger_reason,
-                    context_window,
-                    reserve_tokens,
-                    keep_recent_tokens,
-                    tokens_before,
-                    tokens_after,
-                    retained_event_count: Some(retained_event_count),
-                    read_files,
-                    modified_files,
-                    timestamp: Self::now_ts(),
-                };
-                self.append_event_immediate(ev);
-                // append_immediate already updates display incrementally via SessionState.
-                self.latest_usage = Some(UsageStats {
-                    input_tokens: Some(tokens_after),
-                    output_tokens: None,
-                    total_tokens: Some(tokens_after),
-                });
-                self.auto_scroll = true;
-                self.bump_log_revision();
-                self.persist_messages();
-            }
-            AgentEvent::ToolCallStart { id, name, args } => {
-                self.last_output_at = Some(std::time::Instant::now());
-                self.session.live_turn.tool_entries.push(LiveToolEntry {
-                    id: id.clone(),
-                    name: name.clone(),
-                    args: args.clone(),
-                    result: None,
-                });
-                // ToolCall is buffered; only flushed together with its result.
-                self.session
-                    .pending_turn_events
-                    .push(SessionEvent::ToolCall {
-                        id,
-                        name,
-                        args,
-                        timestamp: Self::now_ts(),
-                    });
-                self.bump_log_revision();
-            }
-            AgentEvent::ToolCallEnd { id, result } => {
-                self.last_output_at = Some(std::time::Instant::now());
-                let display_range = result.truncation.as_ref().map(|tr| DisplayRange {
-                    first_line: tr.first_kept_line,
-                    last_line: tr.first_kept_line + tr.output_lines - 1,
-                    total_lines: tr.total_lines,
-                });
-                // Update the matching live tool entry with its result.
-                if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
-                    entry.result = Some(LiveToolResult {
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                        display_range: display_range.clone(),
-                    });
-                }
-                // Resolve tool name from the matching pending ToolCall.
-                let name = self
-                    .session
-                    .pending_turn_events
-                    .iter()
-                    .rev()
-                    .find_map(|e| {
-                        if let SessionEvent::ToolCall { id: cid, name, .. } = e {
-                            if cid == &id { Some(name.clone()) } else { None }
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                self.session
-                    .pending_turn_events
-                    .push(SessionEvent::ToolResult {
-                        id,
-                        name,
-                        content: result.content,
-                        is_error: result.is_error,
-                        display_range,
-                        timestamp: Self::now_ts(),
-                    });
-                self.bump_log_revision();
-            }
+            } => self.on_compaction_done(
+                summary,
+                trigger_reason,
+                context_window,
+                reserve_tokens,
+                keep_recent_tokens,
+                tokens_before,
+                tokens_after,
+                retained_event_count,
+                read_files,
+                modified_files,
+            ),
+            AgentEvent::ToolCallStart { id, name, args } => self.on_tool_call_start(id, name, args),
+            AgentEvent::ToolCallEnd { id, result } => self.on_tool_call_end(id, result),
             AgentEvent::ExternalFileChange {
                 paths: _,
                 notification,
-            } => {
-                self.last_output_at = Some(std::time::Instant::now());
-                // External file change notifications are user-visible context
-                // injected into the conversation — treat as UserMessage.
-                self.append_user_message(notification);
-                self.bump_log_revision();
-            }
-            AgentEvent::TurnEnd => {
-                self.streaming_status = Some(StreamingStatus::Waiting);
-                // Finalise the assistant message in the pending buffer before
-                // flushing, using the current in-memory messages state.
-                self.finalise_assistant_turn_event();
-                self.flush_turn_events();
-                self.persist_messages();
-            }
-            AgentEvent::Done => {
-                self.streaming_status = None;
-                self.last_output_at = None;
-                self.runtime.agent_task = None;
-                self.runtime.cancel_tx = None;
-                self.runtime.steering_tx = None;
-                self.runtime.queued_steering.clear();
-                self.bump_log_revision();
-                // The final TurnEnd already flushed the turn buffer.
-                // Done only cleans up live streaming state.
-                self.persist_messages();
-            }
-            AgentEvent::Error(e) => {
-                self.streaming_status = None;
-                self.last_output_at = None;
-                self.runtime.agent_task = None;
-                self.runtime.cancel_tx = None;
-                self.runtime.steering_tx = None;
-                self.runtime.queued_steering.clear();
-                self.bump_log_revision();
+            } => self.on_external_file_change(notification),
+            AgentEvent::TurnEnd => self.on_turn_end(),
+            AgentEvent::Done => self.on_agent_done(),
+            AgentEvent::Error(e) => self.on_agent_error(e),
+        }
+    }
 
-                let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
+    fn on_thinking_token(&mut self, token: String) {
+        if !token.trim().is_empty() {
+            self.last_output_at = Some(std::time::Instant::now());
+        }
+        self.session
+            .live_turn
+            .assistant_thinking
+            .get_or_insert_with(String::new)
+            .push_str(&token);
+        self.bump_log_revision();
+    }
 
-                if is_unauthorized
-                    && self.login.auth_retry_budget > 0
-                    && self.trigger_auth_refresh(RetryTarget::AgentTurn)
-                {
-                    log::debug!(
-                        "received 401, refresh triggered: provider={} remaining_budget= {}",
-                        self.provider.current_instance.id,
-                        self.login.auth_retry_budget
-                    );
-                    self.login.auth_retry_budget -= 1;
-                    self.streaming_status = None;
-                    // Refresh triggered; retry will happen automatically after refresh completes.
-                    // Discard pending events and in-flight turn state — the turn will be retried.
-                    self.session.pending_turn_events.clear();
-                    self.session.live_turn.clear_turn();
+    fn on_usage(&mut self, usage: UsageStats) {
+        self.latest_usage = Some(usage);
+    }
+
+    fn on_text_token(&mut self, text: String, phase: AssistantPhase) {
+        if !text.trim().is_empty() {
+            self.last_output_at = Some(std::time::Instant::now());
+        }
+        self.session.live_turn.assistant_content.push_str(&text);
+        if phase != AssistantPhase::Unknown {
+            self.session.live_turn.assistant_phase = phase;
+        }
+        self.bump_log_revision();
+    }
+
+    fn on_tool_intent_start(&mut self) {
+        self.session.live_turn.assistant_phase = AssistantPhase::Provisional;
+        self.bump_log_revision();
+    }
+
+    fn on_steering_consumed(&mut self, text: String) {
+        self.last_output_at = Some(std::time::Instant::now());
+        if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
+            self.runtime.queued_steering.remove(pos);
+        }
+        // Steering messages are user messages — append immediately.
+        self.append_user_message(text);
+        self.bump_log_revision();
+    }
+
+    fn on_status_update(&mut self, msg: String) {
+        if !msg.is_empty() {
+            self.last_output_at = Some(std::time::Instant::now());
+        }
+        self.streaming_status = if msg.is_empty() {
+            Some(StreamingStatus::Waiting)
+        } else {
+            Some(StreamingStatus::Message(msg))
+        };
+        self.bump_log_revision();
+    }
+
+    fn on_compacting(&mut self) {
+        self.last_output_at = Some(std::time::Instant::now());
+        self.streaming_status = Some(StreamingStatus::Message("compacting…".to_string()));
+        self.bump_log_revision();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_compaction_done(
+        &mut self,
+        summary: String,
+        trigger_reason: crate::session_event::CompactionTrigger,
+        context_window: usize,
+        reserve_tokens: usize,
+        keep_recent_tokens: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+        retained_event_count: usize,
+        read_files: Vec<String>,
+        modified_files: Vec<String>,
+    ) {
+        let ev = SessionEvent::CompactionSummary {
+            summary,
+            trigger_reason,
+            context_window,
+            reserve_tokens,
+            keep_recent_tokens,
+            tokens_before,
+            tokens_after,
+            retained_event_count: Some(retained_event_count),
+            read_files,
+            modified_files,
+            timestamp: Self::now_ts(),
+        };
+        self.append_event_immediate(ev);
+        // append_immediate already updates display incrementally via SessionState.
+        self.latest_usage = Some(UsageStats {
+            input_tokens: Some(tokens_after),
+            output_tokens: None,
+            total_tokens: Some(tokens_after),
+        });
+        self.auto_scroll = true;
+        self.bump_log_revision();
+        self.persist_messages();
+    }
+
+    fn on_tool_call_start(&mut self, id: String, name: String, args: serde_json::Value) {
+        self.last_output_at = Some(std::time::Instant::now());
+        self.session.live_turn.tool_entries.push(LiveToolEntry {
+            id: id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+            result: None,
+        });
+        // ToolCall is buffered; only flushed together with its result.
+        self.session
+            .pending_turn_events
+            .push(SessionEvent::ToolCall {
+                id,
+                name,
+                args,
+                timestamp: Self::now_ts(),
+            });
+        self.bump_log_revision();
+    }
+
+    fn on_tool_call_end(&mut self, id: String, result: crate::agent::types::ToolResult) {
+        self.last_output_at = Some(std::time::Instant::now());
+        let display_range = result.truncation.as_ref().map(|tr| DisplayRange {
+            first_line: tr.first_kept_line,
+            last_line: tr.first_kept_line + tr.output_lines - 1,
+            total_lines: tr.total_lines,
+        });
+        // Update the matching live tool entry with its result.
+        if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            entry.result = Some(LiveToolResult {
+                content: result.content.clone(),
+                is_error: result.is_error,
+                display_range: display_range.clone(),
+            });
+        }
+        // Resolve tool name from the matching pending ToolCall.
+        let name = self
+            .session
+            .pending_turn_events
+            .iter()
+            .rev()
+            .find_map(|e| {
+                if let SessionEvent::ToolCall { id: cid, name, .. } = e {
+                    if cid == &id { Some(name.clone()) } else { None }
                 } else {
-                    let provider_label = active_provider_display_name(
-                        &self.provider.current_instance.id,
-                        &self.provider.instances,
-                    );
-                    let rendered = format_provider_error_for_display(&provider_label, &e);
-                    self.session
-                        .live_turn
-                        .notices
-                        .push(Message::assistant(format!("[Error: {rendered}]")));
-                    self.bump_log_revision();
-                    self.streaming_status = None;
-                    // Discard any partially accumulated assistant/tool events
-                    // and append a TurnError instead.
-                    self.session.pending_turn_events.clear();
-                    self.session.live_turn.clear_turn();
-                    self.append_event_immediate(SessionEvent::TurnError {
-                        message: format!("[Error: {rendered}]"),
-                        timestamp: Self::now_ts(),
-                    });
-                    self.persist_messages();
+                    None
                 }
-            }
+            })
+            .unwrap_or_default();
+        self.session
+            .pending_turn_events
+            .push(SessionEvent::ToolResult {
+                id,
+                name,
+                content: result.content,
+                is_error: result.is_error,
+                display_range,
+                timestamp: Self::now_ts(),
+            });
+        self.bump_log_revision();
+    }
+
+    fn on_external_file_change(&mut self, notification: String) {
+        self.last_output_at = Some(std::time::Instant::now());
+        // External file change notifications are user-visible context
+        // injected into the conversation — treat as UserMessage.
+        self.append_user_message(notification);
+        self.bump_log_revision();
+    }
+
+    fn on_turn_end(&mut self) {
+        self.streaming_status = Some(StreamingStatus::Waiting);
+        // Finalise the assistant message in the pending buffer before
+        // flushing, using the current in-memory messages state.
+        self.finalise_assistant_turn_event();
+        self.flush_turn_events();
+        self.persist_messages();
+    }
+
+    fn on_agent_done(&mut self) {
+        self.streaming_status = None;
+        self.last_output_at = None;
+        self.runtime.agent_task = None;
+        self.runtime.cancel_tx = None;
+        self.runtime.steering_tx = None;
+        self.runtime.queued_steering.clear();
+        self.bump_log_revision();
+        // The final TurnEnd already flushed the turn buffer.
+        // Done only cleans up live streaming state.
+        self.persist_messages();
+    }
+
+    fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
+        self.streaming_status = None;
+        self.last_output_at = None;
+        self.runtime.agent_task = None;
+        self.runtime.cancel_tx = None;
+        self.runtime.steering_tx = None;
+        self.runtime.queued_steering.clear();
+        self.bump_log_revision();
+
+        let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
+
+        if is_unauthorized
+            && self.login.auth_retry_budget > 0
+            && self.trigger_auth_refresh(RetryTarget::AgentTurn)
+        {
+            log::debug!(
+                "received 401, refresh triggered: provider={} remaining_budget= {}",
+                self.provider.current_instance.id,
+                self.login.auth_retry_budget
+            );
+            self.login.auth_retry_budget -= 1;
+            self.streaming_status = None;
+            // Refresh triggered; retry will happen automatically after refresh completes.
+            // Discard pending events and in-flight turn state — the turn will be retried.
+            self.session.pending_turn_events.clear();
+            self.session.live_turn.clear_turn();
+        } else {
+            let provider_label = active_provider_display_name(
+                &self.provider.current_instance.id,
+                &self.provider.instances,
+            );
+            let rendered = format_provider_error_for_display(&provider_label, &e);
+            self.session
+                .live_turn
+                .notices
+                .push(Message::assistant(format!("[Error: {rendered}]")));
+            self.bump_log_revision();
+            self.streaming_status = None;
+            // Discard any partially accumulated assistant/tool events
+            // and append a TurnError instead.
+            self.session.pending_turn_events.clear();
+            self.session.live_turn.clear_turn();
+            self.append_event_immediate(SessionEvent::TurnError {
+                message: format!("[Error: {rendered}]"),
+                timestamp: Self::now_ts(),
+            });
+            self.persist_messages();
         }
     }
 

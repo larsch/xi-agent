@@ -44,13 +44,13 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 }
 
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
-    if !matches!(&app.cached_log_lines, Some((rev, w, _)) if *rev == app.log_revision && *w == width)
+    if !matches!(&app.log_cache.cached_lines, Some((rev, w, _)) if *rev == app.log_cache.revision && *w == width)
     {
         let combined = app.display_messages_combined();
         let lines = build_log_lines(&combined, app.streaming(), width);
-        app.cached_log_lines = Some((app.log_revision, width, lines));
+        app.log_cache.cached_lines = Some((app.log_cache.revision, width, lines));
     }
-    &app.cached_log_lines.as_ref().unwrap().2
+    &app.log_cache.cached_lines.as_ref().unwrap().2
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {

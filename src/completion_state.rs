@@ -1,4 +1,8 @@
-use crate::completion::CompletionItem;
+use ratatui_textarea::TextArea;
+
+use crate::completion::{self, CompletionItem};
+use crate::provider_instance::ProviderInstance;
+use crate::skills::SkillMeta;
 
 /// Holds the popup-completion and model-fetch state for the chat input.
 ///
@@ -55,6 +59,40 @@ impl CompletionState {
         if len > 0 {
             self.completion_selected = (self.completion_selected + len - 1) % len;
         }
+    }
+    /// Recompute the completion list from the current textarea content.
+    ///
+    /// Parameters come from `App` fields that `CompletionState` doesn't own:
+    /// - `textarea` — the current chat input
+    /// - `loaded_skills` — list of skill names for `/skill` completion
+    /// - `thinking_supported` — whether the current provider supports thinking levels
+    /// - `instances` — provider instances for `/provider` completion
+    pub fn update(
+        &mut self,
+        textarea: &TextArea<'_>,
+        loaded_skills: &[SkillMeta],
+        thinking_supported: bool,
+        instances: &[ProviderInstance],
+    ) {
+        let lines = textarea.lines().to_vec();
+        let input = if lines.len() == 1 {
+            lines[0].trim().to_string()
+        } else {
+            String::new()
+        };
+        let new = completion::completions_for(
+            &input,
+            self.available_models.as_deref(),
+            self.models_loading,
+            self.model_fetch_error.as_deref(),
+            loaded_skills,
+            thinking_supported,
+            instances,
+        );
+        if new.len() != self.completions.len() {
+            self.completion_selected = 0;
+        }
+        self.completions = new;
     }
 }
 

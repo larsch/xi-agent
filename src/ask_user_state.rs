@@ -42,6 +42,17 @@ impl AskUserState {
             question: None,
         }
     }
+
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn allows_freeform(&self) -> bool {
+        self.pending
+            .as_ref()
+            .map(|p| p.allow_freeform)
+            .unwrap_or(false)
+    }
 }
 
 impl Default for AskUserState {

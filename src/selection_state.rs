@@ -3,6 +3,54 @@ use crate::completion::CompletionItem;
 /// Maximum number of rows shown in the selection menu before scrolling.
 pub const MAX_SELECTION_VISIBLE: usize = 12;
 
+/// Filters `all_items` by `query` and updates `items`, `selected`, and `scroll`.
+fn filter_and_clip(
+    query: &str,
+    all_items: &[CompletionItem],
+    items: &mut Vec<CompletionItem>,
+    selected: &mut usize,
+    scroll: &mut usize,
+) {
+    let q = query.trim();
+    if q.is_empty() {
+        *items = all_items.to_vec();
+    } else {
+        let needle = q.to_lowercase();
+        *items = all_items
+            .iter()
+            .filter(|item| {
+                item.label.to_lowercase().contains(&needle)
+                    || item.detail.to_lowercase().contains(&needle)
+            })
+            .cloned()
+            .collect();
+    }
+
+    if items.is_empty() {
+        *selected = 0;
+        *scroll = 0;
+        return;
+    }
+
+    if *selected >= items.len() {
+        *selected = 0;
+    }
+    ensure_visible_impl(*selected, scroll, items.len());
+}
+
+fn ensure_visible_impl(selected: usize, scroll: &mut usize, len: usize) {
+    if len == 0 {
+        *scroll = 0;
+        return;
+    }
+    if selected < *scroll {
+        *scroll = selected;
+    }
+    if selected >= *scroll + MAX_SELECTION_VISIBLE {
+        *scroll = selected + 1 - MAX_SELECTION_VISIBLE;
+    }
+}
+
 /// Discriminates what kind of selection menu is currently open.
 ///
 /// # Methods that remain on `App`
@@ -67,6 +115,61 @@ impl SelectionState {
             selected: 0,
             scroll: 0,
         }
+    }
+
+    /// Activate the picker with a given kind, title, and item list.
+    ///
+    /// Clears the query, resets scroll, and applies the (empty) filter so
+    /// `items` is fully populated and `selected`/`scroll` are consistent.
+    pub fn activate(
+        &mut self,
+        kind: SelectionKind,
+        title: &'static str,
+        all_items: Vec<CompletionItem>,
+    ) {
+        self.active = true;
+        self.kind = Some(kind);
+        self.title = title;
+        self.query.clear();
+        self.all_items = all_items;
+        self.selected = 0;
+        self.scroll = 0;
+        self.apply_filter();
+    }
+
+    /// Reset the picker to inactive/empty state.
+    pub fn reset(&mut self) {
+        self.active = false;
+        self.kind = None;
+        self.items.clear();
+        self.all_items.clear();
+        self.query.clear();
+        self.selected = 0;
+        self.scroll = 0;
+    }
+
+    /// Re-filter `all_items` using `query` and update `items`, `selected`, `scroll`.
+    pub fn apply_filter(&mut self) {
+        filter_and_clip(
+            &self.query.clone(),
+            &self.all_items.clone(),
+            &mut self.items,
+            &mut self.selected,
+            &mut self.scroll,
+        );
+    }
+
+    /// Ensure `selected` is within the visible scroll window.
+    pub fn ensure_visible(&mut self) {
+        ensure_visible_impl(self.selected, &mut self.scroll, self.items.len());
+    }
+
+    /// Replace the item list and reapply the current filter.
+    pub fn set_items(&mut self, all_items: Vec<CompletionItem>) {
+        self.all_items = all_items;
+        self.selected = 0;
+        self.scroll = 0;
+        self.apply_filter();
     }
 }
 
