@@ -564,20 +564,28 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
     macro_rules! flush_inline {
         ($block_prefix:expr) => {{
             let block_prefix: &str = $block_prefix;
+            let first_plain_paragraph = first_block
+                && !prefix.is_empty()
+                && block_prefix.is_empty()
+                && !in_list_item
+                && !in_blockquote;
             // Decide the effective line-0 prefix:
             // • If we haven't emitted anything yet AND caller-supplied `prefix`
             //   is non-empty, prepend it (plus the block's own prefix).
             // • Otherwise use the block's own prefix as-is.
             let effective_prefix: std::borrow::Cow<str> = if first_block && !prefix.is_empty() {
                 first_block = false;
-                // The prefix width already accounts for the icon; the
-                // continuation indent uses spaces of the same total width.
+                // The prefix width already accounts for the icon.
                 let combined = format!("{}{}", prefix, block_prefix);
                 std::borrow::Cow::Owned(combined)
             } else {
                 std::borrow::Cow::Borrowed(block_prefix)
             };
-            let indent = " ".repeat(effective_prefix.width());
+            let indent = if first_plain_paragraph {
+                String::new()
+            } else {
+                " ".repeat(effective_prefix.width())
+            };
             if !inline_spans.is_empty() || in_list_item {
                 let wrapped = wrap_spans(&inline_spans, width, &effective_prefix, &indent);
                 out.extend(wrapped);
@@ -914,6 +922,13 @@ mod tests {
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
 
+    #[test]
+    fn plain_text_first_paragraph_wraps_to_first_column_after_icon() {
+        let lines = render("hello world from tau", 12, "💬 ");
+        let texts = lines_text(&lines);
+        assert_eq!(texts, vec!["💬 hello ", "world from ", "tau"]);
+    }
+
     // ── Bold / italic / inline code ─────────────────────────────────────────────
 
     #[test]
@@ -991,6 +1006,13 @@ mod tests {
     }
 
     // ── Table ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_wrapping_remains_indented_under_prefix() {
+        let lines = render("- hello world from tau", 12, "💬 ");
+        let texts = lines_text(&lines);
+        assert_eq!(texts, vec!["💬 • hello ", "     world ", "     from ", "     tau"]);
+    }
 
     #[test]
     fn table_produces_correct_line_count() {
