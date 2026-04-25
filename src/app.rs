@@ -2780,20 +2780,18 @@ impl App {
                 &self.provider.instances,
             );
             let rendered = format_provider_error_for_display(&provider_label, &e);
-            self.session
-                .live_turn
-                .notices
-                .push(Message::assistant(format!("[Error: {rendered}]")));
-            self.bump_log_revision();
             self.streaming_status = None;
             // Discard any partially accumulated assistant/tool events
-            // and append a TurnError instead.
+            // and append a TurnError instead. Provider errors are already
+            // shown in the output area via the committed TurnError, so do not
+            // also keep them as persistent status/notices.
             self.session.pending_turn_events.clear();
             self.session.live_turn.clear_turn();
             self.append_event_immediate(SessionEvent::TurnError {
                 message: format!("[Error: {rendered}]"),
                 timestamp: Self::now_ts(),
             });
+            self.bump_log_revision();
             self.persist_messages();
         }
     }
@@ -4014,6 +4012,10 @@ mod tests {
 
         assert!(app.session.live_turn.assistant_content.is_empty());
         assert!(app.session.pending_turn_events.is_empty());
+        assert!(
+            app.session.live_turn.notices.is_empty(),
+            "provider errors should not accumulate as persistent live notices"
+        );
 
         let events = app
             .session
@@ -4021,11 +4023,14 @@ mod tests {
             .as_ref()
             .expect("session state")
             .events();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, crate::session_event::SessionEvent::TurnError { .. })),
-            "TurnError should be committed"
+        let turn_errors: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, crate::session_event::SessionEvent::TurnError { .. }))
+            .collect();
+        assert_eq!(
+            turn_errors.len(),
+            1,
+            "TurnError should be committed exactly once"
         );
     }
 

@@ -1011,7 +1011,10 @@ mod tests {
     fn list_wrapping_remains_indented_under_prefix() {
         let lines = render("- hello world from tau", 12, "💬 ");
         let texts = lines_text(&lines);
-        assert_eq!(texts, vec!["💬 • hello ", "     world ", "     from ", "     tau"]);
+        assert_eq!(
+            texts,
+            vec!["💬 • hello ", "     world ", "     from ", "     tau"]
+        );
     }
 
     #[test]
