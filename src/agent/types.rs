@@ -287,7 +287,6 @@ pub struct AskUserOption {
 /// Payload sent from `AskUserTool` to the TUI loop.
 #[derive(Debug)]
 pub struct AskRequest {
-    pub question: String,
     pub context: Option<String>,
     pub options: Vec<AskUserOption>,
     pub allow_multiple: bool,

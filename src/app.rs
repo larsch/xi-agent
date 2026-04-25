@@ -506,7 +506,7 @@ impl App {
     }
 
     pub fn ask_user_question(&self) -> Option<&str> {
-        self.ask_user.question.as_deref()
+        None
     }
 
     pub fn queued_steering(&self) -> &[String] {
@@ -1686,7 +1686,6 @@ impl App {
 
     pub fn receive_ask_request(&mut self, req: AskRequest) {
         let AskRequest {
-            question,
             context: _context,
             options,
             allow_multiple: _allow_multiple,
@@ -1695,7 +1694,6 @@ impl App {
         } = req;
 
         self.ask_user.pending = Some(PendingAsk {
-            question: question.clone(),
             options: options.clone(),
             allow_freeform,
         });
@@ -1710,9 +1708,7 @@ impl App {
         if options.is_empty() {
             // No options: go straight to freeform input so the user can type
             // their answer without an intermediate selection-menu step.
-            // Store the question for display in the input area.
             self.ask_user.freeform_mode = true;
-            self.ask_user.question = Some(question);
             self.exit_selection_mode();
             self.reset_textarea();
             return;
@@ -1751,14 +1747,7 @@ impl App {
         self.exit_selection_mode();
         self.reset_textarea();
         if self.pending_ask_allows_freeform() && !self.ask_user.freeform_mode {
-            let question = self
-                .ask_user
-                .pending
-                .as_ref()
-                .map(|p| p.question.clone())
-                .unwrap_or_default();
             self.ask_user.freeform_mode = true;
-            self.ask_user.question = Some(question);
         }
     }
 
@@ -1780,16 +1769,9 @@ impl App {
             self.selection.selected = idx;
             self.ensure_selection_visible();
         }
-        // Activate the brown input field and show the question as a hint.
+        // Activate the brown input field.
         if !self.ask_user.freeform_mode {
-            let question = self
-                .ask_user
-                .pending
-                .as_ref()
-                .map(|p| p.question.clone())
-                .unwrap_or_default();
             self.ask_user.freeform_mode = true;
-            self.ask_user.question = Some(question);
         }
     }
 
@@ -1797,7 +1779,6 @@ impl App {
     /// Called when the user navigates away from the freeform sentinel.
     pub fn cancel_ask_freeform_typing(&mut self) {
         self.ask_user.freeform_mode = false;
-        self.ask_user.question = None;
         self.reset_textarea();
     }
 
@@ -1843,7 +1824,6 @@ impl App {
         }
         self.ask_user.pending = None;
         self.ask_user.freeform_mode = false;
-        self.ask_user.question = None;
         self.exit_selection_mode();
         self.reset_textarea();
     }
@@ -3351,13 +3331,12 @@ mod tests {
     // ── receive_ask_request ───────────────────────────────────────────────────
 
     /// When ask_user has no options, receive_ask_request must go directly into
-    /// freeform mode (not selection mode) and store the question for display.
+    /// freeform mode (not selection mode).
     #[test]
     fn receive_ask_request_no_options_enters_freeform_mode() {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
-            question: "What is your name?".to_string(),
             context: None,
             options: vec![],
             allow_multiple: false,
@@ -3373,11 +3352,6 @@ mod tests {
             app.ask_user_freeform_mode(),
             "freeform mode should be active"
         );
-        assert_eq!(
-            app.ask_user_question(),
-            Some("What is your name?"),
-            "question should be stored for display"
-        );
         assert!(app.has_pending_ask(), "pending ask should be set");
     }
 
@@ -3388,7 +3362,6 @@ mod tests {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
-            question: "Pick one".to_string(),
             context: None,
             options: vec![
                 AskUserOption {
@@ -3417,7 +3390,6 @@ mod tests {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
-            question: "Pick one".to_string(),
             context: None,
             options: vec![
                 AskUserOption {

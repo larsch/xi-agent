@@ -1451,7 +1451,6 @@ mod tests {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
-            question: "Choose?".to_string(),
             context: None,
             options: vec![AskUserOption {
                 title: "Option A".to_string(),

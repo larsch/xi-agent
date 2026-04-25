@@ -21,7 +21,6 @@ use crate::agent::types::{AskUserOption, AskUserResponse};
 ///
 /// They remain on `App` accessing ask-user fields via `self.ask_user.*`.
 pub(crate) struct PendingAsk {
-    pub(crate) question: String,
     pub(crate) options: Vec<AskUserOption>,
     pub(crate) allow_freeform: bool,
 }
@@ -30,7 +29,6 @@ pub(crate) struct AskUserState {
     pub(crate) pending: Option<PendingAsk>,
     pub(crate) reply: Option<tokio::sync::oneshot::Sender<AskUserResponse>>,
     pub(crate) freeform_mode: bool,
-    pub(crate) question: Option<String>,
 }
 
 impl AskUserState {
@@ -39,10 +37,8 @@ impl AskUserState {
             pending: None,
             reply: None,
             freeform_mode: false,
-            question: None,
         }
     }
-
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -71,7 +67,6 @@ mod tests {
         assert!(s.pending.is_none());
         assert!(s.reply.is_none());
         assert!(!s.freeform_mode);
-        assert!(s.question.is_none());
     }
 
     #[test]
@@ -81,17 +76,14 @@ mod tests {
         assert_eq!(a.freeform_mode, b.freeform_mode);
         assert!(b.pending.is_none());
         assert!(b.reply.is_none());
-        assert!(b.question.is_none());
     }
 
     #[test]
     fn pending_ask_stores_fields() {
         let ask = PendingAsk {
-            question: "Continue?".to_string(),
             options: vec![],
             allow_freeform: true,
         };
-        assert_eq!(ask.question, "Continue?");
         assert!(ask.options.is_empty());
         assert!(ask.allow_freeform);
     }

@@ -622,7 +622,6 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
             break req;
         }
     };
-    assert_eq!(req.question, "What is your name?");
     assert!(req.options.is_empty(), "expected no options");
     req.reply
         .send(AskUserResponse::Answer("Alice".to_string()))
