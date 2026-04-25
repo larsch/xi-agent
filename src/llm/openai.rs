@@ -1,14 +1,13 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     ToolDefinition, UsageStats,
-    common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
+    common::{
+        StreamControl, build_http_client, infer_initiator, send_streaming_request, stream_sse_lines,
+    },
     provider_format::to_openai_wire,
 };
 
@@ -102,108 +101,88 @@ impl OpenAiProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut byte_stream = response.bytes_stream();
-            let mut sse = SseLineDecoder::new();
             // Accumulate partial tool-call deltas keyed by index.
-            let mut tool_calls: HashMap<u32, PartialToolCall> = HashMap::new();
+            let mut tool_calls: std::collections::HashMap<u32, PartialToolCall> = std::collections::HashMap::new();
             let mut emitted_tool_intent = false;
-            let mut line_num = 0usize;
 
-            'outer: while let Some(chunk) = byte_stream.next().await {
-                let bytes = match chunk {
-                    Ok(b) => b,
-                    Err(e) => {
-                        yield LlmEvent::Error(ProviderError::network("OpenAI", e.to_string()));
-                        return;
-                    }
-                };
-                sse.push_bytes(&bytes);
-
-                while let Some(line) = sse.next_data_line() {
-                    if line == "[DONE]" {
-                        // Flush any accumulated tool calls.
-                        let mut calls: Vec<PartialToolCall> = {
-                            let mut v: Vec<(u32, PartialToolCall)> = tool_calls.drain().collect();
-                            v.sort_by_key(|(i, _)| *i);
-                            v.into_iter().map(|(_, tc)| tc).collect()
-                        };
-                        for (i, tc) in calls.iter_mut().enumerate() {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
-                            yield LlmEvent::ToolCall {
-                                id: tc.id.clone().unwrap_or_else(|| format!("call_{i}")),
-                                name: tc.name.clone(),
-                                args,
-                            };
-                        }
-                        yield LlmEvent::Done;
-                        break 'outer;
-                    }
-
-                    log::debug!("[TAU_DEBUG] ← chunk {line_num}: {line}");
-                    line_num += 1;
-
-                    let chunk: ChatChunk = match serde_json::from_str(&line) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            yield LlmEvent::Error(ProviderError::other("OpenAI", format!("Parse error: {e}")));
-                            return;
-                        }
+            let mut stream = stream_sse_lines("OpenAI", response, move |line, events| {
+                if line == "[DONE]" {
+                    // Flush any accumulated tool calls.
+                    let mut calls: Vec<PartialToolCall> = {
+                        let mut v: Vec<(u32, PartialToolCall)> = tool_calls.drain().collect();
+                        v.sort_by_key(|(i, _)| *i);
+                        v.into_iter().map(|(_, tc)| tc).collect()
                     };
-
-                    if let Some(usage) = chunk.usage {
-                        yield LlmEvent::Usage(UsageStats {
-                            input_tokens: usage.prompt_tokens,
-                            output_tokens: usage.completion_tokens,
-                            total_tokens: usage.total_tokens,
+                    for (i, tc) in calls.iter_mut().enumerate() {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                        events.push(LlmEvent::ToolCall {
+                            id: tc.id.clone().unwrap_or_else(|| format!("call_{i}")),
+                            name: tc.name.clone(),
+                            args,
                         });
                     }
+                    events.push(LlmEvent::Done);
+                    return StreamControl::Done;
+                }
 
-                    for choice in chunk.choices {
-                        let delta = choice.delta;
+                let chunk: ChatChunk = match serde_json::from_str(line) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        events.push(LlmEvent::Error(ProviderError::other("OpenAI", format!("Parse error: {e}"))));
+                        return StreamControl::Done;
+                    }
+                };
 
-                        // Text tokens.
-                        if let Some(content) = delta.content
-                            && !content.is_empty() {
-                                yield LlmEvent::Token {
-                                    text: content,
-                                    phase: if emitted_tool_intent {
-                                        AssistantPhase::Provisional
-                                    } else {
-                                        AssistantPhase::Unknown
-                                    },
-                                };
-                            }
+                if let Some(usage) = chunk.usage {
+                    events.push(LlmEvent::Usage(UsageStats {
+                        input_tokens: usage.prompt_tokens,
+                        output_tokens: usage.completion_tokens,
+                        total_tokens: usage.total_tokens,
+                    }));
+                }
 
-                        // Tool-call delta fragments — merge into accumulator.
-                        if !delta.tool_calls.is_empty() && !emitted_tool_intent {
-                            emitted_tool_intent = true;
-                            yield LlmEvent::ToolIntentStart;
-                        }
-                        for tc_delta in delta.tool_calls {
-                            let entry = tool_calls
-                                .entry(tc_delta.index)
-                                .or_default();
-                            if let Some(id) = tc_delta.id {
-                                entry.id = Some(id);
-                            }
-                            if let Some(name) = tc_delta.function.name {
-                                entry.name.push_str(&name);
-                            }
-                            if let Some(args) = tc_delta.function.arguments {
-                                entry.arguments.push_str(&args);
-                            }
+                for choice in chunk.choices {
+                    let delta = choice.delta;
+
+                    if let Some(content) = delta.content
+                        && !content.is_empty() {
+                            events.push(LlmEvent::Token {
+                                text: content,
+                                phase: if emitted_tool_intent {
+                                    AssistantPhase::Provisional
+                                } else {
+                                    AssistantPhase::Unknown
+                                },
+                            });
                         }
 
-                        // When finish_reason == "tool_calls" the arguments are
-                        // complete.  We flush at [DONE] above, but also handle
-                        // it here for providers that set finish_reason before
-                        // [DONE] on the same or next chunk.
-                        if choice.finish_reason.as_deref() == Some("stop") && tool_calls.is_empty() {
-                            // Normal text finish — Done will be emitted at [DONE].
+                    if !delta.tool_calls.is_empty() && !emitted_tool_intent {
+                        emitted_tool_intent = true;
+                        events.push(LlmEvent::ToolIntentStart);
+                    }
+                    for tc_delta in delta.tool_calls {
+                        let entry = tool_calls
+                            .entry(tc_delta.index)
+                            .or_default();
+                        if let Some(id) = tc_delta.id {
+                            entry.id = Some(id);
+                        }
+                        if let Some(name) = tc_delta.function.name {
+                            entry.name.push_str(&name);
+                        }
+                        if let Some(args) = tc_delta.function.arguments {
+                            entry.arguments.push_str(&args);
                         }
                     }
                 }
+
+                StreamControl::Continue
+            });
+
+            use futures_util::StreamExt as _;
+            while let Some(ev) = stream.next().await {
+                yield ev;
             }
         })
     }

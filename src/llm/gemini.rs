@@ -1,11 +1,10 @@
 use crate::thinking::GeminiThinkingLevel;
-use futures_util::StreamExt;
 use serde::Deserialize;
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{SseLineDecoder, build_http_client},
+    common::{StreamControl, build_http_client, stream_sse_lines},
     provider_format::to_gemini_wire,
 };
 
@@ -384,96 +383,90 @@ impl GeminiProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut byte_stream = response.bytes_stream();
-            let mut sse = SseLineDecoder::new();
             let mut emitted_tool_intent = false;
 
-            while let Some(chunk) = byte_stream.next().await {
-                let bytes = match chunk {
-                    Ok(b) => b,
-                    Err(e) => {
-                        yield LlmEvent::Error(ProviderError::network("Gemini", e.to_string()));
-                        return;
-                    }
+            let mut stream = stream_sse_lines("Gemini", response, move |line, events| {
+                let chunk: GeminiStreamChunk = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => return StreamControl::Continue,
                 };
-                sse.push_bytes(&bytes);
 
-                while let Some(line) = sse.next_data_line() {
-                    let chunk: GeminiStreamChunk = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
+                let Some(response) = chunk.response else { return StreamControl::Continue };
 
-                    let Some(response) = chunk.response else { continue };
-
-                    if let Some(usage) = response.usage_metadata {
-                        let stats = UsageStats::from(usage);
-                        if stats.input_tokens.is_some()
-                            || stats.output_tokens.is_some()
-                            || stats.total_tokens.is_some()
-                        {
-                            yield LlmEvent::Usage(stats);
-                        }
+                if let Some(usage) = response.usage_metadata {
+                    let stats = UsageStats::from(usage);
+                    if stats.input_tokens.is_some()
+                        || stats.output_tokens.is_some()
+                        || stats.total_tokens.is_some()
+                    {
+                        events.push(LlmEvent::Usage(stats));
                     }
+                }
 
-                    let Some(candidate) = response.candidates.as_deref().and_then(|c| c.first())
-                    else {
-                        continue;
-                    };
+                let Some(candidate) = response.candidates.as_deref().and_then(|c| c.first())
+                else {
+                    return StreamControl::Continue;
+                };
 
-                    let parts = candidate
-                        .content
-                        .as_ref()
-                        .and_then(|c| c.parts.as_deref())
-                        .unwrap_or(&[]);
+                let parts = candidate
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.parts.as_deref())
+                    .unwrap_or(&[]);
 
-                    for part in parts {
-                        match part {
-                            GeminiPart::FunctionCall { function_call } => {
-                                if !emitted_tool_intent {
-                                    emitted_tool_intent = true;
-                                    yield LlmEvent::ToolIntentStart;
-                                }
-                                let id = function_call
-                                    .id
-                                    .clone()
-                                    .unwrap_or_else(|| format!(
-                                        "gemini_call_{}",
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_millis())
-                                            .unwrap_or(0)
-                                    ));
-                                let args = function_call
-                                    .args
-                                    .clone()
-                                    .unwrap_or_else(|| serde_json::json!({}));
-                                yield LlmEvent::ToolCall {
-                                    id,
-                                    name: function_call.name.clone(),
-                                    args,
-                                };
+                for part in parts {
+                    match part {
+                        GeminiPart::FunctionCall { function_call } => {
+                            if !emitted_tool_intent {
+                                emitted_tool_intent = true;
+                                events.push(LlmEvent::ToolIntentStart);
                             }
-                            GeminiPart::Text { text, thought } => {
-                                if text.is_empty() {
-                                    continue;
-                                }
-                                if *thought {
-                                    yield LlmEvent::ThinkingToken(text.clone());
-                                } else {
-                                    yield LlmEvent::Token {
-                                        text: text.clone(),
-                                        phase: if emitted_tool_intent {
-                                            AssistantPhase::Provisional
-                                        } else {
-                                            AssistantPhase::Unknown
-                                        },
-                                    };
-                                }
+                            let id = function_call
+                                .id
+                                .clone()
+                                .unwrap_or_else(|| format!(
+                                    "gemini_call_{}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0)
+                                ));
+                            let args = function_call
+                                .args
+                                .clone()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            events.push(LlmEvent::ToolCall {
+                                id,
+                                name: function_call.name.clone(),
+                                args,
+                            });
+                        }
+                        GeminiPart::Text { text, thought } => {
+                            if text.is_empty() {
+                                continue;
+                            }
+                            if *thought {
+                                events.push(LlmEvent::ThinkingToken(text.clone()));
+                            } else {
+                                events.push(LlmEvent::Token {
+                                    text: text.clone(),
+                                    phase: if emitted_tool_intent {
+                                        AssistantPhase::Provisional
+                                    } else {
+                                        AssistantPhase::Unknown
+                                    },
+                                });
                             }
                         }
                     }
                 }
+
+                StreamControl::Continue
+            });
+
+            use futures_util::StreamExt as _;
+            while let Some(ev) = stream.next().await {
+                yield ev;
             }
 
             yield LlmEvent::Done;

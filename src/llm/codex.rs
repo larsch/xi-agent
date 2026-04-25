@@ -1,11 +1,12 @@
-use futures_util::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
+    common::{
+        StreamControl, build_http_client, infer_initiator, send_streaming_request, stream_sse_lines,
+    },
     provider_format::to_codex_wire,
 };
 
@@ -230,130 +231,116 @@ impl CodexProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut byte_stream = response.bytes_stream();
-            let mut sse = SseLineDecoder::new();
             // Track pending function calls keyed by item id.
             let mut pending_calls: HashMap<String, PendingCall> = HashMap::new();
             let mut current_call_item_id: Option<String> = None;
             let mut emitted_tool_intent = false;
-            let mut line_num = 0usize;
 
-            while let Some(chunk) = byte_stream.next().await {
-                let bytes = match chunk {
-                    Ok(b) => b,
-                    Err(e) => { yield LlmEvent::Error(ProviderError::network("Codex", e.to_string())); return; }
-                };
-                sse.push_bytes(&bytes);
-
-                while let Some(data) = sse.next_data_line() {
-                    if data == "[DONE]" {
-                        yield LlmEvent::Done;
-                        return;
-                    }
-
-                    log::debug!("[TAU_DEBUG] ← chunk {line_num}: {data}");
-                    line_num += 1;
-
-                    let ev: CodexEvent = match serde_json::from_str(&data) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            yield LlmEvent::Error(ProviderError::other("Codex", format!("Parse error: {e}")));
-                            return;
-                        }
-                    };
-
-                    match ev {
-                        // ── Text token ────────────────────────────────────────
-                        CodexEvent::OutputTextDelta { delta } if !delta.is_empty() => {
-                            yield LlmEvent::Token {
-                                text: delta,
-                                phase: if emitted_tool_intent {
-                                    AssistantPhase::Provisional
-                                } else {
-                                    AssistantPhase::Unknown
-                                },
-                            };
-                        }
-
-                        // ── Thinking / reasoning token ────────────────────────
-                        CodexEvent::ReasoningSummaryTextDelta { delta } if !delta.is_empty() => {
-                            yield LlmEvent::ThinkingToken(delta);
-                        }
-
-                        // ── Function call started ─────────────────────────────
-                        CodexEvent::OutputItemAdded {
-                            item: OutputItem::FunctionCall { id, .. },
-                        } => {
-                            if !emitted_tool_intent {
-                                emitted_tool_intent = true;
-                                yield LlmEvent::ToolIntentStart;
-                            }
-                            pending_calls.insert(id.clone(), PendingCall { arguments: String::new() });
-                            current_call_item_id = Some(id);
-                        }
-
-                        // ── Function call arguments delta ─────────────────────
-                        CodexEvent::FunctionCallArgumentsDelta { item_id, delta } => {
-                            let key = if pending_calls.contains_key(&item_id) {
-                                Some(item_id.clone())
-                            } else {
-                                current_call_item_id.clone()
-                            };
-                            if let Some(k) = key
-                                && let Some(call) = pending_calls.get_mut(&k)
-                            {
-                                call.arguments.push_str(&delta);
-                            }
-                        }
-
-                        // ── Item completed ────────────────────────────────────
-                        CodexEvent::OutputItemDone {
-                            item: OutputItem::FunctionCall { id, call_id, name, arguments },
-                        } => {
-                            let args: serde_json::Value = serde_json::from_str(&arguments)
-                                .unwrap_or(serde_json::Value::Object(Default::default()));
-                            pending_calls.remove(&id);
-                            if current_call_item_id.as_deref() == Some(&id) {
-                                current_call_item_id = None;
-                            }
-                            yield LlmEvent::ToolCall { id: call_id, name, args };
-                        }
-
-                        // ── Stream complete ───────────────────────────────────
-                        CodexEvent::ResponseCompleted { response }
-                        | CodexEvent::ResponseDone { response }
-                        | CodexEvent::ResponseIncomplete { response } => {
-                            if let Some(usage) = response.and_then(|r| r.usage).map(UsageStats::from)
-                                && (usage.input_tokens.is_some()
-                                    || usage.output_tokens.is_some()
-                                    || usage.total_tokens.is_some())
-                            {
-                                yield LlmEvent::Usage(usage);
-                            }
-                            yield LlmEvent::Done;
-                            return;
-                        }
-
-                        // ── Errors ────────────────────────────────────────────
-                        CodexEvent::ResponseFailed { response } => {
-                            let msg = response
-                                .and_then(|r| r.error)
-                                .and_then(|e| e.message)
-                                .unwrap_or_else(|| "Codex response failed".to_string());
-                            yield LlmEvent::Error(ProviderError::other("Codex", msg));
-                            return;
-                        }
-                        CodexEvent::Error { message, code } => {
-                            let msg = message
-                                .or(code)
-                                .unwrap_or_else(|| "Unknown error".to_string());
-                            yield LlmEvent::Error(ProviderError::other("Codex", format!("Codex error: {msg}")));
-                            return;
-                        }
-
-                        _ => {} // ignore other/empty variants
-                    }
+            let mut stream = stream_sse_lines("Codex", response, move |data, events| {
+                if data == "[DONE]" {
+                    events.push(LlmEvent::Done);
+                    return StreamControl::Done;
                 }
+
+                let ev: CodexEvent = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        events.push(LlmEvent::Error(ProviderError::other("Codex", format!("Parse error: {e}"))));
+                        return StreamControl::Done;
+                    }
+                };
+
+                match ev {
+                    CodexEvent::OutputTextDelta { delta } if !delta.is_empty() => {
+                        events.push(LlmEvent::Token {
+                            text: delta,
+                            phase: if emitted_tool_intent {
+                                AssistantPhase::Provisional
+                            } else {
+                                AssistantPhase::Unknown
+                            },
+                        });
+                    }
+
+                    CodexEvent::ReasoningSummaryTextDelta { delta } if !delta.is_empty() => {
+                        events.push(LlmEvent::ThinkingToken(delta));
+                    }
+
+                    CodexEvent::OutputItemAdded {
+                        item: OutputItem::FunctionCall { id, .. },
+                    } => {
+                        if !emitted_tool_intent {
+                            emitted_tool_intent = true;
+                            events.push(LlmEvent::ToolIntentStart);
+                        }
+                        pending_calls.insert(id.clone(), PendingCall { arguments: String::new() });
+                        current_call_item_id = Some(id);
+                    }
+
+                    CodexEvent::FunctionCallArgumentsDelta { item_id, delta } => {
+                        let key = if pending_calls.contains_key(&item_id) {
+                            Some(item_id.clone())
+                        } else {
+                            current_call_item_id.clone()
+                        };
+                        if let Some(k) = key
+                            && let Some(call) = pending_calls.get_mut(&k)
+                        {
+                            call.arguments.push_str(&delta);
+                        }
+                    }
+
+                    CodexEvent::OutputItemDone {
+                        item: OutputItem::FunctionCall { id, call_id, name, arguments },
+                    } => {
+                        let args: serde_json::Value = serde_json::from_str(&arguments)
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        pending_calls.remove(&id);
+                        if current_call_item_id.as_deref() == Some(&id) {
+                            current_call_item_id = None;
+                        }
+                        events.push(LlmEvent::ToolCall { id: call_id, name, args });
+                    }
+
+                    CodexEvent::ResponseCompleted { response }
+                    | CodexEvent::ResponseDone { response }
+                    | CodexEvent::ResponseIncomplete { response } => {
+                        if let Some(usage) = response.and_then(|r| r.usage).map(UsageStats::from)
+                            && (usage.input_tokens.is_some()
+                                || usage.output_tokens.is_some()
+                                || usage.total_tokens.is_some())
+                        {
+                            events.push(LlmEvent::Usage(usage));
+                        }
+                        events.push(LlmEvent::Done);
+                        return StreamControl::Done;
+                    }
+
+                    CodexEvent::ResponseFailed { response } => {
+                        let msg = response
+                            .and_then(|r| r.error)
+                            .and_then(|e| e.message)
+                            .unwrap_or_else(|| "Codex response failed".to_string());
+                        events.push(LlmEvent::Error(ProviderError::other("Codex", msg)));
+                        return StreamControl::Done;
+                    }
+                    CodexEvent::Error { message, code } => {
+                        let msg = message
+                            .or(code)
+                            .unwrap_or_else(|| "Unknown error".to_string());
+                        events.push(LlmEvent::Error(ProviderError::other("Codex", format!("Codex error: {msg}"))));
+                        return StreamControl::Done;
+                    }
+
+                    _ => {}
+                }
+
+                StreamControl::Continue
+            });
+
+            use futures_util::StreamExt as _;
+            while let Some(ev) = stream.next().await {
+                yield ev;
             }
 
             yield LlmEvent::Done;

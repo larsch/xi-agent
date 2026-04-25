@@ -1,11 +1,12 @@
-use futures_util::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     Role, ToolDefinition, UsageStats,
-    common::{SseLineDecoder, build_http_client, infer_initiator, send_streaming_request},
+    common::{
+        StreamControl, build_http_client, infer_initiator, send_streaming_request, stream_sse_lines,
+    },
     provider_format::to_anthropic_wire,
 };
 use crate::provider::{context_window_for_model, scaled_token_budget};
@@ -189,137 +190,119 @@ impl AnthropicProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut byte_stream = response.bytes_stream();
-            let mut sse = SseLineDecoder::new();
             // Track streaming tool_use blocks: content index → accumulated state.
             let mut tool_blocks: HashMap<u64, ToolBlock> = HashMap::new();
             let mut emitted_tool_intent = false;
-            let mut line_num = 0usize;
             // Input token count from the message_start event; combined with
             // output tokens from message_delta/message_stop before emitting Usage.
             let mut input_tokens_from_start: Option<usize> = None;
 
-            while let Some(chunk) = byte_stream.next().await {
-                let bytes = match chunk {
-                    Ok(b) => b,
+            let mut stream = stream_sse_lines("Anthropic", response, move |data, events| {
+                if data == "[DONE]" {
+                    events.push(LlmEvent::Done);
+                    return StreamControl::Done;
+                }
+
+                let ev: AnthropicEvent = match serde_json::from_str(data) {
+                    Ok(v) => v,
                     Err(e) => {
-                        yield LlmEvent::Error(ProviderError::network("Anthropic", e.to_string()));
-                        return;
+                        events.push(LlmEvent::Error(ProviderError::other("Anthropic", format!("Parse error: {e}"))));
+                        return StreamControl::Done;
                     }
                 };
-                sse.push_bytes(&bytes);
 
-                while let Some(data) = sse.next_data_line() {
-                    if data == "[DONE]" {
-                        yield LlmEvent::Done;
-                        return;
+                match ev {
+                    AnthropicEvent::MessageStart { message } => {
+                        if let Some(usage) = message.usage {
+                            input_tokens_from_start = usage.input_tokens;
+                        }
                     }
 
-                    log::debug!("[TAU_DEBUG] ← anthropic chunk {line_num}: {data}");
-                    line_num += 1;
-
-                    let ev: AnthropicEvent = match serde_json::from_str(&data) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            yield LlmEvent::Error(ProviderError::other("Anthropic", format!("Parse error: {e}")));
-                            return;
-                        }
-                    };
-
-                    match ev {
-                        AnthropicEvent::MessageStart { message } => {
-                            // Capture input_tokens emitted at the start of the
-                            // stream so they can be combined with output_tokens
-                            // that arrive later in the message_delta event.
-                            if let Some(usage) = message.usage {
-                                input_tokens_from_start = usage.input_tokens;
+                    AnthropicEvent::ContentBlockStart { index, content_block } => {
+                        if let ContentBlock::ToolUse { id, name } = content_block {
+                            if !emitted_tool_intent {
+                                emitted_tool_intent = true;
+                                events.push(LlmEvent::ToolIntentStart);
                             }
+                            tool_blocks.insert(
+                                index,
+                                ToolBlock { id, name, partial_json: String::new() },
+                            );
                         }
-
-                        AnthropicEvent::ContentBlockStart { index, content_block } => {
-                            if let ContentBlock::ToolUse { id, name } = content_block {
-                                if !emitted_tool_intent {
-                                    emitted_tool_intent = true;
-                                    yield LlmEvent::ToolIntentStart;
-                                }
-                                tool_blocks.insert(
-                                    index,
-                                    ToolBlock { id, name, partial_json: String::new() },
-                                );
-                            }
-                        }
-
-                        AnthropicEvent::ContentBlockDelta { index, delta } => {
-                            match delta {
-                                ContentDelta::TextDelta { text } if !text.is_empty() => {
-                                    yield LlmEvent::Token {
-                                        text,
-                                        phase: if emitted_tool_intent {
-                                            AssistantPhase::Provisional
-                                        } else {
-                                            AssistantPhase::Unknown
-                                        },
-                                    };
-                                }
-                                ContentDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
-                                    yield LlmEvent::ThinkingToken(thinking);
-                                }
-                                ContentDelta::InputJsonDelta { partial_json } => {
-                                    if let Some(block) = tool_blocks.get_mut(&index) {
-                                        block.partial_json.push_str(&partial_json);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // When a tool_use block finishes, emit the accumulated call.
-                        AnthropicEvent::ContentBlockStop { index } => {
-                            if let Some(block) = tool_blocks.remove(&index) {
-                                let args: serde_json::Value =
-                                    serde_json::from_str(&block.partial_json)
-                                        .unwrap_or(serde_json::Value::Object(Default::default()));
-                                yield LlmEvent::ToolCall {
-                                    id: block.id,
-                                    name: block.name,
-                                    args,
-                                };
-                            }
-                        }
-
-                        AnthropicEvent::MessageDelta { delta, usage } => {
-                            if let Some(usage_stats) = build_usage_from_delta(usage, &mut input_tokens_from_start) {
-                                yield LlmEvent::Usage(usage_stats);
-                            }
-                            // If the response was cut off by the token limit while a
-                            // tool_use block was still being streamed, content_block_stop
-                            // will never arrive and the tool call would be silently lost.
-                            // Emit an error instead so the agent can surface it.
-                            if delta.stop_reason.as_deref() == Some("max_tokens")
-                                && !tool_blocks.is_empty()
-                            {
-                                yield LlmEvent::Error(ProviderError::other(
-                                    "Anthropic",
-                                    "Response truncated by token limit mid-tool-call; \
-                                     tool arguments incomplete.",
-                                ));
-                                return;
-                            }
-                        }
-
-                        AnthropicEvent::MessageStop => {
-                            yield LlmEvent::Done;
-                            return;
-                        }
-
-                        AnthropicEvent::Error { error } => {
-                            yield LlmEvent::Error(ProviderError::other("Anthropic", error.message));
-                            return;
-                        }
-
-                        AnthropicEvent::Unknown => {}
                     }
+
+                    AnthropicEvent::ContentBlockDelta { index, delta } => {
+                        match delta {
+                            ContentDelta::TextDelta { text } if !text.is_empty() => {
+                                events.push(LlmEvent::Token {
+                                    text,
+                                    phase: if emitted_tool_intent {
+                                        AssistantPhase::Provisional
+                                    } else {
+                                        AssistantPhase::Unknown
+                                    },
+                                });
+                            }
+                            ContentDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
+                                events.push(LlmEvent::ThinkingToken(thinking));
+                            }
+                            ContentDelta::InputJsonDelta { partial_json } => {
+                                if let Some(block) = tool_blocks.get_mut(&index) {
+                                    block.partial_json.push_str(&partial_json);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    AnthropicEvent::ContentBlockStop { index } => {
+                        if let Some(block) = tool_blocks.remove(&index) {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&block.partial_json)
+                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                            events.push(LlmEvent::ToolCall {
+                                id: block.id,
+                                name: block.name,
+                                args,
+                            });
+                        }
+                    }
+
+                    AnthropicEvent::MessageDelta { delta, usage } => {
+                        if let Some(usage_stats) = build_usage_from_delta(usage, &mut input_tokens_from_start) {
+                            events.push(LlmEvent::Usage(usage_stats));
+                        }
+                        if delta.stop_reason.as_deref() == Some("max_tokens")
+                            && !tool_blocks.is_empty()
+                        {
+                            events.push(LlmEvent::Error(ProviderError::other(
+                                "Anthropic",
+                                "Response truncated by token limit mid-tool-call; \
+                                 tool arguments incomplete.",
+                            )));
+                            return StreamControl::Done;
+                        }
+                    }
+
+                    AnthropicEvent::MessageStop => {
+                        events.push(LlmEvent::Done);
+                        return StreamControl::Done;
+                    }
+
+                    AnthropicEvent::Error { error } => {
+                        events.push(LlmEvent::Error(ProviderError::other("Anthropic", error.message)));
+                        return StreamControl::Done;
+                    }
+
+                    AnthropicEvent::Unknown => {}
                 }
+
+                StreamControl::Continue
+            });
+
+            use futures_util::StreamExt as _;
+            while let Some(ev) = stream.next().await {
+                yield ev;
             }
 
             yield LlmEvent::Done;

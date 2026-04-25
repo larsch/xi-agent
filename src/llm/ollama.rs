@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
     ToolDefinition, UsageStats,
-    common::{build_http_client, send_streaming_request},
+    common::{StreamControl, build_http_client, send_streaming_request, stream_ndjson_lines},
     provider_format::to_ollama_wire,
 };
 
@@ -243,28 +242,19 @@ impl LlmProvider for OllamaProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut byte_stream = response.bytes_stream();
-            let mut buf = String::new();
-            let mut line_num = 0usize;
             let mut emitted_tool_intent = false;
-            while let Some(chunk) = byte_stream.next().await {
-                let bytes = match chunk {
-                    Ok(b) => b,
-                    Err(e) => { yield LlmEvent::Error(ProviderError::network("Ollama", e.to_string())); return; }
-                };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].trim().to_string();
-                    buf.drain(..=pos);
-                    if !line.is_empty() {
-                        log::debug!("[TAU_DEBUG] ← ollama chunk {line_num}: {line}");
-                        line_num += 1;
-                    }
-                    let mut events = Vec::new();
-                    let done = parse_ndjson_line(&line, &mut events, &mut emitted_tool_intent);
-                    for ev in events { yield ev; }
-                    if done { return; }
+
+            let mut stream = stream_ndjson_lines("Ollama", response, move |line, events| {
+                if parse_ndjson_line(line, events, &mut emitted_tool_intent) {
+                    StreamControl::Done
+                } else {
+                    StreamControl::Continue
                 }
+            });
+
+            use futures_util::StreamExt as _;
+            while let Some(ev) = stream.next().await {
+                yield ev;
             }
             yield LlmEvent::Done;
         })
@@ -314,28 +304,19 @@ impl LlmProvider for OllamaProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut byte_stream = response.bytes_stream();
-            let mut buf = String::new();
-            let mut line_num = 0usize;
             let mut emitted_tool_intent = false;
-            while let Some(chunk) = byte_stream.next().await {
-                let bytes = match chunk {
-                    Ok(b) => b,
-                    Err(e) => { yield LlmEvent::Error(ProviderError::network("Ollama", e.to_string())); return; }
-                };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].trim().to_string();
-                    buf.drain(..=pos);
-                    if !line.is_empty() {
-                        log::debug!("[TAU_DEBUG] ← chunk {line_num}: {line}");
-                        line_num += 1;
-                    }
-                    let mut events = Vec::new();
-                    let done = parse_ndjson_line(&line, &mut events, &mut emitted_tool_intent);
-                    for ev in events { yield ev; }
-                    if done { return; }
+
+            let mut stream = stream_ndjson_lines("Ollama", response, move |line, events| {
+                if parse_ndjson_line(line, events, &mut emitted_tool_intent) {
+                    StreamControl::Done
+                } else {
+                    StreamControl::Continue
                 }
+            });
+
+            use futures_util::StreamExt as _;
+            while let Some(ev) = stream.next().await {
+                yield ev;
             }
             yield LlmEvent::Done;
         })

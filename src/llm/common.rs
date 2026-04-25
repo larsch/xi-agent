@@ -273,6 +273,131 @@ where
     Ok(ids)
 }
 
+// ── Streaming loop drivers ────────────────────────────────────────────────────
+
+/// Signal returned from a per-line parse closure.
+pub enum StreamControl {
+    /// Keep reading more lines.
+    Continue,
+    /// Stop the byte loop and do not yield `Done` (the closure already did).
+    Done,
+}
+
+/// Drive an SSE (or any `data:`-prefixed) streaming response.
+///
+/// Bytes from `response` are fed through [`SseLineDecoder`].  For each decoded
+/// data line (with the `data:` prefix already stripped) `parse_line` is called
+/// with the line text and a mutable event buffer.  Any events placed in the
+/// buffer are yielded in order before the next line is read.
+///
+/// When `parse_line` returns [`StreamControl::Done`] the driver stops
+/// immediately without emitting an additional `LlmEvent::Done`.
+///
+/// On a byte-stream error the driver yields `LlmEvent::Error` and returns.
+///
+/// When the byte stream ends normally the driver yields `LlmEvent::Done`.
+///
+/// The `[DONE]` sentinel line is passed to `parse_line` so the caller can
+/// decide how to handle it (e.g. flush accumulated state before emitting
+/// `Done`).
+pub fn stream_sse_lines<F>(
+    provider_name: &'static str,
+    response: reqwest::Response,
+    parse_line: F,
+) -> super::LlmStream
+where
+    F: FnMut(&str, &mut Vec<super::LlmEvent>) -> StreamControl + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
+        let mut byte_stream = response.bytes_stream();
+        let mut sse = SseLineDecoder::new();
+        let mut parse_line = parse_line;
+        let mut line_num = 0usize;
+
+        'outer: while let Some(chunk) = futures_util::StreamExt::next(&mut byte_stream).await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    yield super::LlmEvent::Error(super::ProviderError::network(
+                        provider_name,
+                        e.to_string(),
+                    ));
+                    return;
+                }
+            };
+            sse.push_bytes(&bytes);
+
+            while let Some(line) = sse.next_data_line() {
+                log::debug!("[TAU_DEBUG] ← {provider_name} chunk {line_num}: {line}");
+                line_num += 1;
+
+                let mut events = Vec::new();
+                let control = parse_line(&line, &mut events);
+                for ev in events {
+                    yield ev;
+                }
+                if matches!(control, StreamControl::Done) {
+                    break 'outer;
+                }
+            }
+        }
+    })
+}
+
+/// Drive an NDJSON streaming response (newline-delimited JSON, no `data:` prefix).
+///
+/// Each newline-terminated line is passed to `parse_line`.  Behaviour is
+/// otherwise identical to [`stream_sse_lines`].
+pub fn stream_ndjson_lines<F>(
+    provider_name: &'static str,
+    response: reqwest::Response,
+    parse_line: F,
+) -> super::LlmStream
+where
+    F: FnMut(&str, &mut Vec<super::LlmEvent>) -> StreamControl + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
+        let mut byte_stream = response.bytes_stream();
+        let mut buf = String::new();
+        let mut parse_line = parse_line;
+        let mut line_num = 0usize;
+
+        'outer: while let Some(chunk) = futures_util::StreamExt::next(&mut byte_stream).await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    yield super::LlmEvent::Error(super::ProviderError::network(
+                        provider_name,
+                        e.to_string(),
+                    ));
+                    return;
+                }
+            };
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].trim().to_string();
+                buf.drain(..=pos);
+                if line.is_empty() {
+                    continue;
+                }
+
+                log::debug!("[TAU_DEBUG] ← {provider_name} chunk {line_num}: {line}");
+                line_num += 1;
+
+                let mut events = Vec::new();
+                let control = parse_line(&line, &mut events);
+                for ev in events {
+                    yield ev;
+                }
+                if matches!(control, StreamControl::Done) {
+                    break 'outer;
+                }
+            }
+        }
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
