@@ -1,5 +1,6 @@
 use crate::thinking::GeminiThinkingLevel;
 use futures_util::StreamExt;
+use serde::Deserialize;
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture, ProviderError,
@@ -7,6 +8,69 @@ use super::{
     common::{SseLineDecoder, build_http_client},
     provider_format::to_gemini_wire,
 };
+
+// ── Typed response structs ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GeminiStreamChunk {
+    response: Option<GeminiResponse>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiResponse {
+    candidates: Option<Vec<GeminiCandidate>>,
+    usage_metadata: Option<GeminiUsage>,
+}
+
+#[derive(Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiContent>,
+}
+
+#[derive(Deserialize)]
+struct GeminiContent {
+    parts: Option<Vec<GeminiPart>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GeminiPart {
+    FunctionCall {
+        #[serde(rename = "functionCall")]
+        function_call: GeminiFunctionCall,
+    },
+    Text {
+        text: String,
+        #[serde(default)]
+        thought: bool,
+    },
+}
+
+#[derive(Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    id: Option<String>,
+    args: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiUsage {
+    prompt_token_count: Option<usize>,
+    candidates_token_count: Option<usize>,
+    total_token_count: Option<usize>,
+}
+
+impl From<GeminiUsage> for UsageStats {
+    fn from(u: GeminiUsage) -> Self {
+        Self {
+            input_tokens: u.prompt_token_count,
+            output_tokens: u.candidates_token_count,
+            total_tokens: u.total_token_count,
+        }
+    }
+}
 
 const MAX_RETRIES: u32 = 3;
 /// For server-directed 429s (where we parsed an explicit delay), allow more
@@ -335,80 +399,76 @@ impl GeminiProvider {
                 sse.push_bytes(&bytes);
 
                 while let Some(line) = sse.next_data_line() {
-                    let chunk: serde_json::Value = match serde_json::from_str(&line) {
+                    let chunk: GeminiStreamChunk = match serde_json::from_str(&line) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
 
-                    if let Some(response) = chunk.get("response") {
-                        if let Some(usage) = parse_usage(response) {
-                            yield LlmEvent::Usage(usage);
-                        }
+                    let Some(response) = chunk.response else { continue };
 
-                        let Some(candidate) = response
-                            .get("candidates")
-                            .and_then(|c| c.as_array())
-                            .and_then(|arr| arr.first())
-                        else {
-                            continue;
-                        };
-
-                        if let Some(parts) = candidate
-                            .get("content")
-                            .and_then(|c| c.get("parts"))
-                            .and_then(|p| p.as_array())
+                    if let Some(usage) = response.usage_metadata {
+                        let stats = UsageStats::from(usage);
+                        if stats.input_tokens.is_some()
+                            || stats.output_tokens.is_some()
+                            || stats.total_tokens.is_some()
                         {
-                            for part in parts {
-                                if let Some(function_call) = part.get("functionCall") {
-                                    if !emitted_tool_intent {
-                                        emitted_tool_intent = true;
-                                        yield LlmEvent::ToolIntentStart;
-                                    }
+                            yield LlmEvent::Usage(stats);
+                        }
+                    }
 
-                                    let name = function_call
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default()
-                                        .to_string();
-                                    let id = function_call
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .map(ToString::to_string)
-                                        .unwrap_or_else(|| format!(
-                                            "gemini_call_{}",
-                                            std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_millis())
-                                                .unwrap_or(0)
-                                        ));
-                                    let args = function_call
-                                        .get("args")
-                                        .cloned()
-                                        .unwrap_or_else(|| serde_json::json!({}));
+                    let Some(candidate) = response.candidates.as_deref().and_then(|c| c.first())
+                    else {
+                        continue;
+                    };
 
-                                    yield LlmEvent::ToolCall { id, name, args };
+                    let parts = candidate
+                        .content
+                        .as_ref()
+                        .and_then(|c| c.parts.as_deref())
+                        .unwrap_or(&[]);
+
+                    for part in parts {
+                        match part {
+                            GeminiPart::FunctionCall { function_call } => {
+                                if !emitted_tool_intent {
+                                    emitted_tool_intent = true;
+                                    yield LlmEvent::ToolIntentStart;
                                 }
-
-                                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                                    if text.is_empty() {
-                                        continue;
-                                    }
-                                    let is_thinking = part
-                                        .get("thought")
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false);
-                                    if is_thinking {
-                                        yield LlmEvent::ThinkingToken(text.to_string());
-                                    } else {
-                                        yield LlmEvent::Token {
-                                            text: text.to_string(),
-                                            phase: if emitted_tool_intent {
-                                                AssistantPhase::Provisional
-                                            } else {
-                                                AssistantPhase::Unknown
-                                            },
-                                        };
-                                    }
+                                let id = function_call
+                                    .id
+                                    .clone()
+                                    .unwrap_or_else(|| format!(
+                                        "gemini_call_{}",
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis())
+                                            .unwrap_or(0)
+                                    ));
+                                let args = function_call
+                                    .args
+                                    .clone()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                yield LlmEvent::ToolCall {
+                                    id,
+                                    name: function_call.name.clone(),
+                                    args,
+                                };
+                            }
+                            GeminiPart::Text { text, thought } => {
+                                if text.is_empty() {
+                                    continue;
+                                }
+                                if *thought {
+                                    yield LlmEvent::ThinkingToken(text.clone());
+                                } else {
+                                    yield LlmEvent::Token {
+                                        text: text.clone(),
+                                        phase: if emitted_tool_intent {
+                                            AssistantPhase::Provisional
+                                        } else {
+                                            AssistantPhase::Unknown
+                                        },
+                                    };
                                 }
                             }
                         }
@@ -417,32 +477,6 @@ impl GeminiProvider {
             }
 
             yield LlmEvent::Done;
-        })
-    }
-}
-
-fn parse_usage(response: &serde_json::Value) -> Option<UsageStats> {
-    let usage = response.get("usageMetadata")?;
-    let input = usage
-        .get("promptTokenCount")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-    let output = usage
-        .get("candidatesTokenCount")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-    let total = usage
-        .get("totalTokenCount")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-
-    if input.is_none() && output.is_none() && total.is_none() {
-        None
-    } else {
-        Some(UsageStats {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: total,
         })
     }
 }
@@ -572,10 +606,93 @@ impl LlmProvider for GeminiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_request, extract_retry_delay_ms};
+    use super::{
+        GeminiPart, GeminiStreamChunk, GeminiUsage, build_request, extract_retry_delay_ms,
+    };
     use crate::llm::provider_format::to_gemini_wire;
-    use crate::llm::{Message, ToolDefinition};
+    use crate::llm::{Message, ToolDefinition, UsageStats};
     use crate::thinking::GeminiThinkingLevel;
+
+    fn parse_chunk(json: &str) -> GeminiStreamChunk {
+        serde_json::from_str(json).expect("parse failed")
+    }
+
+    // ── New typed-parsing tests ───────────────────────────────────────────────
+
+    #[test]
+    fn text_part_parses_correctly() {
+        let chunk = parse_chunk(
+            r#"{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}}"#,
+        );
+        let parts = chunk.response.unwrap().candidates.unwrap();
+        let part = &parts[0].content.as_ref().unwrap().parts.as_ref().unwrap()[0];
+        let GeminiPart::Text { text, thought } = part else {
+            panic!("expected Text")
+        };
+        assert_eq!(text, "hello");
+        assert!(!thought);
+    }
+
+    #[test]
+    fn thought_part_parses_correctly() {
+        let chunk = parse_chunk(
+            r#"{"response":{"candidates":[{"content":{"parts":[{"text":"reasoning","thought":true}]}}]}}"#,
+        );
+        let parts = chunk.response.unwrap().candidates.unwrap();
+        let part = &parts[0].content.as_ref().unwrap().parts.as_ref().unwrap()[0];
+        let GeminiPart::Text { text, thought } = part else {
+            panic!("expected Text")
+        };
+        assert_eq!(text, "reasoning");
+        assert!(thought);
+    }
+
+    #[test]
+    fn function_call_part_parses_correctly() {
+        let chunk = parse_chunk(
+            r#"{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","id":"fc_1","args":{"path":"a.txt"}}}]}}]}}"#,
+        );
+        let parts = chunk.response.unwrap().candidates.unwrap();
+        let part = &parts[0].content.as_ref().unwrap().parts.as_ref().unwrap()[0];
+        let GeminiPart::FunctionCall { function_call } = part else {
+            panic!("expected FunctionCall")
+        };
+        assert_eq!(function_call.name, "read_file");
+        assert_eq!(function_call.id.as_deref(), Some("fc_1"));
+        assert_eq!(function_call.args.as_ref().unwrap()["path"], "a.txt");
+    }
+
+    #[test]
+    fn function_call_without_id_parses_correctly() {
+        let chunk = parse_chunk(
+            r#"{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{}}}]}}]}}"#,
+        );
+        let parts = chunk.response.unwrap().candidates.unwrap();
+        let part = &parts[0].content.as_ref().unwrap().parts.as_ref().unwrap()[0];
+        let GeminiPart::FunctionCall { function_call } = part else {
+            panic!()
+        };
+        assert_eq!(function_call.name, "list_dir");
+        assert!(function_call.id.is_none());
+    }
+
+    #[test]
+    fn usage_metadata_parses_correctly() {
+        let chunk = parse_chunk(
+            r#"{"response":{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}}"#,
+        );
+        let usage: GeminiUsage = chunk.response.unwrap().usage_metadata.unwrap();
+        let stats = UsageStats::from(usage);
+        assert_eq!(stats.input_tokens, Some(10));
+        assert_eq!(stats.output_tokens, Some(20));
+        assert_eq!(stats.total_tokens, Some(30));
+    }
+
+    #[test]
+    fn chunk_without_response_parses_cleanly() {
+        let chunk = parse_chunk(r#"{}"#);
+        assert!(chunk.response.is_none());
+    }
 
     #[test]
     fn extract_retry_delay_parses_quota_reset_message() {

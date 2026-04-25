@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use super::{
@@ -8,6 +9,93 @@ use super::{
     provider_format::to_anthropic_wire,
 };
 use crate::provider::{context_window_for_model, scaled_token_budget};
+
+// ── Typed SSE event structs ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicEvent {
+    MessageStart {
+        message: MessageStartPayload,
+    },
+    ContentBlockStart {
+        index: u64,
+        content_block: ContentBlock,
+    },
+    ContentBlockDelta {
+        index: u64,
+        delta: ContentDelta,
+    },
+    ContentBlockStop {
+        index: u64,
+    },
+    MessageDelta {
+        delta: MessageDeltaPayload,
+        usage: Option<MessageDeltaUsage>,
+    },
+    MessageStop,
+    Error {
+        error: AnthropicApiError,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct MessageStartPayload {
+    usage: Option<MessageUsage>,
+}
+
+#[derive(Deserialize)]
+struct MessageUsage {
+    input_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentBlock {
+    ToolUse {
+        id: String,
+        name: String,
+    },
+    Text,
+    Thinking,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentDelta {
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        thinking: String,
+    },
+    InputJsonDelta {
+        partial_json: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct MessageDeltaPayload {
+    stop_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MessageDeltaUsage {
+    output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicApiError {
+    message: String,
+}
+
+// ── Provider ──────────────────────────────────────────────────────────────────
 
 pub struct AnthropicProvider {
     base_url: String,
@@ -130,7 +218,7 @@ impl AnthropicProvider {
                     log::debug!("[TAU_DEBUG] ← anthropic chunk {line_num}: {data}");
                     line_num += 1;
 
-                    let ev: serde_json::Value = match serde_json::from_str(&data) {
+                    let ev: AnthropicEvent = match serde_json::from_str(&data) {
                         Ok(v) => v,
                         Err(e) => {
                             yield LlmEvent::Error(ProviderError::other("Anthropic", format!("Parse error: {e}")));
@@ -138,71 +226,47 @@ impl AnthropicProvider {
                         }
                     };
 
-                    match ev["type"].as_str() {
-                        Some("message_start") => {
+                    match ev {
+                        AnthropicEvent::MessageStart { message } => {
                             // Capture input_tokens emitted at the start of the
                             // stream so they can be combined with output_tokens
                             // that arrive later in the message_delta event.
-                            if let Some(usage) = ev
-                                .get("message")
-                                .and_then(|m| m.get("usage"))
-                            {
-                                input_tokens_from_start = usage
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .and_then(|n| usize::try_from(n).ok());
+                            if let Some(usage) = message.usage {
+                                input_tokens_from_start = usage.input_tokens;
                             }
                         }
 
-                        Some("content_block_start") => {
-                            let index = ev["index"].as_u64().unwrap_or(0);
-                            let block = &ev["content_block"];
-                            if block["type"].as_str() == Some("tool_use") {
+                        AnthropicEvent::ContentBlockStart { index, content_block } => {
+                            if let ContentBlock::ToolUse { id, name } = content_block {
                                 if !emitted_tool_intent {
                                     emitted_tool_intent = true;
                                     yield LlmEvent::ToolIntentStart;
                                 }
                                 tool_blocks.insert(
                                     index,
-                                    ToolBlock {
-                                        id: block["id"].as_str().unwrap_or("").to_string(),
-                                        name: block["name"].as_str().unwrap_or("").to_string(),
-                                        partial_json: String::new(),
-                                    },
+                                    ToolBlock { id, name, partial_json: String::new() },
                                 );
                             }
                         }
 
-                        Some("content_block_delta") => {
-                            let index = ev["index"].as_u64().unwrap_or(0);
-                            let delta = &ev["delta"];
-                            match delta["type"].as_str() {
-                                Some("text_delta") => {
-                                    if let Some(text) = delta["text"].as_str()
-                                        && !text.is_empty()
-                                    {
-                                        yield LlmEvent::Token {
-                                            text: text.to_string(),
-                                            phase: if emitted_tool_intent {
-                                                AssistantPhase::Provisional
-                                            } else {
-                                                AssistantPhase::Unknown
-                                            },
-                                        };
-                                    }
+                        AnthropicEvent::ContentBlockDelta { index, delta } => {
+                            match delta {
+                                ContentDelta::TextDelta { text } if !text.is_empty() => {
+                                    yield LlmEvent::Token {
+                                        text,
+                                        phase: if emitted_tool_intent {
+                                            AssistantPhase::Provisional
+                                        } else {
+                                            AssistantPhase::Unknown
+                                        },
+                                    };
                                 }
-                                Some("thinking_delta") => {
-                                    if let Some(t) = delta["thinking"].as_str()
-                                        && !t.is_empty()
-                                    {
-                                        yield LlmEvent::ThinkingToken(t.to_string());
-                                    }
+                                ContentDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
+                                    yield LlmEvent::ThinkingToken(thinking);
                                 }
-                                Some("input_json_delta") => {
-                                    if let Some(partial) = delta["partial_json"].as_str()
-                                        && let Some(block) = tool_blocks.get_mut(&index)
-                                    {
-                                        block.partial_json.push_str(partial);
+                                ContentDelta::InputJsonDelta { partial_json } => {
+                                    if let Some(block) = tool_blocks.get_mut(&index) {
+                                        block.partial_json.push_str(&partial_json);
                                     }
                                 }
                                 _ => {}
@@ -210,8 +274,7 @@ impl AnthropicProvider {
                         }
 
                         // When a tool_use block finishes, emit the accumulated call.
-                        Some("content_block_stop") => {
-                            let index = ev["index"].as_u64().unwrap_or(0);
+                        AnthropicEvent::ContentBlockStop { index } => {
                             if let Some(block) = tool_blocks.remove(&index) {
                                 let args: serde_json::Value =
                                     serde_json::from_str(&block.partial_json)
@@ -224,25 +287,15 @@ impl AnthropicProvider {
                             }
                         }
 
-                        Some("message_delta") => {
-                            if let Some(mut usage) = extract_usage_stats(&ev) {
-                                // Merge input tokens from message_start into
-                                // the delta usage so the Usage event carries
-                                // both input and output counts.
-                                if usage.input_tokens.is_none() {
-                                    usage.input_tokens = input_tokens_from_start;
-                                    // Recompute total with combined counts.
-                                    if let (Some(i), Some(o)) = (usage.input_tokens, usage.output_tokens) {
-                                        usage.total_tokens = Some(i.saturating_add(o));
-                                    }
-                                }
-                                yield LlmEvent::Usage(usage);
+                        AnthropicEvent::MessageDelta { delta, usage } => {
+                            if let Some(usage_stats) = build_usage_from_delta(usage, &mut input_tokens_from_start) {
+                                yield LlmEvent::Usage(usage_stats);
                             }
                             // If the response was cut off by the token limit while a
                             // tool_use block was still being streamed, content_block_stop
                             // will never arrive and the tool call would be silently lost.
                             // Emit an error instead so the agent can surface it.
-                            if ev["delta"]["stop_reason"].as_str() == Some("max_tokens")
+                            if delta.stop_reason.as_deref() == Some("max_tokens")
                                 && !tool_blocks.is_empty()
                             {
                                 yield LlmEvent::Error(ProviderError::other(
@@ -254,30 +307,17 @@ impl AnthropicProvider {
                             }
                         }
 
-                        Some("message_stop") => {
-                            if let Some(mut usage) = extract_usage_stats(&ev) {
-                                if usage.input_tokens.is_none() {
-                                    usage.input_tokens = input_tokens_from_start;
-                                    if let (Some(i), Some(o)) = (usage.input_tokens, usage.output_tokens) {
-                                        usage.total_tokens = Some(i.saturating_add(o));
-                                    }
-                                }
-                                yield LlmEvent::Usage(usage);
-                            }
+                        AnthropicEvent::MessageStop => {
                             yield LlmEvent::Done;
                             return;
                         }
 
-                        Some("error") => {
-                            let msg = ev["error"]["message"]
-                                .as_str()
-                                .unwrap_or("Anthropic API error")
-                                .to_string();
-                            yield LlmEvent::Error(ProviderError::other("Anthropic", msg));
+                        AnthropicEvent::Error { error } => {
+                            yield LlmEvent::Error(ProviderError::other("Anthropic", error.message));
                             return;
                         }
 
-                        _ => {}
+                        AnthropicEvent::Unknown => {}
                     }
                 }
             }
@@ -287,48 +327,21 @@ impl AnthropicProvider {
     }
 }
 
-fn extract_usage_stats(ev: &serde_json::Value) -> Option<UsageStats> {
-    let usage = ev
-        .get("usage")
-        .or_else(|| ev.get("message").and_then(|m| m.get("usage")))
-        .or_else(|| ev.get("delta").and_then(|d| d.get("usage")))?;
-
-    let input = usage
-        .get("input_tokens")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-    let output = usage
-        .get("output_tokens")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok());
-
-    // Anthropic can expose cache-related counters; include in total when present.
-    let cache_creation = usage
-        .get("cache_creation_input_tokens")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0);
-    let cache_read = usage
-        .get("cache_read_input_tokens")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0);
-
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| usize::try_from(n).ok())
-        .or_else(|| {
-            let i = input?;
-            let o = output?;
-            Some(
-                i.saturating_add(o)
-                    .saturating_add(cache_creation)
-                    .saturating_add(cache_read),
-            )
-        });
-
-    if input.is_none() && output.is_none() && total.is_none() {
+/// Build a `UsageStats` from a `MessageDelta` usage payload, merging in the
+/// input tokens captured from the earlier `MessageStart` event.
+fn build_usage_from_delta(
+    usage: Option<MessageDeltaUsage>,
+    input_tokens_from_start: &mut Option<usize>,
+) -> Option<UsageStats> {
+    let output = usage.as_ref().and_then(|u| u.output_tokens);
+    let input = input_tokens_from_start.take();
+    let total = match (input, output) {
+        (Some(i), Some(o)) => Some(i.saturating_add(o)),
+        (Some(i), None) => Some(i),
+        (None, Some(o)) => Some(o),
+        (None, None) => None,
+    };
+    if input.is_none() && output.is_none() {
         None
     } else {
         Some(UsageStats {
@@ -394,4 +407,158 @@ struct ToolBlock {
     id: String,
     name: String,
     partial_json: String,
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> AnthropicEvent {
+        serde_json::from_str(json).expect("parse failed")
+    }
+
+    #[test]
+    fn message_start_captures_input_tokens() {
+        let ev = parse(
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":42,"output_tokens":0}}}"#,
+        );
+        let AnthropicEvent::MessageStart { message } = ev else {
+            panic!("wrong variant")
+        };
+        assert_eq!(message.usage.unwrap().input_tokens, Some(42));
+    }
+
+    #[test]
+    fn content_block_start_text_variant() {
+        let ev =
+            parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#);
+        let AnthropicEvent::ContentBlockStart {
+            index,
+            content_block,
+        } = ev
+        else {
+            panic!()
+        };
+        assert_eq!(index, 0);
+        assert!(matches!(content_block, ContentBlock::Text));
+    }
+
+    #[test]
+    fn content_block_start_tool_use_variant() {
+        let ev = parse(
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"read_file"}}"#,
+        );
+        let AnthropicEvent::ContentBlockStart {
+            index,
+            content_block,
+        } = ev
+        else {
+            panic!()
+        };
+        assert_eq!(index, 1);
+        let ContentBlock::ToolUse { id, name } = content_block else {
+            panic!()
+        };
+        assert_eq!(id, "toolu_123");
+        assert_eq!(name, "read_file");
+    }
+
+    #[test]
+    fn content_block_delta_text_delta() {
+        let ev = parse(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#,
+        );
+        let AnthropicEvent::ContentBlockDelta { index, delta } = ev else {
+            panic!()
+        };
+        assert_eq!(index, 0);
+        let ContentDelta::TextDelta { text } = delta else {
+            panic!()
+        };
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn content_block_delta_input_json() {
+        let ev = parse(
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"k\":"}}"#,
+        );
+        let AnthropicEvent::ContentBlockDelta { index, delta } = ev else {
+            panic!()
+        };
+        assert_eq!(index, 1);
+        let ContentDelta::InputJsonDelta { partial_json } = delta else {
+            panic!()
+        };
+        assert_eq!(partial_json, "{\"k\":");
+    }
+
+    #[test]
+    fn content_block_stop() {
+        let ev = parse(r#"{"type":"content_block_stop","index":2}"#);
+        let AnthropicEvent::ContentBlockStop { index } = ev else {
+            panic!()
+        };
+        assert_eq!(index, 2);
+    }
+
+    #[test]
+    fn message_delta_with_usage() {
+        let ev = parse(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}"#,
+        );
+        let AnthropicEvent::MessageDelta { delta, usage } = ev else {
+            panic!()
+        };
+        assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(usage.unwrap().output_tokens, Some(15));
+    }
+
+    #[test]
+    fn message_stop_variant() {
+        let ev = parse(r#"{"type":"message_stop"}"#);
+        assert!(matches!(ev, AnthropicEvent::MessageStop));
+    }
+
+    #[test]
+    fn error_event_parses_message() {
+        let ev =
+            parse(r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#);
+        let AnthropicEvent::Error { error } = ev else {
+            panic!()
+        };
+        assert_eq!(error.message, "Overloaded");
+    }
+
+    #[test]
+    fn unknown_event_type_ignored() {
+        let ev = parse(r#"{"type":"ping"}"#);
+        assert!(matches!(ev, AnthropicEvent::Unknown));
+    }
+
+    #[test]
+    fn build_usage_merges_input_and_output() {
+        let mut input = Some(100usize);
+        let usage = build_usage_from_delta(
+            Some(MessageDeltaUsage {
+                output_tokens: Some(20),
+            }),
+            &mut input,
+        );
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, Some(100));
+        assert_eq!(u.output_tokens, Some(20));
+        assert_eq!(u.total_tokens, Some(120));
+        // input_tokens_from_start should be consumed
+        assert!(input.is_none());
+    }
+
+    #[test]
+    fn build_usage_returns_none_when_no_data() {
+        let mut input = None;
+        let usage = build_usage_from_delta(None, &mut input);
+        assert!(usage.is_none());
+    }
 }
