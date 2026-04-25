@@ -20,7 +20,7 @@ src/
   completion.rs        — CompletionItem and completions_for (completion popup logic)
   completion_state.rs  — CompletionState sub-struct: popup items, selection index, model-fetch status
   selection_state.rs   — SelectionState, SelectionKind, MAX_SELECTION_VISIBLE
-  login_state.rs       — LoginState, LoginActionKind: auth panel state and login action menu enum
+  login_state.rs       — LoginState, LoginActionKind: auth panel state, login action menu enum, and all login-flow methods (start_login, cancel_login, enter_login_selection_mode, enter_login_action_menu, apply_login_action, apply_login_event, clipboard_set)
   ask_user_state.rs    — AskUserState, PendingAsk: pending agent ask-user request state
   agent_runtime.rs     — AgentRuntime: agent task handle, event channels, steering queue, cancellation
   config.rs            — config.toml loading (XDG + HOME fallback)

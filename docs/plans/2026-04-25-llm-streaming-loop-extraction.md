@@ -1,6 +1,7 @@
 # Plan: Extract shared streaming loop for LLM providers
 
 Date: 2026-04-25
+Status: **Complete (2026-04-25)**
 
 ## Context
 

@@ -1,7 +1,7 @@
 # Plan: App behaviour extraction — completing the sub-struct refactor
 
 Date: 2026-04-25
-Status: **Phase 1, 2, 3a/b/c complete (2026-04-25)**
+Status: **Phase 1, 2, 3a/b/c/d complete (2026-04-25)**
 
 ## Context
 
