@@ -71,12 +71,8 @@ impl Tool for ReadFileTool {
         "Read the contents of a file at the given path. \
          Optionally specify `offset` (1-indexed line number to start from) \
          and `limit` (maximum number of lines to return). \
-         When the output is truncated a header `[lines X-Y of Z]` is prepended."
+         When the output is truncated a notice `[lines X-Y of Z. Use offset/limit parameters to read more.]` is appended."
     }
-    // NOTE: the description above is intentionally kept identical to the
-    // original wording so that existing sessions that reference it remain
-    // coherent.  The actual `[lines …]` header is no longer embedded in
-    // content; range information is now carried in ToolResult::truncation.
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
@@ -168,24 +164,32 @@ impl Tool for ReadFileTool {
                 .unwrap()
                 .record(std::path::Path::new(&path));
 
-            let mut result = ToolResult::ok_str(tr.content);
+            let mut result_content = tr.content;
             if truncated {
                 let output_lines = if last_line >= first_line {
                     last_line - first_line + 1
                 } else {
                     0
                 };
+                // Append an in-band notice so the model always sees the range
+                // and total, even when it cannot inspect ToolResult metadata.
+                let notice = format!(
+                    "\n[lines {first_line}-{last_line} of {total}. Use offset/limit parameters to read more.]"
+                );
+                result_content.push_str(&notice);
+                let mut result = ToolResult::ok_str(result_content.clone());
                 result.truncation = Some(TruncationResult {
-                    content: result.content.clone(),
+                    content: result_content,
                     truncated: true,
                     total_lines: total,
-
                     output_lines,
                     first_kept_line: first_line,
                 });
                 result.is_truncated = true;
+                result
+            } else {
+                ToolResult::ok_str(result_content)
             }
-            result
         })
     }
 }
@@ -285,9 +289,18 @@ mod tests {
         });
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        // Content must be the raw body — no in-band header anymore.
-        assert_eq!(result.content, "b\r\n");
-        // Range information must be carried in the truncation field.
+        // Content must start with the raw line body followed by the truncation notice.
+        assert!(
+            result.content.starts_with("b\r\n"),
+            "unexpected content: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("[lines 2-2 of 3"),
+            "missing truncation notice: {}",
+            result.content
+        );
+        // Range information must also be carried in the truncation field.
         let tr = result.truncation.expect("truncation metadata expected");
         assert_eq!(tr.first_kept_line, 2);
         assert_eq!(tr.total_lines, 3);
