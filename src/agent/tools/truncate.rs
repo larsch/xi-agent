@@ -18,9 +18,6 @@ pub struct TruncationResult {
     pub truncated: bool,
     /// Total lines in the original content.
     pub total_lines: usize,
-    /// Total bytes in the original content.
-    #[allow(dead_code)]
-    pub total_bytes: usize,
     /// Number of complete lines kept in the output.
     pub output_lines: usize,
     /// 1-indexed line number of the first kept line.
@@ -40,8 +37,6 @@ pub fn truncate_tail_with_limits(
     max_lines: usize,
     max_bytes: usize,
 ) -> TruncationResult {
-    let total_bytes = content.len();
-
     // Strip a single trailing newline before splitting so it doesn't produce
     // a phantom empty last line (e.g. "a\nb\n".split('\n') == ["a","b",""]).
     // We restore it on the way out.
@@ -69,7 +64,6 @@ pub fn truncate_tail_with_limits(
                 content: content_out,
                 truncated: true,
                 total_lines,
-                total_bytes,
                 output_lines: 1,
                 first_kept_line: 1,
             };
@@ -78,7 +72,6 @@ pub fn truncate_tail_with_limits(
             content: content.to_string(),
             truncated: false,
             total_lines,
-            total_bytes,
             output_lines: total_lines,
             first_kept_line: 1,
         };
@@ -128,7 +121,6 @@ pub fn truncate_tail_with_limits(
         content: content_out,
         truncated: true,
         total_lines,
-        total_bytes,
         output_lines,
         first_kept_line,
     }
@@ -151,7 +143,6 @@ pub fn truncate_head_with_limits(
             content: content.to_string(),
             truncated: false,
             total_lines,
-            total_bytes,
             output_lines: total_lines,
             first_kept_line: 1,
         };
@@ -179,7 +170,6 @@ pub fn truncate_head_with_limits(
         content: content_out,
         truncated: true,
         total_lines,
-        total_bytes,
         output_lines,
         first_kept_line: 1,
     }

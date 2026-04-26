@@ -412,7 +412,7 @@ mod tests {
                 content: "line1\nline2".to_string(),
                 truncated: true,
                 total_lines: 100,
-                total_bytes: 5000,
+
                 output_lines: 2,
                 first_kept_line: 99,
             }),

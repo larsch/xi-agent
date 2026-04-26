@@ -179,7 +179,7 @@ impl Tool for ReadFileTool {
                     content: result.content.clone(),
                     truncated: true,
                     total_lines: total,
-                    total_bytes: content.len(),
+
                     output_lines,
                     first_kept_line: first_line,
                 });
