@@ -79,9 +79,6 @@ pub enum AuthMode {
 pub enum EndpointBehavior {
     Predetermined,
     UserSupplied,
-    /// Predetermined default but overrideable by the user.
-    #[allow(dead_code)]
-    Overrideable,
     Internal,
 }
 
@@ -140,9 +137,6 @@ pub struct BackendPresetDef {
     /// Whether the user should be allowed to choose the API type.
     /// `false` means tau picks internally (e.g. Copilot).
     pub user_selects_api: bool,
-    /// Whether multiple instances of this service make sense.
-    #[allow(dead_code)]
-    pub multi_instance: bool,
     /// Whether the endpoint is predetermined, user-supplied, or overrideable.
     pub endpoint_behavior: EndpointBehavior,
     /// Which authentication mode this preset requires.
@@ -165,7 +159,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         ],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
-        multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
         url_normalization: None,
@@ -177,7 +170,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::OpenAiCompatible],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
-        multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::ApiKey,
         url_normalization: None,
@@ -189,7 +181,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::OpenAiCompatible],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
-        multi_instance: true,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::ApiKey,
         url_normalization: Some(UrlNormalization {
@@ -206,7 +197,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::OpenAiResponses],
         default_api: ApiType::OpenAiResponses,
         user_selects_api: false,
-        multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
         url_normalization: None,
@@ -218,7 +208,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::GeminiNative],
         default_api: ApiType::GeminiNative,
         user_selects_api: false,
-        multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::OAuthLogin,
         url_normalization: None,
@@ -234,7 +223,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         ],
         default_api: ApiType::OllamaChatApi,
         user_selects_api: true,
-        multi_instance: true,
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::None,
         url_normalization: Some(UrlNormalization {
@@ -251,7 +239,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::OllamaChatApi],
         default_api: ApiType::OllamaChatApi,
         user_selects_api: false,
-        multi_instance: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
         auth_mode: AuthMode::None,
         url_normalization: None,
@@ -263,7 +250,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::OpenAiCompatible, ApiType::OllamaChatApi],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: true,
-        multi_instance: true,
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::ApiKey,
         url_normalization: Some(UrlNormalization {
@@ -280,7 +266,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::OpenAiCompatible],
         default_api: ApiType::OpenAiCompatible,
         user_selects_api: false,
-        multi_instance: true,
         endpoint_behavior: EndpointBehavior::UserSupplied,
         auth_mode: AuthMode::ApiKey,
         url_normalization: Some(UrlNormalization {
@@ -297,7 +282,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         allowed_apis: &[ApiType::Test],
         default_api: ApiType::Test,
         user_selects_api: false,
-        multi_instance: false,
         endpoint_behavior: EndpointBehavior::Internal,
         auth_mode: AuthMode::None,
         url_normalization: None,

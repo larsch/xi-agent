@@ -552,7 +552,7 @@ fn normalize_paste_text(text: &str) -> String {
 fn provider_setup_requires_endpoint(instance: &ProviderInstance) -> bool {
     matches!(
         instance.backend_preset.def().endpoint_behavior,
-        EndpointBehavior::UserSupplied | EndpointBehavior::Overrideable
+        EndpointBehavior::UserSupplied
     )
 }
 
