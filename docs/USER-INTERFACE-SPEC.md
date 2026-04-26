@@ -4,9 +4,9 @@
 
 - Start in interactive mode by default.
 - Support non-interactive mode with `-p/--print` flag, which prints the result of each command to stdout instead of rendering a UI.
-- In interactive mode, `--provider <name>` must exactly match one of the provider names shown by `/provider`, or `test`; unknown values are an error.
+- In interactive mode, `--provider <name>` must exactly match one of the configured provider instance names shown by `/provider`, or `test`; unknown values are an error.
 - In non-interactive mode, `--print` requires `--provider <name>`.
-- In non-interactive mode, `--provider <name>` must exactly match one of the provider names shown by `/provider`, or `test`; unknown values are an error.
+- In non-interactive mode, `--provider <name>` must exactly match one of the configured provider instance names shown by `/provider`, or `test`; unknown values are an error.
 - User-facing provider errors in both interactive and non-interactive modes should be rendered in natural English first, followed by the original provider message as supporting detail.
 - Error text should identify the active backend/provider label (for example `Open WebUI`) rather than leaking the transport/API name used underneath.
 

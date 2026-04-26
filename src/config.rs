@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::Context;
 
-use crate::provider_instance::{BackendPreset, ProviderInstance};
+use crate::provider_instance::ProviderInstance;
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TauConfig {
@@ -12,13 +12,12 @@ pub struct TauConfig {
     #[serde(default)]
     pub thinking_by_model: HashMap<String, String>,
 
-    /// Named provider instances (new format).
-    /// When empty on load, `migrate_legacy_providers` synthesises instances
-    /// from the legacy per-kind sections below.
+    /// Named provider instances.
     #[serde(default)]
     pub providers: Vec<ProviderInstance>,
 
-    // ── Legacy per-kind sections (read-only after migration) ─────────────────
+    // Provider-specific persisted settings that are still used for endpoint
+    // history and similar UI convenience state.
     #[serde(default)]
     pub openai: OpenAiConfig,
     #[serde(default)]
@@ -58,93 +57,6 @@ impl TauConfig {
         let before = self.providers.len();
         self.providers.retain(|p| p.id != id);
         self.providers.len() < before
-    }
-
-    /// Ensure singleton built-in hosted providers exist in `providers`.
-    fn ensure_builtin_hosted_providers(&mut self) {
-        if self.find_provider("openrouter").is_none() {
-            self.providers.push(ProviderInstance::new(
-                "openrouter",
-                BackendPreset::OpenRouter,
-            ));
-        }
-    }
-
-    /// Synthesise provider instances from legacy per-kind config sections.
-    ///
-    /// Called automatically by `from_toml_str`. When `providers` is empty, it
-    /// synthesises instances from the legacy per-kind sections below. It also
-    /// ensures singleton built-in hosted providers are present for newer
-    /// instance-based configs.
-    /// Idempotent — safe to call multiple times.
-    fn migrate_legacy_providers(&mut self) {
-        if self.providers.is_empty() {
-            // Copilot — always present as a built-in default.
-            let mut copilot = ProviderInstance::new("copilot", BackendPreset::Copilot);
-            copilot.model = self.copilot.model.clone();
-            self.providers.push(copilot);
-
-            // OpenAI — only if an api_key is configured.
-            if self.openai.api_key.is_some() {
-                let mut openai = ProviderInstance::new("openai", BackendPreset::OpenAi);
-                openai.base_url = self.openai.base_url.clone();
-                openai.api_key = self.openai.api_key.clone();
-                openai.model = self.openai.model.clone();
-                self.providers.push(openai);
-            }
-
-            // Codex — always a built-in (auth handled separately via AuthStore).
-            let mut codex = ProviderInstance::new("codex", BackendPreset::Codex);
-            codex.base_url = self.codex.base_url.clone();
-            codex.model = self.codex.model.clone();
-            self.providers.push(codex);
-
-            // Gemini — always a built-in (auth handled separately via AuthStore).
-            let mut gemini = ProviderInstance::new("gemini", BackendPreset::Gemini);
-            gemini.base_url = self.gemini.base_url.clone();
-            gemini.model = self.gemini.model.clone();
-            self.providers.push(gemini);
-
-            // Ollama — only if a base_url is configured; otherwise skip (user
-            // hasn't set it up yet).
-            if self.ollama.base_url.is_some() {
-                let mut ollama = ProviderInstance::new("ollama", BackendPreset::Ollama);
-                ollama.base_url = self.ollama.base_url.clone();
-                ollama.model = self.ollama.model.clone();
-                self.providers.push(ollama);
-            }
-
-            // Open WebUI — only if a base_url is configured.
-            if self.open_webui.base_url.is_some() {
-                let mut open_webui = ProviderInstance::new("open-webui", BackendPreset::OpenWebUi);
-                open_webui.base_url = self.open_webui.base_url.clone();
-                open_webui.api_key = self.open_webui.api_key.clone();
-                open_webui.model = self.open_webui.model.clone();
-                self.providers.push(open_webui);
-            }
-
-            // Migrate the `provider` field: map legacy provider names to instance ids.
-            if let Some(ref name) = self.provider.clone() {
-                let mapped_id = match name.as_str() {
-                    "copilot" | "github-copilot" => Some("copilot"),
-                    "openai" => Some("openai"),
-                    "openrouter" => Some("openrouter"),
-                    "codex" => Some("codex"),
-                    "gemini" | "google-gemini" => Some("gemini"),
-                    "ollama" => Some("ollama"),
-                    "open-webui" | "openwebui" => Some("open-webui"),
-                    _ => None,
-                };
-                if let Some(id) = mapped_id {
-                    // Only keep the mapped id if we actually synthesised that instance.
-                    if self.providers.iter().any(|p| p.id == id) {
-                        self.provider = Some(id.to_string());
-                    }
-                }
-            }
-        }
-
-        self.ensure_builtin_hosted_providers();
     }
 }
 
@@ -239,9 +151,7 @@ impl TauConfig {
     }
 
     pub fn from_toml_str(raw: &str) -> anyhow::Result<Self> {
-        let mut cfg: Self = toml::from_str(raw)?;
-        cfg.migrate_legacy_providers();
-        Ok(cfg)
+        Ok(toml::from_str(raw)?)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -270,8 +180,10 @@ mod tests {
     use super::{OllamaConfig, TauConfig};
     use crate::provider_instance::{ApiType, BackendPreset};
 
+    // ── Instance-format config tests ─────────────────────────────────────────
+
     #[test]
-    fn parses_full_config_toml() {
+    fn provider_sections_parse_without_synthesising_instances() {
         let raw = r#"
 provider = "openai"
 thinking = "low"
@@ -340,146 +252,44 @@ recent_endpoints = ["http://localhost:11434", "http://gpu-box:11434"]
             cfg.ollama.recent_endpoints,
             vec!["http://localhost:11434", "http://gpu-box:11434"]
         );
+        assert!(cfg.providers.is_empty());
     }
 
-    // ── Migration tests ───────────────────────────────────────────────────────
-
     #[test]
-    fn migration_synthesises_copilot_from_legacy_config() {
+    fn legacy_provider_sections_do_not_synthesise_instances() {
         let raw = r#"
 provider = "copilot"
-[copilot]
-model = "gpt-4o"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        let inst = cfg
-            .find_provider("copilot")
-            .expect("copilot instance present");
-        assert_eq!(inst.backend_preset, BackendPreset::Copilot);
-        assert_eq!(inst.model.as_deref(), Some("gpt-4o"));
-        assert_eq!(cfg.provider.as_deref(), Some("copilot"));
-    }
 
-    #[test]
-    fn migration_synthesises_openrouter_as_builtin_hosted_provider() {
-        let raw = r#"
-provider = "copilot"
-[copilot]
-model = "gpt-4o"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        let inst = cfg
-            .find_provider("openrouter")
-            .expect("openrouter instance present");
-        assert_eq!(inst.backend_preset, BackendPreset::OpenRouter);
-        assert_eq!(inst.id, "openrouter");
-    }
-
-    #[test]
-    fn migration_adds_openrouter_to_existing_providers_without_duplication() {
-        let raw = r#"
-[[providers]]
-id = "copilot"
-backend_preset = "copilot"
-api_type = "openai-compatible"
-model = "claude-sonnet-4.5"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        assert!(cfg.find_provider("openrouter").is_some());
-        assert_eq!(
-            cfg.providers
-                .iter()
-                .filter(|p| p.id == "openrouter")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn migration_synthesises_openai_when_api_key_present() {
-        let raw = r#"
 [openai]
 api_key = "sk-test"
 model = "gpt-4o-mini"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        let inst = cfg
-            .find_provider("openai")
-            .expect("openai instance present");
-        assert_eq!(inst.backend_preset, BackendPreset::OpenAi);
-        assert_eq!(inst.api_key.as_deref(), Some("sk-test"));
-        assert_eq!(inst.model.as_deref(), Some("gpt-4o-mini"));
-    }
 
-    #[test]
-    fn migration_skips_openai_without_api_key() {
-        let raw = r#"
-[openai]
-model = "gpt-4o-mini"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        assert!(cfg.find_provider("openai").is_none());
-    }
+[copilot]
+model = "gpt-4o"
 
-    #[test]
-    fn migration_synthesises_ollama_when_base_url_present() {
-        let raw = r#"
+[codex]
+model = "gpt-5"
+
+[gemini]
+model = "gemini-2.5-pro"
+
 [ollama]
 base_url = "http://gpu-box:11434"
 model = "llama3.1"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        let inst = cfg
-            .find_provider("ollama")
-            .expect("ollama instance present");
-        assert_eq!(inst.backend_preset, BackendPreset::Ollama);
-        assert_eq!(inst.api_type, ApiType::OllamaChatApi);
-        assert_eq!(inst.base_url.as_deref(), Some("http://gpu-box:11434"));
-    }
 
-    #[test]
-    fn migration_skips_ollama_without_base_url() {
-        let raw = "[ollama]\nmodel = \"llama3.1\"\n";
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        assert!(cfg.find_provider("ollama").is_none());
-    }
-
-    #[test]
-    fn migration_synthesises_open_webui_when_base_url_present() {
-        let raw = r#"
 [open_webui]
 base_url = "https://my-webui.example.com"
 api_key = "token123"
 model = "llama3.1"
 "#;
         let cfg = TauConfig::from_toml_str(raw).unwrap();
-        let inst = cfg
-            .find_provider("open-webui")
-            .expect("open-webui instance present");
-        assert_eq!(inst.backend_preset, BackendPreset::OpenWebUi);
-        assert_eq!(inst.api_key.as_deref(), Some("token123"));
-    }
-
-    #[test]
-    fn migration_is_idempotent_when_providers_already_present() {
-        let raw = r#"
-[copilot]
-model = "gpt-4o"
-
-[[providers]]
-id = "copilot"
-backend_preset = "copilot"
-api_type = "openai-compatible"
-model = "claude-sonnet-4.5"
-"#;
-        let cfg = TauConfig::from_toml_str(raw).unwrap();
-        // Explicit providers remain intact, and builtin openrouter is added once.
-        assert_eq!(cfg.providers.len(), 2);
-        let inst = cfg.find_provider("copilot").unwrap();
-        // The explicit [[providers]] entry wins, not the legacy [copilot] section.
-        assert_eq!(inst.model.as_deref(), Some("claude-sonnet-4.5"));
-        let openrouter = cfg.find_provider("openrouter").unwrap();
-        assert_eq!(openrouter.backend_preset, BackendPreset::OpenRouter);
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.find_provider("copilot").is_none());
+        assert!(cfg.find_provider("openai").is_none());
+        assert!(cfg.find_provider("codex").is_none());
+        assert!(cfg.find_provider("gemini").is_none());
+        assert!(cfg.find_provider("ollama").is_none());
+        assert!(cfg.find_provider("open-webui").is_none());
     }
 
     #[test]
@@ -502,7 +312,7 @@ api_type = "ollama-chat-api"
 base_url = "http://gpu-box:11434"
 "#;
         let cfg = TauConfig::from_toml_str(raw).unwrap();
-        assert_eq!(cfg.providers.len(), 3);
+        assert_eq!(cfg.providers.len(), 2);
 
         let webui = cfg.find_provider("work-webui").unwrap();
         assert_eq!(webui.backend_preset, BackendPreset::OpenWebUi);
@@ -512,8 +322,7 @@ base_url = "http://gpu-box:11434"
         assert_eq!(gpu.backend_preset, BackendPreset::Ollama);
         assert_eq!(gpu.api_type, ApiType::OllamaChatApi);
 
-        let openrouter = cfg.find_provider("openrouter").unwrap();
-        assert_eq!(openrouter.backend_preset, BackendPreset::OpenRouter);
+        assert!(cfg.find_provider("openrouter").is_none());
 
         assert_eq!(cfg.provider.as_deref(), Some("work-webui"));
     }

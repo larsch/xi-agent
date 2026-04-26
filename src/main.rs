@@ -77,7 +77,7 @@ use thinking::ThinkingLevel;
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// LLM provider to use (copilot, openai, codex, gemini, ollama).
+    /// LLM provider to use (must match a configured provider instance id).
     #[arg(long, short = 'P', value_name = "PROVIDER")]
     provider: Option<String>,
 
@@ -1359,13 +1359,12 @@ fn apply_paste(app: &mut App, provider: &Arc<dyn LlmProvider + Send + Sync>, tex
 /// 2. First instance in `config.providers`
 /// 3. Synthetic copilot default
 fn resolve_default_provider_instance(config: &TauConfig) -> ProviderInstance {
-    // Try config.provider as an instance id.
     if let Some(ref id) = config.provider
         && let Some(inst) = config.find_provider(id)
     {
         return inst.clone();
     }
-    // First configured instance, or a synthesised copilot default.
+
     config.providers.first().cloned().unwrap_or_else(|| {
         ProviderInstance::new("copilot", provider_instance::BackendPreset::Copilot)
     })
@@ -1908,6 +1907,16 @@ mod tests {
 
         assert_eq!(instance.id, "work-webui");
         assert_eq!(instance.backend_preset, BackendPreset::OpenWebUi);
+    }
+
+    #[test]
+    fn resolve_default_provider_instance_falls_back_to_synthetic_copilot() {
+        let cfg = TauConfig::default();
+
+        let instance = resolve_default_provider_instance(&cfg);
+
+        assert_eq!(instance.id, "copilot");
+        assert_eq!(instance.backend_preset, BackendPreset::Copilot);
     }
 
     #[test]

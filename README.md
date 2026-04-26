@@ -9,7 +9,7 @@ persistence, and interactive authentication.
 functional for basic use and being used as the daily driver for its author. See
 the [ROADMAP](docs/ROADMAP.md) for planned features and improvements.
 
-* Supported providers: copilot, openai, codex, gemini, ollama, open-webui, anthropic
+* Supported providers: built-in hosted providers plus configured named provider instances
 * Built-in tools: read_file, write_file, edit_file, find_files, ask_user, bash/cmd/powershell
 * Standard `AGENTS.md` support
 * Standard `SKILL.md` support (see below)
@@ -32,7 +32,7 @@ cargo install --path .
 
 | Short | Long | Description |
 |-------|------|-------------|
-| `-P` | `--provider <PROVIDER>` | LLM provider to use (copilot, openai, codex, gemini, ollama, open-webui, anthropic) |
+| `-P` | `--provider <PROVIDER>` | Configured provider instance id to use |
 | `-m` | `--model <MODEL>` | Model name to use (e.g. gpt-4o, llama3.1) |
 | `-p` | `--print <PROMPT>...` | Run in non-interactive mode: send PROMPT, stream the response to stdout, and exit. Accepts multiple words without shell quoting |
 | | `--print-dirs` | Print the file-system paths tau uses and exit |
@@ -61,7 +61,7 @@ cargo install --path .
 | `/model`             | Open interactive model picker                    |
 | `/model <name>`      | Switch to a named model                          |
 | `/provider`          | Open interactive provider picker                 |
-| `/provider <name>`   | Switch provider (copilot / openai / codex / gemini / ollama / open-webui / anthropic) |
+| `/provider <name>`   | Switch to a configured provider instance         |
 | `/thinking <level>`  | Set reasoning effort (off / minimal / low / medium / high / xhigh) |
 | `/login`             | Open interactive auth provider picker (copilot / codex / gemini) |
 | `/login <provider>`  | Authenticate provider                            |

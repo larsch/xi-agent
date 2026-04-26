@@ -31,7 +31,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "provider",
         usage: "/provider <name>",
-        description: "Switch the LLM provider (copilot / openai / codex / gemini / ollama)",
+        description: "Switch the active configured provider instance",
         takes_arg: true,
     },
     SlashCommand {
