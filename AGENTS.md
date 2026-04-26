@@ -40,3 +40,4 @@ Open work items are tracked as Gitea issues at https://gitea.belunktum.dk/larsch
 
 - Follow the active skill's gate and authorization rules for `git commit` and `git push`.
 - A passing preflight is not by itself permission to commit.
+- Explicit user authorization in the current session turn, or an active wrap-up order, is required to commit and push.
