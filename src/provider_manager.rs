@@ -10,10 +10,64 @@
 //! The setup-flow *methods* remain on `App` because they need access to the
 //! textarea and selection widgets.  `ProviderManager` is a pure data holder.
 
-use crate::app::{PendingProviderRemoval, PendingProviderSetup, ProviderSetupStep};
 use crate::provider_instance::ProviderInstance;
-use crate::provider_instance::{ApiType, BackendPreset};
+use crate::provider_instance::{ApiType, AuthMode, BackendPreset};
 use crate::thinking::ThinkingLevel;
+
+/// Tracks which step of the provider setup input flow is currently active.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ProviderSetupStep {
+    #[default]
+    Idle,
+    /// User is typing an endpoint URL (covers Ollama, Open WebUI, generic endpoints).
+    Endpoint,
+    /// User is typing an API key / token. Holds the URL captured in a prior `Endpoint` step.
+    ApiKey { pending_url: Option<String> },
+    /// User is typing a provider instance name.
+    Name,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingProviderSetup {
+    pub(crate) original_id: String,
+    pub(crate) id: String,
+    pub(crate) backend_preset: Option<BackendPreset>,
+    pub(crate) api_type: Option<ApiType>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) api_key: Option<String>,
+    pub(crate) editing_existing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingProviderRemoval {
+    pub(crate) id: String,
+}
+
+impl PendingProviderSetup {
+    pub(crate) fn new(id: String) -> Self {
+        Self {
+            original_id: id.clone(),
+            id,
+            backend_preset: None,
+            api_type: None,
+            base_url: None,
+            api_key: None,
+            editing_existing: false,
+        }
+    }
+
+    pub(crate) fn from_instance(instance: &ProviderInstance) -> Self {
+        Self {
+            original_id: instance.id.clone(),
+            id: instance.id.clone(),
+            backend_preset: Some(instance.backend_preset.clone()),
+            api_type: Some(instance.api_type.clone()),
+            base_url: instance.base_url.clone(),
+            api_key: instance.api_key.clone(),
+            editing_existing: true,
+        }
+    }
+}
 
 /// All provider-related state owned by the application.
 pub(crate) struct ProviderManager {
@@ -247,6 +301,75 @@ impl ProviderManager {
             existing_token
         } else {
             Some(token)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupInputKind {
+    Name,
+    BaseUrl,
+    ApiKey,
+}
+
+impl SetupInputKind {
+    pub fn prompt_label(self, instance: Option<&ProviderInstance>) -> String {
+        match self {
+            Self::Name => "provider instance name: ".to_string(),
+            Self::BaseUrl => match instance {
+                Some(p) => p
+                    .backend_preset
+                    .def()
+                    .url_normalization
+                    .as_ref()
+                    .map(|n| n.endpoint_label.to_string())
+                    .unwrap_or_else(|| "URL: ".to_string()),
+                None => "URL: ".to_string(),
+            },
+            Self::ApiKey => match instance {
+                Some(p) => match p.backend_preset.def().auth_mode {
+                    AuthMode::ApiKey => match p.backend_preset {
+                        BackendPreset::OpenRouter => "OpenRouter API key: ".to_string(),
+                        BackendPreset::OpenWebUi => "open-webui token: ".to_string(),
+                        _ if p.base_url.is_some() => {
+                            "API key (leave empty to keep current): ".to_string()
+                        }
+                        _ => "API key: ".to_string(),
+                    },
+                    _ => "token: ".to_string(),
+                },
+                None => "API key: ".to_string(),
+            },
+        }
+    }
+
+    pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
+        match self {
+            Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
+            Self::BaseUrl => match instance {
+                Some(p) => p
+                    .backend_preset
+                    .def()
+                    .url_normalization
+                    .as_ref()
+                    .map(|n| n.endpoint_hint.to_string())
+                    .unwrap_or_else(|| {
+                        "https://example.com   Enter confirm   Esc cancel".to_string()
+                    }),
+                None => "https://example.com   Enter confirm   Esc cancel".to_string(),
+            },
+            Self::ApiKey => match instance {
+                Some(p) if p.api_key.is_some() => "Enter keep current   Esc cancel".to_string(),
+                Some(p) => match p.backend_preset {
+                    BackendPreset::OpenRouter => "sk-or-…   Enter confirm   Esc cancel".to_string(),
+                    BackendPreset::OpenWebUi => "sk-…   Enter confirm   Esc cancel".to_string(),
+                    BackendPreset::OpenAiCompatible | BackendPreset::OpenAi => {
+                        "sk-…   Enter confirm   Esc cancel".to_string()
+                    }
+                    _ => "token   Enter confirm   Esc cancel".to_string(),
+                },
+                None => "token   Enter confirm   Esc cancel".to_string(),
+            },
         }
     }
 }

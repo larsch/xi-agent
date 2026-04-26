@@ -36,6 +36,7 @@ mod event_log;
 mod export;
 mod live_turn;
 mod llm;
+mod log_view_state;
 mod login_state;
 mod markdown;
 mod process;
@@ -49,6 +50,7 @@ mod session_event;
 mod session_manager;
 mod session_state;
 mod shell;
+mod shell_state;
 mod skills;
 mod thinking;
 mod tool_presentation;
@@ -59,13 +61,14 @@ use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
-use app::{App, InputMode, ProviderSetupStep, SelectionResult, format_provider_error_for_display};
+use app::{App, InputMode, SelectionResult, format_provider_error_for_display};
 use app_event::AppEvent;
 use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
 use provider::{ThinkingSupport, build_provider_for_instance, thinking_support_for_instance};
 use provider_instance::{AuthMode, EndpointBehavior, ProviderInstance};
+use provider_manager::{PendingProviderSetup, ProviderSetupStep};
 use thinking::ThinkingLevel;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -312,7 +315,7 @@ async fn main() -> io::Result<()> {
                     let requires_api_key = provider_setup_requires_api_key(&inst);
                     if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
                         app.provider.pending_setup =
-                            Some(app::PendingProviderSetup::from_instance(&inst));
+                            Some(PendingProviderSetup::from_instance(&inst));
                         app.enter_provider_api_key_input_mode();
                         continue;
                     }
@@ -833,13 +836,13 @@ fn handle_shell_mode_key(
             if let (Some(threshold), Some(t)) = (PASTE_ENTER_THRESHOLD_MS, last_key_at)
                 && t.elapsed().as_millis() < threshold
             {
-                app.shell_textarea.insert_newline();
+                app.shell.textarea.insert_newline();
                 return KeyDispatch::Continue;
             }
             app.submit_shell_command();
         }
         _ => {
-            app.shell_textarea.input(Event::Key(key));
+            app.shell.textarea.input(Event::Key(key));
         }
     }
 
@@ -1339,7 +1342,7 @@ fn apply_paste(app: &mut App, provider: &Arc<dyn LlmProvider + Send + Sync>, tex
         app.exit_selection_mode();
     }
     if app.input_mode == InputMode::Shell {
-        app.shell_textarea.insert_str(normalized);
+        app.shell.textarea.insert_str(normalized);
     } else {
         app.textarea.insert_str(normalized);
         app.update_completions();

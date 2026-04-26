@@ -1,4 +1,3 @@
-use ratatui::text::Line;
 use ratatui_textarea::{CursorMove, TextArea};
 use std::sync::Arc;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -15,10 +14,10 @@ use crate::{
     llm::{
         AssistantPhase, DisplayRange, LlmProvider, Message, ProviderErrorKind, Role, UsageStats,
     },
-    provider_instance::{ApiType, AuthMode, BackendPreset, ProviderInstance},
+    provider_instance::{ApiType, BackendPreset, ProviderInstance},
     session::SessionStore,
     session_state::SessionState,
-    shell::{self, ShellKind},
+    shell,
     skills::SkillMeta,
     thinking::ThinkingLevel,
 };
@@ -27,11 +26,15 @@ use crate::agent_runtime::AgentRuntime;
 use crate::ask_user_state::{AskUserState, PendingAsk};
 use crate::completion_state::CompletionState;
 use crate::export;
+use crate::log_view_state::LogViewState;
 use crate::login_state::{LoginActionKind, LoginState};
-use crate::provider_manager::ProviderManager;
+use crate::provider_manager::{
+    PendingProviderRemoval, PendingProviderSetup, ProviderManager, ProviderSetupStep,
+};
 use crate::selection_state::{MAX_SELECTION_VISIBLE, SelectionKind, SelectionState};
 use crate::session_event::SessionEvent;
 use crate::session_manager::SessionManager;
+use crate::shell_state::ShellState;
 
 // ── Streaming status ──────────────────────────────────────────────────────────
 
@@ -73,130 +76,6 @@ pub enum SelectionResult {
     ProviderApiType(ApiType),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupInputKind {
-    Name,
-    BaseUrl,
-    ApiKey,
-}
-
-impl SetupInputKind {
-    pub fn prompt_label(self, instance: Option<&ProviderInstance>) -> String {
-        match self {
-            Self::Name => "provider instance name: ".to_string(),
-            Self::BaseUrl => match instance {
-                Some(p) => p
-                    .backend_preset
-                    .def()
-                    .url_normalization
-                    .as_ref()
-                    .map(|n| n.endpoint_label.to_string())
-                    .unwrap_or_else(|| "URL: ".to_string()),
-                None => "URL: ".to_string(),
-            },
-            Self::ApiKey => match instance {
-                Some(p) => match p.backend_preset.def().auth_mode {
-                    AuthMode::ApiKey => match p.backend_preset {
-                        BackendPreset::OpenRouter => "OpenRouter API key: ".to_string(),
-                        BackendPreset::OpenWebUi => "open-webui token: ".to_string(),
-                        _ if p.base_url.is_some() => {
-                            "API key (leave empty to keep current): ".to_string()
-                        }
-                        _ => "API key: ".to_string(),
-                    },
-                    _ => "token: ".to_string(),
-                },
-                None => "API key: ".to_string(),
-            },
-        }
-    }
-
-    pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
-        match self {
-            Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
-            Self::BaseUrl => match instance {
-                Some(p) => p
-                    .backend_preset
-                    .def()
-                    .url_normalization
-                    .as_ref()
-                    .map(|n| n.endpoint_hint.to_string())
-                    .unwrap_or_else(|| {
-                        "https://example.com   Enter confirm   Esc cancel".to_string()
-                    }),
-                None => "https://example.com   Enter confirm   Esc cancel".to_string(),
-            },
-            Self::ApiKey => match instance {
-                Some(p) if p.api_key.is_some() => "Enter keep current   Esc cancel".to_string(),
-                Some(p) => match p.backend_preset {
-                    BackendPreset::OpenRouter => "sk-or-…   Enter confirm   Esc cancel".to_string(),
-                    BackendPreset::OpenWebUi => "sk-…   Enter confirm   Esc cancel".to_string(),
-                    BackendPreset::OpenAiCompatible | BackendPreset::OpenAi => {
-                        "sk-…   Enter confirm   Esc cancel".to_string()
-                    }
-                    _ => "token   Enter confirm   Esc cancel".to_string(),
-                },
-                None => "token   Enter confirm   Esc cancel".to_string(),
-            },
-        }
-    }
-}
-
-/// Tracks which step of the provider setup input flow is currently active.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum ProviderSetupStep {
-    #[default]
-    Idle,
-    /// User is typing an endpoint URL (covers Ollama, Open WebUI, generic endpoints).
-    Endpoint,
-    /// User is typing an API key / token. Holds the URL captured in a prior `Endpoint` step.
-    ApiKey { pending_url: Option<String> },
-    /// User is typing a provider instance name.
-    Name,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingProviderSetup {
-    pub(crate) original_id: String,
-    pub(crate) id: String,
-    pub(crate) backend_preset: Option<BackendPreset>,
-    pub(crate) api_type: Option<ApiType>,
-    pub(crate) base_url: Option<String>,
-    pub(crate) api_key: Option<String>,
-    pub(crate) editing_existing: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingProviderRemoval {
-    pub(crate) id: String,
-}
-
-impl PendingProviderSetup {
-    fn new(id: String) -> Self {
-        Self {
-            original_id: id.clone(),
-            id,
-            backend_preset: None,
-            api_type: None,
-            base_url: None,
-            api_key: None,
-            editing_existing: false,
-        }
-    }
-
-    pub(crate) fn from_instance(instance: &ProviderInstance) -> Self {
-        Self {
-            original_id: instance.id.clone(),
-            id: instance.id.clone(),
-            backend_preset: Some(instance.backend_preset.clone()),
-            api_type: Some(instance.api_type.clone()),
-            base_url: instance.base_url.clone(),
-            api_key: instance.api_key.clone(),
-            editing_existing: true,
-        }
-    }
-}
-
 /// Target operation to retry after token refresh completes.
 #[derive(Debug, Clone, Copy)]
 enum RetryTarget {
@@ -215,54 +94,16 @@ pub enum InputMode {
 // ── Login state ───────────────────────────────────────────────────────────────
 // ── Log cache ─────────────────────────────────────────────────────────────────
 
-/// Tracks the monotonic log revision and its pre-wrapped line cache.
-///
-/// Call `invalidate()` whenever log content changes. Call `ensure_cached()` in
-/// the render path to populate or reuse the wrapped-line cache.
-pub struct LogCache {
-    /// Monotonic counter bumped on every log-content change.
-    pub(crate) revision: u64,
-    /// Pre-wrapped lines: `(revision, width, lines)`. Invalidated on bump.
-    pub(crate) cached_lines: Option<(u64, usize, Vec<Line<'static>>)>,
-}
-
-impl LogCache {
-    pub fn new() -> Self {
-        Self {
-            revision: 0,
-            cached_lines: None,
-        }
-    }
-
-    /// Bump the revision counter and drop the cached lines.
-    pub fn invalidate(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
-        self.cached_lines = None;
-    }
-}
-
-impl Default for LogCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct App {
     pub(crate) textarea: TextArea<'static>,
-    pub(crate) shell_textarea: TextArea<'static>,
+    /// Shell mode state (textarea, selected shell, available shells).
+    /// Shell mode state (textarea, selected shell, available shells).
+    pub(crate) shell: ShellState,
     pub(crate) input_mode: InputMode,
-    pub(crate) selected_shell: ShellKind,
-    pub(crate) available_shells: Vec<ShellKind>,
-    /// Tracks log-revision and pre-wrapped line cache; call `log_cache.invalidate()`
-    /// whenever visible log content changes.
-    pub(crate) log_cache: LogCache,
-    pub(crate) log_scroll: usize,
-    /// When true, the view always follows the bottom (auto-scrolls).
-    pub(crate) auto_scroll: bool,
-    /// Height of the log pane from the last draw — used as page-size scrolling.
-    pub(crate) last_log_height: usize,
+    /// Log pane scroll and cache state.
+    pub(crate) log_view: LogViewState,
     /// Current streaming state; `None` when no turn is active.
     pub(crate) streaming_status: Option<StreamingStatus>,
     /// Throbber animation frame index, advanced on every UI tick while streaming.
@@ -383,11 +224,11 @@ fn active_provider_display_name(
 
 impl App {
     fn bump_log_revision(&mut self) {
-        self.log_cache.invalidate();
+        self.log_view.invalidate();
     }
 
     pub fn mark_log_dirty(&mut self) {
-        self.log_cache.invalidate();
+        self.log_view.invalidate();
     }
 
     pub fn new(
@@ -397,18 +238,11 @@ impl App {
         agent_config: AgentLoopConfig,
     ) -> Self {
         let initial_model = initial_model.into();
-        let available_shells = shell::discover_available_shells();
-        let selected_shell = available_shells.first().copied().unwrap_or(ShellKind::Bash);
         Self {
             textarea: Self::make_textarea(),
-            shell_textarea: Self::make_textarea(),
+            shell: ShellState::new(),
             input_mode: InputMode::Chat,
-            selected_shell,
-            available_shells,
-            log_cache: LogCache::new(),
-            log_scroll: 0,
-            auto_scroll: true,
-            last_log_height: 0,
+            log_view: LogViewState::new(),
             streaming_status: None,
             throbber_tick: 0,
             last_output_at: None,
@@ -617,8 +451,8 @@ impl App {
                 self.session.session_state = Some(SessionState::from_event_log(log));
                 self.session.live_turn.clear_all();
                 self.session.current_session_id = Some(session_id.to_string());
-                self.auto_scroll = true;
-                self.log_scroll = 0;
+                self.log_view.auto_scroll = true;
+                self.log_view.log_scroll = 0;
                 self.bump_log_revision();
             }
             Err(e) => {
@@ -790,37 +624,26 @@ impl App {
     }
 
     pub fn shell_input_is_empty(&self) -> bool {
-        self.shell_textarea
-            .lines()
-            .iter()
-            .all(|line| line.trim().is_empty())
+        self.shell.input_is_empty()
     }
 
     pub fn enter_shell_mode(&mut self) {
         self.input_mode = InputMode::Shell;
-        self.shell_textarea = Self::make_textarea();
+        self.shell.reset_textarea();
         self.completion.clear();
     }
 
     pub fn exit_shell_mode(&mut self) {
         self.input_mode = InputMode::Chat;
-        self.shell_textarea = Self::make_textarea();
+        self.shell.reset_textarea();
     }
 
     pub fn cycle_shell(&mut self) {
-        if self.available_shells.len() <= 1 {
-            return;
-        }
-        let idx = self
-            .available_shells
-            .iter()
-            .position(|s| *s == self.selected_shell)
-            .unwrap_or(0);
-        self.selected_shell = self.available_shells[(idx + 1) % self.available_shells.len()];
+        self.shell.cycle();
     }
 
     pub fn submit_shell_command(&mut self) {
-        let lines: Vec<String> = self.shell_textarea.lines().to_vec();
+        let lines: Vec<String> = self.shell.textarea.lines().to_vec();
         let command = lines.join("\n").trim().to_string();
         if command.is_empty() || self.streaming() || self.login.active {
             return;
@@ -831,10 +654,10 @@ impl App {
         } else {
             self.session.current_cwd.clone()
         };
-        let prompt = self.selected_shell.prompt_char();
+        let prompt = self.shell.selected.prompt_char();
 
-        let cmd_prefix = if self.available_shells.len() > 1 {
-            format!("[{}] {}{}", self.selected_shell.label(), cwd, prompt)
+        let cmd_prefix = if self.shell.available.len() > 1 {
+            format!("[{}] {}{}", self.shell.selected.label(), cwd, prompt)
         } else {
             format!("{}{}", cwd, prompt)
         };
@@ -851,7 +674,7 @@ impl App {
         call_msg.include_in_llm = false;
         self.session.live_turn.notices.push(call_msg);
 
-        let output = shell::run_shell_command_blocking(self.selected_shell, &cwd, &command);
+        let output = shell::run_shell_command_blocking(self.shell.selected, &cwd, &command);
         let mut body = String::new();
         if !output.stdout.is_empty() {
             body.push_str(&output.stdout);
@@ -876,7 +699,7 @@ impl App {
 
         self.persist_messages();
         self.exit_shell_mode();
-        self.auto_scroll = true;
+        self.log_view.auto_scroll = true;
     }
 
     /// True when the input is a single line beginning with `/`.
@@ -1841,10 +1664,10 @@ impl App {
             login,
             session,
             selection,
-            log_cache,
+            log_view,
             ..
         } = self;
-        login.apply_login_event(ev, session, selection, log_cache);
+        login.apply_login_event(ev, session, selection, &mut log_view.log_cache);
     }
 
     // ── Conversation management ───────────────────────────────────────────────
@@ -1940,7 +1763,7 @@ impl App {
         self.streaming_status = None;
         self.latest_usage = None;
         self.reset_textarea();
-        self.auto_scroll = true;
+        self.log_view.auto_scroll = true;
         self.bump_log_revision();
         self.refresh_resume_availability();
     }
@@ -2007,7 +1830,7 @@ impl App {
         self.streaming_status = Some(StreamingStatus::Waiting);
         self.login.auth_retry_budget = 1;
         self.latest_usage = None;
-        self.auto_scroll = true;
+        self.log_view.auto_scroll = true;
         self.start_agent_task(provider);
     }
 
@@ -2028,7 +1851,7 @@ impl App {
             self.runtime.queued_steering.push(trimmed);
             self.bump_log_revision();
             self.reset_textarea();
-            self.auto_scroll = true;
+            self.log_view.auto_scroll = true;
         }
     }
 
@@ -2051,7 +1874,7 @@ impl App {
 
         self.streaming_status = Some(StreamingStatus::Waiting);
         self.login.auth_retry_budget = 1;
-        self.auto_scroll = true;
+        self.log_view.auto_scroll = true;
         self.start_agent_task(provider);
     }
 
@@ -2204,21 +2027,19 @@ impl App {
     // ── Scrolling ─────────────────────────────────────────────────────────────
 
     pub fn scroll_up(&mut self) {
-        self.scroll_up_lines(self.last_log_height.max(1));
+        self.log_view.scroll_up();
     }
 
     pub fn scroll_up_lines(&mut self, n: usize) {
-        self.auto_scroll = false;
-        self.log_scroll = self.log_scroll.saturating_sub(n);
+        self.log_view.scroll_up_lines(n);
     }
 
     pub fn scroll_down_lines(&mut self, n: usize) {
-        self.log_scroll = self.log_scroll.saturating_add(n);
+        self.log_view.scroll_down_lines(n);
     }
 
     pub fn scroll_down(&mut self) {
-        self.auto_scroll = false;
-        self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
+        self.log_view.scroll_down();
     }
 
     // ── Agent event handling ──────────────────────────────────────────────────
@@ -2398,7 +2219,7 @@ impl App {
             output_tokens: None,
             total_tokens: Some(tokens_after),
         });
-        self.auto_scroll = true;
+        self.log_view.auto_scroll = true;
         self.bump_log_revision();
         self.persist_messages();
     }
@@ -2610,6 +2431,7 @@ mod tests {
         },
         llm::{Message, ProviderError, Role},
         provider_instance::{ApiType, BackendPreset, ProviderInstance},
+        provider_manager::SetupInputKind,
         thinking::ThinkingLevel,
     };
 
@@ -2647,47 +2469,44 @@ mod tests {
     #[test]
     fn setup_input_kind_uses_service_specific_prompts() {
         assert_eq!(
-            super::SetupInputKind::Name.prompt_label(None),
+            SetupInputKind::Name.prompt_label(None),
             "provider instance name: "
         );
 
         let mut open_webui = ProviderInstance::new("work-webui", BackendPreset::OpenWebUi);
         open_webui.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
-            super::SetupInputKind::BaseUrl.prompt_label(Some(&open_webui)),
+            SetupInputKind::BaseUrl.prompt_label(Some(&open_webui)),
             "open-webui URL: "
         );
         assert_eq!(
-            super::SetupInputKind::ApiKey.prompt_label(Some(&open_webui)),
+            SetupInputKind::ApiKey.prompt_label(Some(&open_webui)),
             "open-webui token: "
         );
 
         let mut openrouter = ProviderInstance::new("router", BackendPreset::OpenRouter);
         openrouter.api_type = ApiType::OpenAiCompatible;
         assert_eq!(
-            super::SetupInputKind::BaseUrl.prompt_label(Some(&openrouter)),
+            SetupInputKind::BaseUrl.prompt_label(Some(&openrouter)),
             "URL: "
         );
         assert_eq!(
-            super::SetupInputKind::ApiKey.prompt_label(Some(&openrouter)),
+            SetupInputKind::ApiKey.prompt_label(Some(&openrouter)),
             "OpenRouter API key: "
         );
 
         let mut ollama = ProviderInstance::new("gpu-box", BackendPreset::Ollama);
         ollama.api_type = ApiType::OllamaChatApi;
         assert_eq!(
-            super::SetupInputKind::BaseUrl.prompt_label(Some(&ollama)),
+            SetupInputKind::BaseUrl.prompt_label(Some(&ollama)),
             "ollama URL: "
         );
 
         let mut compat = ProviderInstance::new("test", BackendPreset::OpenAiCompatible);
         compat.api_type = ApiType::OpenAiCompatible;
+        assert_eq!(SetupInputKind::BaseUrl.prompt_label(Some(&compat)), "URL: ");
         assert_eq!(
-            super::SetupInputKind::BaseUrl.prompt_label(Some(&compat)),
-            "URL: "
-        );
-        assert_eq!(
-            super::SetupInputKind::ApiKey.prompt_label(Some(&compat)),
+            SetupInputKind::ApiKey.prompt_label(Some(&compat)),
             "API key: "
         );
     }
@@ -3903,7 +3722,7 @@ mod tests {
         app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
             crate::event_log::EventLog::load(&path).expect("load event log"),
         ));
-        app.shell_textarea.insert_str("printf 'hello'");
+        app.shell.textarea.insert_str("printf 'hello'");
 
         app.submit_shell_command();
 

@@ -44,13 +44,13 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 }
 
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
-    if !matches!(&app.log_cache.cached_lines, Some((rev, w, _)) if *rev == app.log_cache.revision && *w == width)
+    if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, _)) if *rev == app.log_view.log_cache.revision && *w == width)
     {
         let combined = app.display_messages_combined();
         let lines = build_log_lines(&combined, app.streaming(), width);
-        app.log_cache.cached_lines = Some((app.log_cache.revision, width, lines));
+        app.log_view.log_cache.cached_lines = Some((app.log_view.log_cache.revision, width, lines));
     }
-    &app.log_cache.cached_lines.as_ref().unwrap().2
+    &app.log_view.log_cache.cached_lines.as_ref().unwrap().2
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -61,7 +61,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let resume_hint_visible = app.should_show_resume_hint();
 
     let active_lines = if app.input_mode == InputMode::Shell {
-        app.shell_textarea.lines()
+        app.shell.textarea.lines()
     } else {
         app.textarea.lines()
     };
@@ -122,22 +122,22 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let inner_height = log_area.height as usize;
     let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
     let log_width = log_content_area.width as usize;
-    app.last_log_height = inner_height;
+    app.log_view.last_log_height = inner_height;
 
     let total_lines = build_log_lines_cached(app, log_width).len();
     let max_scroll = total_lines.saturating_sub(inner_height);
 
-    if app.auto_scroll {
-        app.log_scroll = max_scroll;
+    if app.log_view.auto_scroll {
+        app.log_view.log_scroll = max_scroll;
     } else {
-        app.log_scroll = app.log_scroll.min(max_scroll);
-        if app.log_scroll >= max_scroll {
-            app.auto_scroll = true;
+        app.log_view.log_scroll = app.log_view.log_scroll.min(max_scroll);
+        if app.log_view.log_scroll >= max_scroll {
+            app.log_view.auto_scroll = true;
         }
     }
 
-    let has_scrollbar = total_lines > inner_height && !app.auto_scroll;
-    let log_scroll = app.log_scroll;
+    let has_scrollbar = total_lines > inner_height && !app.log_view.auto_scroll;
+    let log_scroll = app.log_view.log_scroll;
     let visible_lines: Vec<Line<'static>> = {
         let all = build_log_lines_cached(app, log_width);
         if total_lines <= inner_height {
@@ -159,7 +159,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(log_paragraph, log_content_area);
 
     if has_scrollbar && let Some(scrollbar_area) = log_scrollbar_area {
-        let mut scrollbar_state = ScrollbarState::new(max_scroll + 1).position(app.log_scroll);
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll + 1).position(app.log_view.log_scroll);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             scrollbar_area,
@@ -1220,8 +1221,8 @@ mod tests {
             Message::user("four"),
         ]);
         // Scrolled up: scrollbar should be visible, reserving the rightmost column.
-        app.auto_scroll = false;
-        app.log_scroll = 0;
+        app.log_view.auto_scroll = false;
+        app.log_view.log_scroll = 0;
 
         terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
 
@@ -1247,20 +1248,20 @@ mod tests {
             Message::user("four"),
         ]);
         // Default: auto_scroll = true (pinned to bottom).
-        assert!(app.auto_scroll);
+        assert!(app.log_view.auto_scroll);
 
         terminal.draw(|f| draw(f, &mut app)).expect("draw succeeds");
 
         // auto_scroll should still be true — content fits, no scrollbar needed.
         assert!(
-            app.auto_scroll,
+            app.log_view.auto_scroll,
             "auto_scroll should remain true when content fits"
         );
 
         // Verify no scrollbar glyph in the last column of the log rows.
         let buf = terminal.backend().buffer().clone();
         let width = buf.area.width;
-        let log_height = app.last_log_height;
+        let log_height = app.log_view.last_log_height;
         let scrollbar_col_has_glyph = (0..log_height as u16).any(|row| {
             let cell = buf.cell((width - 1, row)).unwrap();
             !cell.symbol().trim().is_empty()

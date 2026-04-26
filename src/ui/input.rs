@@ -7,7 +7,8 @@ use ratatui::{
 use ratatui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, InputMode, ProviderSetupStep, SetupInputKind};
+use crate::app::{App, InputMode};
+use crate::provider_manager::{ProviderSetupStep, SetupInputKind};
 
 /// Background colour of the input panel.
 pub(super) const INPUT_BG: Color = Color::Rgb(30, 30, 40);
@@ -33,7 +34,7 @@ pub(super) fn style_textarea(app: &mut App) {
     };
 
     let active: &mut TextArea<'static> = if app.input_mode == InputMode::Shell {
-        &mut app.shell_textarea
+        &mut app.shell.textarea
     } else {
         &mut app.textarea
     };
@@ -266,21 +267,21 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
         } else {
             app.session.current_cwd.clone()
         };
-        let prefix = if app.available_shells.len() > 1 {
+        let prefix = if app.shell.available.len() > 1 {
             format!(
                 "[{}] {}{} ",
-                app.selected_shell.label(),
+                app.shell.selected.label(),
                 cwd,
-                app.selected_shell.prompt_char()
+                app.shell.selected.prompt_char()
             )
         } else {
-            format!("{}{} ", cwd, app.selected_shell.prompt_char())
+            format!("{}{} ", cwd, app.shell.selected.prompt_char())
         };
         (
-            app.shell_textarea.lines().to_vec(),
-            app.shell_textarea.cursor(),
+            app.shell.textarea.lines().to_vec(),
+            app.shell.textarea.cursor(),
             prefix,
-            (app.available_shells.len() > 1).then_some("Ctrl+S switch".to_string()),
+            (app.shell.available.len() > 1).then_some("Ctrl+S switch".to_string()),
         )
     } else if app.provider.setup_step != ProviderSetupStep::Idle {
         let instance = app.pending_provider_instance();

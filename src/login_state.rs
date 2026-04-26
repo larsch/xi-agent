@@ -4,11 +4,11 @@ use std::sync::{
 };
 
 use crate::{
-    app::LogCache,
     app_event::AppEventTx,
     auth::{self, AuthFlow, LoginEvent},
     completion::CompletionItem,
     llm::Message,
+    log_view_state::LogCache,
     selection_state::{SelectionKind, SelectionState},
     session_manager::SessionManager,
 };
