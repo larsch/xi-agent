@@ -20,93 +20,6 @@ const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_REFERER: &str = "https://github.com/larsch/tau";
 const OPENROUTER_TITLE: &str = "tau";
 
-/// All supported back-end providers, in display order.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderKind {
-    Copilot,
-    OpenAi,
-    OpenRouter,
-    Codex,
-    Gemini,
-    Ollama,
-    OpenWebUi,
-    /// Hidden test provider — exercises the UI without a real API connection.
-    /// Never appears in the provider selection menu.
-    Test,
-}
-
-#[allow(dead_code)]
-impl ProviderKind {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Copilot => "copilot",
-            Self::OpenAi => "openai",
-            Self::OpenRouter => "openrouter",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::Ollama => "ollama",
-            Self::OpenWebUi => "open-webui",
-            Self::Test => "test",
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Copilot => "GitHub Copilot",
-            Self::OpenAi => "OpenAI API",
-            Self::OpenRouter => "OpenRouter",
-            Self::Codex => "OpenAI Codex (chatgpt.com)",
-            Self::Gemini => "Google Gemini CLI (Cloud Code Assist)",
-            Self::Ollama => "Ollama (local)",
-            Self::OpenWebUi => "Open WebUI",
-            Self::Test => "Test (UI exercise)",
-        }
-    }
-
-    pub fn all() -> &'static [ProviderKind] {
-        &[
-            Self::Copilot,
-            Self::OpenAi,
-            Self::OpenRouter,
-            Self::Codex,
-            Self::Gemini,
-            Self::Ollama,
-            Self::OpenWebUi,
-            // Test is intentionally omitted — it is hidden from the menu.
-        ]
-    }
-
-    pub fn from_name(s: &str) -> Option<Self> {
-        match s {
-            "copilot" | "github-copilot" => Some(Self::Copilot),
-            "openai" => Some(Self::OpenAi),
-            "openrouter" => Some(Self::OpenRouter),
-            "codex" => Some(Self::Codex),
-            "gemini" | "google-gemini" => Some(Self::Gemini),
-            "ollama" => Some(Self::Ollama),
-            "open-webui" | "openwebui" => Some(Self::OpenWebUi),
-            "test" => Some(Self::Test),
-            _ => None,
-        }
-    }
-
-    /// Sensible default model for this provider.
-    #[allow(dead_code)]
-    pub fn default_model(&self) -> &'static str {
-        match self {
-            Self::Copilot => "gpt-4o",
-            Self::OpenAi => "gpt-4o",
-            Self::OpenRouter => "openai/gpt-4o",
-            Self::Codex => "gpt-5.4",
-            Self::Gemini => "gemini-2.5-pro",
-            Self::Ollama => "llama3.1",
-            Self::OpenWebUi => "llama3.1",
-            Self::Test => "test",
-        }
-    }
-}
-
 /// Return the context-window size (in tokens) for a known model name.
 ///
 /// Checks the Copilot model metadata cache first (populated by
@@ -207,7 +120,6 @@ pub fn scaled_token_budget(context_window: usize, floor: usize, scale: usize) ->
     (value as usize).min(cap).max(1)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopilotApiRoute {
     OpenAiChatCompletions,
@@ -227,7 +139,6 @@ pub enum ThinkingSupport {
 /// primary signal.  Falls back to model-name heuristics on cold start (before
 /// `list_models()` has populated the cache) and for the OpenAI
 /// Chat-Completions vs. Responses split (not exposed in the API).
-#[allow(dead_code)]
 fn classify_copilot_route(model: &str) -> CopilotApiRoute {
     // Primary: vendor from the API metadata cache.
     if let Some(vendor) = CopilotProvider::cached_vendor(model)
@@ -245,33 +156,6 @@ fn classify_copilot_route(model: &str) -> CopilotApiRoute {
         CopilotApiRoute::OpenAiResponses
     } else {
         CopilotApiRoute::OpenAiChatCompletions
-    }
-}
-
-#[allow(dead_code)]
-pub fn thinking_support_for(kind: &ProviderKind, model: &str) -> ThinkingSupport {
-    match kind {
-        ProviderKind::Copilot => match classify_copilot_route(model) {
-            CopilotApiRoute::OpenAiResponses => ThinkingSupport::Applied,
-            CopilotApiRoute::AnthropicMessages => {
-                ThinkingSupport::Ignored("copilot anthropic route has no thinking mapping yet")
-            }
-            CopilotApiRoute::OpenAiChatCompletions => ThinkingSupport::Ignored(
-                "copilot chat-completions route does not expose reasoning.effort",
-            ),
-        },
-        ProviderKind::Codex => ThinkingSupport::Applied,
-        ProviderKind::Gemini => ThinkingSupport::Applied,
-        ProviderKind::OpenAi | ProviderKind::OpenRouter => {
-            ThinkingSupport::Ignored("openai chat-completions provider does not map thinking yet")
-        }
-        ProviderKind::Ollama => {
-            ThinkingSupport::Ignored("ollama provider does not support mapped thinking levels")
-        }
-        ProviderKind::OpenWebUi => {
-            ThinkingSupport::Ignored("open-webui provider does not support mapped thinking levels")
-        }
-        ProviderKind::Test => ThinkingSupport::Ignored("test provider does not support thinking"),
     }
 }
 
@@ -460,10 +344,9 @@ pub fn build_provider_for_instance(
 mod tests {
     use super::{
         CopilotApiRoute, ThinkingSupport, classify_copilot_route, context_window_for_model,
-        scaled_token_budget, thinking_support_for, thinking_support_for_instance,
+        scaled_token_budget, thinking_support_for_instance,
     };
     use crate::llm::copilot::test_helpers;
-    use crate::provider::ProviderKind;
     use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
     use crate::thinking::{GeminiThinkingLevel, ThinkingLevel};
 
@@ -488,30 +371,6 @@ mod tests {
         assert_eq!(
             classify_copilot_route("gpt-4o"),
             CopilotApiRoute::OpenAiChatCompletions
-        );
-    }
-
-    #[test]
-    fn thinking_support_applies_for_copilot_responses() {
-        assert_eq!(
-            thinking_support_for(&ProviderKind::Copilot, "gpt-5.3-codex"),
-            ThinkingSupport::Applied
-        );
-    }
-
-    #[test]
-    fn thinking_support_ignored_for_copilot_chat() {
-        assert!(matches!(
-            thinking_support_for(&ProviderKind::Copilot, "gpt-4o"),
-            ThinkingSupport::Ignored(_)
-        ));
-    }
-
-    #[test]
-    fn thinking_support_applies_for_gemini() {
-        assert_eq!(
-            thinking_support_for(&ProviderKind::Gemini, "gemini-2.5-pro"),
-            ThinkingSupport::Applied
         );
     }
 
@@ -558,16 +417,6 @@ mod tests {
             thinking_support_for_instance(&instance, "claude-sonnet-4.5"),
             ThinkingSupport::Ignored(_)
         ));
-    }
-
-    #[test]
-    fn openrouter_provider_kind_defaults_and_lookup_work() {
-        assert_eq!(
-            ProviderKind::from_name("openrouter"),
-            Some(ProviderKind::OpenRouter)
-        );
-        assert_eq!(ProviderKind::OpenRouter.label(), "OpenRouter");
-        assert_eq!(ProviderKind::OpenRouter.default_model(), "openai/gpt-4o");
     }
 
     // ── Cache-driven routing ─────────────────────────────────────────────────

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -40,17 +38,6 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             extra_headers,
             client: build_http_client(),
-        }
-    }
-
-    /// Clone this provider, replacing only the model name.
-    pub fn with_model(&self, model: impl Into<String>) -> Self {
-        Self {
-            base_url: self.base_url.clone(),
-            model: model.into(),
-            api_key: self.api_key.clone(),
-            extra_headers: self.extra_headers.clone(),
-            client: self.client.clone(),
         }
     }
 
@@ -232,7 +219,6 @@ struct ChatChunk {
 #[derive(Deserialize)]
 struct ChunkChoice {
     delta: Delta,
-    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

@@ -1,6 +1,4 @@
-// Items in this module form the public provider-instance API; not all are
-// used at every call site yet, and that is expected.
-#![allow(dead_code)]
+// Items in this module form the public provider-instance API.
 
 /// API protocol/transport types that tau knows how to speak.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -81,6 +79,8 @@ pub enum AuthMode {
 pub enum EndpointBehavior {
     Predetermined,
     UserSupplied,
+    /// Predetermined default but overrideable by the user.
+    #[allow(dead_code)]
     Overrideable,
     Internal,
 }
@@ -141,6 +141,7 @@ pub struct BackendPresetDef {
     /// `false` means tau picks internally (e.g. Copilot).
     pub user_selects_api: bool,
     /// Whether multiple instances of this service make sense.
+    #[allow(dead_code)]
     pub multi_instance: bool,
     /// Whether the endpoint is predetermined, user-supplied, or overrideable.
     pub endpoint_behavior: EndpointBehavior,
