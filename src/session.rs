@@ -333,6 +333,7 @@ fn session_id_from_path(path: &Path) -> Option<String> {
 /// wrote.  Canonicalising both paths resolves the true on-disk identity before
 /// comparing.  Falls back to a plain equality check if canonicalisation fails
 /// (e.g. if either path does not yet exist).
+#[allow(dead_code)]
 fn paths_are_same(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(ca), Ok(cb)) => ca == cb,

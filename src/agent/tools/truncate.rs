@@ -6,7 +6,7 @@
 ///
 /// `truncate_tail` keeps the *last* N lines — suited for bash output where
 /// errors and final results appear at the end.
-/// `truncate_head` keeps the *first* N lines — suited for file reads.
+/// `truncate_head_with_limits` keeps the *first* N lines — suited for file reads.
 pub const DEFAULT_MAX_LINES: usize = 2000;
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024; // 50 KiB
 
@@ -136,12 +136,6 @@ pub fn truncate_tail_with_limits(
 
 /// Keep the **first** `max_lines` / `max_bytes` of `content`.
 /// Returns complete lines only.
-#[allow(dead_code)]
-pub fn truncate_head(content: &str) -> TruncationResult {
-    truncate_head_with_limits(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
-}
-
-#[allow(dead_code)]
 pub fn truncate_head_with_limits(
     content: &str,
     max_lines: usize,
@@ -239,14 +233,6 @@ mod tests {
         assert!(r.truncated);
         assert!(r.content.contains("line5"));
         assert!(!r.content.contains("line1"));
-    }
-
-    #[test]
-    fn head_no_truncation_when_small() {
-        let r = truncate_head("a\nb\nc");
-        assert!(!r.truncated);
-        assert_eq!(r.content, "a\nb\nc");
-        assert_eq!(r.first_kept_line, 1);
     }
 
     #[test]

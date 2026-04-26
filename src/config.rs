@@ -54,7 +54,6 @@ impl TauConfig {
     }
 
     /// Remove a provider instance by id. Returns `true` if it was present.
-    #[allow(dead_code)]
     pub fn remove_provider(&mut self, id: &str) -> bool {
         let before = self.providers.len();
         self.providers.retain(|p| p.id != id);

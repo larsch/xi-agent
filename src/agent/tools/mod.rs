@@ -220,6 +220,7 @@ pub fn register_builtin_tools(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::{parse_args, translate_serde_message};
     use serde::Deserialize;
@@ -232,7 +233,6 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
-    #[allow(dead_code)]
     struct Multi {
         name: String,
         count: u64,
@@ -324,7 +324,6 @@ mod tests {
     #[test]
     fn parse_args_wrong_type_array_got_string() {
         #[derive(Debug, Deserialize)]
-        #[allow(dead_code)]
         struct WithVec {
             tags: Vec<String>,
         }
@@ -340,7 +339,6 @@ mod tests {
     #[test]
     fn parse_args_wrong_type_object_got_array() {
         #[derive(Debug, Deserialize)]
-        #[allow(dead_code)]
         struct WithMap {
             meta: std::collections::HashMap<String, String>,
         }

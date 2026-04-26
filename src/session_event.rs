@@ -192,7 +192,6 @@ impl SessionEvent {
 }
 
 /// What triggered a compaction.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionTrigger {
