@@ -49,61 +49,6 @@ impl SessionStore {
         Ok(session_id)
     }
 
-    #[allow(dead_code)]
-    pub fn save_messages(
-        &mut self,
-        session_id: &str,
-        cwd: &str,
-        messages: &[Message],
-    ) -> anyhow::Result<()> {
-        let target = self.session_file_path(cwd, session_id);
-        self.write_session_messages(&target, messages)?;
-
-        if let Some(existing_path) = self.find_session_file_by_id(session_id)?
-            && !paths_are_same(&existing_path, &target)
-        {
-            fs::remove_file(&existing_path).with_context(|| {
-                format!(
-                    "Failed to remove stale duplicate session file: {}",
-                    existing_path.display()
-                )
-            })?;
-        }
-
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn load_messages(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
-        let Some(path) = self.find_session_file_by_id(session_id)? else {
-            return Ok(vec![]);
-        };
-
-        let file = fs::File::open(&path)
-            .with_context(|| format!("Failed to open session file: {}", path.display()))?;
-        let reader = std::io::BufReader::new(file);
-
-        let mut out = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Message>(line) {
-                Ok(msg) => out.push(msg),
-                Err(e) => {
-                    log::debug!(
-                        "skipping invalid session message line in {}: {}",
-                        path.display(),
-                        e
-                    );
-                }
-            }
-        }
-        Ok(out)
-    }
-
     pub fn list_sessions(&self) -> Vec<SessionMeta> {
         let mut by_id: HashMap<String, SessionMeta> = HashMap::new();
 
@@ -201,10 +146,10 @@ impl SessionStore {
     ///
     /// If a file already exists for `session_id` (located by scanning the
     /// sessions directory), that path is returned so that the event log reuses
-    /// the same file as the legacy session.  For sessions that have no file
-    /// yet, a path under an `_unknown_cwd` bucket is returned as a fallback;
-    /// it will be superseded by the first `save_messages` call that associates
-    /// the session with a real cwd.
+    /// the same file.  For sessions that have no file yet, a path under an
+    /// `_unknown_cwd` bucket is returned as a fallback; it will be superseded
+    /// once the session is associated with a real cwd on the next
+    /// `create_session` call.
     pub(crate) fn resolve_event_log_path(&self, session_id: &str) -> anyhow::Result<PathBuf> {
         if let Some(existing) = self.find_session_file_by_id(session_id)? {
             return Ok(existing);
@@ -324,23 +269,6 @@ fn session_id_from_path(path: &Path) -> Option<String> {
     path.file_stem()?.to_str().map(ToOwned::to_owned)
 }
 
-/// Return true when `a` and `b` refer to the same file-system entry.
-///
-/// On case-insensitive file systems (e.g. Windows NTFS) two `PathBuf`s that
-/// differ only in case (`D%3A%5Ctoday` vs `d%3A%5Ctoday`) point to the same
-/// file.  A plain `==` comparison on the raw path strings would incorrectly
-/// treat them as different, causing `save_messages` to delete the file it just
-/// wrote.  Canonicalising both paths resolves the true on-disk identity before
-/// comparing.  Falls back to a plain equality check if canonicalisation fails
-/// (e.g. if either path does not yet exist).
-#[allow(dead_code)]
-fn paths_are_same(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a == b,
-    }
-}
-
 fn is_session_jsonl_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
@@ -424,79 +352,27 @@ mod tests {
     #[test]
     fn latest_for_cwd_only_looks_at_matching_directory() {
         let tmp = tempdir().expect("tempdir");
-        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+        let store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
 
         let cwd_a = "/a";
         let cwd_b = "/b";
 
-        store
-            .save_messages("20260328T120000-aaaaaaaa", cwd_a, &[Message::user("hello")])
-            .expect("save a1");
-        store
-            .save_messages("20260328T120100-bbbbbbbb", cwd_b, &[Message::user("hi")])
-            .expect("save b1");
-        store
-            .save_messages("20260328T120200-cccccccc", cwd_a, &[Message::user("newer")])
-            .expect("save a2");
+        // Seed three sessions by creating them and writing a minimal event log
+        // line so they register as non-empty (message_count > 0).
+        let minimal_event = "{\"type\":\"user_message\",\"content\":\"hi\",\"timestamp\":1}\n";
+        for (id, cwd) in [
+            ("20260328T120000-aaaaaaaa", cwd_a),
+            ("20260328T120100-bbbbbbbb", cwd_b),
+            ("20260328T120200-cccccccc", cwd_a),
+        ] {
+            let path = store.session_file_path(cwd, id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, minimal_event).unwrap();
+        }
 
         let latest = store.latest_for_cwd(cwd_a).expect("latest for cwd a");
         assert_eq!(latest.id, "20260328T120200-cccccccc");
         assert_eq!(latest.cwd, cwd_a);
-    }
-
-    /// Regression test: saving a session whose cwd encodes to a directory name
-    /// that differs only in case from the on-disk directory must not delete the
-    /// file immediately after writing it.
-    ///
-    /// On Windows, NTFS is case-insensitive but the `PathBuf` string comparison
-    /// used by the old code was case-sensitive.  A session first saved with
-    /// `D:\today` created dir `D%3A%5Ctoday`; a subsequent save with `d:\today`
-    /// computed target path `d%3A%5Ctoday\<id>.jsonl`, wrote the file (NTFS
-    /// silently mapped it to the existing dir), then `find_session_file_by_id`
-    /// returned the on-disk path with the original casing (`D%3A%5Ctoday\…`),
-    /// which differed from the computed target string → the file was deleted.
-    #[cfg(windows)]
-    #[test]
-    fn save_messages_does_not_delete_file_on_cwd_case_mismatch() {
-        let tmp = tempdir().expect("tempdir");
-        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
-
-        let id = "20260328T120000-casetest";
-
-        // First save with uppercase drive letter — creates D%3A%5Ctoday dir.
-        store
-            .save_messages(id, "D:\\today", &[Message::user("first")])
-            .expect("first save");
-
-        // Second save with lowercase drive letter — must NOT delete the file.
-        store
-            .save_messages(id, "d:\\today", &[Message::user("first")])
-            .expect("second save");
-
-        // File must still exist and be loadable.
-        let loaded = store.load_messages(id).expect("load after second save");
-        assert_eq!(loaded.len(), 1, "session file was deleted after save");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn latest_for_cwd_matches_case_and_separator_variants_on_windows() {
-        let tmp = tempdir().expect("tempdir");
-        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
-
-        store
-            .save_messages(
-                "20260328T120000-aaaaaaaa",
-                "D:\\today",
-                &[Message::user("hello")],
-            )
-            .expect("save");
-
-        let latest = store
-            .latest_for_cwd("d:/today/")
-            .expect("latest for normalized cwd");
-        assert_eq!(latest.id, "20260328T120000-aaaaaaaa");
-        assert_eq!(latest.cwd, "D:\\today");
     }
 
     #[test]

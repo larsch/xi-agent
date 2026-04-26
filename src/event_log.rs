@@ -139,16 +139,6 @@ impl crate::session::SessionStore {
         let path = self.resolve_event_log_path(session_id)?;
         EventLog::load(path)
     }
-
-    /// Append a batch of events to the event log for `session_id`.
-    ///
-    /// Creates the file if it does not exist.
-    #[allow(dead_code)]
-    pub fn append_events(&self, session_id: &str, batch: &[SessionEvent]) -> anyhow::Result<()> {
-        let path = self.resolve_event_log_path(session_id)?;
-        let mut log = EventLog::load(&path)?;
-        log.append_batch(batch)
-    }
 }
 
 #[cfg(test)]
