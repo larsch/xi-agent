@@ -373,3 +373,75 @@ impl SetupInputKind {
         }
     }
 }
+
+/// Format a provider error into a user-friendly English sentence.
+pub(crate) fn format_provider_error_for_display(
+    provider_label: &str,
+    err: &crate::llm::ProviderError,
+) -> String {
+    use crate::llm::ProviderErrorKind;
+
+    let subject = if provider_label.trim().is_empty() {
+        "The provider"
+    } else {
+        provider_label
+    };
+
+    let summary = match (err.kind, err.status_code) {
+        (ProviderErrorKind::Unauthorized, Some(code)) => {
+            format!("{subject} rejected the request because authentication expired ({code}).")
+        }
+        (ProviderErrorKind::Unauthorized, None) => {
+            format!("{subject} rejected the request because authentication expired.")
+        }
+        (ProviderErrorKind::Forbidden, Some(code)) => {
+            format!("{subject} rejected the request because access was denied ({code}).")
+        }
+        (ProviderErrorKind::Forbidden, None) => {
+            format!("{subject} rejected the request because access was denied.")
+        }
+        (ProviderErrorKind::RateLimited, Some(code)) => {
+            format!("{subject} is rate limiting requests ({code}).")
+        }
+        (ProviderErrorKind::RateLimited, None) => {
+            format!("{subject} is rate limiting requests.")
+        }
+        (ProviderErrorKind::ServerError, Some(524)) => {
+            format!("{subject} timed out on the backend (524).")
+        }
+        (ProviderErrorKind::ServerError, Some(code)) => {
+            format!("{subject} reported a backend error ({code}).")
+        }
+        (ProviderErrorKind::ServerError, None) => {
+            format!("{subject} reported a backend error.")
+        }
+        (ProviderErrorKind::Network, _) => {
+            format!("Could not reach {subject}.")
+        }
+        (ProviderErrorKind::Other, Some(code)) => {
+            format!("{subject} could not process the request ({code}).")
+        }
+        (ProviderErrorKind::Other, None) => {
+            format!("{subject} could not process the request.")
+        }
+    };
+
+    let message = err.message.trim();
+    if message.is_empty() {
+        summary
+    } else {
+        format!("{summary}\nProvider message: {message}")
+    }
+}
+
+/// Return the display label for the currently active provider.
+pub(crate) fn active_provider_display_name(
+    current_provider: &str,
+    provider_instances: &[ProviderInstance],
+) -> String {
+    provider_instances
+        .iter()
+        .find(|instance| instance.id == current_provider)
+        .map(|instance| instance.backend_preset.label().to_string())
+        .unwrap_or_else(|| current_provider.to_string())
+}

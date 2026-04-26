@@ -23,7 +23,10 @@ use std::{
 mod agent;
 mod agent_runtime;
 mod app;
+mod app_agent_handlers;
 mod app_event;
+mod app_interaction;
+mod app_submission;
 mod ask_user_state;
 mod auth;
 mod commands;
@@ -61,13 +64,14 @@ use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
-use app::{App, InputMode, SelectionResult, format_provider_error_for_display};
+use app::{App, InputMode, SelectionResult};
 use app_event::AppEvent;
 use commands::CommandAction;
 use config::TauConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
 use provider::{ThinkingSupport, build_provider_for_instance, thinking_support_for_instance};
 use provider_instance::{AuthMode, EndpointBehavior, ProviderInstance};
+use provider_manager::format_provider_error_for_display;
 use provider_manager::{PendingProviderSetup, ProviderSetupStep};
 use thinking::ThinkingLevel;
 
@@ -1833,10 +1837,10 @@ mod tests {
         resolve_model_for_instance, resolve_provider_instance, resolve_thinking_level_for_model,
     };
     use crate::{
-        app::format_provider_error_for_display,
         config::TauConfig,
         llm::ProviderError,
         provider_instance::{BackendPreset, ProviderInstance},
+        provider_manager::format_provider_error_for_display,
         thinking::ThinkingLevel,
     };
 
