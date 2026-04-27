@@ -149,24 +149,22 @@ struct ShowResponse {
 //
 // Parses an Ollama NDJSON chunk and emits the corresponding LlmEvents.
 // Returns `true` when the stream is finished (done=true or error).
-fn parse_ndjson_line(
-    line: &str,
-    events: &mut Vec<LlmEvent>,
-    emitted_tool_intent: &mut bool,
-) -> bool {
+fn parse_ndjson_line(line: &str, events: &mut Vec<LlmEvent>) -> bool {
     if line.is_empty() {
         return false;
     }
     match serde_json::from_str::<ChatChunk>(line) {
         Ok(chunk) => {
             if !chunk.message.tool_calls.is_empty() {
-                if !*emitted_tool_intent {
-                    *emitted_tool_intent = true;
-                    events.push(LlmEvent::ToolIntentStart);
-                }
                 for (i, tc) in chunk.message.tool_calls.iter().enumerate() {
+                    let id = format!("call_{i}");
+                    // Ollama delivers complete tool calls — emit Start + Call together.
+                    events.push(LlmEvent::ToolCallStart {
+                        id: id.clone(),
+                        name: tc.function.name.clone(),
+                    });
                     events.push(LlmEvent::ToolCall {
-                        id: format!("call_{i}"),
+                        id,
                         name: tc.function.name.clone(),
                         args: coerce_arguments(tc.function.arguments.clone()),
                     });
@@ -178,11 +176,7 @@ fn parse_ndjson_line(
                 if !chunk.message.content.is_empty() {
                     events.push(LlmEvent::Token {
                         text: chunk.message.content.clone(),
-                        phase: if *emitted_tool_intent {
-                            AssistantPhase::Provisional
-                        } else {
-                            AssistantPhase::Unknown
-                        },
+                        phase: AssistantPhase::Unknown,
                     });
                 }
             }
@@ -242,10 +236,8 @@ impl LlmProvider for OllamaProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut emitted_tool_intent = false;
-
             let mut stream = stream_ndjson_lines("Ollama", response, move |line, events| {
-                if parse_ndjson_line(line, events, &mut emitted_tool_intent) {
+                if parse_ndjson_line(line, events) {
                     StreamControl::Done
                 } else {
                     StreamControl::Continue
@@ -304,10 +296,8 @@ impl LlmProvider for OllamaProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut emitted_tool_intent = false;
-
             let mut stream = stream_ndjson_lines("Ollama", response, move |line, events| {
-                if parse_ndjson_line(line, events, &mut emitted_tool_intent) {
+                if parse_ndjson_line(line, events) {
                     StreamControl::Done
                 } else {
                     StreamControl::Continue

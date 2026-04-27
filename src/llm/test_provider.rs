@@ -247,7 +247,10 @@ fn ask_user_stream(
         .into();
 
     Box::pin(stream! {
-        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "ask_user".to_string(),
+        };
         yield LlmEvent::ToolCall {
             id: "test-1".to_string(),
             name: "ask_user".to_string(),
@@ -268,7 +271,10 @@ fn write_file_stream() -> LlmStream {
         .to_string_lossy()
         .into_owned();
     Box::pin(stream! {
-        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "write_file".to_string(),
+        };
         yield LlmEvent::ToolCall {
             id: "test-1".to_string(),
             name: "write_file".to_string(),
@@ -284,7 +290,10 @@ fn write_file_stream() -> LlmStream {
 /// Build a tool call stream for a shell tool (bash / powershell / cmd).
 fn shell_tool_stream(tool_name: String, command: String) -> LlmStream {
     Box::pin(stream! {
-        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: tool_name.clone(),
+        };
         yield LlmEvent::ToolCall {
             id: "test-1".to_string(),
             name: tool_name,
@@ -314,7 +323,10 @@ fn exec_tool_stream(invocation: String) -> LlmStream {
     let program = tokens[0].clone();
     let args: Vec<String> = tokens[1..].to_vec();
     Box::pin(stream! {
-        yield LlmEvent::ToolIntentStart;
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "exec".to_string(),
+        };
         yield LlmEvent::ToolCall {
             id: "test-1".to_string(),
             name: "exec".to_string(),

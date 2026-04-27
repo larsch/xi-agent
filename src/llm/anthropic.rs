@@ -192,7 +192,6 @@ impl AnthropicProvider {
 
             // Track streaming tool_use blocks: content index → accumulated state.
             let mut tool_blocks: HashMap<u64, ToolBlock> = HashMap::new();
-            let mut emitted_tool_intent = false;
             // Input token count from the message_start event; combined with
             // output tokens from message_delta/message_stop before emitting Usage.
             let mut input_tokens_from_start: Option<usize> = None;
@@ -220,10 +219,10 @@ impl AnthropicProvider {
 
                     AnthropicEvent::ContentBlockStart { index, content_block } => {
                         if let ContentBlock::ToolUse { id, name } = content_block {
-                            if !emitted_tool_intent {
-                                emitted_tool_intent = true;
-                                events.push(LlmEvent::ToolIntentStart);
-                            }
+                            events.push(LlmEvent::ToolCallStart {
+                                id: id.clone(),
+                                name: name.clone(),
+                            });
                             tool_blocks.insert(
                                 index,
                                 ToolBlock { id, name, partial_json: String::new() },
@@ -236,7 +235,7 @@ impl AnthropicProvider {
                             ContentDelta::TextDelta { text } if !text.is_empty() => {
                                 events.push(LlmEvent::Token {
                                     text,
-                                    phase: if emitted_tool_intent {
+                                    phase: if !tool_blocks.is_empty() {
                                         AssistantPhase::Provisional
                                     } else {
                                         AssistantPhase::Unknown
@@ -249,6 +248,10 @@ impl AnthropicProvider {
                             ContentDelta::InputJsonDelta { partial_json } => {
                                 if let Some(block) = tool_blocks.get_mut(&index) {
                                     block.partial_json.push_str(&partial_json);
+                                    events.push(LlmEvent::ToolCallArgsDelta {
+                                        id: block.id.clone(),
+                                        partial_json: partial_json.clone(),
+                                    });
                                 }
                             }
                             _ => {}

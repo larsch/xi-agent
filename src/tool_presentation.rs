@@ -3,6 +3,87 @@ use serde_json::Value;
 const MAX_MULTILINE_SHELL_COMMAND_LINES: usize = 5;
 const MAX_ONE_LINE_CHARS: usize = 120;
 
+/// Whether a tool uses head-truncation (show end while streaming, snap to
+/// beginning when done) or tail-truncation (always show the trailing window).
+fn uses_head_truncation(name: &str) -> bool {
+    matches!(name, "bash" | "cmd" | "powershell" | "exec" | "ask_user")
+}
+
+/// Extract the display string for a partial JSON argument object.
+///
+/// Uses `jawohl::complete_json` to complete the partial JSON into a valid
+/// document, parses it with `serde_json`, then extracts the target field.
+/// Returns `None` if the field is not yet present or the JSON can't be
+/// completed/parsed.
+pub fn extract_partial_field(partial_json: &str, field: &str) -> Option<String> {
+    let completed = jawohl::complete_json(partial_json).ok()?;
+    let value: Value = serde_json::from_str(&completed).ok()?;
+    value.get(field)?.as_str().map(|s| s.to_string())
+}
+
+/// Build a display label for a tool call whose arguments are still streaming.
+///
+/// `partial_json` is the accumulated raw argument JSON so far.
+/// `streaming_field` is the field name to extract for display (from
+/// `ToolDefinition::streaming_field`). If `None`, falls back to the
+/// completed-args display.
+pub fn tool_invocation_label_partial(
+    name: &str,
+    partial_json: &str,
+    streaming_field: Option<&str>,
+) -> String {
+    let emoji = tool_emoji(name);
+
+    let Some(field) = streaming_field else {
+        return format!("{emoji} {name}");
+    };
+
+    let text = match extract_partial_field(partial_json, field) {
+        Some(t) => t,
+        None => return format!("{emoji} {name}"),
+    };
+
+    if text.is_empty() {
+        return format!("{emoji} {name}");
+    }
+
+    let detail = if uses_head_truncation(name) {
+        // Head-truncation: show the trailing N lines (newest content).
+        head_truncate(&text)
+    } else {
+        // Tail-truncation: show the trailing N lines.
+        tail_truncate(&text)
+    };
+
+    if detail.is_empty() {
+        format!("{emoji} {name}")
+    } else {
+        format!("{emoji} {detail}")
+    }
+}
+
+/// Truncate to the last N lines, prepending "…" if truncated.
+fn head_truncate(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_MULTILINE_SHELL_COMMAND_LINES {
+        return text.trim_end_matches('\n').to_string();
+    }
+    let start = lines.len() - MAX_MULTILINE_SHELL_COMMAND_LINES;
+    let mut result = String::from("…\n");
+    result.push_str(&lines[start..].join("\n"));
+    result
+}
+
+/// Truncate to the last N lines with no leading marker.
+fn tail_truncate(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_MULTILINE_SHELL_COMMAND_LINES {
+        return text.trim_end_matches('\n').to_string();
+    }
+    let start = lines.len() - MAX_MULTILINE_SHELL_COMMAND_LINES;
+    lines[start..].join("\n")
+}
+
 /// Return the display emoji for a tool name.
 pub fn tool_emoji(name: &str) -> &'static str {
     match name {

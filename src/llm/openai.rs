@@ -90,7 +90,6 @@ impl OpenAiProvider {
 
             // Accumulate partial tool-call deltas keyed by index.
             let mut tool_calls: std::collections::HashMap<u32, PartialToolCall> = std::collections::HashMap::new();
-            let mut emitted_tool_intent = false;
 
             let mut stream = stream_sse_lines("OpenAI", response, move |line, events| {
                 if line == "[DONE]" {
@@ -136,7 +135,7 @@ impl OpenAiProvider {
                         && !content.is_empty() {
                             events.push(LlmEvent::Token {
                                 text: content,
-                                phase: if emitted_tool_intent {
+                                phase: if !tool_calls.is_empty() {
                                     AssistantPhase::Provisional
                                 } else {
                                     AssistantPhase::Unknown
@@ -144,10 +143,6 @@ impl OpenAiProvider {
                             });
                         }
 
-                    if !delta.tool_calls.is_empty() && !emitted_tool_intent {
-                        emitted_tool_intent = true;
-                        events.push(LlmEvent::ToolIntentStart);
-                    }
                     for tc_delta in delta.tool_calls {
                         let entry = tool_calls
                             .entry(tc_delta.index)
@@ -158,8 +153,26 @@ impl OpenAiProvider {
                         if let Some(name) = tc_delta.function.name {
                             entry.name.push_str(&name);
                         }
-                        if let Some(args) = tc_delta.function.arguments {
+                        // Emit ToolCallStart once we have both id and name.
+                        if !entry.started
+                            && entry.id.is_some()
+                            && !entry.name.is_empty()
+                        {
+                            entry.started = true;
+                            events.push(LlmEvent::ToolCallStart {
+                                id: entry.id.clone().unwrap(),
+                                name: entry.name.clone(),
+                            });
+                        }
+                        if let Some(args) = tc_delta.function.arguments
+                            && !args.is_empty()
+                        {
+                            let id = entry.id.clone().unwrap_or_default();
                             entry.arguments.push_str(&args);
+                            events.push(LlmEvent::ToolCallArgsDelta {
+                                id,
+                                partial_json: args,
+                            });
                         }
                     }
                 }
@@ -254,6 +267,8 @@ struct PartialToolCall {
     id: Option<String>,
     name: String,
     arguments: String,
+    /// Whether we have already emitted `ToolCallStart` for this call.
+    started: bool,
 }
 
 // ── Model list response ───────────────────────────────────────────────────────

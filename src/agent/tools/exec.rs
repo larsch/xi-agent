@@ -78,6 +78,10 @@ impl Tool for ExecTool {
         true
     }
 
+    fn streaming_field(&self) -> Option<String> {
+        Some("args".to_string())
+    }
+
     fn execute(
         &self,
         args: Value,

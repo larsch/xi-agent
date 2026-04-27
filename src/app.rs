@@ -1530,6 +1530,8 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "powershell".to_string(),
                     args: serde_json::json!({"command": "git diff"}),
+                    partial_args: String::new(),
+                    streaming_field: None,
                     result: None,
                 });
 
@@ -1577,6 +1579,8 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "ask_user".to_string(),
                     args: serde_json::json!({"question": "Continue?"}),
+                    partial_args: String::new(),
+                    streaming_field: None,
                     result: None,
                 });
 

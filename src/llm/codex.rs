@@ -234,7 +234,6 @@ impl CodexProvider {
             // Track pending function calls keyed by item id.
             let mut pending_calls: HashMap<String, PendingCall> = HashMap::new();
             let mut current_call_item_id: Option<String> = None;
-            let mut emitted_tool_intent = false;
 
             let mut stream = stream_sse_lines("Codex", response, move |data, events| {
                 if data == "[DONE]" {
@@ -254,7 +253,7 @@ impl CodexProvider {
                     CodexEvent::OutputTextDelta { delta } if !delta.is_empty() => {
                         events.push(LlmEvent::Token {
                             text: delta,
-                            phase: if emitted_tool_intent {
+                            phase: if !pending_calls.is_empty() {
                                 AssistantPhase::Provisional
                             } else {
                                 AssistantPhase::Unknown
@@ -267,13 +266,13 @@ impl CodexProvider {
                     }
 
                     CodexEvent::OutputItemAdded {
-                        item: OutputItem::FunctionCall { id, .. },
+                        item: OutputItem::FunctionCall { id, call_id, name, .. },
                     } => {
-                        if !emitted_tool_intent {
-                            emitted_tool_intent = true;
-                            events.push(LlmEvent::ToolIntentStart);
-                        }
-                        pending_calls.insert(id.clone(), PendingCall { arguments: String::new() });
+                        events.push(LlmEvent::ToolCallStart {
+                            id: call_id.clone(),
+                            name: name.clone(),
+                        });
+                        pending_calls.insert(id.clone(), PendingCall { call_id, arguments: String::new() });
                         current_call_item_id = Some(id);
                     }
 
@@ -287,6 +286,10 @@ impl CodexProvider {
                             && let Some(call) = pending_calls.get_mut(&k)
                         {
                             call.arguments.push_str(&delta);
+                            events.push(LlmEvent::ToolCallArgsDelta {
+                                id: call.call_id.clone(),
+                                partial_json: delta,
+                            });
                         }
                     }
 
@@ -404,6 +407,7 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
 // ── Pending call accumulator ──────────────────────────────────────────────────
 
 struct PendingCall {
+    call_id: String,
     arguments: String,
 }
 

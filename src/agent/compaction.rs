@@ -441,7 +441,8 @@ async fn collect_summary(
             LlmEvent::Token { text, .. } => summary.push_str(&text),
             LlmEvent::ThinkingToken(_) => {}
             LlmEvent::Usage(_) => {}
-            LlmEvent::ToolIntentStart => {}
+            LlmEvent::ToolCallStart { .. } => {}
+            LlmEvent::ToolCallArgsDelta { .. } => {}
             LlmEvent::ToolCall { .. } => {}
             LlmEvent::StatusUpdate(_) => {}
             LlmEvent::Done => break,

@@ -75,6 +75,7 @@ impl UsageStats {
 /// | `tool_call_id`     | —    | —      | —         | ✓        | ✓          |
 /// | `tool_name`        | —    | —      | —         | ✓        | —          |
 /// | `tool_args`        | —    | —      | —         | ✓        | —          |
+/// | `tool_partial_args`| —    | —      | —         | ✓        | —          |
 /// | `is_error`         | —    | —      | —         | —        | ✓          |
 /// | `display_range`    | —    | —      | —         | —        | ✓          |
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -107,6 +108,14 @@ pub struct Message {
     /// Arguments passed to the tool (JSON object).
     /// Set only for [`Role::ToolCall`]; `None` for all other roles.
     pub tool_args: Option<serde_json::Value>,
+    /// Partial raw JSON string for an in-progress tool call whose args are
+    /// still streaming. Display-only; never sent to the LLM or persisted.
+    #[serde(skip)]
+    pub tool_partial_args: Option<String>,
+    /// The argument field to stream for display (from `ToolDefinition::streaming_field`).
+    /// Display-only; never sent to the LLM or persisted.
+    #[serde(skip)]
+    pub tool_streaming_field: Option<String>,
     // ── Tool-result fields (Role::ToolResult) ─────────────────────────────────
     /// True when the tool returned an error.
     /// Meaningful only for [`Role::ToolResult`]; always `false` for other roles.
@@ -140,6 +149,8 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_args: None,
+            tool_partial_args: None,
+            tool_streaming_field: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -157,6 +168,8 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_args: None,
+            tool_partial_args: None,
+            tool_streaming_field: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -174,6 +187,8 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_args: None,
+            tool_partial_args: None,
+            tool_streaming_field: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -196,6 +211,8 @@ impl Message {
             tool_call_id: Some(id.into()),
             tool_name: Some(name.into()),
             tool_args: Some(args),
+            tool_partial_args: None,
+            tool_streaming_field: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -218,6 +235,8 @@ impl Message {
             tool_call_id: Some(call_id.into()),
             tool_name: None,
             tool_args: None,
+            tool_partial_args: None,
+            tool_streaming_field: None,
             is_error,
             display_range: None,
             image_data: None,
@@ -280,9 +299,11 @@ pub enum LlmEvent {
     Token { text: String, phase: AssistantPhase },
     /// Final/best-effort token usage stats for the turn.
     Usage(UsageStats),
-    /// The provider indicated that an assistant tool call is forthcoming.
-    ToolIntentStart,
-    /// The model requested a tool call.
+    /// The model started a tool call block; name is known, args are still streaming.
+    ToolCallStart { id: String, name: String },
+    /// A partial JSON chunk for an in-progress tool call's arguments.
+    ToolCallArgsDelta { id: String, partial_json: String },
+    /// The model completed a tool call; args are fully parsed.
     ToolCall {
         id: String,
         name: String,
@@ -304,6 +325,9 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON Schema object describing the tool's parameters.
     pub parameters: serde_json::Value,
+    /// The argument field whose value should be streamed live to the display
+    /// as argument deltas arrive. `None` means no partial display.
+    pub streaming_field: Option<String>,
 }
 
 /// A boxed, heap-allocated stream of `LlmEvent`s that is `Send` and `'static`,

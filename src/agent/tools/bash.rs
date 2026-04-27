@@ -47,6 +47,10 @@ impl Tool for BashTool {
         true
     }
 
+    fn streaming_field(&self) -> Option<String> {
+        Some("command".to_string())
+    }
+
     fn execute(
         &self,
         args: Value,

@@ -229,7 +229,10 @@ async fn agent_loop_tool_call_then_text() {
 #[tokio::test]
 async fn agent_loop_forwards_tool_intent_before_tool_start() {
     let provider = MockProvider::new(vec![vec![
-        LlmEvent::ToolIntentStart,
+        LlmEvent::ToolCallStart {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+        },
         LlmEvent::ToolCall {
             id: "call_1".to_string(),
             name: "bash".to_string(),
@@ -242,8 +245,8 @@ async fn agent_loop_forwards_tool_intent_before_tool_start() {
 
     let intent_idx = events
         .iter()
-        .position(|e| matches!(e, AgentEvent::ToolIntentStart))
-        .expect("expected ToolIntentStart");
+        .position(|e| matches!(e, AgentEvent::ToolCallIntent { .. }))
+        .expect("expected ToolCallIntent");
     let tool_start_idx = events
         .iter()
         .position(|e| matches!(e, AgentEvent::ToolCallStart { .. }))
@@ -251,7 +254,7 @@ async fn agent_loop_forwards_tool_intent_before_tool_start() {
 
     assert!(
         intent_idx < tool_start_idx,
-        "expected ToolIntentStart before ToolCallStart"
+        "expected ToolCallIntent before ToolCallStart"
     );
 }
 

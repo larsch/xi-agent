@@ -183,6 +183,12 @@ async fn stream_assistant_turn(
     tx: &UnboundedSender<AppEvent>,
     overflow_retry_remaining: usize,
 ) -> TurnOutcome {
+    // Build a lookup from tool name → streaming_field for intent events.
+    let streaming_fields: std::collections::HashMap<String, Option<String>> = tool_defs
+        .iter()
+        .map(|t| (t.name.clone(), t.streaming_field.clone()))
+        .collect();
+
     let mut stream = provider.stream_chat_with_tools(messages, tool_defs);
 
     let mut assistant_text = String::new();
@@ -214,10 +220,21 @@ async fn stream_assistant_turn(
                 latest_usage = Some(usage);
                 let _ = tx.send(AppEvent::Agent(AgentEvent::Usage(usage)));
             }
-            LlmEvent::ToolIntentStart => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::ToolIntentStart));
+            LlmEvent::ToolCallStart { id, name } => {
+                let streaming_field = streaming_fields.get(&name).and_then(|f| f.clone());
+                let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallIntent {
+                    id,
+                    name,
+                    streaming_field,
+                }));
                 assistant_phase = AssistantPhase::Provisional;
                 tool_intent_seen = true;
+            }
+            LlmEvent::ToolCallArgsDelta { id, partial_json } => {
+                let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallArgsDelta {
+                    id,
+                    partial_json,
+                }));
             }
             LlmEvent::ToolCall { id, name, args } => {
                 pending_tool_calls.push((id, name, args));
@@ -351,6 +368,7 @@ pub async fn run_agent_loop(
             name: t.name().to_string(),
             description: t.description().to_string(),
             parameters: t.parameters_schema(),
+            streaming_field: t.streaming_field(),
         })
         .collect();
 

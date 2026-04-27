@@ -242,6 +242,11 @@ pub trait Tool: Send + Sync {
     fn saves_output(&self) -> bool {
         false
     }
+    /// The argument field whose string value should be streamed live to the
+    /// display as JSON argument deltas arrive. `None` means no partial display.
+    fn streaming_field(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A registry mapping tool names to their implementations.
@@ -396,8 +401,14 @@ pub enum AgentEvent {
     ThinkingToken(String),
     /// Final/best-effort token usage stats for the turn.
     Usage(UsageStats),
-    /// The provider indicated that an assistant tool call is forthcoming.
-    ToolIntentStart,
+    /// The model started a tool call block; name is known, args are still streaming.
+    ToolCallIntent {
+        id: String,
+        name: String,
+        streaming_field: Option<String>,
+    },
+    /// A partial JSON argument chunk for an in-progress tool call.
+    ToolCallArgsDelta { id: String, partial_json: String },
     /// A queued steering message was consumed and inserted into loop history.
     SteeringConsumed { text: String },
     /// A transient status message from the provider (e.g. "Rate limited, retrying in 7s…").

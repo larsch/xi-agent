@@ -55,7 +55,14 @@ impl App {
             AgentEvent::ThinkingToken(token) => self.on_thinking_token(token),
             AgentEvent::Usage(usage) => self.on_usage(usage),
             AgentEvent::TextToken { text, phase } => self.on_text_token(text, phase),
-            AgentEvent::ToolIntentStart => self.on_tool_intent_start(),
+            AgentEvent::ToolCallIntent {
+                id,
+                name,
+                streaming_field,
+            } => self.on_tool_call_intent(id, name, streaming_field),
+            AgentEvent::ToolCallArgsDelta { id, partial_json } => {
+                self.on_tool_call_args_delta(id, partial_json)
+            }
             AgentEvent::SteeringConsumed { text } => self.on_steering_consumed(text),
             AgentEvent::StatusUpdate(msg) => self.on_status_update(msg),
             AgentEvent::Compacting => self.on_compacting(),
@@ -121,8 +128,24 @@ impl App {
         self.bump_log_revision();
     }
 
-    fn on_tool_intent_start(&mut self) {
+    fn on_tool_call_intent(&mut self, id: String, name: String, streaming_field: Option<String>) {
         self.session.live_turn.assistant_phase = AssistantPhase::Provisional;
+        // Create a live entry with no args yet — partial args will stream in.
+        self.session.live_turn.tool_entries.push(LiveToolEntry {
+            id,
+            name,
+            args: serde_json::Value::Object(Default::default()),
+            partial_args: String::new(),
+            streaming_field,
+            result: None,
+        });
+        self.bump_log_revision();
+    }
+
+    fn on_tool_call_args_delta(&mut self, id: String, partial_json: String) {
+        if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            entry.partial_args.push_str(&partial_json);
+        }
         self.bump_log_revision();
     }
 
@@ -203,12 +226,22 @@ impl App {
 
     fn on_tool_call_start(&mut self, id: String, name: String, args: serde_json::Value) {
         self.last_output_at = Some(std::time::Instant::now());
-        self.session.live_turn.tool_entries.push(LiveToolEntry {
-            id: id.clone(),
-            name: name.clone(),
-            args: args.clone(),
-            result: None,
-        });
+        // The live entry was already created by on_tool_call_intent when the
+        // LLM started the tool block. Update it with the complete args.
+        // If for some reason no intent entry exists (e.g. provider that skips
+        // ToolCallIntent), push a new one.
+        if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            entry.args = args.clone();
+        } else {
+            self.session.live_turn.tool_entries.push(LiveToolEntry {
+                id: id.clone(),
+                name: name.clone(),
+                args: args.clone(),
+                partial_args: String::new(),
+                streaming_field: None,
+                result: None,
+            });
+        }
         // ToolCall is buffered; only flushed together with its result.
         self.session
             .pending_turn_events

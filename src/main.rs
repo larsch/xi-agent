@@ -1634,7 +1634,10 @@ async fn run_print_mode_loop(
             AgentEvent::Usage(_) => {
                 // Suppress usage events in print mode.
             }
-            AgentEvent::ToolIntentStart => {
+            AgentEvent::ToolCallIntent { .. } => {
+                // No-op in print mode.
+            }
+            AgentEvent::ToolCallArgsDelta { .. } => {
                 // No-op in print mode.
             }
             AgentEvent::SteeringConsumed { .. } => {
@@ -1785,7 +1788,8 @@ async fn run_print_mode_loop_inner(
             }
             AgentEvent::ThinkingToken(_)
             | AgentEvent::Usage(_)
-            | AgentEvent::ToolIntentStart
+            | AgentEvent::ToolCallIntent { .. }
+            | AgentEvent::ToolCallArgsDelta { .. }
             | AgentEvent::SteeringConsumed { .. }
             | AgentEvent::TurnEnd => {}
             AgentEvent::StatusUpdate(msg) => {

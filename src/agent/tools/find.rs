@@ -51,6 +51,10 @@ impl Tool for FindTool {
         })
     }
 
+    fn streaming_field(&self) -> Option<String> {
+        Some("pattern".to_string())
+    }
+
     fn execute(
         &self,
         args: Value,

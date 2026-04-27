@@ -120,12 +120,21 @@ pub(super) fn build_log_lines(
                             format!("⚙ {prefix} {command}")
                         }
                     } else {
-                        match msg.tool_args.as_ref() {
-                            Some(args) => tool_presentation::tool_invocation_label(name, args),
-                            None => tool_presentation::tool_invocation_label(
+                        // Check for partial streaming args first.
+                        if let Some(partial) = msg.tool_partial_args.as_deref() {
+                            tool_presentation::tool_invocation_label_partial(
                                 name,
-                                &serde_json::Value::Null,
-                            ),
+                                partial,
+                                msg.tool_streaming_field.as_deref(),
+                            )
+                        } else {
+                            match msg.tool_args.as_ref() {
+                                Some(args) => tool_presentation::tool_invocation_label(name, args),
+                                None => tool_presentation::tool_invocation_label(
+                                    name,
+                                    &serde_json::Value::Null,
+                                ),
+                            }
                         }
                     };
 

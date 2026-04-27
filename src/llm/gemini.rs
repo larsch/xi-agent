@@ -383,8 +383,6 @@ impl GeminiProvider {
                 Err(e) => { yield LlmEvent::Error(e); return; }
             };
 
-            let mut emitted_tool_intent = false;
-
             let mut stream = stream_sse_lines("Gemini", response, move |line, events| {
                 let chunk: GeminiStreamChunk = match serde_json::from_str(line) {
                     Ok(v) => v,
@@ -417,10 +415,6 @@ impl GeminiProvider {
                 for part in parts {
                     match part {
                         GeminiPart::FunctionCall { function_call } => {
-                            if !emitted_tool_intent {
-                                emitted_tool_intent = true;
-                                events.push(LlmEvent::ToolIntentStart);
-                            }
                             let id = function_call
                                 .id
                                 .clone()
@@ -435,6 +429,12 @@ impl GeminiProvider {
                                 .args
                                 .clone()
                                 .unwrap_or_else(|| serde_json::json!({}));
+                            // Gemini delivers complete tool calls in one chunk — no deltas.
+                            // Emit ToolCallStart immediately followed by ToolCall.
+                            events.push(LlmEvent::ToolCallStart {
+                                id: id.clone(),
+                                name: function_call.name.clone(),
+                            });
                             events.push(LlmEvent::ToolCall {
                                 id,
                                 name: function_call.name.clone(),
@@ -450,11 +450,7 @@ impl GeminiProvider {
                             } else {
                                 events.push(LlmEvent::Token {
                                     text: text.clone(),
-                                    phase: if emitted_tool_intent {
-                                        AssistantPhase::Provisional
-                                    } else {
-                                        AssistantPhase::Unknown
-                                    },
+                                    phase: AssistantPhase::Unknown,
                                 });
                             }
                         }
@@ -766,6 +762,7 @@ mod tests {
             name: "read_file".to_string(),
             description: "Read".to_string(),
             parameters: serde_json::json!({"type":"object"}),
+            streaming_field: None,
         }];
         let req = build_request(&messages, &tools, "proj-1", "gemini-2.5-pro", None);
         assert_eq!(

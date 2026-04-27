@@ -83,6 +83,10 @@ impl Tool for WriteTool {
         })
     }
 
+    fn streaming_field(&self) -> Option<String> {
+        Some("content".to_string())
+    }
+
     fn execute(
         &self,
         args: Value,

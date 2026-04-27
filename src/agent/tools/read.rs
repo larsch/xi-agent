@@ -121,6 +121,10 @@ impl Tool for ReadFileTool {
         })
     }
 
+    fn streaming_field(&self) -> Option<String> {
+        Some("path".to_string())
+    }
+
     fn execute(
         &self,
         args: Value,

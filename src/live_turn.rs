@@ -35,6 +35,11 @@ pub struct LiveToolEntry {
     pub id: String,
     pub name: String,
     pub args: serde_json::Value,
+    /// Accumulated raw partial JSON string while args are still streaming.
+    /// Empty once args are fully received.
+    pub partial_args: String,
+    /// The argument field to stream for display (from ToolDefinition).
+    pub streaming_field: Option<String>,
     pub result: Option<LiveToolResult>,
 }
 
@@ -123,11 +128,15 @@ impl LiveTurnState {
         }
 
         for entry in &self.tool_entries {
-            msgs.push(Message::tool_call(
-                entry.id.clone(),
-                entry.name.clone(),
-                entry.args.clone(),
-            ));
+            let mut tool_msg =
+                Message::tool_call(entry.id.clone(), entry.name.clone(), entry.args.clone());
+            // If the result is not yet present, args may still be streaming.
+            // Attach partial_args for the UI to render a live preview.
+            if entry.result.is_none() && !entry.partial_args.is_empty() {
+                tool_msg.tool_partial_args = Some(entry.partial_args.clone());
+                tool_msg.tool_streaming_field = entry.streaming_field.clone();
+            }
+            msgs.push(tool_msg);
             if let Some(result) = &entry.result {
                 let mut msg =
                     Message::tool_result(entry.id.clone(), result.content.clone(), result.is_error);
@@ -220,6 +229,8 @@ mod tests {
             id: "c1".to_string(),
             name: "read_file".to_string(),
             args: serde_json::json!({}),
+            partial_args: String::new(),
+            streaming_field: None,
             result: Some(LiveToolResult {
                 content: "content".to_string(),
                 is_error: false,
