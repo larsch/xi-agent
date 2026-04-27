@@ -17,6 +17,30 @@ impl ReadFileTool {
     }
 }
 
+/// Detect the MIME type of a file from its magic bytes.
+///
+/// Reads up to 16 bytes from the start of `data` and returns the MIME type
+/// string for JPEG, PNG, GIF, and WebP images, or `None` for everything else.
+fn detect_image_mime_type(data: &[u8]) -> Option<&'static str> {
+    // JPEG: FF D8 FF
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    // GIF: 47 49 46 38 ("GIF8")
+    if data.starts_with(b"GIF8") {
+        return Some("image/gif");
+    }
+    // WebP: 52 49 46 46 ?? ?? ?? ?? 57 45 42 50 ("RIFF....WEBP")
+    if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
 fn split_lines_preserving_endings(content: &str) -> Vec<&str> {
     if content.is_empty() {
         return Vec::new();
@@ -69,6 +93,8 @@ impl Tool for ReadFileTool {
 
     fn description(&self) -> &str {
         "Read the contents of a file at the given path. \
+         Supports text files and images (JPEG, PNG, GIF, WebP). \
+         For image files the raw image is returned for the model to inspect. \
          Optionally specify `offset` (1-indexed line number to start from) \
          and `limit` (maximum number of lines to return). \
          When the output is truncated a notice `[lines X-Y of Z. Use offset/limit parameters to read more.]` is appended."
@@ -109,9 +135,31 @@ impl Tool for ReadFileTool {
                 Err(e) => return *e,
             };
 
-            let content = match tokio::fs::read_to_string(&path).await {
-                Ok(c) => c,
+            // Read the raw bytes first so we can sniff the magic header.
+            let raw_bytes = match tokio::fs::read(&path).await {
+                Ok(b) => b,
                 Err(e) => return ToolResult::err(format!("Failed to read {path}: {e}")),
+            };
+
+            // Record the file in the tracker regardless of type.
+            self.tracker
+                .lock()
+                .unwrap()
+                .record(std::path::Path::new(&path));
+
+            // Check for an image by magic bytes.
+            if let Some(mime_type) = detect_image_mime_type(&raw_bytes) {
+                return ToolResult::ok_image(raw_bytes, mime_type);
+            }
+
+            // Fall through to text handling.
+            let content = match String::from_utf8(raw_bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    return ToolResult::err(format!(
+                        "Failed to read {path}: file is not valid UTF-8 and is not a recognised image format"
+                    ));
+                }
             };
 
             let all_lines = split_lines_preserving_endings(&content);
@@ -132,10 +180,6 @@ impl Tool for ReadFileTool {
 
             // Empty window (offset beyond EOF) — return early with no metadata.
             if start == end && is_windowed {
-                self.tracker
-                    .lock()
-                    .unwrap()
-                    .record(std::path::Path::new(&path));
                 return ToolResult::ok_str("");
             }
 
@@ -157,12 +201,7 @@ impl Tool for ReadFileTool {
                 end
             };
 
-            // Record the full file snapshot (always the whole file, regardless
-            // of offset/limit, so we can diff correctly later).
-            self.tracker
-                .lock()
-                .unwrap()
-                .record(std::path::Path::new(&path));
+            // (File already recorded above before image detection.)
 
             let mut result_content = tr.content;
             if truncated {
@@ -220,8 +259,8 @@ mod tests {
         let args = serde_json::json!({"path": f.path().to_str().unwrap()});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("line1"));
-        assert!(result.content.contains("line3"));
+        assert!(result.content.as_text().contains("line1"));
+        assert!(result.content.as_text().contains("line3"));
     }
 
     #[tokio::test]
@@ -237,24 +276,26 @@ mod tests {
         assert!(!result.is_error);
         // Should contain lines 2-3 (b, c) but not a or e
         assert!(
-            result.content.contains('b'),
+            result.content.as_text().contains('b'),
             "missing b: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            result.content.contains('c'),
+            result.content.as_text().contains('c'),
             "missing c: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            !result.content.contains("\na\n") && !result.content.starts_with("a"),
+            !result.content.as_text().contains("\na\n")
+                && !result.content.as_text().starts_with("a"),
             "should not contain line a: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            !result.content.contains("\ne\n") && !result.content.ends_with("\ne"),
+            !result.content.as_text().contains("\ne\n")
+                && !result.content.as_text().ends_with("\ne"),
             "should not contain line e: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -265,7 +306,7 @@ mod tests {
         let args = serde_json::json!({"path": f.path().to_str().unwrap()});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert_eq!(result.content, "a\r\nb\r\n");
+        assert_eq!(result.content.as_text(), "a\r\nb\r\n");
     }
 
     #[tokio::test]
@@ -275,7 +316,7 @@ mod tests {
         let args = serde_json::json!({"path": f.path().to_str().unwrap()});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert_eq!(result.content, "a\rb\r");
+        assert_eq!(result.content.as_text(), "a\rb\r");
     }
 
     #[tokio::test]
@@ -291,14 +332,14 @@ mod tests {
         assert!(!result.is_error);
         // Content must start with the raw line body followed by the truncation notice.
         assert!(
-            result.content.starts_with("b\r\n"),
+            result.content.as_text().starts_with("b\r\n"),
             "unexpected content: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            result.content.contains("[lines 2-2 of 3"),
+            result.content.as_text().contains("[lines 2-2 of 3"),
             "missing truncation notice: {}",
-            result.content
+            result.content.as_text()
         );
         // Range information must also be carried in the truncation field.
         let tr = result.truncation.expect("truncation metadata expected");
@@ -318,9 +359,9 @@ mod tests {
         assert!(!result.is_error);
         // No lines selected; content should be empty (no in-band header anymore).
         assert!(
-            result.content.trim().is_empty(),
+            result.content.as_text().trim().is_empty(),
             "unexpected content: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -359,9 +400,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Invalid arguments"),
+            result.content.as_text().contains("Invalid arguments"),
             "expected 'Invalid arguments' in error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -372,6 +413,54 @@ mod tests {
         let args = serde_json::json!({"path": f.path().to_str().unwrap(), "unknown": true});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("hello"));
+        assert!(result.content.as_text().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn read_png_returns_image_content() {
+        // Minimal 1×1 PNG (smallest valid PNG)
+        let png_bytes: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        ];
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        f.write_all(png_bytes).unwrap();
+        let tool = make_tool();
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert!(
+            matches!(result.content, crate::agent::types::ToolContent::Image { ref mime_type, .. } if mime_type == "image/png"),
+            "expected Image(image/png) content, got: {:?}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn read_jpeg_returns_image_content() {
+        // JPEG magic bytes
+        let jpeg_bytes: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        f.write_all(jpeg_bytes).unwrap();
+        let tool = make_tool();
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert!(
+            matches!(result.content, crate::agent::types::ToolContent::Image { ref mime_type, .. } if mime_type == "image/jpeg"),
+            "expected Image(image/jpeg) content"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_text_file_still_works_after_image_detection() {
+        let f = write_temp("hello world\n");
+        let tool = make_tool();
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+        assert!(!result.is_error);
+        assert!(result.content.as_text().contains("hello world"));
     }
 }

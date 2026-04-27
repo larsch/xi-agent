@@ -3,6 +3,19 @@ use std::{future::Future, pin::Pin};
 pub mod error;
 pub use error::{ProviderError, ProviderErrorKind};
 
+/// Binary image payload attached to a [`Message`].
+///
+/// Used when a tool result (e.g. `read_file`) returns an image rather than
+/// text.  The `content` field of the message carries a human-readable
+/// placeholder; providers that support vision encode the image from here.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImageData {
+    /// Base64-encoded image bytes (standard alphabet, no line breaks).
+    pub base64: String,
+    /// MIME type, e.g. `"image/png"`.
+    pub mime_type: String,
+}
+
 /// Line-range metadata for a partially-shown file read result.
 ///
 /// Stored on [`Message`] when the corresponding `read_file` tool call only
@@ -103,6 +116,12 @@ pub struct Message {
     /// call was `read_file` and where only a window of the file was returned.
     #[serde(default)]
     pub display_range: Option<DisplayRange>,
+    /// Binary image content for tool results that return an image
+    /// (e.g. `read_file` on an image path).  The tuple is
+    /// `(raw_bytes, mime_type)`.  `content` carries a text placeholder when
+    /// this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_data: Option<ImageData>,
 }
 
 fn default_true() -> bool {
@@ -123,6 +142,7 @@ impl Message {
             tool_args: None,
             is_error: false,
             display_range: None,
+            image_data: None,
         }
     }
 
@@ -139,6 +159,7 @@ impl Message {
             tool_args: None,
             is_error: false,
             display_range: None,
+            image_data: None,
         }
     }
 
@@ -155,6 +176,7 @@ impl Message {
             tool_args: None,
             is_error: false,
             display_range: None,
+            image_data: None,
         }
     }
 
@@ -176,6 +198,7 @@ impl Message {
             tool_args: Some(args),
             is_error: false,
             display_range: None,
+            image_data: None,
         }
     }
 
@@ -197,12 +220,19 @@ impl Message {
             tool_args: None,
             is_error,
             display_range: None,
+            image_data: None,
         }
     }
 
     /// Builder: attach a [`DisplayRange`] to a tool-result message.
     pub fn with_display_range(mut self, range: DisplayRange) -> Self {
         self.display_range = Some(range);
+        self
+    }
+
+    /// Builder: attach [`ImageData`] to a tool-result message.
+    pub fn with_image_data(mut self, data: ImageData) -> Self {
+        self.image_data = Some(data);
         self
     }
 

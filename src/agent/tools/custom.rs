@@ -384,7 +384,11 @@ printf "got: $input"
             .execute(serde_json::json!({"input": "hello"}))
             .await;
         assert!(!result.is_error);
-        assert!(result.content.contains("got:"), "got: {}", result.content);
+        assert!(
+            result.content.as_text().contains("got:"),
+            "got: {}",
+            result.content.as_text()
+        );
     }
 
     #[tokio::test]
@@ -411,12 +415,12 @@ exit 1
         assert!(
             result.is_error,
             "expected is_error, got: {:?}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            result.content.contains("exit 1"),
+            result.content.as_text().contains("exit 1"),
             "expected 'exit 1' in content, got: {:?}",
-            result.content
+            result.content.as_text()
         );
     }
 

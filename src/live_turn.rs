@@ -44,6 +44,8 @@ pub struct LiveToolResult {
     pub content: String,
     pub is_error: bool,
     pub display_range: Option<DisplayRange>,
+    /// Image data when the tool returned a binary image.
+    pub image_data: Option<crate::llm::ImageData>,
 }
 
 /// Transient state for the currently active (or most recently completed but
@@ -132,6 +134,9 @@ impl LiveTurnState {
                 if let Some(dr) = result.display_range.clone() {
                     msg = msg.with_display_range(dr);
                 }
+                if let Some(img) = result.image_data.clone() {
+                    msg = msg.with_image_data(img);
+                }
                 msgs.push(msg);
             }
         }
@@ -219,6 +224,7 @@ mod tests {
                 content: "content".to_string(),
                 is_error: false,
                 display_range: None,
+                image_data: None,
             }),
         });
         let overlay = live.render_overlay(false);

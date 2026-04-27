@@ -196,9 +196,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("hello"),
+            result.content.as_text().contains("hello"),
             "stdout: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -210,9 +210,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("oops"),
+            result.content.as_text().contains("oops"),
             "stderr: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -223,9 +223,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("exit 42"),
+            result.content.as_text().contains("exit 42"),
             "output: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -235,11 +235,11 @@ mod tests {
         let args = serde_json::json!({"program": "echo", "args": ["ok"]});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("ok"));
+        assert!(result.content.as_text().contains("ok"));
         assert!(
-            !result.content.contains("exit 0"),
+            !result.content.as_text().contains("exit 0"),
             "should omit zero exit: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -258,14 +258,14 @@ mod tests {
         assert!(!result.is_error);
         // The string should be echoed back verbatim.
         assert!(
-            result.content.contains("hello `world` $PATH"),
+            result.content.as_text().contains("hello `world` $PATH"),
             "special chars not preserved: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            result.content.contains("\"quoted\""),
+            result.content.as_text().contains("\"quoted\""),
             "double quotes not preserved: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -282,9 +282,9 @@ mod tests {
         assert!(!result.is_error);
         // 3 positional arguments: "a", "b c", "d"
         assert!(
-            result.content.trim() == "3",
+            result.content.as_text().trim() == "3",
             "expected 3 args, got: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -295,9 +295,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.trim() == "/tmp",
+            result.content.as_text().trim() == "/tmp",
             "cwd not applied: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -312,9 +312,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("tau_test_value"),
+            result.content.as_text().contains("tau_test_value"),
             "env var not set: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -325,9 +325,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Invalid arguments"),
+            result.content.as_text().contains("Invalid arguments"),
             "{}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -338,9 +338,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Failed to spawn"),
+            result.content.as_text().contains("Failed to spawn"),
             "expected spawn error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -372,9 +372,9 @@ mod tests {
         assert!(!result.is_error);
         // One argument containing a newline — argc should be 1
         assert!(
-            result.content.trim() == "1",
+            result.content.as_text().trim() == "1",
             "expected 1 arg, got: {}",
-            result.content
+            result.content.as_text()
         );
     }
 }

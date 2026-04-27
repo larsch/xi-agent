@@ -103,7 +103,7 @@ fn record_tool_call_result(
     session_events.push(SessionEvent::ToolResult {
         id: id.to_string(),
         name: name.to_string(),
-        content: result.content,
+        content: result.content.as_text().to_string(),
         is_error: result.is_error,
         display_range: None,
         timestamp: 0,

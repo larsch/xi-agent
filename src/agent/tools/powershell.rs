@@ -111,11 +111,11 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.to_lowercase().contains("hello"),
+            result.content.as_text().to_lowercase().contains("hello"),
             "stdout not captured: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("stdout:"));
+        assert!(!result.content.as_text().contains("stdout:"));
     }
 
     #[tokio::test]
@@ -125,9 +125,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("exit 42"),
+            result.content.as_text().contains("exit 42"),
             "exit code not in output: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -137,8 +137,8 @@ mod tests {
         let args = serde_json::json!({"command": "Write-Output ok"});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.to_lowercase().contains("ok"));
-        assert!(!result.content.contains("exit 0"));
+        assert!(result.content.as_text().to_lowercase().contains("ok"));
+        assert!(!result.content.as_text().contains("exit 0"));
     }
 
     #[tokio::test]
@@ -149,11 +149,11 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("a b"),
+            result.content.as_text().contains("a b"),
             "double-quoted argument did not round-trip: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("exit 1"));
+        assert!(!result.content.as_text().contains("exit 1"));
     }
 
     #[tokio::test]
@@ -164,9 +164,9 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.to_lowercase().contains("true"),
+            result.content.as_text().to_lowercase().contains("true"),
             "double-quoted path with spaces failed: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -178,9 +178,9 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("\\a b\\"),
+            result.content.as_text().contains("\\a b\\"),
             "expected literal backslashes from \\\" escaping: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -192,11 +192,12 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("ParserError") || result.content.contains("Unexpected token"),
+            result.content.as_text().contains("ParserError")
+                || result.content.as_text().contains("Unexpected token"),
             "expected parser error when command is wrapped in quotes: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(result.content.contains("exit 1"));
+        assert!(result.content.as_text().contains("exit 1"));
     }
 
     #[tokio::test]
@@ -207,11 +208,11 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("a b"),
+            result.content.as_text().contains("a b"),
             "external command did not receive spaced argument: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("exit 1"));
+        assert!(!result.content.as_text().contains("exit 1"));
     }
 
     #[tokio::test]
@@ -222,10 +223,10 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("foo bar"),
+            result.content.as_text().contains("foo bar"),
             "double-quoted argument to external program failed: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("exit 1"));
+        assert!(!result.content.as_text().contains("exit 1"));
     }
 }

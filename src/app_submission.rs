@@ -205,6 +205,7 @@ impl App {
                     content: "Interrupted by user".to_string(),
                     is_error: true,
                     display_range: None,
+                    image_data: None,
                 });
             }
 

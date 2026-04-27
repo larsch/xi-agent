@@ -1769,7 +1769,7 @@ mod tests {
         app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallEnd {
             id: "call_1".to_string(),
             result: crate::agent::types::ToolResult {
-                content: "ok".to_string(),
+                content: crate::agent::types::ToolContent::Text("ok".to_string()),
                 is_error: false,
                 is_truncated: false,
                 truncation: None,

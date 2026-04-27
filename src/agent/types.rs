@@ -8,11 +8,71 @@ use crate::session_event::CompactionTrigger;
 
 // ── Tool result ───────────────────────────────────────────────────────────────
 
+/// The content payload of a tool result — either plain text or a binary image.
+#[derive(Debug, Clone)]
+pub enum ToolContent {
+    /// Plain text output (the common case).
+    Text(String),
+    /// A binary image returned by the tool (e.g. from `read_file` on an image
+    /// path).  `data` is the raw bytes; `mime_type` is a supported image MIME
+    /// type such as `"image/png"`.
+    Image { data: Vec<u8>, mime_type: String },
+}
+
+impl ToolContent {
+    /// Return the text content, or a short placeholder for images.
+    pub fn as_text(&self) -> &str {
+        match self {
+            Self::Text(s) => s.as_str(),
+            Self::Image { .. } => "[image]",
+        }
+    }
+
+    /// Return `true` when this is a `Text` variant.
+    #[allow(dead_code)]
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+
+    /// Convenience: unwrap as a `&str`, panicking if this is an image.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn unwrap_text(&self) -> &str {
+        match self {
+            Self::Text(s) => s.as_str(),
+            Self::Image { .. } => panic!("expected Text, got Image"),
+        }
+    }
+
+    /// Base64-encode the image data.  Returns `None` for text content.
+    pub fn image_base64(&self) -> Option<(&str, String)> {
+        match self {
+            Self::Image { data, mime_type } => {
+                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                Some((mime_type.as_str(), STANDARD.encode(data)))
+            }
+            Self::Text(_) => None,
+        }
+    }
+}
+
+impl From<String> for ToolContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for ToolContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
 /// The output produced by a tool execution.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
-    /// Text content returned to the model (may be truncated).
-    pub content: String,
+    /// Content returned to the model — text or an image.
+    pub content: ToolContent,
     /// True when the tool encountered an error.
     pub is_error: bool,
     /// True when the content was truncated and the full output is longer.
@@ -28,7 +88,7 @@ pub struct ToolResult {
 impl ToolResult {
     pub fn ok(tr: TruncationResult) -> Self {
         Self {
-            content: tr.content,
+            content: ToolContent::Text(tr.content),
             is_error: false,
             is_truncated: false,
             truncation: None,
@@ -39,7 +99,7 @@ impl ToolResult {
 
     pub fn ok_truncated(tr: TruncationResult, raw_stdout: String, raw_stderr: String) -> Self {
         Self {
-            content: tr.content.clone(),
+            content: ToolContent::Text(tr.content.clone()),
             is_error: false,
             is_truncated: true,
             truncation: Some(tr),
@@ -50,7 +110,7 @@ impl ToolResult {
 
     pub fn err(content: impl Into<String>) -> Self {
         Self {
-            content: content.into(),
+            content: ToolContent::Text(content.into()),
             is_error: true,
             is_truncated: false,
             truncation: None,
@@ -62,7 +122,22 @@ impl ToolResult {
     /// Convenience constructor for plain (non-truncated) ok results.
     pub fn ok_str(content: impl Into<String>) -> Self {
         Self {
-            content: content.into(),
+            content: ToolContent::Text(content.into()),
+            is_error: false,
+            is_truncated: false,
+            truncation: None,
+            raw_stdout: None,
+            raw_stderr: None,
+        }
+    }
+
+    /// Convenience constructor for an image result.
+    pub fn ok_image(data: Vec<u8>, mime_type: impl Into<String>) -> Self {
+        Self {
+            content: ToolContent::Image {
+                data,
+                mime_type: mime_type.into(),
+            },
             is_error: false,
             is_truncated: false,
             truncation: None,
@@ -122,12 +197,20 @@ impl ToolResult {
             format!("[Output truncated. Full output{cmd_label} in {files}]")
         };
 
-        let mut content = self.content.clone();
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push('\n');
-        content.push_str(&notice);
+        // Only text content can have a log notice appended.
+        let content = match self.content {
+            ToolContent::Text(ref s) => {
+                let mut c = s.clone();
+                if !c.ends_with('\n') {
+                    c.push('\n');
+                }
+                c.push('\n');
+                c.push_str(&notice);
+                ToolContent::Text(c)
+            }
+            // Image content cannot be appended to; return unchanged.
+            ToolContent::Image { .. } => self.content.clone(),
+        };
 
         Self {
             content,
@@ -405,7 +488,7 @@ mod tests {
 
     fn truncated_result() -> ToolResult {
         ToolResult {
-            content: "line1\nline2".to_string(),
+            content: super::ToolContent::Text("line1\nline2".to_string()),
             is_error: false,
             is_truncated: true,
             truncation: Some(TruncationResult {
@@ -427,7 +510,7 @@ mod tests {
         let r = ToolResult::ok_str("hello");
         let out = r.with_log_notice("call-1", None, &mut log);
         assert!(!out.is_truncated);
-        assert_eq!(out.content, "hello");
+        assert_eq!(out.content.as_text(), "hello");
     }
 
     #[test]
@@ -437,19 +520,19 @@ mod tests {
         let out = r.with_log_notice("call-2", None, &mut log);
         // Notice should be appended after a blank line.
         assert!(
-            out.content.contains("[Showing lines"),
+            out.content.as_text().contains("[Showing lines"),
             "notice should contain line range: {}",
-            out.content
+            out.content.as_text()
         );
         assert!(
-            out.content.contains("99"),
+            out.content.as_text().contains("99"),
             "notice should reference first kept line: {}",
-            out.content
+            out.content.as_text()
         );
         assert!(
-            out.content.contains("100"),
+            out.content.as_text().contains("100"),
             "notice should reference total lines: {}",
-            out.content
+            out.content.as_text()
         );
     }
 
@@ -459,9 +542,9 @@ mod tests {
         let r = truncated_result();
         let out = r.with_log_notice("call-3", Some("ls -la"), &mut log);
         assert!(
-            out.content.contains("of `ls -la`"),
+            out.content.as_text().contains("of `ls -la`"),
             "notice should include command summary: {}",
-            out.content
+            out.content.as_text()
         );
     }
 }

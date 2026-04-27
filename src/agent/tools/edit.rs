@@ -182,7 +182,11 @@ mod tests {
             "new_text": "goodbye"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         let updated = std::fs::read_to_string(&path).unwrap();
         assert_eq!(updated, "goodbye world\n");
     }
@@ -198,7 +202,11 @@ mod tests {
             "new_text": "x\n"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         let updated = std::fs::read_to_string(&path).unwrap();
         assert_eq!(updated, "a\r\nx\r\nc\r\n");
     }
@@ -214,7 +222,11 @@ mod tests {
             "new_text": "hi\n"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes[0..3], [0xEF, 0xBB, 0xBF]);
         let updated = std::fs::read_to_string(&path).unwrap();
@@ -246,9 +258,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error, "expected error for multiple matches");
         assert!(
-            result.content.contains("3 times"),
+            result.content.as_text().contains("3 times"),
             "expected count in error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -264,9 +276,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Invalid arguments"),
+            result.content.as_text().contains("Invalid arguments"),
             "expected 'Invalid arguments' in error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -282,7 +294,11 @@ mod tests {
             "dry_run": true
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world\n");
     }
 }

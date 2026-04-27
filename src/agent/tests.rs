@@ -327,7 +327,7 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
         matches!(
             e,
             AgentEvent::ToolCallEnd { id, result, .. }
-            if id == "call_2" && result.is_error && result.content.contains("Skipped due to queued user message")
+            if id == "call_2" && result.is_error && result.content.as_text().contains("Skipped due to queued user message")
         )
     });
     assert!(skipped_second, "expected second tool call to be skipped");
@@ -392,7 +392,7 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         matches!(
             e,
             AgentEvent::ToolCallEnd { id, result, .. }
-            if id == "call_2" && result.is_error && result.content.contains("Interrupted by user")
+            if id == "call_2" && result.is_error && result.content.as_text().contains("Interrupted by user")
         )
     });
     assert!(

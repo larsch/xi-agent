@@ -138,7 +138,11 @@ mod tests {
             "content": "hello\n"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         assert!(path.exists(), "file was not created");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
     }
@@ -168,7 +172,11 @@ mod tests {
             "content": "deep\n"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         assert!(path.exists(), "file not created in nested dirs");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep\n");
     }
@@ -183,7 +191,11 @@ mod tests {
             "content": "a\r\nb\r\n"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nb\r\n");
     }
 
@@ -197,9 +209,13 @@ mod tests {
             "content": "a\rb\r"
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         assert_eq!(
-            result.content,
+            result.content.as_text(),
             format!("Written 2 lines to {}", path.to_str().unwrap())
         );
     }
@@ -213,9 +229,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Invalid arguments"),
+            result.content.as_text().contains("Invalid arguments"),
             "expected 'Invalid arguments' in error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -227,7 +243,11 @@ mod tests {
         let args =
             serde_json::json!({"path": path.to_str().unwrap(), "content": "hi\n", "mode": "644"});
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi\n");
     }
 }

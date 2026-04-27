@@ -181,14 +181,14 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("hello"),
+            result.content.as_text().contains("hello"),
             "stdout not captured: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            !result.content.contains("stdout:"),
+            !result.content.as_text().contains("stdout:"),
             "stdout heading should be omitted: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -199,14 +199,14 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("oops"),
+            result.content.as_text().contains("oops"),
             "stderr not captured: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            !result.content.contains("stderr:"),
+            !result.content.as_text().contains("stderr:"),
             "stderr heading should be omitted: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -217,9 +217,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("exit 42"),
+            result.content.as_text().contains("exit 42"),
             "exit code not in output: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -229,11 +229,11 @@ mod tests {
         let args = serde_json::json!({"command": "echo ok"});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("ok"));
+        assert!(result.content.as_text().contains("ok"));
         assert!(
-            !result.content.contains("exit 0"),
+            !result.content.as_text().contains("exit 0"),
             "should omit zero exit code: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -260,11 +260,11 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.is_truncated);
         assert!(
-            result.content.contains("3000"),
+            result.content.as_text().contains("3000"),
             "tail should include last line"
         );
         assert!(
-            !result.content.contains("\n1\n"),
+            !result.content.as_text().contains("\n1\n"),
             "tail should not include first line"
         );
     }
@@ -284,9 +284,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Invalid arguments"),
+            result.content.as_text().contains("Invalid arguments"),
             "expected 'Invalid arguments' in error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let args = serde_json::json!({"command": "echo hi", "timeout": 30});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("hi"));
+        assert!(result.content.as_text().contains("hi"));
     }
 
     /// Regression test: a command that backgrounds a process must not cause
@@ -320,9 +320,9 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("done"),
+            result.content.as_text().contains("done"),
             "expected 'done' in output: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
             elapsed.as_secs() < 1,
@@ -339,16 +339,16 @@ mod tests {
         assert!(!result.is_error);
         // Should only show the final state, not intermediate progress lines
         assert!(
-            result.content.contains("[30%]"),
+            result.content.as_text().contains("[30%]"),
             "expected final progress state in output: {}",
-            result.content
+            result.content.as_text()
         );
         // The output should be cleaned, so intermediate states are removed
         // (they would appear as separate lines before the fix)
         assert!(
-            !result.content.contains("[10%]"),
+            !result.content.as_text().contains("[10%]"),
             "should not contain intermediate progress [10%]: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -372,9 +372,9 @@ mod tests {
             .await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("notty"),
+            result.content.as_text().contains("notty"),
             "expected stdout to not be a tty: {}",
-            result.content
+            result.content.as_text()
         );
 
         // /dev/tty should not be openable without a controlling terminal
@@ -383,9 +383,9 @@ mod tests {
             .await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("no_ctty"),
+            result.content.as_text().contains("no_ctty"),
             "expected /dev/tty to be inaccessible: {}",
-            result.content
+            result.content.as_text()
         );
     }
 }

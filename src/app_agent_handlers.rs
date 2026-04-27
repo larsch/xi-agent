@@ -223,9 +223,15 @@ impl App {
         // Update the matching live tool entry with its result.
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.result = Some(LiveToolResult {
-                content: result.content.clone(),
+                content: result.content.as_text().to_string(),
                 is_error: result.is_error,
                 display_range: display_range.clone(),
+                image_data: result.content.image_base64().map(|(mime, b64)| {
+                    crate::llm::ImageData {
+                        base64: b64,
+                        mime_type: mime.to_string(),
+                    }
+                }),
             });
         }
         // Resolve tool name from the matching pending ToolCall.
@@ -247,7 +253,7 @@ impl App {
             .push(SessionEvent::ToolResult {
                 id,
                 name,
-                content: result.content,
+                content: result.content.as_text().to_string(),
                 is_error: result.is_error,
                 display_range,
                 timestamp: Self::now_ts(),

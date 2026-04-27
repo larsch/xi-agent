@@ -110,11 +110,11 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.to_lowercase().contains("hello"),
+            result.content.as_text().to_lowercase().contains("hello"),
             "stdout not captured: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("stdout:"));
+        assert!(!result.content.as_text().contains("stdout:"));
     }
 
     #[tokio::test]
@@ -124,9 +124,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("exit 42"),
+            result.content.as_text().contains("exit 42"),
             "exit code not in output: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -136,8 +136,8 @@ mod tests {
         let args = serde_json::json!({"command": "echo ok"});
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        assert!(result.content.to_lowercase().contains("ok"));
-        assert!(!result.content.contains("exit 0"));
+        assert!(result.content.as_text().to_lowercase().contains("ok"));
+        assert!(!result.content.as_text().contains("exit 0"));
     }
 
     #[tokio::test]
@@ -148,11 +148,11 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("a b"),
+            result.content.as_text().contains("a b"),
             "double-quoted argument did not round-trip: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("exit 1"));
+        assert!(!result.content.as_text().contains("exit 1"));
     }
 
     #[tokio::test]
@@ -163,14 +163,14 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("a b"),
+            result.content.as_text().contains("a b"),
             "expected echoed payload to include a b: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            result.content.contains("\\\""),
+            result.content.as_text().contains("\\\""),
             "expected literal backslash+quote sequence from \\\" escaping: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -182,12 +182,20 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.to_lowercase().contains("cannot find")
-                || result.content.to_lowercase().contains("not recognized"),
+            result
+                .content
+                .as_text()
+                .to_lowercase()
+                .contains("cannot find")
+                || result
+                    .content
+                    .as_text()
+                    .to_lowercase()
+                    .contains("not recognized"),
             "expected wrapped command string to fail: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(result.content.contains("exit 1"));
+        assert!(result.content.as_text().contains("exit 1"));
     }
 
     #[tokio::test]
@@ -200,11 +208,11 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(
-            result.content.contains("a b"),
+            result.content.as_text().contains("a b"),
             "external command did not receive spaced argument: {}",
-            result.content
+            result.content.as_text()
         );
-        assert!(!result.content.contains("exit 1"));
+        assert!(!result.content.as_text().contains("exit 1"));
     }
 
     #[tokio::test]
@@ -216,9 +224,13 @@ mod tests {
         let result = tool.execute(args).await;
 
         assert!(
-            result.content.to_lowercase().contains("program files"),
+            result
+                .content
+                .as_text()
+                .to_lowercase()
+                .contains("program files"),
             "double-quoted Windows path argument did not execute properly: {}",
-            result.content
+            result.content.as_text()
         );
     }
 }

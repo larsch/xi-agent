@@ -13,11 +13,42 @@
 //! - [`to_ollama_wire`]   — Ollama `/api/chat` (OpenAI-like with `thinking` and object `arguments`)
 
 use super::common::normalize_tool_name;
-use super::{Message, Role};
+use super::{ImageData, Message, Role};
 
-// ── OpenAI Chat Completions ───────────────────────────────────────────────────
+// ── Shared helpers ────────────────────────────────────────────────────────────
 
-/// Convert a tau `Message` history to the OpenAI Chat Completions wire format.
+/// Build the `content` value for an OpenAI-style tool result message.
+///
+/// When the message carries image data, the content is a two-element array:
+/// a text block with the placeholder and an `image_url` block using a
+/// `data:` URI.  Otherwise the content is the plain text string.
+fn openai_tool_result_content(tr: &Message) -> serde_json::Value {
+    if let Some(ImageData { base64, mime_type }) = &tr.image_data {
+        serde_json::json!([
+            { "type": "text", "text": &tr.content },
+            { "type": "image_url", "image_url": { "url": format!("data:{mime_type};base64,{base64}") } }
+        ])
+    } else {
+        serde_json::Value::String(tr.content.clone())
+    }
+}
+
+/// Build the `content` array for an Anthropic tool result message.
+///
+/// For image results the content carries both a `text` block (placeholder)
+/// and an `image` block with base64 data.  For text results it is a single
+/// `text` block.
+fn anthropic_tool_result_content(tr: &Message) -> serde_json::Value {
+    if let Some(ImageData { base64, mime_type }) = &tr.image_data {
+        serde_json::json!([
+            { "type": "text", "text": &tr.content },
+            { "type": "image", "source": { "type": "base64", "media_type": mime_type, "data": base64 } }
+        ])
+    } else {
+        serde_json::Value::String(tr.content.clone())
+    }
+}
+
 ///
 /// The OpenAI API requires that tool calls and their accompanying text live in
 /// *one* assistant message, followed by one `"role":"tool"` message per result.
@@ -59,9 +90,10 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
                     if j < messages.len() && messages[j].role == Role::ToolResult {
                         let tr = &messages[j];
+                        let tr_content = openai_tool_result_content(tr);
                         tool_results.push(serde_json::json!({
                             "role": "tool",
-                            "content": tr.content,
+                            "content": tr_content,
                             "tool_call_id": tr.tool_call_id,
                         }));
                         j += 1;
@@ -110,9 +142,10 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
             Role::ToolResult => {
                 let tr = msg;
+                let tr_content = openai_tool_result_content(tr);
                 result.push(serde_json::json!({
                     "role": "tool",
-                    "content": tr.content,
+                    "content": tr_content,
                     "tool_call_id": tr.tool_call_id,
                 }));
                 i += 1;
@@ -192,10 +225,11 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
                     if i < messages.len() && messages[i].role == Role::ToolResult {
                         let tr = &messages[i];
+                        let tr_content = anthropic_tool_result_content(tr);
                         tool_results.push(serde_json::json!({
                             "type": "tool_result",
                             "tool_use_id": tr.tool_call_id.as_deref().unwrap_or("call_0"),
-                            "content": tr.content,
+                            "content": tr_content,
                             "is_error": tr.is_error,
                         }));
                         i += 1;
@@ -235,12 +269,13 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
             Role::ToolResult => {
                 let tr = msg;
+                let tr_content = anthropic_tool_result_content(tr);
                 result.push(serde_json::json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": tr.tool_call_id.as_deref().unwrap_or("call_0"),
-                        "content": tr.content,
+                        "content": tr_content,
                         "is_error": tr.is_error,
                     }],
                 }));
@@ -442,9 +477,10 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
                     if j < messages.len() && messages[j].role == Role::ToolResult {
                         let tr = &messages[j];
+                        let tr_content = openai_tool_result_content(tr);
                         tool_results.push(serde_json::json!({
                             "role": "tool",
-                            "content": tr.content,
+                            "content": tr_content,
                             "tool_call_id": tr.tool_call_id,
                         }));
                         j += 1;
@@ -498,9 +534,10 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
             Role::ToolResult => {
                 let tr = msg;
+                let tr_content = openai_tool_result_content(tr);
                 result.push(serde_json::json!({
                     "role": "tool",
-                    "content": tr.content,
+                    "content": tr_content,
                     "tool_call_id": tr.tool_call_id,
                 }));
                 i += 1;

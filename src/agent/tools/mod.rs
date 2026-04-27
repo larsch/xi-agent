@@ -260,7 +260,11 @@ mod tests {
     // ── parse_args error messages ────────────────────────────────────────────
 
     fn err_content<T: for<'de> Deserialize<'de> + std::fmt::Debug>(v: serde_json::Value) -> String {
-        parse_args::<T>(v).unwrap_err().content
+        parse_args::<T>(v)
+            .unwrap_err()
+            .content
+            .as_text()
+            .to_string()
     }
 
     #[test]

@@ -1662,7 +1662,10 @@ async fn run_print_mode_loop(
             }
             AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
-                    eprintln!("  ✗ {}", result.content.lines().next().unwrap_or("error"));
+                    eprintln!(
+                        "  ✗ {}",
+                        result.content.as_text().lines().next().unwrap_or("error")
+                    );
                 }
             }
             AgentEvent::TurnEnd => {}
@@ -1807,7 +1810,10 @@ async fn run_print_mode_loop_inner(
             }
             AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
-                    eprintln!("  ✗ {}", result.content.lines().next().unwrap_or("error"));
+                    eprintln!(
+                        "  ✗ {}",
+                        result.content.as_text().lines().next().unwrap_or("error")
+                    );
                 }
             }
             AgentEvent::ExternalFileChange { paths, .. } => {

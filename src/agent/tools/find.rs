@@ -172,9 +172,9 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Invalid arguments"),
+            result.content.as_text().contains("Invalid arguments"),
             "expected 'Invalid arguments' in error: {}",
-            result.content
+            result.content.as_text()
         );
     }
 
@@ -189,8 +189,12 @@ mod tests {
             "recursive": true
         });
         let result = tool.execute(args).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content);
-        assert!(result.content.contains("hello.rs"));
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
+        assert!(result.content.as_text().contains("hello.rs"));
     }
 
     #[tokio::test]
@@ -206,14 +210,14 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(!result.is_error);
         assert!(
-            result.content.contains("foo.rs"),
+            result.content.as_text().contains("foo.rs"),
             "expected foo.rs: {}",
-            result.content
+            result.content.as_text()
         );
         assert!(
-            !result.content.contains("bar.txt"),
+            !result.content.as_text().contains("bar.txt"),
             "unexpected bar.txt: {}",
-            result.content
+            result.content.as_text()
         );
     }
 }
