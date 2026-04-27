@@ -131,6 +131,14 @@ impl App {
         if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
             self.runtime.queued_steering.remove(pos);
         }
+        // Flush any buffered assistant turn events first so the assistant
+        // response appears before the steering message in the conversation log.
+        // (The agent sends SteeringConsumed before TurnEnd, so without this the
+        // UserMessage would be committed before the AssistantMessage.)
+        if !self.session.pending_turn_events.is_empty() {
+            self.finalise_assistant_turn_event();
+            self.flush_turn_events();
+        }
         // Steering messages are user messages — append immediately.
         self.append_user_message(text);
         self.bump_log_revision();
