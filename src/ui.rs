@@ -28,7 +28,7 @@ use self::{
         style_textarea,
     },
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
-    log::build_log_lines,
+    log::{ToolBodyConfig, build_log_lines},
     login::{LOGIN_HEADER_BG, build_login_content_lines},
     menu::{build_completion_lines, build_selection_lines},
 };
@@ -47,7 +47,11 @@ fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, _)) if *rev == app.log_view.log_cache.revision && *w == width)
     {
         let combined = app.display_messages_combined();
-        let lines = build_log_lines(&combined, app.streaming(), width);
+        let cfg = ToolBodyConfig {
+            full_output: app.log_view.full_output,
+            ..ToolBodyConfig::default()
+        };
+        let lines = build_log_lines(&combined, app.streaming(), width, &cfg);
         app.log_view.log_cache.cached_lines = Some((app.log_view.log_cache.revision, width, lines));
     }
     &app.log_view.log_cache.cached_lines.as_ref().unwrap().2
@@ -81,7 +85,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
-        has_activity: app.throbber_visible(),
+        has_activity: app.throbber_visible() || app.log_view.full_output,
         has_provider_status: app.provider_status_visible(),
         queued_steering_len: app.queued_steering().len(),
     });
@@ -947,21 +951,35 @@ mod tests {
     fn hidden_user_messages_are_not_rendered() {
         let mut hidden = Message::user("secret");
         hidden.hidden = true;
-        let lines = log::build_log_lines(&[hidden, Message::assistant("shown")], false, 80);
+        let lines = log::build_log_lines(
+            &[hidden, Message::assistant("shown")],
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+        );
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "💬 shown");
     }
 
     #[test]
     fn streaming_empty_assistant_message_is_not_rendered() {
-        let lines = log::build_log_lines(&[Message::assistant("")], true, 80);
+        let lines = log::build_log_lines(
+            &[Message::assistant("")],
+            true,
+            80,
+            &log::ToolBodyConfig::default(),
+        );
         assert!(lines.is_empty());
     }
 
     #[test]
     fn stream_suffix_is_only_on_final_visible_chunk() {
-        let lines =
-            log::build_log_lines(&[Message::assistant("abcdefghijklmnopqrstuvwxyz")], true, 8);
+        let lines = log::build_log_lines(
+            &[Message::assistant("abcdefghijklmnopqrstuvwxyz")],
+            true,
+            8,
+            &log::ToolBodyConfig::default(),
+        );
         let rows_with_cursor: Vec<usize> = lines
             .iter()
             .enumerate()
@@ -974,7 +992,12 @@ mod tests {
 
     #[test]
     fn user_message_renders_block_edges() {
-        let lines = log::build_log_lines(&[Message::user("hi")], false, 10);
+        let lines = log::build_log_lines(
+            &[Message::user("hi")],
+            false,
+            10,
+            &log::ToolBodyConfig::default(),
+        );
         assert_eq!(line_text(&lines[0]), "▄▄▄▄▄▄▄▄▄▄");
         assert_eq!(line_text(&lines[1]), "hi        ");
         assert_eq!(line_text(&lines[2]), "▀▀▀▀▀▀▀▀▀▀");
@@ -993,7 +1016,7 @@ mod tests {
             ),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 120);
+        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
         assert!(line_text(&lines[0]).contains("[10-20/300]"));
     }
 
@@ -1010,22 +1033,27 @@ mod tests {
             ),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 120);
+        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(!rendered.contains("[lines 10-20 of 300]"));
         assert!(rendered.contains("│alpha"));
     }
 
     #[test]
-    fn tool_result_preview_truncates_with_ellipsis_after_limit() {
+    fn tool_result_preview_truncates_with_line_count_marker() {
+        // A bash result with many lines should be tail-truncated with ... (N lines total)
+        let long_output = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let messages = vec![
             Message::tool_call("1", "bash", json!({"command": "echo hi"})),
-            Message::tool_result("1", "a".repeat(250), false),
+            Message::tool_result("1", &long_output, false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 300);
+        let lines = log::build_log_lines(&messages, false, 300, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains('…'));
+        assert!(rendered.contains("20 lines total"), "{rendered}");
     }
 
     #[test]
@@ -1036,7 +1064,7 @@ mod tests {
             json!({"command": "echo one\necho two\necho three"}),
         )];
 
-        let lines = log::build_log_lines(&messages, false, 120);
+        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
             rendered.contains("💻 echo one\necho two\necho three"),
@@ -1045,24 +1073,26 @@ mod tests {
     }
 
     #[test]
-    fn shell_tool_call_truncates_above_five_lines_with_ellipsis_on_its_own_line() {
+    fn shell_tool_call_truncates_above_five_lines_with_line_count_marker() {
         let messages = vec![Message::tool_call(
             "1",
             "bash",
             json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
         )];
 
-        let lines = log::build_log_lines(&messages, false, 120);
+        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n…"), "{rendered}");
-        assert!(!rendered.contains("\n\n…"), "{rendered}");
+        assert!(
+            rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n... (6 lines total)"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("l6"), "{rendered}");
     }
 
     #[test]
     fn assistant_lines_are_prefixed_with_speech_bubble() {
         let messages = vec![Message::assistant("hello")];
-        let lines = log::build_log_lines(&messages, false, 80);
+        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
 
@@ -1070,7 +1100,7 @@ mod tests {
     fn assistant_provisional_phase_uses_thought_bubble() {
         let mut msg = Message::assistant("working");
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let lines = log::build_log_lines(&[msg], false, 80);
+        let lines = log::build_log_lines(&[msg], false, 80, &log::ToolBodyConfig::default());
         assert_eq!(line_text(&lines[0]), "💭 working");
     }
 
@@ -1078,7 +1108,7 @@ mod tests {
     fn assistant_unknown_phase_streaming_uses_thought_bubble() {
         let mut msg = Message::assistant("streaming");
         msg.assistant_phase = Some(AssistantPhase::Unknown);
-        let lines = log::build_log_lines(&[msg], true, 80);
+        let lines = log::build_log_lines(&[msg], true, 80, &log::ToolBodyConfig::default());
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
     }
 
@@ -1087,7 +1117,7 @@ mod tests {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some("planning".to_string());
         let messages = vec![msg];
-        let lines = log::build_log_lines(&messages, false, 80);
+        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
         assert_eq!(line_text(&lines[0]), "🧠 planning");
         assert_eq!(line_text(&lines[2]), "💬 answer");
     }
@@ -1395,7 +1425,7 @@ mod tests {
             Message::tool_result("1", "\n\n  output line  \n\n", false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 80);
+        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
         // Leading/trailing newlines are stripped; leading spaces (indentation)
         // on the first content line are preserved.
         let result_lines: Vec<_> = lines
@@ -1418,7 +1448,7 @@ mod tests {
             Message::tool_result("1", "    indented output", false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 80);
+        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
@@ -1439,7 +1469,7 @@ mod tests {
             Message::tool_result("1", "load: 1.0\n", false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 80);
+        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("│load: 1.0"), "{rendered}");
         // No extra blank line after the content.

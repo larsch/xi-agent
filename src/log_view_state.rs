@@ -42,6 +42,8 @@ pub struct LogViewState {
     pub(crate) auto_scroll: bool,
     /// Height of the log pane from the last draw — used as page-size scrolling.
     pub(crate) last_log_height: usize,
+    /// When true, tool bodies are rendered without truncation.
+    pub(crate) full_output: bool,
 }
 
 impl LogViewState {
@@ -51,6 +53,7 @@ impl LogViewState {
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
+            full_output: false,
         }
     }
 
@@ -74,6 +77,12 @@ impl LogViewState {
     pub fn scroll_down(&mut self) {
         self.auto_scroll = false;
         self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
+    }
+
+    /// Toggle untruncated tool body display and invalidate the line cache.
+    pub fn toggle_full_output(&mut self) {
+        self.full_output = !self.full_output;
+        self.log_cache.invalidate();
     }
 }
 

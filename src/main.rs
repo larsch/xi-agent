@@ -800,6 +800,11 @@ fn handle_global_key_shortcuts(
         return KeyDispatch::Continue;
     }
 
+    if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.log_view.toggle_full_output();
+        return KeyDispatch::Continue;
+    }
+
     if key.code == KeyCode::Char('r')
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !app.selection.active

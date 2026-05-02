@@ -62,7 +62,8 @@ pub fn tool_invocation_label_partial(
     }
 }
 
-/// Truncate to the last N lines, prepending "…" if truncated.
+/// Truncate to the last N lines for streaming display, prepending "…" if truncated.
+/// Used for shell tools during streaming where total is not yet known.
 fn head_truncate(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= MAX_MULTILINE_SHELL_COMMAND_LINES {
@@ -91,6 +92,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "write" | "write_file" => "✏️",
         "edit" | "edit_file" => "📝",
         "bash" | "cmd" | "powershell" => "💻",
+        "exec" => "⚙️",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
         _ => "⚙️",
@@ -121,6 +123,18 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
         && let Some(question) = args.get("question").and_then(|v| v.as_str())
     {
         return one_line(question);
+    }
+
+    // find_files: render pattern and/or path meaningfully.
+    if matches!(name, "find" | "find_files") {
+        let pattern = args.get("pattern").and_then(|v| v.as_str());
+        let path = args.get("path").and_then(|v| v.as_str());
+        return match (pattern, path) {
+            (Some(p), Some(d)) => format!("{} in {}", compact(p), d),
+            (Some(p), None) => compact(p),
+            (None, Some(d)) => format!("in {}", d),
+            (None, None) => String::new(),
+        };
     }
 
     for key in ["command", "pattern", "path", "question", "prompt"] {
@@ -180,7 +194,7 @@ fn multiline_shell_command(input: &str) -> String {
         .collect();
 
     if lines.len() > MAX_MULTILINE_SHELL_COMMAND_LINES {
-        shown.push("…".to_string());
+        shown.push(format!("... ({} lines total)", lines.len()));
     }
 
     shown.join("\n")
@@ -229,9 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn shell_label_truncates_after_five_lines_with_standalone_ellipsis() {
+    fn shell_label_truncates_after_five_lines_with_line_count() {
         let label = tool_invocation_label("bash", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
-        assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n…");
+        assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n... (6 lines total)");
     }
 
     #[test]
@@ -253,12 +267,12 @@ mod tests {
     }
 
     #[test]
-    fn label_prefers_pattern_before_path() {
+    fn label_shows_pattern_and_path_for_find_files() {
         let label = tool_invocation_label(
             "find_files",
             &json!({"pattern": "src/**/*.rs", "path": "."}),
         );
-        assert_eq!(label, "🔍 src/**/*.rs");
+        assert_eq!(label, "🔍 src/**/*.rs in .");
     }
 
     #[test]

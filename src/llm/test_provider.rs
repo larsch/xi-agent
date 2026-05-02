@@ -201,6 +201,14 @@ const HELP_TEXT: &str = r#"Test provider commands:
 
   write                 Issue a write_file tool call that writes a file to
                         the system temp directory
+  read                  Issue a read_file tool call on a short fixture (≤8 lines)
+  read-long             Issue a read_file tool call on a 20-line fixture
+                        (exercises head-truncation and range suffix)
+  find                  Issue a find_files tool call on the temp directory
+  edit                  Issue an edit_file tool call with short old/new text
+                        (use after 'write'; exercises compact diff body)
+  edit-long             Issue an edit_file tool call with 6 lines per side
+                        (exercises per-side truncation markers)
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -282,6 +290,106 @@ fn write_file_stream() -> LlmStream {
                 "path": path,
                 "content": "Hello from the tau test provider!\n",
             }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Temp file path used by write/read/edit test commands.
+fn test_temp_path() -> String {
+    std::env::temp_dir()
+        .join("tau-test-write.txt")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Short fixture content (≤8 lines) for `read` command.
+const READ_SHORT_FIXTURE: &str = "\
+line 1: Hello from the tau test provider\n\
+line 2: This file exercises read_file rendering\n\
+line 3: It is short enough to display without truncation\n\
+line 4: End of short fixture\n\
+";
+
+/// Long fixture content (>8 lines) for `read-long` command.
+const READ_LONG_FIXTURE: &str = "\
+line 01: The quick brown fox\n\
+line 02: jumps over the lazy dog\n\
+line 03: Pack my box with five\n\
+line 04: dozen liquor jugs\n\
+line 05: How vexingly quick\n\
+line 06: daft zebras jump\n\
+line 07: The five boxing wizards\n\
+line 08: jump quickly\n\
+line 09: Sphinx of black quartz\n\
+line 10: judge my vow\n\
+line 11: Waltz nymph for quick\n\
+line 12: jigs vex bud\n\
+line 13: Blowzy red-haired\n\
+line 14: vixens blow\n\
+line 15: Jumpy halfback\n\
+line 16: vows to fix\n\
+line 17: plucky quarterback\n\
+line 18: who zaps\n\
+line 19: quickly foxing\n\
+line 20: the dizzy dog\n\
+";
+
+/// Write content to the test temp file and return a read_file tool call stream.
+fn read_file_stream(content: &'static str) -> LlmStream {
+    let path = test_temp_path();
+    Box::pin(stream! {
+        // Write the fixture to the temp file first.
+        if let Err(e) = std::fs::write(&path, content) {
+            yield LlmEvent::Token {
+                text: format!("Failed to write fixture: {e}\n"),
+                phase: AssistantPhase::Final,
+            };
+            yield LlmEvent::Done;
+            return;
+        }
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({ "path": path }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// find_files tool call stream targeting the system temp directory.
+fn find_files_stream() -> LlmStream {
+    let path = std::env::temp_dir().to_string_lossy().into_owned();
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "find_files".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "find_files".to_string(),
+            args: serde_json::json!({ "pattern": "*", "path": path }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// edit_file tool call stream — both sides within 4 lines.
+fn edit_file_stream(old_text: String, new_text: String) -> LlmStream {
+    let path = test_temp_path();
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "edit_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "edit_file".to_string(),
+            args: serde_json::json!({ "path": path, "old_text": old_text, "new_text": new_text }),
         };
         yield LlmEvent::Done;
     })
@@ -576,6 +684,30 @@ impl super::LlmProvider for TestProvider {
             }
 
             "write" => write_file_stream(),
+
+            "read" => read_file_stream(READ_SHORT_FIXTURE),
+
+            "read-long" => read_file_stream(READ_LONG_FIXTURE),
+
+            "find" => find_files_stream(),
+
+            "edit" => {
+                // Short edit: both sides within the 4-line diff limit.
+                let old = "Hello from the tau test provider\n".to_string();
+                let new = "Hello from the tau test provider — edited!\n".to_string();
+                edit_file_stream(old, new)
+            }
+
+            "edit-long" => {
+                // Long edit: 6 lines per side to exercise per-side truncation.
+                let old =
+                    "old line 1\nold line 2\nold line 3\nold line 4\nold line 5\nold line 6\n"
+                        .to_string();
+                let new =
+                    "new line 1\nnew line 2\nnew line 3\nnew line 4\nnew line 5\nnew line 6\n"
+                        .to_string();
+                edit_file_stream(old, new)
+            }
 
             "" => stream_text("Type 'help' for a list of test provider commands.\n", None),
 

@@ -13,11 +13,26 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let throbber_style = Style::default()
         .fg(Color::Rgb(160, 200, 255))
         .add_modifier(ratatui::style::Modifier::BOLD);
+    let hint_style = Style::default()
+        .fg(Color::Rgb(100, 140, 100))
+        .add_modifier(ratatui::style::Modifier::ITALIC);
     let frame = THROBBER_FRAMES[(app.throbber_tick as usize) % THROBBER_FRAMES.len()];
-    let line = if app.throbber_visible() {
-        Line::from(Span::styled(format!("{frame}"), throbber_style))
-    } else {
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if app.throbber_visible() {
+        spans.push(Span::styled(format!("{frame}"), throbber_style));
+    }
+    if app.log_view.full_output {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled("[full output — Ctrl+F to toggle]", hint_style));
+    }
+
+    let line = if spans.is_empty() {
         Line::default()
+    } else {
+        Line::from(spans)
     };
     f.render_widget(Paragraph::new(line), area);
 }

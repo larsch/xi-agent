@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
@@ -11,13 +11,51 @@ use crate::{
 
 use super::input::{normalize_terminal_segment, wrap_str};
 
-pub(super) const USER_BG: Color = Color::Rgb(50, 50, 60);
-const ASK_USER_INPUT_BG: Color = Color::Rgb(50, 30, 15);
+pub(super) const USER_BG: Color = Color::Rgb(50, 50, 64);
+const ASK_USER_BG: Color = Color::Rgb(27, 71, 31);
+
+// ── ToolBodyConfig ────────────────────────────────────────────────────────────
+
+/// Display configuration for tool body rendering.
+///
+/// All line-count limits apply to the visible window; when a body exceeds
+/// the limit the overflow is replaced by a `... (N lines total)` marker.
+/// Setting `full_output = true` disables all limits.
+#[derive(Debug, Clone)]
+pub struct ToolBodyConfig {
+    /// Show untruncated output for all tools.
+    pub full_output: bool,
+    /// Max lines shown for head-truncated bodies (read_file, write_file, find_files).
+    pub head_lines: usize,
+    /// Max lines shown for tail-truncated bodies (bash, exec, custom).
+    pub tail_lines: usize,
+    /// Max lines per side for edit_file diff body.
+    pub diff_lines: usize,
+    /// Max lines shown for shell command intent (bash/cmd/powershell).
+    /// Reserved for future use when streaming command intent body is implemented.
+    #[allow(dead_code)]
+    pub intent_shell_lines: usize,
+}
+
+impl Default for ToolBodyConfig {
+    fn default() -> Self {
+        Self {
+            full_output: false,
+            head_lines: 8,
+            tail_lines: 8,
+            diff_lines: 4,
+            intent_shell_lines: 5,
+        }
+    }
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
 
 pub(super) fn build_log_lines(
     messages: &[Message],
     streaming: bool,
     width: usize,
+    cfg: &ToolBodyConfig,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -75,147 +113,477 @@ pub(super) fn build_log_lines(
                 }
             }
             Role::ToolCall => {
-                let name = msg.tool_name.as_deref().unwrap_or("unknown");
-
-                if name == "ask_user" {
-                    let args = msg.tool_args.as_ref();
-                    let context = args
-                        .and_then(|a| a.get("context"))
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty());
-                    let question = args
-                        .and_then(|a| a.get("question"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if let Some(ctx) = context {
-                        let md_lines = crate::markdown::render(ctx, width, "❓ ");
-                        append_markdown_answer(&mut lines, md_lines, false);
-                        lines.push(Line::default());
-                    }
-
-                    if !question.is_empty() {
-                        let q_prefix = if context.is_none() { "❓ " } else { "" };
-                        let md_lines = crate::markdown::render(question, width, q_prefix);
-                        append_markdown_answer(&mut lines, md_lines, false);
-                    }
-                } else {
-                    let mut label = if name == "local_shell" {
-                        let prefix = msg
-                            .tool_args
-                            .as_ref()
-                            .and_then(|a| a.get("prefix"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let command = msg
-                            .tool_args
-                            .as_ref()
-                            .and_then(|a| a.get("command"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if prefix.is_empty() {
-                            format!("⚙ {command}")
-                        } else {
-                            format!("⚙ {prefix} {command}")
-                        }
-                    } else {
-                        // Check for partial streaming args first.
-                        if let Some(partial) = msg.tool_partial_args.as_deref() {
-                            tool_presentation::tool_invocation_label_partial(
-                                name,
-                                partial,
-                                msg.tool_streaming_field.as_deref(),
-                            )
-                        } else {
-                            match msg.tool_args.as_ref() {
-                                Some(args) => tool_presentation::tool_invocation_label(name, args),
-                                None => tool_presentation::tool_invocation_label(
-                                    name,
-                                    &serde_json::Value::Null,
-                                ),
-                            }
-                        }
-                    };
-
-                    if matches!(name, "read" | "read_file")
-                        && let Some(next) = messages.get(idx + 1)
-                        && next.role == Role::ToolResult
-                        && let Some(ref dr) = next.display_range
-                    {
-                        label.push_str(&format!(
-                            " [{}-{}/{}]",
-                            dr.first_line, dr.last_line, dr.total_lines
-                        ));
-                    }
-
-                    let color = if name == "local_shell" {
-                        Color::LightBlue
-                    } else {
-                        Color::Cyan
-                    };
-                    append_message_colored(&mut lines, &label, width, color);
-                }
+                render_tool_call(messages, idx, width, cfg, &mut lines);
             }
             Role::ToolResult => {
-                let prev_is_local_shell = matches!(
-                    messages.get(idx.saturating_sub(1)),
-                    Some(prev)
-                        if prev.role == Role::ToolCall
-                            && matches!(prev.tool_name.as_deref(), Some("local_shell"))
-                );
-                let prev_is_ask_user = matches!(
-                    messages.get(idx.saturating_sub(1)),
-                    Some(prev)
-                        if prev.role == Role::ToolCall
-                            && matches!(prev.tool_name.as_deref(), Some("ask_user"))
-                );
-
-                let content_for_display = msg.content.clone();
-                const DISPLAY_CHARS: usize = 200;
-                const SANITIZE_LIMIT: usize = DISPLAY_CHARS * 5;
-                let original_overflows = content_for_display.chars().nth(DISPLAY_CHARS).is_some();
-                let sanitize_input = if original_overflows {
-                    let byte_end = content_for_display
-                        .char_indices()
-                        .nth(SANITIZE_LIMIT)
-                        .map(|(b, _)| b)
-                        .unwrap_or(content_for_display.len());
-                    &content_for_display[..byte_end]
-                } else {
-                    &content_for_display
-                };
-                let content_for_display = sanitize_for_display(sanitize_input);
-
-                let preview: String = content_for_display.chars().take(DISPLAY_CHARS).collect();
-                let truncated = original_overflows || content_for_display.len() > DISPLAY_CHARS;
-                let display = if truncated {
-                    format!("{preview}…")
-                } else {
-                    preview
-                };
-                let color = if prev_is_local_shell {
-                    if msg.is_error {
-                        Color::LightRed
-                    } else {
-                        Color::LightBlue
-                    }
-                } else if msg.is_error {
-                    Color::Red
-                } else {
-                    Color::Green
-                };
-                if prev_is_ask_user {
-                    append_ask_user_response_block(&mut lines, &display, width, ASK_USER_INPUT_BG);
-                } else {
-                    append_tool_result_block(&mut lines, &display, width, color);
-                }
+                render_tool_result(messages, idx, width, cfg, &mut lines);
             }
         }
     }
 
     lines
 }
+
+// ── Tool call rendering ───────────────────────────────────────────────────────
+
+fn render_tool_call(
+    messages: &[Message],
+    idx: usize,
+    width: usize,
+    cfg: &ToolBodyConfig,
+    out: &mut Vec<Line<'static>>,
+) {
+    let msg = &messages[idx];
+    let name = msg.tool_name.as_deref().unwrap_or("unknown");
+
+    if name == "ask_user" {
+        // ask_user: only render in output area once the exchange is complete
+        // (result present). While pending, the menu area is the active surface.
+        let has_result = matches!(
+            messages.get(idx + 1),
+            Some(next) if next.role == Role::ToolResult
+        );
+        if !has_result {
+            return;
+        }
+
+        let args = msg.tool_args.as_ref();
+        let context = args
+            .and_then(|a| a.get("context"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let question = args
+            .and_then(|a| a.get("question"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Context: green bg, dimmed text, no icon.
+        if let Some(ctx) = context {
+            append_ask_user_block_dim(out, ctx, width, ASK_USER_BG);
+        }
+
+        // Question: green bg, normal text, ❓ icon.
+        if !question.is_empty() {
+            let md_lines = crate::markdown::render(question, width, "❓ ");
+            append_ask_user_block_normal(out, md_lines, width, ASK_USER_BG);
+        }
+
+        // Response is rendered in render_tool_result; nothing more here.
+        return;
+    }
+
+    // Regular tool call intent line.
+    let label = if name == "local_shell" {
+        let prefix = msg
+            .tool_args
+            .as_ref()
+            .and_then(|a| a.get("prefix"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let command = msg
+            .tool_args
+            .as_ref()
+            .and_then(|a| a.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if prefix.is_empty() {
+            format!("⚙ {command}")
+        } else {
+            format!("⚙ {prefix} {command}")
+        }
+    } else if let Some(partial) = msg.tool_partial_args.as_deref() {
+        tool_presentation::tool_invocation_label_partial(
+            name,
+            partial,
+            msg.tool_streaming_field.as_deref(),
+        )
+    } else {
+        match msg.tool_args.as_ref() {
+            Some(args) => tool_presentation::tool_invocation_label(name, args),
+            None => tool_presentation::tool_invocation_label(name, &serde_json::Value::Null),
+        }
+    };
+
+    // For write_file: show the content body from tool args while streaming
+    // (before result arrives). This is the intent body streaming case.
+    // We only show it when there is NO following ToolResult yet; once the
+    // result arrives the ToolResult handler shows the content.
+    let show_write_intent_body = matches!(name, "write_file" | "write")
+        && !matches!(
+            messages.get(idx + 1),
+            Some(next) if next.role == Role::ToolResult
+        );
+
+    // Append read_file range suffix when result is available.
+    let mut intent_label = label;
+    if matches!(name, "read" | "read_file")
+        && let Some(next) = messages.get(idx + 1)
+        && next.role == Role::ToolResult
+        && let Some(ref dr) = next.display_range
+    {
+        intent_label.push_str(&format!(
+            " [{}-{}/{}]",
+            dr.first_line, dr.last_line, dr.total_lines
+        ));
+    }
+
+    let color = if name == "local_shell" {
+        Color::LightBlue
+    } else {
+        Color::Cyan
+    };
+    append_message_colored(out, &intent_label, width, color);
+
+    // Show streaming write_file intent body.
+    if show_write_intent_body
+        && let Some(content) = msg
+            .tool_args
+            .as_ref()
+            .and_then(|a| a.get("content"))
+            .and_then(|v| v.as_str())
+    {
+        let body_color = Color::Cyan;
+        render_head_truncated_body(
+            out,
+            content,
+            cfg.head_lines,
+            cfg.full_output,
+            body_color,
+            width,
+        );
+    }
+}
+
+// ── Tool result rendering ─────────────────────────────────────────────────────
+
+fn render_tool_result(
+    messages: &[Message],
+    idx: usize,
+    width: usize,
+    cfg: &ToolBodyConfig,
+    out: &mut Vec<Line<'static>>,
+) {
+    let msg = &messages[idx];
+    let prev = messages.get(idx.saturating_sub(1));
+    let prev_name = prev
+        .filter(|p| p.role == Role::ToolCall)
+        .and_then(|p| p.tool_name.as_deref())
+        .unwrap_or("unknown");
+
+    // ask_user: response is committed as part of the ToolCall rendering above.
+    // Here we just append the response block (green bg, italic).
+    if prev_name == "ask_user" {
+        append_ask_user_response(out, &msg.content, width, ASK_USER_BG);
+        return;
+    }
+
+    // local_shell: existing color treatment, tail-truncated.
+    if prev_name == "local_shell" {
+        let color = if msg.is_error {
+            Color::LightRed
+        } else {
+            Color::LightBlue
+        };
+        let content = sanitize_for_display(&msg.content);
+        render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+        return;
+    }
+
+    // edit_file: compact diff from tool args old_text/new_text.
+    if matches!(prev_name, "edit" | "edit_file") {
+        // If error, fall through to plain content rendering.
+        if !msg.is_error {
+            let old_text = prev
+                .and_then(|p| p.tool_args.as_ref())
+                .and_then(|a| a.get("old_text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_text = prev
+                .and_then(|p| p.tool_args.as_ref())
+                .and_then(|a| a.get("new_text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !old_text.is_empty() || !new_text.is_empty() {
+                render_diff_body(
+                    out,
+                    old_text,
+                    new_text,
+                    cfg.diff_lines,
+                    cfg.full_output,
+                    width,
+                );
+                return;
+            }
+        }
+        // Fallthrough to plain content on error or missing args.
+        let color = if msg.is_error {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        let content = sanitize_for_display(&msg.content);
+        render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+        return;
+    }
+
+    // write_file: show written content from tool args (head-truncated).
+    if matches!(prev_name, "write" | "write_file") && !msg.is_error {
+        let content = prev
+            .and_then(|p| p.tool_args.as_ref())
+            .and_then(|a| a.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let color = Color::Green;
+        render_head_truncated_body(out, content, cfg.head_lines, cfg.full_output, color, width);
+        return;
+    }
+
+    // read_file / find_files: head-truncated.
+    if matches!(prev_name, "read" | "read_file" | "find" | "find_files") {
+        let color = if msg.is_error {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        let content = sanitize_for_display(&msg.content);
+        render_head_truncated_body(out, &content, cfg.head_lines, cfg.full_output, color, width);
+        return;
+    }
+
+    // bash / cmd / powershell / exec: tail-truncated.
+    if matches!(prev_name, "bash" | "cmd" | "powershell" | "exec") {
+        let color = if msg.is_error {
+            Color::LightRed
+        } else {
+            Color::LightBlue
+        };
+        let content = sanitize_for_display(&msg.content);
+        render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+        return;
+    }
+
+    // Custom / unknown tools: tail-truncated, green/red.
+    let color = if msg.is_error {
+        Color::Red
+    } else {
+        Color::Green
+    };
+    let content = sanitize_for_display(&msg.content);
+    render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+}
+
+// ── Body rendering helpers ────────────────────────────────────────────────────
+
+/// Render head-truncated body: show first `max_lines` lines, then marker.
+fn render_head_truncated_body(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    max_lines: usize,
+    full_output: bool,
+    color: Color,
+    width: usize,
+) {
+    if content.trim().is_empty() {
+        return;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let limit = if full_output { total } else { max_lines };
+    let shown = lines.iter().take(limit);
+    for line in shown {
+        let normalized = normalize_terminal_segment(line, 1);
+        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
+        for chunk in chunks {
+            out.push(tool_result_line(chunk, color));
+        }
+    }
+    if !full_output && total > max_lines {
+        out.push(tool_result_line(
+            format!("... ({total} lines total)"),
+            color,
+        ));
+    }
+}
+
+/// Render tail-truncated body: show marker then last `max_lines` lines.
+fn render_tail_truncated_body(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    max_lines: usize,
+    full_output: bool,
+    color: Color,
+    width: usize,
+) {
+    if content.trim().is_empty() {
+        return;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let limit = if full_output { total } else { max_lines };
+    if !full_output && total > max_lines {
+        out.push(tool_result_line(
+            format!("... ({total} lines total)"),
+            color,
+        ));
+    }
+    let start = if full_output || total <= max_lines {
+        0
+    } else {
+        total - max_lines
+    };
+    for line in &lines[start..] {
+        let normalized = normalize_terminal_segment(line, 1);
+        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
+        for chunk in chunks {
+            out.push(tool_result_line(chunk, color));
+        }
+    }
+    let _ = limit;
+}
+
+/// Render a compact diff body for edit_file.
+fn render_diff_body(
+    out: &mut Vec<Line<'static>>,
+    old_text: &str,
+    new_text: &str,
+    max_lines_per_side: usize,
+    full_output: bool,
+    width: usize,
+) {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let old_total = old_lines.len();
+    let new_total = new_lines.len();
+    let old_limit = if full_output {
+        old_total
+    } else {
+        max_lines_per_side
+    };
+    let new_limit = if full_output {
+        new_total
+    } else {
+        max_lines_per_side
+    };
+
+    // Old side (red, - prefix).
+    for line in old_lines.iter().take(old_limit) {
+        let text = format!("- {line}");
+        let normalized = normalize_terminal_segment(&text, 0);
+        let chunks = wrap_str(&normalized, width);
+        for chunk in chunks {
+            out.push(Line::from(Span::styled(
+                chunk,
+                Style::default().fg(Color::LightRed),
+            )));
+        }
+    }
+    if !full_output && old_total > max_lines_per_side {
+        out.push(Line::from(Span::styled(
+            format!("... ({old_total} lines total)"),
+            Style::default().fg(Color::LightRed),
+        )));
+    }
+
+    // New side (green, + prefix).
+    for line in new_lines.iter().take(new_limit) {
+        let text = format!("+ {line}");
+        let normalized = normalize_terminal_segment(&text, 0);
+        let chunks = wrap_str(&normalized, width);
+        for chunk in chunks {
+            out.push(Line::from(Span::styled(
+                chunk,
+                Style::default().fg(Color::LightGreen),
+            )));
+        }
+    }
+    if !full_output && new_total > max_lines_per_side {
+        out.push(Line::from(Span::styled(
+            format!("... ({new_total} lines total)"),
+            Style::default().fg(Color::LightGreen),
+        )));
+    }
+}
+
+/// Build a single tool-result line with `│` marker.
+fn tool_result_line(content: impl Into<String>, color: Color) -> Line<'static> {
+    let style = Style::default().fg(color);
+    Line::from(vec![
+        Span::styled("│", style),
+        Span::styled(content.into(), style),
+    ])
+}
+
+// ── ask_user block helpers ────────────────────────────────────────────────────
+
+/// Context block: green background, dimmed text, no icon.
+fn append_ask_user_block_dim(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
+    let dim_bg_style = Style::default().bg(bg).add_modifier(Modifier::DIM);
+    let padding_style = Style::default().bg(bg);
+    let md_lines = crate::markdown::render(content, width, "");
+    for line in md_lines {
+        // Re-render with bg color and dim applied to each span.
+        let dimmed: Vec<Span<'static>> = line
+            .spans
+            .into_iter()
+            .map(|s| Span::styled(s.content, dim_bg_style.patch(s.style)))
+            .collect();
+        let text_width: usize = dimmed.iter().map(|s| s.content.width()).sum();
+        let padding = width.saturating_sub(text_width);
+        let mut spans = dimmed;
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), padding_style));
+        }
+        out.push(Line::from(spans));
+    }
+}
+
+/// Question block: green background, normal text, icon already in md prefix.
+fn append_ask_user_block_normal(
+    out: &mut Vec<Line<'static>>,
+    md_lines: Vec<Line<'static>>,
+    width: usize,
+    bg: Color,
+) {
+    let bg_style = Style::default().bg(bg);
+    for line in md_lines {
+        let colored: Vec<Span<'static>> = line
+            .spans
+            .into_iter()
+            .map(|s| Span::styled(s.content, bg_style.patch(s.style)))
+            .collect();
+        let text_width: usize = colored.iter().map(|s| s.content.width()).sum();
+        let padding = width.saturating_sub(text_width);
+        let mut spans = colored;
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), bg_style));
+        }
+        out.push(Line::from(spans));
+    }
+}
+
+/// Response block: green background, italic text.
+fn append_ask_user_response(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
+    let bg_italic_style = Style::default().bg(bg).add_modifier(Modifier::ITALIC);
+    let bg_style = Style::default().bg(bg);
+    let sanitized = sanitize_for_display(content);
+    let segments: Vec<&str> = sanitized.split('\n').collect();
+    for seg in &segments {
+        if seg.is_empty() {
+            continue;
+        }
+        let chunks = wrap_str(seg, width);
+        for chunk in chunks {
+            let text_cols = chunk.as_str().width();
+            let padding = width.saturating_sub(text_cols);
+            let padded = format!("{chunk}{}", " ".repeat(padding));
+            out.push(Line::from(Span::styled(padded, bg_italic_style)));
+        }
+    }
+    let _ = bg_style;
+}
+
+// ── Shared rendering primitives ───────────────────────────────────────────────
 
 fn trim_assistant_block_edges(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
@@ -289,6 +657,7 @@ fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: us
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn append_tool_result_block(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -301,7 +670,7 @@ pub(super) fn append_tool_result_block(
     if content.is_empty() {
         let no_output_style = Style::default()
             .fg(Color::Rgb(100, 100, 120))
-            .add_modifier(ratatui::style::Modifier::ITALIC);
+            .add_modifier(Modifier::ITALIC);
         out.push(Line::from(vec![
             Span::styled("│", marker_style),
             Span::styled("(no output)", no_output_style),
@@ -345,50 +714,6 @@ pub(super) fn append_tool_result_block(
     }
 }
 
-fn append_ask_user_response_block(
-    out: &mut Vec<Line<'static>>,
-    content: &str,
-    width: usize,
-    bg: Color,
-) {
-    let bg_style = Style::default().bg(bg);
-    let segments: Vec<&str> = if content.is_empty() {
-        vec![""]
-    } else {
-        content.split('\n').collect()
-    };
-    let visible: Vec<usize> = if content.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
-                }
-            })
-            .collect()
-    };
-
-    out.push(halfblock_line(width, '▄', bg));
-    for seg_idx in visible {
-        let segment = segments[seg_idx];
-        let normalized = normalize_terminal_segment(segment, 0);
-        let chunks = wrap_str(&normalized, width);
-        for chunk in chunks {
-            let text_cols = chunk.as_str().width();
-            let padding = width.saturating_sub(text_cols);
-            let padded = format!("{}{}", chunk, " ".repeat(padding));
-            out.push(Line::from(Span::styled(padded, bg_style)));
-        }
-    }
-    out.push(halfblock_line(width, '▀', bg));
-}
-
 fn append_message_dim(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -397,7 +722,7 @@ fn append_message_dim(
 ) {
     let dim_style = Style::default()
         .fg(Color::DarkGray)
-        .add_modifier(ratatui::style::Modifier::DIM);
+        .add_modifier(Modifier::DIM);
     let segments: Vec<&str> = if content.is_empty() {
         vec![""]
     } else {
@@ -560,10 +885,16 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
     result
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
-    use super::{build_log_lines, trim_assistant_block_edges};
-    use crate::llm::{AssistantPhase, Message};
+    use super::{ToolBodyConfig, build_log_lines, trim_assistant_block_edges};
+    use crate::llm::{AssistantPhase, DisplayRange, Message};
+
+    fn cfg() -> ToolBodyConfig {
+        ToolBodyConfig::default()
+    }
 
     #[test]
     fn trim_assistant_block_edges_hides_outer_whitespace() {
@@ -581,8 +912,275 @@ mod tests {
     fn build_log_lines_hides_whitespace_only_streaming_assistant() {
         let mut msg = Message::assistant("\n   \n".to_string());
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-
-        let lines = build_log_lines(&[msg], true, 80);
+        let lines = build_log_lines(&[msg], true, 80, &cfg());
         assert!(lines.is_empty());
+    }
+
+    // ── read_file ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_file_result_head_truncated_to_8_lines() {
+        let call = { Message::tool_call("c1", "read_file", serde_json::json!({"path": "foo.rs"})) };
+        let content = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        // 8 content lines + 1 marker = 9 body lines, plus 1 intent line = 10 total
+        assert_eq!(lines.len(), 10);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.last().unwrap().contains("20 lines total"));
+    }
+
+    #[test]
+    fn read_file_result_no_truncation_marker_when_within_limit() {
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "foo.rs"}));
+        let content = "line1\nline2\nline3";
+        let result = Message::tool_result("c1", content, false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(!text.iter().any(|t| t.contains("lines total")));
+    }
+
+    #[test]
+    fn read_file_range_suffix_shown_when_display_range_present() {
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "foo.rs"}));
+        let mut result = Message::tool_result("c1", "content", false);
+        result.display_range = Some(DisplayRange {
+            first_line: 1,
+            last_line: 5,
+            total_lines: 100,
+        });
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let intent = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            intent.contains("[1-5/100]"),
+            "expected range suffix, got: {intent}"
+        );
+    }
+
+    // ── find_files ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn find_files_result_head_truncated() {
+        let call = Message::tool_call("c1", "find_files", serde_json::json!({"pattern": "*.rs"}));
+        let content = (1..=12)
+            .map(|i| format!("src/file{i}.rs"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.last().unwrap().contains("12 lines total"));
+    }
+
+    // ── edit_file diff ────────────────────────────────────────────────────────
+
+    #[test]
+    fn edit_file_renders_diff_body() {
+        let call = Message::tool_call(
+            "c1",
+            "edit_file",
+            serde_json::json!({"path": "foo.rs", "old_text": "old line", "new_text": "new line"}),
+        );
+        let result = Message::tool_result("c1", "Successfully edited foo.rs", false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.iter().any(|t| t.starts_with("- ")), "expected - line");
+        assert!(text.iter().any(|t| t.starts_with("+ ")), "expected + line");
+    }
+
+    #[test]
+    fn edit_file_diff_truncated_per_side() {
+        let old = (1..=6)
+            .map(|i| format!("old{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (1..=6)
+            .map(|i| format!("new{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = Message::tool_call(
+            "c1",
+            "edit_file",
+            serde_json::json!({"path": "foo.rs", "old_text": old, "new_text": new}),
+        );
+        let result = Message::tool_result("c1", "ok", false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Two truncation markers: one per side
+        let marker_count = text.iter().filter(|t| t.contains("lines total")).count();
+        assert_eq!(marker_count, 2);
+    }
+
+    #[test]
+    fn edit_file_error_shows_plain_content() {
+        let call = Message::tool_call(
+            "c1",
+            "edit_file",
+            serde_json::json!({"path": "foo.rs", "old_text": "x", "new_text": "y"}),
+        );
+        let result = Message::tool_result("c1", "old_text not found", true);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.iter().any(|t| t.contains("old_text not found")));
+        assert!(!text.iter().any(|t| t.starts_with("- ")));
+    }
+
+    // ── bash tail truncation ──────────────────────────────────────────────────
+
+    #[test]
+    fn bash_result_tail_truncated() {
+        let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "seq 20"}));
+        let content = (1..=20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Marker should be first body line (tail-truncated)
+        let body: Vec<&String> = text.iter().skip(1).collect();
+        assert!(
+            body[0].contains("20 lines total"),
+            "expected marker first, got: {}",
+            body[0]
+        );
+        assert!(
+            body.last().unwrap().contains("20"),
+            "expected last line to be 20"
+        );
+    }
+
+    // ── full_output toggle ────────────────────────────────────────────────────
+
+    #[test]
+    fn full_output_disables_truncation() {
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "foo.rs"}));
+        let content = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let full_cfg = ToolBodyConfig {
+            full_output: true,
+            ..ToolBodyConfig::default()
+        };
+        let lines = build_log_lines(&[call, result], false, 120, &full_cfg);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(!text.iter().any(|t| t.contains("lines total")));
+        // 20 content lines + 1 intent = 21
+        assert_eq!(lines.len(), 21);
+    }
+
+    // ── ask_user ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ask_user_not_rendered_while_pending() {
+        let call = Message::tool_call(
+            "c1",
+            "ask_user",
+            serde_json::json!({"question": "What do you want?"}),
+        );
+        // No following ToolResult.
+        let lines = build_log_lines(&[call], false, 120, &cfg());
+        assert!(lines.is_empty(), "ask_user should not render while pending");
+    }
+
+    #[test]
+    fn ask_user_renders_after_answer() {
+        let call = Message::tool_call(
+            "c1",
+            "ask_user",
+            serde_json::json!({"question": "What do you want?"}),
+        );
+        let result = Message::tool_result("c1", "Option A", false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text.iter().any(|t| t.contains("What do you want?")),
+            "question not rendered"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("Option A")),
+            "response not rendered"
+        );
     }
 }
