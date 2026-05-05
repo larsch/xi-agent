@@ -646,14 +646,22 @@ async fn run(
     #[cfg(windows)]
     let mut last_key_at: Option<std::time::Instant> = None;
 
+    // Draw unconditionally on the first iteration; subsequent draws are only
+    // performed when something actually changed (dirty flag).
+    let mut needs_redraw = true;
+
     loop {
-        execute!(io::stdout(), BeginSynchronizedUpdate)?;
-        terminal.draw(|f| ui::draw(f, app))?;
-        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        if needs_redraw {
+            execute!(io::stdout(), BeginSynchronizedUpdate)?;
+            terminal.draw(|f| ui::draw(f, app))?;
+            execute!(io::stdout(), EndSynchronizedUpdate)?;
+            needs_redraw = false;
+        }
 
         tokio::select! {
             // ── Terminal input ────────────────────────────────────────────────
             Some(Ok(ev)) = crossterm_events.next() => {
+                needs_redraw = true;
                 match ev {
                     Event::Key(key) => {
                         if let Some(result) = handle_key_event(
@@ -682,6 +690,7 @@ async fn run(
 
             // ── Background app events ───────────────────────────────────────
             Some(ev) = app.recv_app_event() => {
+                needs_redraw = true;
                 app.apply_app_event(ev);
                 if app.login.needs_rebuild {
                     app.login.needs_rebuild = false;
@@ -692,6 +701,11 @@ async fn run(
             // ── Throbber animation tick ───────────────────────────────────────
             _ = tick_interval.tick() => {
                 app.tick();
+                // Only mark dirty when the throbber is actually animating;
+                // when idle the tick fires but nothing visible changes.
+                if app.streaming() {
+                    needs_redraw = true;
+                }
             }
         }
     }
