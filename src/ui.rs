@@ -28,7 +28,7 @@ use self::{
         style_textarea,
     },
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
-    log::{ToolBodyConfig, build_log_lines},
+    log::{ToolBodyConfig, build_log_lines, dim_lines},
     login::{LOGIN_HEADER_BG, build_login_content_lines},
     menu::{build_completion_lines, build_selection_lines},
 };
@@ -44,17 +44,26 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 }
 
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
-    if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, _)) if *rev == app.log_view.log_cache.revision && *w == width)
+    let step_cursor = app.step_cursor;
+    if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, sc, _))
+        if *rev == app.log_view.log_cache.revision && *w == width && *sc == step_cursor)
     {
-        let combined = app.display_messages_combined();
         let cfg = ToolBodyConfig {
             full_output: app.log_view.full_output,
             ..ToolBodyConfig::default()
         };
-        let lines = build_log_lines(&combined, app.streaming(), width, &cfg);
-        app.log_view.log_cache.cached_lines = Some((app.log_view.log_cache.revision, width, lines));
+        let lines = if let Some((kept, discarded)) = app.display_messages_split() {
+            let mut lines = build_log_lines(&kept, false, width, &cfg);
+            lines.extend(dim_lines(build_log_lines(&discarded, false, width, &cfg)));
+            lines
+        } else {
+            let combined = app.display_messages_combined();
+            build_log_lines(&combined, app.streaming(), width, &cfg)
+        };
+        let rev = app.log_view.log_cache.revision;
+        app.log_view.log_cache.cached_lines = Some((rev, width, step_cursor, lines));
     }
-    &app.log_view.log_cache.cached_lines.as_ref().unwrap().2
+    &app.log_view.log_cache.cached_lines.as_ref().unwrap().3
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -133,6 +142,20 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     if app.log_view.auto_scroll {
         app.log_view.log_scroll = max_scroll;
+    } else if app.step_cursor.is_some() && app.log_view.log_scroll == usize::MAX {
+        // Centre the step-cursor boundary in the viewport.
+        let kept_count = app
+            .display_messages_split()
+            .map(|(kept, _)| {
+                let cfg = ToolBodyConfig {
+                    full_output: app.log_view.full_output,
+                    ..ToolBodyConfig::default()
+                };
+                build_log_lines(&kept, false, log_width, &cfg).len()
+            })
+            .unwrap_or(0);
+        let half_height = inner_height / 2;
+        app.log_view.log_scroll = kept_count.saturating_sub(half_height).min(max_scroll);
     } else {
         app.log_view.log_scroll = app.log_view.log_scroll.min(max_scroll);
         if app.log_view.log_scroll >= max_scroll {

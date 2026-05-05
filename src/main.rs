@@ -1074,6 +1074,10 @@ fn handle_chat_mode_key(
         KeyCode::PageUp => app.scroll_up(),
         KeyCode::PageDown => app.scroll_down(),
         KeyCode::Up => {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                app.step_back();
+                return KeyDispatch::Continue;
+            }
             if !app.completion.completions.is_empty() {
                 app.completion_select_prev();
             } else {
@@ -1081,6 +1085,10 @@ fn handle_chat_mode_key(
             }
         }
         KeyCode::Down => {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                app.step_forward();
+                return KeyDispatch::Continue;
+            }
             if !app.completion.completions.is_empty() {
                 app.completion_select_next();
             } else {
@@ -1231,6 +1239,15 @@ fn handle_chat_submit(
 
     if app.in_slash_mode() {
         return handle_slash_submit(app, provider, config);
+    }
+
+    if app.is_stepping() {
+        // Commit the branch: create a new session from the kept events and
+        // the (possibly edited) message, then submit normally.
+        if app.commit_step_branch().is_some() {
+            app.submit(provider);
+        }
+        return KeyDispatch::Continue;
     }
 
     if app.streaming() {

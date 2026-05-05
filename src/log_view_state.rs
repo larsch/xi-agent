@@ -7,8 +7,8 @@ use ratatui::text::Line;
 pub struct LogCache {
     /// Monotonic counter bumped on every log-content change.
     pub(crate) revision: u64,
-    /// Pre-wrapped lines: `(revision, width, lines)`. Invalidated on bump.
-    pub(crate) cached_lines: Option<(u64, usize, Vec<Line<'static>>)>,
+    /// Pre-wrapped lines: `(revision, width, step_cursor, lines)`. Invalidated on bump.
+    pub(crate) cached_lines: Option<(u64, usize, Option<usize>, Vec<Line<'static>>)>,
 }
 
 impl LogCache {

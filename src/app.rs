@@ -143,6 +143,13 @@ pub struct App {
     // ── Add-provider setup state ─────────────────────────────────────────────
     // ── Runtime/task state ───────────────────────────────────────────────────
     pub(crate) runtime: AgentRuntime,
+
+    // ── Step-back state ──────────────────────────────────────────────────────
+    /// Index into the current session event log pointing at the `UserMessage`
+    /// that serves as the resubmission point.  `None` when not stepping.
+    pub(crate) step_cursor: Option<usize>,
+    /// Input field content saved when stepping began, restored on cancel.
+    pub(crate) saved_input: Option<String>,
 }
 
 // Convenience alias used throughout this module.
@@ -184,6 +191,8 @@ impl App {
             session: SessionManager::new(),
             ask_user: AskUserState::new(),
             runtime: AgentRuntime::new(),
+            step_cursor: None,
+            saved_input: None,
         }
     }
 
@@ -314,6 +323,19 @@ impl App {
             .map(|s| s.display_messages())
             .unwrap_or(&[]);
         compose_display(committed, &self.session.live_turn, self.streaming())
+    }
+
+    /// When in step-back mode, returns `(kept_messages, discarded_messages)`.
+    /// `kept_messages` covers events before the step cursor (rendered normally).
+    /// `discarded_messages` covers events from the step cursor onward (rendered dimmed).
+    /// Returns `None` when not stepping.
+    pub fn display_messages_split(&self) -> Option<(Vec<Message>, Vec<Message>)> {
+        let idx = self.step_cursor?;
+        let ss = self.session.session_state.as_ref()?;
+        let events = ss.events();
+        let kept = crate::projection::project_display_messages(&events[..idx]);
+        let discarded = crate::projection::project_display_messages(&events[idx..]);
+        Some((kept, discarded))
     }
 
     /// Push a transient UI-only notice (not backed by a `SessionEvent`).
@@ -673,7 +695,9 @@ impl App {
     /// 6) cancel login flow
     /// 7) abort streaming agent loop
     pub fn handle_escape_in_chat_mode(&mut self) {
-        if self.has_pending_ask() {
+        if self.is_stepping() {
+            self.cancel_stepping();
+        } else if self.has_pending_ask() {
             self.cancel_pending_ask();
         } else if self.in_slash_mode() {
             self.reset_textarea();
@@ -805,6 +829,177 @@ impl App {
         self.textarea = TextArea::new(vec![text]);
         self.textarea.move_cursor(CursorMove::End);
         self.update_completions();
+    }
+
+    // ── Step-back navigation ──────────────────────────────────────────────────
+
+    /// Returns the event indices (into the committed event log) of all
+    /// `UserMessage` events, in order.
+    pub(crate) fn user_message_boundaries(&self) -> Vec<usize> {
+        let Some(ss) = self.session.session_state.as_ref() else {
+            return Vec::new();
+        };
+        ss.events()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ev)| {
+                if matches!(ev, SessionEvent::UserMessage { .. }) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Returns true when step-back navigation is currently active.
+    pub(crate) fn is_stepping(&self) -> bool {
+        self.step_cursor.is_some()
+    }
+
+    /// Step back to the previous `UserMessage` boundary.
+    ///
+    /// On the first call, saves the current input field content so it can be
+    /// restored on cancel.  No-op when the agent loop is active or there is no
+    /// earlier `UserMessage`.
+    pub(crate) fn step_back(&mut self) {
+        if self.runtime.is_running() {
+            return;
+        }
+        let boundaries = self.user_message_boundaries();
+        if boundaries.is_empty() {
+            return;
+        }
+        let current = self.step_cursor;
+        let new_cursor = match current {
+            None => {
+                // Save current input before first step
+                self.saved_input = Some(self.textarea.lines().join("\n"));
+                // Step to the last UserMessage
+                *boundaries.last().unwrap()
+            }
+            Some(cur) => {
+                // Find the boundary strictly before cur
+                match boundaries.iter().rev().find(|&&i| i < cur) {
+                    Some(&i) => i,
+                    None => return, // Already at the earliest boundary
+                }
+            }
+        };
+        self.step_cursor = Some(new_cursor);
+        self.repopulate_input_from_cursor();
+        self.scroll_to_step_cursor();
+        self.log_view.invalidate();
+    }
+
+    /// Step forward toward the latest `UserMessage` boundary.
+    ///
+    /// When stepping past the end, clears step state and restores the saved
+    /// input.  No-op when the agent loop is active.
+    pub(crate) fn step_forward(&mut self) {
+        if self.runtime.is_running() {
+            return;
+        }
+        let Some(cur) = self.step_cursor else {
+            return;
+        };
+        let boundaries = self.user_message_boundaries();
+        match boundaries.iter().find(|&&i| i > cur) {
+            Some(&next) => {
+                self.step_cursor = Some(next);
+                self.repopulate_input_from_cursor();
+                self.scroll_to_step_cursor();
+                self.log_view.invalidate();
+            }
+            None => {
+                // Past the end — cancel stepping
+                self.cancel_stepping();
+            }
+        }
+    }
+
+    /// Cancel step-back mode, restoring the original input and full view.
+    pub(crate) fn cancel_stepping(&mut self) {
+        if let Some(saved) = self.saved_input.take() {
+            self.textarea = TextArea::new(vec![saved]);
+            self.textarea.move_cursor(CursorMove::End);
+        }
+        self.step_cursor = None;
+        self.log_view.auto_scroll = true;
+        self.log_view.invalidate();
+    }
+
+    /// Repopulate the input field with the `UserMessage` content at the
+    /// current step cursor position.
+    fn repopulate_input_from_cursor(&mut self) {
+        let Some(idx) = self.step_cursor else {
+            return;
+        };
+        let Some(ss) = self.session.session_state.as_ref() else {
+            return;
+        };
+        if let Some(SessionEvent::UserMessage { content, .. }) = ss.events().get(idx) {
+            let text = content.clone();
+            self.textarea = TextArea::new(vec![text]);
+            self.textarea.move_cursor(CursorMove::End);
+        }
+    }
+
+    /// Adjust the scroll position so the step cursor boundary is visible with
+    /// context on both sides.
+    fn scroll_to_step_cursor(&mut self) {
+        self.log_view.auto_scroll = false;
+        // The exact line count for the kept portion is not known until render
+        // time; we set auto_scroll to false and let the render path handle
+        // final clamping.  For now, a coarse approximation: scroll to the end
+        // of the kept portion.  The render path will center it properly.
+        self.log_view.log_scroll = usize::MAX; // will be clamped in draw
+    }
+
+    /// Commit the step: create a new branched session from events up to (but
+    /// not including) the step cursor, plus the current textarea content as a
+    /// new `UserMessage`.  Switches the active session to the branch.
+    ///
+    /// Returns the new `UserMessage` content, or `None` if not in step mode or
+    /// session state is unavailable.
+    pub(crate) fn commit_step_branch(&mut self) -> Option<String> {
+        let idx = self.step_cursor?;
+        let new_content = self.textarea.lines().join("\n");
+        if new_content.trim().is_empty() {
+            return None;
+        }
+
+        let events: Vec<SessionEvent> = {
+            let ss = self.session.session_state.as_ref()?;
+            ss.events()[..idx].to_vec()
+        };
+
+        let cwd = self.session.current_cwd.clone();
+        let new_session_id = self
+            .session
+            .session_store
+            .as_mut()
+            .and_then(|store| store.create_session_from_events(&cwd, &events).ok());
+
+        // Switch active session
+        if let Some(ref session_id) = new_session_id
+            && let Some(store) = &self.session.session_store
+            && let Ok(log) = store.load_events(session_id)
+        {
+            self.session.current_session_id = Some(session_id.clone());
+            self.session.session_state =
+                Some(crate::session_state::SessionState::from_event_log(log));
+            self.session.live_turn = crate::live_turn::LiveTurnState::new();
+            self.session.pending_turn_events.clear();
+        }
+
+        // Clear step state
+        self.step_cursor = None;
+        self.saved_input = None;
+        self.log_view.auto_scroll = true;
+        self.log_view.invalidate();
+
+        Some(new_content)
     }
 }
 
@@ -2244,5 +2439,142 @@ mod tests {
             combined.len() > committed_after.len(),
             "combined view should include live overlay"
         );
+    }
+
+    // ── Step-back navigation ──────────────────────────────────────────────────
+
+    fn make_app_with_events(events: Vec<crate::session_event::SessionEvent>) -> App {
+        let mut app = make_app();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let mut log = crate::event_log::EventLog::load(&path).expect("load");
+        log.append_batch(&events).expect("append");
+        app.session.session_state = Some(crate::session_state::SessionState::from_event_log(log));
+        // Keep tempdir alive inside app so the path is valid for the test duration.
+        // We don't need the store for these unit tests.
+        app
+    }
+
+    fn ts() -> u64 {
+        1_713_000_000
+    }
+
+    fn user_ev(content: &str) -> crate::session_event::SessionEvent {
+        crate::session_event::SessionEvent::UserMessage {
+            content: content.to_string(),
+            timestamp: ts(),
+        }
+    }
+
+    fn assistant_ev(content: &str) -> crate::session_event::SessionEvent {
+        crate::session_event::SessionEvent::AssistantMessage {
+            content: content.to_string(),
+            thinking: None,
+            phase: crate::llm::AssistantPhase::Final,
+            usage: None,
+            timestamp: ts(),
+        }
+    }
+
+    #[test]
+    fn user_message_boundaries_empty() {
+        let app = make_app();
+        assert!(app.user_message_boundaries().is_empty());
+    }
+
+    #[test]
+    fn user_message_boundaries_correct_indices() {
+        let app = make_app_with_events(vec![
+            user_ev("first"),
+            assistant_ev("reply1"),
+            user_ev("second"),
+            assistant_ev("reply2"),
+        ]);
+        assert_eq!(app.user_message_boundaries(), vec![0, 2]);
+    }
+
+    #[test]
+    fn step_back_saves_input_and_repopulates() {
+        let mut app = make_app_with_events(vec![
+            user_ev("first"),
+            assistant_ev("reply1"),
+            user_ev("second"),
+            assistant_ev("reply2"),
+        ]);
+        app.textarea = ratatui_textarea::TextArea::new(vec!["current input".to_string()]);
+
+        app.step_back();
+
+        assert_eq!(app.saved_input.as_deref(), Some("current input"));
+        assert_eq!(app.step_cursor, Some(2));
+        assert_eq!(app.textarea.lines().join(""), "second");
+    }
+
+    #[test]
+    fn step_back_twice_reaches_first_boundary() {
+        let mut app = make_app_with_events(vec![
+            user_ev("first"),
+            assistant_ev("reply1"),
+            user_ev("second"),
+            assistant_ev("reply2"),
+        ]);
+        app.step_back();
+        app.step_back();
+
+        assert_eq!(app.step_cursor, Some(0));
+        assert_eq!(app.textarea.lines().join(""), "first");
+    }
+
+    #[test]
+    fn step_back_noop_at_earliest_boundary() {
+        let mut app = make_app_with_events(vec![user_ev("first"), assistant_ev("reply1")]);
+        app.step_back();
+        app.step_back(); // Should not go further
+
+        assert_eq!(app.step_cursor, Some(0));
+    }
+
+    #[test]
+    fn step_forward_restores_and_clears_at_end() {
+        let mut app = make_app_with_events(vec![
+            user_ev("first"),
+            assistant_ev("reply1"),
+            user_ev("second"),
+            assistant_ev("reply2"),
+        ]);
+        app.textarea = ratatui_textarea::TextArea::new(vec!["current input".to_string()]);
+
+        app.step_back(); // cursor -> 2
+        app.step_back(); // cursor -> 0
+        app.step_forward(); // cursor -> 2
+        assert_eq!(app.step_cursor, Some(2));
+        assert_eq!(app.textarea.lines().join(""), "second");
+
+        app.step_forward(); // past end -> clear
+        assert!(app.step_cursor.is_none());
+        assert!(app.saved_input.is_none());
+        assert_eq!(app.textarea.lines().join(""), "current input");
+    }
+
+    #[test]
+    fn cancel_stepping_restores_input() {
+        let mut app = make_app_with_events(vec![user_ev("first"), assistant_ev("reply1")]);
+        app.textarea = ratatui_textarea::TextArea::new(vec!["my draft".to_string()]);
+
+        app.step_back();
+        assert_eq!(app.step_cursor, Some(0));
+
+        app.cancel_stepping();
+        assert!(app.step_cursor.is_none());
+        assert_eq!(app.textarea.lines().join(""), "my draft");
+    }
+
+    #[tokio::test]
+    async fn step_back_noop_when_runtime_running() {
+        let mut app = make_app_with_events(vec![user_ev("first")]);
+        install_test_agent_task(&mut app);
+
+        app.step_back();
+        assert!(app.step_cursor.is_none());
     }
 }

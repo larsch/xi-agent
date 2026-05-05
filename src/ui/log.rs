@@ -51,6 +51,53 @@ impl Default for ToolBodyConfig {
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
+/// Apply uniform dim styling to all spans in a set of pre-rendered lines.
+///
+/// Used to render the "to be discarded" portion of the conversation log when
+/// the user is in step-back mode.
+/// Dim a colour by blending it toward a dark background.
+fn dim_color(c: Color) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => {
+            // Blend 60 % toward a near-black neutral to reduce brightness while
+            // keeping hue.  The result stays noticeably darker than normal but
+            // not invisible.
+            let blend = |v: u8| -> u8 { ((v as u16 * 40) / 100) as u8 };
+            Color::Rgb(blend(r), blend(g), blend(b))
+        }
+        // For named colours fall back to a fixed muted grey.
+        _ => Color::Rgb(80, 80, 90),
+    }
+}
+
+pub(super) fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| {
+                        let mut style = span.style;
+                        // Dim fg: scale explicit colours down; for default-fg spans
+                        // (plain text, model responses) apply a fixed muted grey so
+                        // they are visibly dimmed rather than left at full brightness.
+                        style = match style.fg {
+                            Some(fg) => style.fg(dim_color(fg)),
+                            None => style.fg(Color::Rgb(110, 110, 120)),
+                        };
+                        // Dim bg so user-message background blocks match the bar lines.
+                        if let Some(bg) = style.bg {
+                            style = style.bg(dim_color(bg));
+                        }
+                        Span::styled(span.content, style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
 pub(super) fn build_log_lines(
     messages: &[Message],
     streaming: bool,
@@ -889,8 +936,73 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolBodyConfig, build_log_lines, trim_assistant_block_edges};
+    use super::{ToolBodyConfig, build_log_lines, dim_lines, trim_assistant_block_edges};
     use crate::llm::{AssistantPhase, DisplayRange, Message};
+    use ratatui::{
+        style::Color,
+        text::{Line, Span},
+    };
+
+    #[test]
+    fn dim_lines_dims_fg_proportionally() {
+        use ratatui::style::Style;
+        let lines = vec![Line::from(vec![Span::styled(
+            "hello",
+            Style::default().fg(Color::Rgb(200, 100, 50)),
+        )])];
+        let dimmed = dim_lines(lines);
+        // 200 * 40/100 = 80, 100 * 40/100 = 40, 50 * 40/100 = 20
+        assert_eq!(dimmed[0].spans[0].style.fg, Some(Color::Rgb(80, 40, 20)));
+    }
+
+    #[test]
+    fn dim_lines_dims_bg_proportionally() {
+        use ratatui::style::Style;
+        // USER_BG = Rgb(50, 50, 64)
+        let bg = Color::Rgb(50, 50, 64);
+        let lines = vec![Line::from(vec![Span::styled(
+            "hello",
+            Style::default().bg(bg),
+        )])];
+        let dimmed = dim_lines(lines);
+        // 50*40/100=20, 50*40/100=20, 64*40/100=25
+        assert_eq!(dimmed[0].spans[0].style.bg, Some(Color::Rgb(20, 20, 25)));
+    }
+
+    #[test]
+    fn dim_lines_bar_fg_and_text_bg_match() {
+        use ratatui::style::Style;
+        // Bar line: fg = USER_BG, no bg
+        let user_bg = Color::Rgb(50, 50, 64);
+        let bar_line = Line::from(vec![Span::styled("▄▄▄", Style::default().fg(user_bg))]);
+        // Text line: bg = USER_BG, no fg
+        let text_line = Line::from(vec![Span::styled("hello", Style::default().bg(user_bg))]);
+        let dimmed = dim_lines(vec![bar_line, text_line]);
+        let bar_fg = dimmed[0].spans[0].style.fg.unwrap();
+        let text_bg = dimmed[1].spans[0].style.bg.unwrap();
+        assert_eq!(
+            bar_fg, text_bg,
+            "bar fg and text bg must match after dimming"
+        );
+    }
+
+    #[test]
+    fn dim_lines_dims_plain_spans_with_fallback_grey() {
+        let lines = vec![Line::from(vec![Span::raw("hello")])];
+        let dimmed = dim_lines(lines);
+        assert_eq!(
+            dimmed[0].spans[0].style.fg,
+            Some(Color::Rgb(110, 110, 120)),
+            "plain spans must get fallback muted grey"
+        );
+    }
+
+    #[test]
+    fn dim_lines_preserves_span_content() {
+        let lines = vec![Line::from(vec![Span::raw("hello")])];
+        let dimmed = dim_lines(lines);
+        assert_eq!(dimmed[0].spans[0].content, "hello");
+    }
 
     fn cfg() -> ToolBodyConfig {
         ToolBodyConfig::default()

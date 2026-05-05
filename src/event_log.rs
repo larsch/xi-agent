@@ -125,6 +125,39 @@ impl EventLog {
         self.events.extend_from_slice(batch);
         Ok(())
     }
+
+    /// Create a new event log at `path` pre-populated with `events`.
+    ///
+    /// The file is created (or overwritten) and all events are written
+    /// immediately.  Returns the new [`EventLog`] with those events loaded.
+    pub fn new_from_events(
+        path: impl Into<PathBuf>,
+        events: &[SessionEvent],
+    ) -> anyhow::Result<Self> {
+        let path = path.into();
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create event log directory: {}", parent.display())
+            })?;
+        }
+
+        let mut buf = String::new();
+        for ev in events {
+            buf.push_str(
+                &serde_json::to_string(ev).with_context(|| "Failed to serialize session event")?,
+            );
+            buf.push('\n');
+        }
+
+        std::fs::write(&path, buf.as_bytes())
+            .with_context(|| format!("Failed to write event log: {}", path.display()))?;
+
+        Ok(Self {
+            path,
+            events: events.to_vec(),
+        })
+    }
 }
 
 // ── SessionStore extension ────────────────────────────────────────────────────
@@ -138,6 +171,21 @@ impl crate::session::SessionStore {
     pub fn load_events(&self, session_id: &str) -> anyhow::Result<EventLog> {
         let path = self.resolve_event_log_path(session_id)?;
         EventLog::load(path)
+    }
+
+    /// Create a new session pre-populated with `events` and return its ID.
+    ///
+    /// A fresh session entry is registered, then the event log file is written
+    /// atomically with all provided events.
+    pub fn create_session_from_events(
+        &mut self,
+        cwd: &str,
+        events: &[SessionEvent],
+    ) -> anyhow::Result<String> {
+        let session_id = self.create_session(cwd)?;
+        let path = self.resolve_event_log_path(&session_id)?;
+        EventLog::new_from_events(path, events)?;
+        Ok(session_id)
     }
 }
 
@@ -317,5 +365,58 @@ mod tests {
         assert!(
             matches!(&reloaded.events[0], SessionEvent::ModelChanged { model, .. } if model == "gpt-4o")
         );
+    }
+
+    #[test]
+    fn new_from_events_writes_and_loads_correctly() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("branch.jsonl");
+        let events = vec![user_ev(), assistant_ev()];
+        let log = EventLog::new_from_events(&path, &events).unwrap();
+        assert_eq!(log.events.len(), 2);
+
+        let reloaded = EventLog::load(&path).unwrap();
+        assert_eq!(reloaded.events.len(), 2);
+        assert!(matches!(
+            reloaded.events[0],
+            SessionEvent::UserMessage { .. }
+        ));
+        assert!(matches!(
+            reloaded.events[1],
+            SessionEvent::AssistantMessage { .. }
+        ));
+    }
+
+    #[test]
+    fn new_from_events_overwrites_existing_file() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("branch.jsonl");
+
+        // Write 3 events first
+        EventLog::new_from_events(&path, &[user_ev(), assistant_ev(), user_ev()]).unwrap();
+
+        // Overwrite with 1 event
+        let log = EventLog::new_from_events(&path, &[user_ev()]).unwrap();
+        assert_eq!(log.events.len(), 1);
+
+        let reloaded = EventLog::load(&path).unwrap();
+        assert_eq!(reloaded.events.len(), 1);
+    }
+
+    #[test]
+    fn create_session_from_events_creates_new_session() {
+        let tmp = tempdir().unwrap();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().to_path_buf()).unwrap();
+        let events = vec![user_ev(), assistant_ev()];
+        let session_id = store.create_session_from_events("/repo", &events).unwrap();
+        assert!(!session_id.is_empty());
+
+        // The new session's event log contains the events
+        let reloaded = store.load_events(&session_id).unwrap();
+        assert_eq!(reloaded.events.len(), 2);
+        assert!(matches!(
+            reloaded.events[0],
+            SessionEvent::UserMessage { .. }
+        ));
     }
 }

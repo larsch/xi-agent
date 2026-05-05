@@ -22,6 +22,22 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
     if app.throbber_visible() {
         spans.push(Span::styled(format!("{frame}"), throbber_style));
     }
+    if let Some(cursor_idx) = app.step_cursor {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        let boundaries = app.user_message_boundaries();
+        let total = boundaries.len();
+        // How many boundaries are at or after the cursor (i.e. will be discarded)?
+        let steps_back = boundaries.iter().filter(|&&i| i >= cursor_idx).count();
+        let step_style = Style::default()
+            .fg(Color::Rgb(220, 180, 80))
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        spans.push(Span::styled(
+            format!("[step back: {steps_back} of {total} — Enter to branch, Esc to cancel]"),
+            step_style,
+        ));
+    }
     if app.log_view.full_output {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
