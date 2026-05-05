@@ -83,8 +83,8 @@ This convention applies consistently to all tool bodies.
 
 #### `write_file`
 
-- Intent: `✏️ <path>`
-- Body: the content being written to the file (`tool_args["content"]`), head-truncated to 8 lines. Streams in as the LLM generates the `content` argument.
+- Intent: `✏️ <path>` — at minimum shows `✏️ write_file` until the `path` argument is available.
+- Body: the content being written to the file (`tool_args["content"]`), head-truncated to 8 lines. Streams in as the LLM generates the `content` argument, sourced from `tool_partial_args` during streaming and from `tool_args` once finalized.
 
 #### `edit_file`
 

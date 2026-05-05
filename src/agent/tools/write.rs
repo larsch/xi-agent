@@ -84,7 +84,7 @@ impl Tool for WriteTool {
     }
 
     fn streaming_field(&self) -> Option<String> {
-        Some("content".to_string())
+        Some("path".to_string())
     }
 
     fn execute(

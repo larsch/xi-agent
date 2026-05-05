@@ -283,22 +283,32 @@ fn render_tool_call(
     append_message_colored(out, &intent_label, width, color);
 
     // Show streaming write_file intent body.
-    if show_write_intent_body
-        && let Some(content) = msg
+    // Content is available either from finalized tool_args or, while still
+    // streaming, extracted from tool_partial_args so the body is visible
+    // throughout streaming without any disappear/reappear flicker.
+    if show_write_intent_body {
+        let streaming_content = msg
+            .tool_partial_args
+            .as_deref()
+            .and_then(|p| tool_presentation::extract_partial_field(p, "content"));
+        let content = msg
             .tool_args
             .as_ref()
             .and_then(|a| a.get("content"))
             .and_then(|v| v.as_str())
-    {
-        let body_color = Color::Cyan;
-        render_head_truncated_body(
-            out,
-            content,
-            cfg.head_lines,
-            cfg.full_output,
-            body_color,
-            width,
-        );
+            .map(|s| s.to_string())
+            .or(streaming_content);
+        if let Some(content) = content {
+            let body_color = Color::Cyan;
+            render_head_truncated_body(
+                out,
+                &content,
+                cfg.head_lines,
+                cfg.full_output,
+                body_color,
+                width,
+            );
+        }
     }
 }
 
