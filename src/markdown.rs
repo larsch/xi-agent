@@ -149,6 +149,7 @@ fn wrap_spans(
         current_spans.push(Span::raw(pfx.to_string()));
     }
     let mut current_width = pfx_width;
+    let mut current_pfx_width = pfx_width;
 
     let flush_line = |spans: Vec<Span<'static>>, lines: &mut Vec<Line<'static>>| {
         lines.push(Line::from(spans));
@@ -158,14 +159,14 @@ fn wrap_spans(
         if token.is_space {
             // Spaces are only added if there is already content on the line,
             // and only if they fit (lazy: treat a single space as 1 column).
-            if current_width > pfx_width && current_width < width {
+            if current_width > current_pfx_width && current_width < width {
                 current_spans.push(Span::styled(" ".to_string(), token.style));
                 current_width += 1;
             }
             continue;
         }
         let tw = token.text.width();
-        if current_width == pfx_width {
+        if current_width == current_pfx_width {
             // First word on this line — always fits (even if it overflows,
             // there's nothing we can do about a word wider than the terminal).
             current_spans.push(Span::styled(token.text.clone(), token.style));
@@ -184,6 +185,7 @@ fn wrap_spans(
                 current_spans.push(Span::raw(ind.to_string()));
             }
             current_width = ind_width;
+            current_pfx_width = ind_width;
             current_spans.push(Span::styled(token.text.clone(), token.style));
             current_width += tw;
         }
@@ -1211,5 +1213,41 @@ mod tests {
         assert_eq!(texts[1], "   • Inner A");
         assert_eq!(texts[2], "   • Inner B");
         assert_eq!(texts[3], "2. Outer 2");
+    }
+
+    // ── Wrapping / space-preservation ──────────────────────────────────────────
+
+    #[test]
+    fn wrapped_continuation_line_preserves_spaces_between_words() {
+        // "💬 " prefix (width 3), empty indent, width 10.
+        // "one two " fills line 1 (3+3+1+3 = 10), then "a b c" wraps to line 2
+        // with empty indent (width 0).  With the old bug, current_width (1)
+        // was compared against pfx_width (3) so the space after "a" was dropped,
+        // producing "ab c" instead of "a b c".
+        let lines = render("one two a b c", 10, "💬 ");
+        let texts = lines_text(&lines);
+        assert_eq!(texts[0], "💬 one two");
+        assert_eq!(texts[1], "a b c");
+    }
+
+    #[test]
+    fn wrapped_continuation_line_preserves_spaces_no_prefix() {
+        // No prefix, width 7.  "foo bar" fits exactly, then "baz qux" wraps.
+        // Spaces between words on the continuation line must be preserved.
+        let lines = render("foo bar baz qux", 7, "");
+        let texts = lines_text(&lines);
+        assert!(
+            texts
+                .iter()
+                .any(|l| l.contains("baz qux") || l == "baz qux"),
+            "expected 'baz qux' on a continuation line, got: {texts:?}"
+        );
+        // No two words should be stuck together without a space.
+        for line in &texts {
+            assert!(
+                !line.contains("bazqux") && !line.contains("foobaz"),
+                "words run together on line {line:?}"
+            );
+        }
     }
 }
