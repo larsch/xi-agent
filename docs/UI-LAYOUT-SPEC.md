@@ -88,8 +88,8 @@ This convention applies consistently to all tool bodies.
 
 #### `edit_file`
 
-- Intent: `📝 <path>`
-- Body: a compact diff showing up to 4 lines of search text (red, `-` prefix) and up to 4 lines of replacement text (green, `+` prefix). Each side is independently truncated with `... (N lines total)` when it exceeds 4 lines. Streams in as the LLM generates the `new_text` argument.
+- Intent: `📝 <path>` — at minimum shows `📝 edit_file` until the `path` argument is available.
+- Body: a compact diff showing up to 4 lines of search text (red, `-` prefix) and up to 4 lines of replacement text (green, `+` prefix). Each side is independently truncated with `... (N lines total)` when it exceeds 4 lines. Streams in progressively as the LLM generates `old_text` and `new_text`, sourced from `tool_partial_args` during streaming and from `tool_args` once finalized.
 
 #### `find_files`
 

@@ -262,6 +262,14 @@ fn render_tool_call(
             Some(next) if next.role == Role::ToolResult
         );
 
+    // For edit_file: show the diff body while streaming, before the result
+    // arrives. Same dual-source pattern as write_file.
+    let show_edit_intent_body = matches!(name, "edit_file" | "edit")
+        && !matches!(
+            messages.get(idx + 1),
+            Some(next) if next.role == Role::ToolResult
+        );
+
     // Append read_file range suffix when result is available.
     let mut intent_label = label;
     if matches!(name, "read" | "read_file")
@@ -306,6 +314,37 @@ fn render_tool_call(
                 cfg.head_lines,
                 cfg.full_output,
                 body_color,
+                width,
+            );
+        }
+    }
+
+    // Show streaming edit_file diff body.
+    // old_text and new_text are extracted from tool_partial_args during
+    // streaming and from tool_args once finalized, so the diff is visible
+    // throughout the entire stream without flicker.
+    if show_edit_intent_body {
+        let extract = |field: &str| -> Option<String> {
+            msg.tool_args
+                .as_ref()
+                .and_then(|a| a.get(field))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    msg.tool_partial_args
+                        .as_deref()
+                        .and_then(|p| tool_presentation::extract_partial_field(p, field))
+                })
+        };
+        let old_text = extract("old_text").unwrap_or_default();
+        let new_text = extract("new_text").unwrap_or_default();
+        if !old_text.is_empty() || !new_text.is_empty() {
+            render_diff_body(
+                out,
+                &old_text,
+                &new_text,
+                cfg.diff_lines,
+                cfg.full_output,
                 width,
             );
         }

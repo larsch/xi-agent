@@ -87,7 +87,7 @@ impl Tool for EditTool {
     }
 
     fn streaming_field(&self) -> Option<String> {
-        Some("new_text".to_string())
+        Some("path".to_string())
     }
 
     fn execute(
