@@ -160,6 +160,7 @@ impl Tool for EditTool {
 mod tests {
     use super::*;
     use crate::agent::types::Tool;
+    use serde_json::json;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -283,6 +284,27 @@ mod tests {
             result.content.as_text().contains("Invalid arguments"),
             "expected 'Invalid arguments' in error: {}",
             result.content.as_text()
+        );
+    }
+
+    #[test]
+    fn edit_schema_preserves_declared_property_order() {
+        let tool = make_tool();
+        let schema = tool.parameters_schema();
+        let properties = schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .expect("properties object");
+        let keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["path", "old_text", "new_text"]);
+
+        let required = schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .expect("required array");
+        assert_eq!(
+            required,
+            &vec![json!("path"), json!("old_text"), json!("new_text")]
         );
     }
 
