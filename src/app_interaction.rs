@@ -628,6 +628,7 @@ impl App {
 
     pub fn receive_ask_request(&mut self, req: AskRequest) {
         let AskRequest {
+            question,
             context: _context,
             options,
             allow_multiple: _allow_multiple,
@@ -636,6 +637,7 @@ impl App {
         } = req;
 
         self.ask_user.pending = Some(PendingAsk {
+            question,
             options: options.clone(),
             allow_freeform,
         });

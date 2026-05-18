@@ -21,6 +21,7 @@ use crate::agent::types::{AskUserOption, AskUserResponse};
 ///
 /// They remain on `App` accessing ask-user fields via `self.ask_user.*`.
 pub(crate) struct PendingAsk {
+    pub(crate) question: String,
     pub(crate) options: Vec<AskUserOption>,
     pub(crate) allow_freeform: bool,
 }
@@ -81,9 +82,11 @@ mod tests {
     #[test]
     fn pending_ask_stores_fields() {
         let ask = PendingAsk {
+            question: "Continue?".to_string(),
             options: vec![],
             allow_freeform: true,
         };
+        assert_eq!(ask.question, "Continue?");
         assert!(ask.options.is_empty());
         assert!(ask.allow_freeform);
     }

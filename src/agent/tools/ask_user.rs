@@ -128,6 +128,7 @@ impl Tool for AskUserTool {
             let (reply_tx, reply_rx) = oneshot::channel();
 
             let request = AskRequest {
+                question,
                 context,
                 options,
                 allow_multiple,

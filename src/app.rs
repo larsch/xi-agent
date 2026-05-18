@@ -272,7 +272,10 @@ impl App {
     }
 
     pub fn ask_user_question(&self) -> Option<&str> {
-        None
+        self.ask_user
+            .pending
+            .as_ref()
+            .map(|pending| pending.question.as_str())
     }
 
     pub fn queued_steering(&self) -> &[String] {
@@ -1505,6 +1508,7 @@ mod tests {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
+            question: "What is your name?".to_string(),
             context: None,
             options: vec![],
             allow_multiple: false,
@@ -1521,6 +1525,7 @@ mod tests {
             "freeform mode should be active"
         );
         assert!(app.has_pending_ask(), "pending ask should be set");
+        assert_eq!(app.ask_user_question(), Some("What is your name?"));
     }
 
     /// When ask_user has options and allow_freeform is true, the freeform
@@ -1530,6 +1535,7 @@ mod tests {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
+            question: "Choose one".to_string(),
             context: None,
             options: vec![
                 AskUserOption {
@@ -1558,6 +1564,7 @@ mod tests {
         let mut app = make_app();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
         app.receive_ask_request(AskRequest {
+            question: "Choose one".to_string(),
             context: None,
             options: vec![
                 AskUserOption {

@@ -184,16 +184,6 @@ fn render_tool_call(
     let name = msg.tool_name.as_deref().unwrap_or("unknown");
 
     if name == "ask_user" {
-        // ask_user: only render in output area once the exchange is complete
-        // (result present). While pending, the menu area is the active surface.
-        let has_result = matches!(
-            messages.get(idx + 1),
-            Some(next) if next.role == Role::ToolResult
-        );
-        if !has_result {
-            return;
-        }
-
         let args = msg.tool_args.as_ref();
         let context = args
             .and_then(|a| a.get("context"))
@@ -1322,7 +1312,7 @@ mod tests {
     // ── ask_user ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn ask_user_not_rendered_while_pending() {
+    fn ask_user_renders_while_pending() {
         let call = Message::tool_call(
             "c1",
             "ask_user",
@@ -1330,7 +1320,19 @@ mod tests {
         );
         // No following ToolResult.
         let lines = build_log_lines(&[call], false, 120, &cfg());
-        assert!(lines.is_empty(), "ask_user should not render while pending");
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text.iter().any(|t| t.contains("What do you want?")),
+            "pending question not rendered"
+        );
     }
 
     #[test]
