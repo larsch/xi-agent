@@ -31,6 +31,8 @@ impl TestProvider {
 // ── Pre-defined questions ─────────────────────────────────────────────────────
 
 const ASK_QUESTION: &str = "Which option do you prefer?";
+const ASK_CONTEXT_QUESTION: &str = "How should I proceed after reviewing the gathered evidence?";
+const ASK_CONTEXT: &str = "Summary: reproduced the issue locally, narrowed it to the ask_user display path, and verified no unrelated warnings are present.";
 const ASK_TYPE_QUESTION: &str = "Please type your answer:";
 const ASK_NOTYPE_QUESTION: &str = "Select one of the following:";
 
@@ -117,6 +119,7 @@ fn main() {
 | `error`                 | —               | Emit a provider error to test the error-display path in the UI              |
 | `system`                | —               | Retrieve and display the full system prompt inside a fenced code block      |
 | `ask [question]`        | question        | Invoke ask_user with three named options and freeform input enabled         |
+| `ask-context [q]`       | question        | Invoke ask_user with context text, options, and freeform input enabled      |
 | `ask-type [q]`          | question        | Invoke ask_user with freeform input only and no predefined option list      |
 | `ask-notype [q]`        | question        | Invoke ask_user with three options and freeform input disabled              |
 | `bash <cmd>`            | shell command   | Execute a real bash command and echo the result as a fenced code block      |
@@ -188,6 +191,7 @@ const HELP_TEXT: &str = r#"Test provider commands:
   system                Show the full system prompt
 
   ask [question]        ask_user with options + freeform
+  ask-context [question] ask_user with context + options + freeform
   ask-type [question]   ask_user freeform only (no options)
   ask-notype [question] ask_user options only (no freeform)
 
@@ -245,6 +249,7 @@ fn stream_owned(text: String) -> LlmStream {
 /// Build a tool call stream for `ask_user`.
 fn ask_user_stream(
     question: String,
+    context: Option<&'static str>,
     options: &'static [&'static str],
     allow_freeform: bool,
 ) -> LlmStream {
@@ -264,6 +269,7 @@ fn ask_user_stream(
             name: "ask_user".to_string(),
             args: serde_json::json!({
                 "question": question,
+                "context": context,
                 "options": options_json,
                 "allowFreeform": allow_freeform,
             }),
@@ -626,7 +632,21 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
-                ask_user_stream(question, &["Option A", "Option B", "Option C"], true)
+                ask_user_stream(question, None, &["Option A", "Option B", "Option C"], true)
+            }
+
+            "ask-context" => {
+                let question = if rest.is_empty() {
+                    ASK_CONTEXT_QUESTION.to_string()
+                } else {
+                    rest
+                };
+                ask_user_stream(
+                    question,
+                    Some(ASK_CONTEXT),
+                    &["Quick pass", "Full pass", "Investigate further"],
+                    true,
+                )
             }
 
             "ask-type" => {
@@ -635,7 +655,7 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
-                ask_user_stream(question, &[], true)
+                ask_user_stream(question, None, &[], true)
             }
 
             "ask-notype" => {
@@ -644,7 +664,7 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
-                ask_user_stream(question, &["Choice 1", "Choice 2", "Choice 3"], false)
+                ask_user_stream(question, None, &["Choice 1", "Choice 2", "Choice 3"], false)
             }
 
             "bash" => {
@@ -720,5 +740,40 @@ impl super::LlmProvider for TestProvider {
 
     fn list_models(&self) -> ModelListFuture {
         Box::pin(async { Ok(vec!["test".to_string()]) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::LlmProvider;
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn ask_context_command_emits_context_argument() {
+        let provider = TestProvider::new();
+        let events: Vec<LlmEvent> = provider
+            .stream_chat(vec![Message::user("ask-context")])
+            .collect()
+            .await;
+
+        let tool_call = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::ToolCall { name, args, .. } if name == "ask_user" => Some(args),
+                _ => None,
+            })
+            .expect("expected ask_user tool call");
+
+        assert_eq!(
+            tool_call.get("context").and_then(serde_json::Value::as_str),
+            Some(ASK_CONTEXT)
+        );
+        assert_eq!(
+            tool_call
+                .get("question")
+                .and_then(serde_json::Value::as_str),
+            Some(ASK_CONTEXT_QUESTION)
+        );
     }
 }
