@@ -136,6 +136,7 @@ impl App {
             name,
             args: serde_json::Value::Object(Default::default()),
             partial_args: String::new(),
+            partial_snapshot: None,
             streaming_field,
             result: None,
         });
@@ -145,6 +146,11 @@ impl App {
     fn on_tool_call_args_delta(&mut self, id: String, partial_json: String) {
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.partial_args.push_str(&partial_json);
+            if let Ok(completed) = jawohl::complete_json(&entry.partial_args)
+                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&completed)
+            {
+                entry.partial_snapshot = Some(parsed);
+            }
         }
         self.bump_log_revision();
     }
@@ -232,12 +238,14 @@ impl App {
         // ToolCallIntent), push a new one.
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.args = args.clone();
+            entry.partial_snapshot = Some(args.clone());
         } else {
             self.session.live_turn.tool_entries.push(LiveToolEntry {
                 id: id.clone(),
                 name: name.clone(),
                 args: args.clone(),
                 partial_args: String::new(),
+                partial_snapshot: Some(args.clone()),
                 streaming_field: None,
                 result: None,
             });

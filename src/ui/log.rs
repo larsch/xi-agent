@@ -239,6 +239,8 @@ fn render_tool_call(
         } else {
             format!("⚙ {prefix} {command}")
         }
+    } else if let Some(snapshot) = msg.tool_partial_snapshot.as_ref() {
+        tool_presentation::tool_invocation_label(name, snapshot)
     } else if let Some(partial) = msg.tool_partial_args.as_deref() {
         tool_presentation::tool_invocation_label_partial(
             name,
@@ -296,9 +298,16 @@ fn render_tool_call(
     // throughout streaming without any disappear/reappear flicker.
     if show_write_intent_body {
         let streaming_content = msg
-            .tool_partial_args
-            .as_deref()
-            .and_then(|p| tool_presentation::extract_partial_field(p, "content"));
+            .tool_partial_snapshot
+            .as_ref()
+            .and_then(|a| a.get("content"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                msg.tool_partial_args
+                    .as_deref()
+                    .and_then(|p| tool_presentation::extract_partial_field(p, "content"))
+            });
         let content = msg
             .tool_args
             .as_ref()
@@ -330,6 +339,13 @@ fn render_tool_call(
                 .and_then(|a| a.get(field))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
+                .or_else(|| {
+                    msg.tool_partial_snapshot
+                        .as_ref()
+                        .and_then(|a| a.get(field))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .or_else(|| {
                     msg.tool_partial_args
                         .as_deref()

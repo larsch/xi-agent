@@ -1726,6 +1726,7 @@ mod tests {
                     name: "powershell".to_string(),
                     args: serde_json::json!({"command": "git diff"}),
                     partial_args: String::new(),
+                    partial_snapshot: None,
                     streaming_field: None,
                     result: None,
                 });
@@ -1775,6 +1776,7 @@ mod tests {
                     name: "ask_user".to_string(),
                     args: serde_json::json!({"question": "Continue?"}),
                     partial_args: String::new(),
+                    partial_snapshot: None,
                     streaming_field: None,
                     result: None,
                 });

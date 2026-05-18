@@ -38,6 +38,9 @@ pub struct LiveToolEntry {
     /// Accumulated raw partial JSON string while args are still streaming.
     /// Empty once args are fully received.
     pub partial_args: String,
+    /// Last successfully completed+parsed partial args snapshot. Used to keep
+    /// streamed previews stable across transient parse failures.
+    pub partial_snapshot: Option<serde_json::Value>,
     /// The argument field to stream for display (from ToolDefinition).
     pub streaming_field: Option<String>,
     pub result: Option<LiveToolResult>,
@@ -134,6 +137,7 @@ impl LiveTurnState {
             // Attach partial_args for the UI to render a live preview.
             if entry.result.is_none() && !entry.partial_args.is_empty() {
                 tool_msg.tool_partial_args = Some(entry.partial_args.clone());
+                tool_msg.tool_partial_snapshot = entry.partial_snapshot.clone();
                 tool_msg.tool_streaming_field = entry.streaming_field.clone();
             }
             msgs.push(tool_msg);
@@ -230,6 +234,7 @@ mod tests {
             name: "read_file".to_string(),
             args: serde_json::json!({}),
             partial_args: String::new(),
+            partial_snapshot: None,
             streaming_field: None,
             result: Some(LiveToolResult {
                 content: "content".to_string(),

@@ -76,6 +76,7 @@ impl UsageStats {
 /// | `tool_name`        | —    | —      | —         | ✓        | —          |
 /// | `tool_args`        | —    | —      | —         | ✓        | —          |
 /// | `tool_partial_args`| —    | —      | —         | ✓        | —          |
+/// | `tool_partial_snapshot` | — | —    | —         | ✓        | —          |
 /// | `is_error`         | —    | —      | —         | —        | ✓          |
 /// | `display_range`    | —    | —      | —         | —        | ✓          |
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -112,6 +113,12 @@ pub struct Message {
     /// still streaming. Display-only; never sent to the LLM or persisted.
     #[serde(skip)]
     pub tool_partial_args: Option<String>,
+    /// Last successfully completed+parsed partial args snapshot for an
+    /// in-progress tool call. Used to keep streamed previews stable across
+    /// transient parse failures. Display-only; never sent to the LLM or
+    /// persisted.
+    #[serde(skip)]
+    pub tool_partial_snapshot: Option<serde_json::Value>,
     /// The argument field to stream for display (from `ToolDefinition::streaming_field`).
     /// Display-only; never sent to the LLM or persisted.
     #[serde(skip)]
@@ -150,6 +157,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             tool_partial_args: None,
+            tool_partial_snapshot: None,
             tool_streaming_field: None,
             is_error: false,
             display_range: None,
@@ -169,6 +177,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             tool_partial_args: None,
+            tool_partial_snapshot: None,
             tool_streaming_field: None,
             is_error: false,
             display_range: None,
@@ -188,6 +197,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             tool_partial_args: None,
+            tool_partial_snapshot: None,
             tool_streaming_field: None,
             is_error: false,
             display_range: None,
@@ -212,6 +222,7 @@ impl Message {
             tool_name: Some(name.into()),
             tool_args: Some(args),
             tool_partial_args: None,
+            tool_partial_snapshot: None,
             tool_streaming_field: None,
             is_error: false,
             display_range: None,
@@ -236,6 +247,7 @@ impl Message {
             tool_name: None,
             tool_args: None,
             tool_partial_args: None,
+            tool_partial_snapshot: None,
             tool_streaming_field: None,
             is_error,
             display_range: None,
