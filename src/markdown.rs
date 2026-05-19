@@ -805,7 +805,8 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                 let text = t.into_string();
                 if in_code_block {
                     // Each text event inside a code block is one line (pulldown-cmark
-                    // includes the newline).  Render with 2-space indent.
+                    // includes the newline).  Render with 2-space indent, hard-wrapping
+                    // lines that exceed the available width.
                     let code_style = Style::default().fg(CODE_FG);
                     for line in text.split('\n') {
                         if line.is_empty() {
@@ -813,15 +814,42 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                             out.push(Line::from(Span::raw("")));
                             continue;
                         }
-                        let indented = format!("  {line}");
-                        if first_block && !prefix.is_empty() {
-                            first_block = false;
-                            out.push(Line::from(vec![
-                                Span::raw(prefix.to_string()),
-                                Span::styled(indented, code_style),
-                            ]));
+                        // Hard-wrap the line if it exceeds the available width.
+                        // Each output line gets a 2-space indent, so the content
+                        // budget is `width.saturating_sub(2)`.
+                        let content_width = if width > 2 { width - 2 } else { width };
+                        let mut hard_lines: Vec<&str> = Vec::new();
+                        if width == 0 || line.width() <= content_width {
+                            hard_lines.push(line);
                         } else {
-                            out.push(Line::from(Span::styled(indented, code_style)));
+                            let mut rest = line;
+                            while !rest.is_empty() {
+                                // Find the split point at `content_width` display columns.
+                                let mut col = 0usize;
+                                let mut byte_pos = rest.len();
+                                for (i, ch) in rest.char_indices() {
+                                    let cw = ch.width().unwrap_or(0);
+                                    if col + cw > content_width {
+                                        byte_pos = i;
+                                        break;
+                                    }
+                                    col += cw;
+                                }
+                                hard_lines.push(&rest[..byte_pos]);
+                                rest = &rest[byte_pos..];
+                            }
+                        }
+                        for (hi, segment) in hard_lines.into_iter().enumerate() {
+                            let indented = format!("  {segment}");
+                            if first_block && !prefix.is_empty() && hi == 0 {
+                                first_block = false;
+                                out.push(Line::from(vec![
+                                    Span::raw(prefix.to_string()),
+                                    Span::styled(indented, code_style),
+                                ]));
+                            } else {
+                                out.push(Line::from(Span::styled(indented, code_style)));
+                            }
                         }
                     }
                 } else if in_table {
@@ -1109,6 +1137,30 @@ mod tests {
     }
 
     // ── Partial / streaming markdown ─────────────────────────────────────────────
+
+    #[test]
+    fn code_block_long_line_wraps_at_width() {
+        // A code block line wider than the terminal must be hard-wrapped.
+        // Width 10: 2-space indent leaves 8 columns of content per segment.
+        let md = "```\nabcdefghijklmnop\n```";
+        let lines = render(md, 10, "");
+        let texts = lines_text(&lines);
+        // Every line must be at most 10 columns wide.
+        for t in &texts {
+            assert!(
+                t.width() <= 10,
+                "line too wide ({} > 10): {:?}",
+                t.width(),
+                t
+            );
+        }
+        // The content should be split into multiple lines.
+        let code_lines: Vec<_> = texts.iter().filter(|t| !t.is_empty()).collect();
+        assert!(
+            code_lines.len() >= 2,
+            "expected wrapping into >=2 lines, got: {texts:?}"
+        );
+    }
 
     #[test]
     fn partial_markdown_does_not_panic() {
