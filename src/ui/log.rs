@@ -555,8 +555,33 @@ fn render_diff_body(
 ) {
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
-    let old_total = old_lines.len();
-    let new_total = new_lines.len();
+
+    // Compute common head length.
+    let common_head = old_lines
+        .iter()
+        .zip(new_lines.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Compute common tail length (must not overlap with head).
+    let old_tail_max = old_lines.len().saturating_sub(common_head);
+    let new_tail_max = new_lines.len().saturating_sub(common_head);
+    let common_tail = old_lines[old_lines.len().saturating_sub(old_tail_max)..]
+        .iter()
+        .rev()
+        .zip(
+            new_lines[new_lines.len().saturating_sub(new_tail_max)..]
+                .iter()
+                .rev(),
+        )
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let old_diff = &old_lines[common_head..old_lines.len() - common_tail];
+    let new_diff = &new_lines[common_head..new_lines.len() - common_tail];
+
+    let old_total = old_diff.len();
+    let new_total = new_diff.len();
     let old_limit = if full_output {
         old_total
     } else {
@@ -568,8 +593,16 @@ fn render_diff_body(
         max_lines_per_side
     };
 
+    // Show hidden head marker.
+    if common_head > 0 {
+        out.push(Line::from(Span::styled(
+            format!("  ... ({common_head} common lines hidden)"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
     // Old side (red, - prefix).
-    for line in old_lines.iter().take(old_limit) {
+    for line in old_diff.iter().take(old_limit) {
         let text = format!("- {line}");
         let normalized = normalize_terminal_segment(&text, 0);
         let chunks = wrap_str(&normalized, width);
@@ -588,7 +621,7 @@ fn render_diff_body(
     }
 
     // New side (green, + prefix).
-    for line in new_lines.iter().take(new_limit) {
+    for line in new_diff.iter().take(new_limit) {
         let text = format!("+ {line}");
         let normalized = normalize_terminal_segment(&text, 0);
         let chunks = wrap_str(&normalized, width);
@@ -603,6 +636,14 @@ fn render_diff_body(
         out.push(Line::from(Span::styled(
             format!("... ({new_total} lines total)"),
             Style::default().fg(Color::LightGreen),
+        )));
+    }
+
+    // Show hidden tail marker.
+    if common_tail > 0 {
+        out.push(Line::from(Span::styled(
+            format!("  ... ({common_tail} common lines hidden)"),
+            Style::default().fg(Color::DarkGray),
         )));
     }
 }
