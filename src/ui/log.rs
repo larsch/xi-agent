@@ -863,9 +863,7 @@ fn append_message_dim(
     suffix: &'static str,
     width: usize,
 ) {
-    let dim_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    let dim_style = Style::default().fg(Color::DarkGray);
     let segments: Vec<&str> = if content.is_empty() {
         vec![""]
     } else {
