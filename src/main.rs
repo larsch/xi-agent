@@ -212,7 +212,8 @@ async fn main() -> io::Result<()> {
         Some(app_event_tx.clone()),
         Arc::clone(&file_tracker),
         custom_tools,
-    );
+    )
+    .await;
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -269,7 +270,8 @@ async fn main() -> io::Result<()> {
                     Some(app_event_tx.clone()),
                     Arc::clone(&file_tracker),
                     custom_tools,
-                );
+                )
+                .await;
                 let loaded_skills = skills::load_skills();
                 let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
                 let skills_count = loaded_skills.len();
@@ -1598,7 +1600,7 @@ async fn run_print_mode(
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let headless_tracker = Arc::new(Mutex::new(build_file_tracker()));
-    let tools = register_builtin_tools(None, Arc::clone(&headless_tracker), custom_tools);
+    let tools = register_builtin_tools(None, Arc::clone(&headless_tracker), custom_tools).await;
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -1795,7 +1797,7 @@ async fn run_print_mode_loop_inner(
     let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let retry_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless-retry")));
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let retry_tools = register_builtin_tools(None, Arc::clone(&retry_tracker), custom_tools);
+    let retry_tools = register_builtin_tools(None, Arc::clone(&retry_tracker), custom_tools).await;
     let retry_config = AgentLoopConfig {
         tools: retry_tools,
         file_tracker: retry_tracker,

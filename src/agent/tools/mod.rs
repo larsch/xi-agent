@@ -144,6 +144,7 @@ pub mod exec;
 pub mod find;
 #[cfg(target_os = "windows")]
 pub mod powershell;
+pub mod python;
 pub mod read;
 #[cfg(not(target_os = "windows"))]
 pub mod terminal;
@@ -161,6 +162,7 @@ use exec::ExecTool;
 use find::FindTool;
 #[cfg(target_os = "windows")]
 use powershell::PowerShellTool;
+use python::PythonTool;
 use read::ReadFileTool;
 use write::WriteTool;
 
@@ -170,7 +172,7 @@ use crate::app_event::AppEventTx;
 ///
 /// `custom` tools are appended after built-ins; any custom tool whose name
 /// collides with a built-in is silently dropped (logged at debug).
-pub fn register_builtin_tools(
+pub async fn register_builtin_tools(
     app_event_tx: Option<AppEventTx>,
     file_tracker: Arc<Mutex<FileTracker>>,
     custom: Vec<custom::CustomTool>,
@@ -198,6 +200,11 @@ pub fn register_builtin_tools(
     {
         tools.push(Arc::new(BashTool));
         tools.push(Arc::new(ExecTool));
+    }
+
+    // Detect and register the Python tool if a suitable runtime is available.
+    if let Some(runtime) = python::detect_python().await {
+        tools.push(Arc::new(PythonTool::new(runtime)));
     }
 
     for tool in tools {
