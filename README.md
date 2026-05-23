@@ -1,5 +1,7 @@
 # tau
 
+[![Rust](https://github.com/larsch/tau-agent/actions/workflows/rust.yml/badge.svg)](https://github.com/larsch/tau-agent/actions/workflows/rust.yml)
+
 **tau** is a focused AI agent for the terminal, heavily inspired by
 [pi](https://pi.dev/). It provides a minimalistic text-based UI for agentic
 interactions with local and remote models, supporting tool calls, session
