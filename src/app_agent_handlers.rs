@@ -95,6 +95,7 @@ impl App {
                 modified_files,
             ),
             AgentEvent::ToolCallStart { id, name, args } => self.on_tool_call_start(id, name, args),
+            AgentEvent::ToolOutputChunk { id, chunk } => self.on_tool_output_chunk(id, chunk),
             AgentEvent::ToolCallEnd { id, result } => self.on_tool_call_end(id, result),
             AgentEvent::ExternalFileChange {
                 paths: _,
@@ -143,6 +144,7 @@ impl App {
             partial_args: String::new(),
             partial_snapshot: None,
             streaming_field,
+            running_output: String::new(),
             result: None,
         });
         self.bump_log_revision();
@@ -252,6 +254,7 @@ impl App {
                 partial_args: String::new(),
                 partial_snapshot: Some(args.clone()),
                 streaming_field: None,
+                running_output: String::new(),
                 result: None,
             });
         }
@@ -267,6 +270,13 @@ impl App {
         self.bump_log_revision();
     }
 
+    fn on_tool_output_chunk(&mut self, id: String, chunk: String) {
+        if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            entry.running_output.push_str(&chunk);
+            self.bump_log_revision();
+        }
+    }
+
     fn on_tool_call_end(&mut self, id: String, result: crate::agent::types::ToolResult) {
         self.last_output_at = Some(std::time::Instant::now());
         let display_range = result.truncation.as_ref().map(|tr| DisplayRange {
@@ -276,6 +286,7 @@ impl App {
         });
         // Update the matching live tool entry with its result.
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            entry.running_output.clear();
             entry.result = Some(LiveToolResult {
                 content: result.content.as_text().to_string(),
                 is_error: result.is_error,

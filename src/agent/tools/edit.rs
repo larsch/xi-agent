@@ -90,9 +90,10 @@ impl Tool for EditTool {
         Some("path".to_string())
     }
 
-    fn execute(
+    fn run(
         &self,
         args: Value,
+        _ctx: crate::agent::types::ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
             let EditArgs {

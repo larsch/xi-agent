@@ -1736,6 +1736,7 @@ mod tests {
                     partial_args: String::new(),
                     partial_snapshot: None,
                     streaming_field: None,
+                    running_output: String::new(),
                     result: None,
                 });
 
@@ -1786,6 +1787,7 @@ mod tests {
                     partial_args: String::new(),
                     partial_snapshot: None,
                     streaming_field: None,
+                    running_output: String::new(),
                     result: None,
                 });
 

@@ -2,12 +2,9 @@ use std::pin::Pin;
 use std::process::Stdio;
 
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::terminal::apply_terminal_render;
-use super::truncate::truncate_tail;
-use crate::agent::types::{Tool, ToolResult};
-use crate::process::DetachFromTty;
+use super::subprocess::SubprocessCommand;
+use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 /// Which Python runtime was detected at registration time.
 #[derive(Debug, Clone)]
@@ -184,9 +181,10 @@ impl Tool for PythonTool {
         Some("script".to_string())
     }
 
-    fn execute(
+    fn run(
         &self,
         args: Value,
+        ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
             let PythonArgs { script, with } = match super::parse_args(args) {
@@ -194,109 +192,20 @@ impl Tool for PythonTool {
                 Err(e) => return *e,
             };
 
-            // Build the command.
-            let mut cmd = match &self.runtime {
+            let cmd = match &self.runtime {
                 PythonRuntime::Uv { .. } => {
-                    let mut c = tokio::process::Command::new("uv");
-                    c.arg("run");
+                    let mut c = SubprocessCommand::new("uv").arg("run");
                     for pkg in &with {
-                        c.arg("--with").arg(pkg);
+                        c = c.arg("--with").arg(pkg);
                     }
-                    c.arg("python").arg("-");
-                    c
+                    c.arg("python").arg("-")
                 }
                 PythonRuntime::Native {
                     cmd: python_cmd, ..
-                } => {
-                    let mut c = tokio::process::Command::new(python_cmd);
-                    c.arg("-");
-                    c
-                }
+                } => SubprocessCommand::new(python_cmd).arg("-"),
             };
 
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .detach_from_tty();
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => return ToolResult::err(format!("Failed to spawn Python: {e}")),
-            };
-
-            // Write the script to stdin, then close it so the interpreter sees EOF.
-            let mut stdin_handle = child.stdin.take().expect("stdin is piped");
-            if let Err(e) = stdin_handle.write_all(script.as_bytes()).await {
-                return ToolResult::err(format!("Failed to write script to stdin: {e}"));
-            }
-            drop(stdin_handle);
-
-            let mut stdout_handle = child.stdout.take().expect("stdout is piped");
-            let mut stderr_handle = child.stderr.take().expect("stderr is piped");
-
-            let mut out_buf = Vec::new();
-            let mut err_buf = Vec::new();
-
-            let read_stdout = stdout_handle.read_to_end(&mut out_buf);
-            let read_stderr = stderr_handle.read_to_end(&mut err_buf);
-
-            tokio::pin!(read_stdout);
-            tokio::pin!(read_stderr);
-
-            // Phase 1: wait for interpreter exit while draining pipes.
-            let status = loop {
-                tokio::select! {
-                    status = child.wait() => {
-                        match status {
-                            Ok(s) => break s,
-                            Err(e) => return ToolResult::err(format!("Failed to wait for Python: {e}")),
-                        }
-                    }
-                    _ = &mut read_stdout => {}
-                    _ = &mut read_stderr => {}
-                }
-            };
-
-            // Phase 2: drain remaining buffered data with a short deadline.
-            let drain_deadline = tokio::time::sleep(std::time::Duration::from_millis(200));
-            tokio::pin!(drain_deadline);
-            tokio::select! {
-                _ = &mut drain_deadline => {}
-                _ = async { tokio::join!(&mut read_stdout, &mut read_stderr) } => {}
-            }
-
-            drop(stdout_handle);
-            drop(stderr_handle);
-
-            let exit_code = status.code().unwrap_or(-1);
-
-            let stdout = String::from_utf8_lossy(&out_buf).into_owned();
-            let stderr = String::from_utf8_lossy(&err_buf).into_owned();
-
-            let stdout = apply_terminal_render(&stdout);
-            let stderr = apply_terminal_render(&stderr);
-
-            let mut merged = String::new();
-            if !stdout.is_empty() {
-                merged.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                merged.push_str(&stderr);
-            }
-            if exit_code != 0 {
-                if !merged.ends_with('\n') && !merged.is_empty() {
-                    merged.push('\n');
-                }
-                merged.push_str(&format!("exit {exit_code}\n"));
-            }
-
-            let tr = truncate_tail(&merged);
-            if tr.truncated {
-                ToolResult::ok_truncated(tr, stdout, stderr)
-            } else {
-                ToolResult::ok(tr)
-            }
+            cmd.stdin_data(script.into_bytes()).run(ctx).await
         })
     }
 }

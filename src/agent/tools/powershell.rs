@@ -3,8 +3,8 @@ use std::process::Stdio;
 
 use serde_json::Value;
 
-use super::truncate::truncate_tail;
-use crate::agent::types::{Tool, ToolResult};
+use super::subprocess::run_child;
+use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 pub struct PowerShellTool;
 
@@ -51,9 +51,10 @@ impl Tool for PowerShellTool {
         Some("command".to_string())
     }
 
-    fn execute(
+    fn run(
         &self,
         args: Value,
+        ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
             let PowerShellArgs { command } = match super::parse_args(args) {
@@ -61,44 +62,21 @@ impl Tool for PowerShellTool {
                 Err(e) => return *e,
             };
 
-            let output = match tokio::process::Command::new("powershell.exe")
+            let child = match tokio::process::Command::new("powershell.exe")
                 .arg("-NoProfile")
                 .arg("-Command")
                 .arg(&command)
                 .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true)
-                .output()
-                .await
+                .spawn()
             {
-                Ok(o) => o,
+                Ok(c) => c,
                 Err(e) => return ToolResult::err(format!("Failed to spawn powershell.exe: {e}")),
             };
 
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-            let mut merged = String::new();
-            if !stdout.is_empty() {
-                merged.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                merged.push_str(&stderr);
-            }
-            if exit_code != 0 {
-                if !merged.ends_with('\n') && !merged.is_empty() {
-                    merged.push('\n');
-                }
-                merged.push_str(&format!("exit {exit_code}\n"));
-            }
-
-            let tr = truncate_tail(&merged);
-            if tr.truncated {
-                ToolResult::ok_truncated(tr, stdout, stderr)
-            } else {
-                ToolResult::ok(tr)
-            }
+            run_child(child, ctx).await
         })
     }
 }

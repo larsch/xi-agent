@@ -1696,6 +1696,7 @@ async fn run_print_mode_loop(
                     );
                 }
             }
+            AgentEvent::ToolOutputChunk { .. } => {}
             AgentEvent::TurnEnd => {}
             AgentEvent::ExternalFileChange { paths, .. } => {
                 // Print the file change notification to stderr in headless mode.
@@ -1845,6 +1846,7 @@ async fn run_print_mode_loop_inner(
                     );
                 }
             }
+            AgentEvent::ToolOutputChunk { .. } => {}
             AgentEvent::ExternalFileChange { paths, .. } => {
                 for path in &paths {
                     eprintln!("⚠️  {} was modified externally", path.display());

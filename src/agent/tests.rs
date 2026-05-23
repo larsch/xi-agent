@@ -68,9 +68,10 @@ impl Tool for SlowTool {
         })
     }
 
-    fn execute(
+    fn run(
         &self,
         args: serde_json::Value,
+        _ctx: crate::agent::types::ToolCallContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::agent::ToolResult> + Send + '_>>
     {
         let value = args

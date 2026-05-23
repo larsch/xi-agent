@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::agent::tools::truncate::TruncationResult;
@@ -223,6 +224,32 @@ impl ToolResult {
     }
 }
 
+// ── ToolCallContext ───────────────────────────────────────────────────────────
+
+/// Context passed to every tool execution.
+///
+/// Subprocess tools use this to forward live output chunks back to the UI via
+/// [`AgentEvent::ToolOutputChunk`].  Non-subprocess tools may ignore it.
+#[derive(Clone)]
+pub struct ToolCallContext {
+    /// The opaque tool call identifier assigned by the LLM provider.
+    pub id: String,
+    /// Optional sender for live output chunks.  `None` in tests or wherever
+    /// live streaming is not wired up.
+    pub tx: Option<UnboundedSender<crate::app_event::AppEvent>>,
+}
+
+impl ToolCallContext {
+    /// Construct a context with no live-output sender (suitable for tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn noop(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            tx: None,
+        }
+    }
+}
+
 // ── Tool trait ────────────────────────────────────────────────────────────────
 
 /// A tool the agent can invoke.
@@ -232,10 +259,35 @@ pub trait Tool: Send + Sync {
     /// JSON Schema object describing the tool's input parameters.
     fn parameters_schema(&self) -> serde_json::Value;
     /// Execute the tool with the given arguments (JSON object).
+    /// The core implementation method — implement this, not `execute`.
+    ///
+    /// `ctx` carries the call identifier and an optional sender for live output
+    /// chunks.  Subprocess tools forward output via `ctx`; others may ignore it.
+    fn run(
+        &self,
+        args: serde_json::Value,
+        ctx: ToolCallContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
+
+    /// Execute the tool without live output (convenience for tests and callers
+    /// that don't need streaming).  Calls [`run`](Self::run) with a noop context.
+    #[allow(dead_code)]
     fn execute(
         &self,
         args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+        self.run(args, ToolCallContext::noop(""))
+    }
+
+    /// Execute the tool with a live-output context.  Production callers use
+    /// this so output chunks are forwarded to the UI.
+    fn execute_live(
+        &self,
+        args: serde_json::Value,
+        ctx: ToolCallContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+        self.run(args, ctx)
+    }
     /// Whether the agent loop should save this tool's full output to a log
     /// file and append the path to the result.  Defaults to `false`; shell
     /// and custom tools override this to `true`.
@@ -268,6 +320,7 @@ pub trait ToolExecutor: Send + Sync {
     /// `args` is the JSON argument object.
     /// `tools` is the registry used to look up the implementation.
     /// `log` is the output log used to persist truncated output.
+    /// `tx` is the optional event sender for live output chunks.
     fn execute_tool<'a>(
         &'a self,
         id: &'a str,
@@ -275,6 +328,7 @@ pub trait ToolExecutor: Send + Sync {
         args: serde_json::Value,
         tools: &'a ToolRegistry,
         log: &'a std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+        tx: Option<UnboundedSender<crate::app_event::AppEvent>>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>>;
 }
 
@@ -327,6 +381,7 @@ impl ToolExecutor for DefaultToolExecutor {
         args: serde_json::Value,
         tools: &'a ToolRegistry,
         log: &'a std::sync::Arc<std::sync::Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+        tx: Option<UnboundedSender<crate::app_event::AppEvent>>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
         Box::pin(async move {
             let blocked = self
@@ -340,7 +395,11 @@ impl ToolExecutor for DefaultToolExecutor {
             } else {
                 match tools.get(name) {
                     Some(tool) => {
-                        let r = tool.execute(args.clone()).await;
+                        let ctx = ToolCallContext {
+                            id: id.to_string(),
+                            tx,
+                        };
+                        let r = tool.execute_live(args.clone(), ctx).await;
                         if tool.saves_output() {
                             let cmd_summary = args.get("command").and_then(|v| v.as_str());
                             r.with_log_notice(id, cmd_summary, &mut log.lock().unwrap())
@@ -437,6 +496,8 @@ pub enum AgentEvent {
         name: String,
         args: serde_json::Value,
     },
+    /// A live output chunk from a running subprocess tool.
+    ToolOutputChunk { id: String, chunk: String },
     /// A tool call finished; contains the result.
     ToolCallEnd { id: String, result: ToolResult },
     // ── Loop lifecycle ─────────────────────────────────────────────────────────

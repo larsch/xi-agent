@@ -2,9 +2,8 @@ use std::{collections::HashSet, env, path::PathBuf, pin::Pin, process::Stdio};
 
 use serde_json::Value;
 
-use super::truncate::truncate_tail;
-use crate::agent::types::{Tool, ToolResult};
-use crate::process::DetachFromTty;
+use super::subprocess::SubprocessCommand;
+use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 // ── CustomTool ────────────────────────────────────────────────────────────────
 
@@ -38,65 +37,19 @@ impl Tool for CustomTool {
         true
     }
 
-    fn execute(
+    fn run(
         &self,
         args: Value,
+        ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
             let args_json = args.to_string();
 
-            let mut child = match tokio::process::Command::new(&self.path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .detach_from_tty()
-                .env("TERM", "dumb")
-                .env("NO_COLOR", "1")
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return ToolResult::err(format!("Failed to spawn tool '{}': {e}", self.name));
-                }
-            };
-
-            // Write args JSON to stdin.
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                if let Err(e) = stdin.write_all(args_json.as_bytes()).await {
-                    return ToolResult::err(format!(
-                        "Failed to write args to tool '{}': {e}",
-                        self.name
-                    ));
-                }
-                // stdin is dropped here, closing the pipe.
-            }
-
-            let output = match child.wait_with_output().await {
-                Ok(o) => o,
-                Err(e) => {
-                    return ToolResult::err(format!(
-                        "Failed to wait for tool '{}': {e}",
-                        self.name
-                    ));
-                }
-            };
-
-            let exit_code = output.status.code().unwrap_or(-1);
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-
-            if exit_code == 0 {
-                let tr = truncate_tail(&stdout);
-                if tr.truncated {
-                    ToolResult::ok_truncated(tr, stdout, String::new())
-                } else {
-                    ToolResult::ok(tr)
-                }
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let detail = if stdout.is_empty() { stderr } else { stdout };
-                ToolResult::err(format!("exit {exit_code}\n{detail}"))
-            }
+            SubprocessCommand::new(self.path.to_string_lossy())
+                .stdin_data(args_json.into_bytes())
+                .error_on_nonzero_exit()
+                .run(ctx)
+                .await
         })
     }
 }

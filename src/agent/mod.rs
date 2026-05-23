@@ -312,6 +312,7 @@ async fn execute_tool_batch(
                 args.clone(),
                 &config.tools,
                 &config.tool_output_log,
+                Some(tx.clone()),
             )
             .await;
 

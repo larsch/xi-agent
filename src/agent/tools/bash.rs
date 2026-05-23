@@ -1,13 +1,9 @@
 use std::pin::Pin;
-use std::process::Stdio;
 
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 
-use super::terminal::apply_terminal_render;
-use super::truncate::truncate_tail;
-use crate::agent::types::{Tool, ToolResult};
-use crate::process::DetachFromTty;
+use super::subprocess::SubprocessCommand;
+use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 pub struct BashTool;
 
@@ -51,9 +47,10 @@ impl Tool for BashTool {
         Some("command".to_string())
     }
 
-    fn execute(
+    fn run(
         &self,
         args: Value,
+        ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
             let BashArgs { command } = match super::parse_args(args) {
@@ -61,114 +58,11 @@ impl Tool for BashTool {
                 Err(e) => return *e,
             };
 
-            // Spawn the shell in its own process group so that any background
-            // processes started with `&` do not inherit our stdout/stderr pipe
-            // write-ends.  If we used `.output().await` (which reads until EOF
-            // on the pipes), a lingering background child that kept those fds
-            // open would cause the tool call to hang forever, even after the
-            // shell itself had exited.
-            //
-            // Instead we:
-            //   1. spawn() with piped stdio and process_group(0)
-            //   2. wait() for the shell to exit
-            //   3. read whatever was buffered in the pipes with a short deadline
-            //      so that any background children still holding the write-ends
-            //      do not block us indefinitely.
-            let mut child = match tokio::process::Command::new("sh")
+            SubprocessCommand::new("sh")
                 .arg("-c")
-                .arg(&command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .detach_from_tty()
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => return ToolResult::err(format!("Failed to spawn shell: {e}")),
-            };
-
-            let mut stdout_handle = child.stdout.take().expect("stdout is piped");
-            let mut stderr_handle = child.stderr.take().expect("stderr is piped");
-
-            // We need to drain the pipes concurrently with waiting for the
-            // shell to exit.  If we wait() first and then read, a foreground
-            // command with large output will deadlock: the pipe buffer fills up,
-            // the child blocks on write, and wait() never returns.
-            //
-            // However if we just read_to_end() we get the old hang: a background
-            // child holding the pipe write-end open keeps read_to_end() blocked
-            // forever even after the shell has exited.
-            //
-            // Solution: drain pipes and wait() truly concurrently.  Once wait()
-            // signals the shell has exited, give the pipes a short deadline to
-            // drain any remaining buffered data, then stop regardless.
-            let mut out_buf = Vec::new();
-            let mut err_buf = Vec::new();
-
-            let read_stdout = stdout_handle.read_to_end(&mut out_buf);
-            let read_stderr = stderr_handle.read_to_end(&mut err_buf);
-
-            tokio::pin!(read_stdout);
-            tokio::pin!(read_stderr);
-
-            // Phase 1: wait for shell exit while concurrently draining pipes.
-            let status = loop {
-                tokio::select! {
-                    status = child.wait() => {
-                        match status {
-                            Ok(s) => break s,
-                            Err(e) => return ToolResult::err(format!("Failed to wait for shell: {e}")),
-                        }
-                    }
-                    _ = &mut read_stdout => {}
-                    _ = &mut read_stderr => {}
-                }
-            };
-
-            // Phase 2: shell has exited.  Drain whatever remains in the pipe
-            // buffers, but give up after 200 ms in case a background child is
-            // still holding the write-end open.
-            let drain_deadline = tokio::time::sleep(std::time::Duration::from_millis(200));
-            tokio::pin!(drain_deadline);
-            tokio::select! {
-                _ = &mut drain_deadline => {}
-                _ = async { tokio::join!(&mut read_stdout, &mut read_stderr) } => {}
-            }
-
-            drop(stdout_handle);
-            drop(stderr_handle);
-
-            let exit_code = status.code().unwrap_or(-1);
-
-            let stdout = String::from_utf8_lossy(&out_buf).into_owned();
-            let stderr = String::from_utf8_lossy(&err_buf).into_owned();
-
-            // Apply terminal rendering to handle carriage returns properly
-            let stdout = apply_terminal_render(&stdout);
-            let stderr = apply_terminal_render(&stderr);
-
-            // Merge for the model response, as a terminal would show.
-            let mut merged = String::new();
-            if !stdout.is_empty() {
-                merged.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                merged.push_str(&stderr);
-            }
-            if exit_code != 0 {
-                if !merged.ends_with('\n') && !merged.is_empty() {
-                    merged.push('\n');
-                }
-                merged.push_str(&format!("exit {exit_code}\n"));
-            }
-
-            let tr = truncate_tail(&merged);
-            if tr.truncated {
-                ToolResult::ok_truncated(tr, stdout, stderr)
-            } else {
-                ToolResult::ok(tr)
-            }
+                .arg(command)
+                .run(ctx)
+                .await
         })
     }
 }

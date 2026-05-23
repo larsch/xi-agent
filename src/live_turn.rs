@@ -43,6 +43,9 @@ pub struct LiveToolEntry {
     pub partial_snapshot: Option<serde_json::Value>,
     /// The argument field to stream for display (from ToolDefinition).
     pub streaming_field: Option<String>,
+    /// Live output chunks received while the tool is still running.
+    /// Cleared when `result` is populated.
+    pub running_output: String,
     pub result: Option<LiveToolResult>,
 }
 
@@ -236,6 +239,7 @@ mod tests {
             partial_args: String::new(),
             partial_snapshot: None,
             streaming_field: None,
+            running_output: String::new(),
             result: Some(LiveToolResult {
                 content: "content".to_string(),
                 is_error: false,

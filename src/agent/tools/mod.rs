@@ -146,6 +146,7 @@ pub mod find;
 pub mod powershell;
 pub mod python;
 pub mod read;
+pub mod subprocess;
 #[cfg(not(target_os = "windows"))]
 pub mod terminal;
 pub mod truncate;

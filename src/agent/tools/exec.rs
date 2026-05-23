@@ -1,13 +1,9 @@
 use std::pin::Pin;
-use std::process::Stdio;
 
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 
-use super::terminal::apply_terminal_render;
-use super::truncate::truncate_tail;
-use crate::agent::types::{Tool, ToolResult};
-use crate::process::DetachFromTty;
+use super::subprocess::SubprocessCommand;
+use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 pub struct ExecTool;
 
@@ -82,9 +78,10 @@ impl Tool for ExecTool {
         Some("args".to_string())
     }
 
-    fn execute(
+    fn run(
         &self,
         args: Value,
+        ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
             let ExecArgs {
@@ -97,95 +94,14 @@ impl Tool for ExecTool {
                 Err(e) => return *e,
             };
 
-            let mut cmd = tokio::process::Command::new(&program);
-            cmd.args(&argv)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .detach_from_tty()
-                .env("TERM", "dumb")
-                .env("NO_COLOR", "1");
-
-            if let Some(ref dir) = cwd {
-                cmd.current_dir(dir);
+            let mut cmd = SubprocessCommand::new(program).args(argv);
+            for (k, v) in env {
+                cmd = cmd.env(k, v);
             }
-
-            for (key, val) in &env {
-                cmd.env(key, val);
+            if let Some(dir) = cwd {
+                cmd = cmd.current_dir(dir);
             }
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => return ToolResult::err(format!("Failed to spawn `{program}`: {e}")),
-            };
-
-            let mut stdout_handle = child.stdout.take().expect("stdout is piped");
-            let mut stderr_handle = child.stderr.take().expect("stderr is piped");
-
-            let mut out_buf = Vec::new();
-            let mut err_buf = Vec::new();
-
-            let read_stdout = stdout_handle.read_to_end(&mut out_buf);
-            let read_stderr = stderr_handle.read_to_end(&mut err_buf);
-
-            tokio::pin!(read_stdout);
-            tokio::pin!(read_stderr);
-
-            // Phase 1: wait for process exit while concurrently draining pipes.
-            let status = loop {
-                tokio::select! {
-                    status = child.wait() => {
-                        match status {
-                            Ok(s) => break s,
-                            Err(e) => return ToolResult::err(format!("Failed to wait for `{program}`: {e}")),
-                        }
-                    }
-                    _ = &mut read_stdout => {}
-                    _ = &mut read_stderr => {}
-                }
-            };
-
-            // Phase 2: process has exited; drain remaining pipe data with a
-            // short deadline in case a background child holds write-ends open.
-            let drain_deadline = tokio::time::sleep(std::time::Duration::from_millis(200));
-            tokio::pin!(drain_deadline);
-            tokio::select! {
-                _ = &mut drain_deadline => {}
-                _ = async { tokio::join!(&mut read_stdout, &mut read_stderr) } => {}
-            }
-
-            drop(stdout_handle);
-            drop(stderr_handle);
-
-            let exit_code = status.code().unwrap_or(-1);
-
-            let stdout = String::from_utf8_lossy(&out_buf).into_owned();
-            let stderr = String::from_utf8_lossy(&err_buf).into_owned();
-
-            let stdout = apply_terminal_render(&stdout);
-            let stderr = apply_terminal_render(&stderr);
-
-            let mut merged = String::new();
-            if !stdout.is_empty() {
-                merged.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                merged.push_str(&stderr);
-            }
-            if exit_code != 0 {
-                if !merged.ends_with('\n') && !merged.is_empty() {
-                    merged.push('\n');
-                }
-                merged.push_str(&format!("exit {exit_code}\n"));
-            }
-
-            let tr = truncate_tail(&merged);
-            if tr.truncated {
-                ToolResult::ok_truncated(tr, stdout, stderr)
-            } else {
-                ToolResult::ok(tr)
-            }
+            cmd.run(ctx).await
         })
     }
 }

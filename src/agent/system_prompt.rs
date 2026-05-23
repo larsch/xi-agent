@@ -227,9 +227,10 @@ mod tests {
             serde_json::json!({"type": "object"})
         }
 
-        fn execute(
+        fn run(
             &self,
             _args: serde_json::Value,
+            _ctx: crate::agent::types::ToolCallContext,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = crate::agent::types::ToolResult> + Send + '_>,
         > {
