@@ -17,6 +17,11 @@ pub struct TestProvider {
     sequence_step: Arc<AtomicU8>,
     /// PID captured from step 1 of bash-background-job, used in steps 2–4.
     sequence_pid: Arc<std::sync::atomic::AtomicU32>,
+    /// Tracks the current step for the write-edit sequence.
+    /// 0 = idle, 1 = waiting for write result, 2 = done.
+    write_edit_step: Arc<AtomicU8>,
+    /// Temp file path used by the write-edit sequence.
+    write_edit_path: Arc<std::sync::Mutex<String>>,
 }
 
 impl TestProvider {
@@ -24,6 +29,8 @@ impl TestProvider {
         Self {
             sequence_step: Arc::new(AtomicU8::new(0)),
             sequence_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            write_edit_step: Arc::new(AtomicU8::new(0)),
+            write_edit_path: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 }
@@ -128,6 +135,7 @@ fn main() {
 | `exec <prog> [args…]`   | prog + args     | Execute a program via argv (shellword-split); no shell interpretation        |
 | `bash-background-job`   | —               | 4-step scripted loop: start sleep 60, check running, kill, confirm gone     |
 | `write`                 | —               | Issue a write_file tool call that writes a file to the system temp directory |
+| `write-edit`            | —               | Stream write_file then edit_file in streaming mode (~4-8 chars/chunk, 20 chunks/sec); uses 6 lines of context |
 
 ## Wide data table
 
@@ -205,6 +213,9 @@ const HELP_TEXT: &str = r#"Test provider commands:
 
   write                 Issue a write_file tool call that writes a file to
                         the system temp directory
+  write-edit            Stream write_file then edit_file (both in streaming
+                        mode, ~4-8 chars/chunk at 20 chunks/sec) on a random
+                        /tmp file; edit uses 6 lines of context each side
   read                  Issue a read_file tool call on a short fixture (≤8 lines)
   read-long             Issue a read_file tool call on a 20-line fixture
                         (exercises head-truncation and range suffix)
@@ -401,6 +412,115 @@ fn edit_file_stream(old_text: String, new_text: String) -> LlmStream {
     })
 }
 
+/// Stream the JSON args of a tool call in small chunks (~4-8 chars each) at
+/// 20 chunks per second (50 ms delay between chunks).
+///
+/// Yields: `ToolCallStart`, N×`ToolCallArgsDelta`, then `ToolCall`, then `Done`.
+fn streaming_tool_call(tool_name: String, args: serde_json::Value) -> LlmStream {
+    let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+    Box::pin(stream! {
+        let id = "test-1".to_string();
+        yield LlmEvent::ToolCallStart {
+            id: id.clone(),
+            name: tool_name.clone(),
+        };
+        // Chunk the JSON string into pieces of 4-8 chars, alternating.
+        let bytes = args_str.as_bytes();
+        let mut pos = 0;
+        let mut chunk_size = 4usize;
+        while pos < bytes.len() {
+            let end = (pos + chunk_size).min(bytes.len());
+            // Find a valid UTF-8 boundary at or before `end`.
+            let end = (pos..=end).rev().find(|&i| args_str.is_char_boundary(i)).unwrap_or(end);
+            let partial_json = args_str[pos..end].to_string();
+            pos = end;
+            chunk_size = if chunk_size == 4 { 8 } else { 4 };
+            sleep(Duration::from_millis(50)).await;
+            yield LlmEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                partial_json,
+            };
+        }
+        yield LlmEvent::ToolCall {
+            id: id.clone(),
+            name: tool_name,
+            args,
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// The multi-line content written by the `write-edit` command.
+const WRITE_EDIT_CONTENT: &str = "\
+context line 1: The quick brown fox\n\
+context line 2: jumps over the lazy dog\n\
+context line 3: Pack my box with five\n\
+context line 4: dozen liquor jugs\n\
+context line 5: How vexingly quick\n\
+context line 6: daft zebras jump\n\
+TARGET LINE: original content to be replaced\n\
+context line 7: The five boxing wizards\n\
+context line 8: jump quickly\n\
+context line 9: Sphinx of black quartz\n\
+context line 10: judge my vow\n\
+context line 11: Waltz nymph for quick\n\
+context line 12: jigs vex bud\n\
+";
+
+/// Build a write_file streaming tool call for the write-edit command.
+fn write_edit_write_stream(path: String) -> LlmStream {
+    streaming_tool_call(
+        "write_file".to_string(),
+        serde_json::json!({
+            "path": path,
+            "content": WRITE_EDIT_CONTENT,
+        }),
+    )
+}
+
+/// Build an edit_file streaming tool call for the write-edit command.
+/// Uses 6 lines of context on each side of the change.
+fn write_edit_edit_stream(path: String) -> LlmStream {
+    let old_text = "\
+context line 1: The quick brown fox\n\
+context line 2: jumps over the lazy dog\n\
+context line 3: Pack my box with five\n\
+context line 4: dozen liquor jugs\n\
+context line 5: How vexingly quick\n\
+context line 6: daft zebras jump\n\
+TARGET LINE: original content to be replaced\n\
+context line 7: The five boxing wizards\n\
+context line 8: jump quickly\n\
+context line 9: Sphinx of black quartz\n\
+context line 10: judge my vow\n\
+context line 11: Waltz nymph for quick\n\
+context line 12: jigs vex bud\n\
+";
+    let new_text = "\
+context line 1: The quick brown fox\n\
+context line 2: jumps over the lazy dog\n\
+context line 3: Pack my box with five\n\
+context line 4: dozen liquor jugs\n\
+context line 5: How vexingly quick\n\
+context line 6: daft zebras jump\n\
+TARGET LINE: replaced content — edit succeeded!\n\
+context line 7: The five boxing wizards\n\
+context line 8: jump quickly\n\
+context line 9: Sphinx of black quartz\n\
+context line 10: judge my vow\n\
+context line 11: Waltz nymph for quick\n\
+context line 12: jigs vex bud\n\
+";
+    streaming_tool_call(
+        "edit_file".to_string(),
+        serde_json::json!({
+            "path": path,
+            "old_text": old_text,
+            "new_text": new_text,
+        }),
+    )
+}
+
 /// Build a tool call stream for a shell tool (bash / powershell / cmd).
 fn shell_tool_stream(tool_name: String, command: String) -> LlmStream {
     Box::pin(stream! {
@@ -516,6 +636,22 @@ impl super::LlmProvider for TestProvider {
         if let Some(last) = messages.last()
             && last.role == Role::ToolResult
         {
+            // Check write-edit sequence first.
+            let we_step = self.write_edit_step.load(Ordering::SeqCst);
+            if we_step == 1 {
+                self.write_edit_step.store(0, Ordering::SeqCst);
+                let path = self.write_edit_path.lock().unwrap().clone();
+                return write_edit_edit_stream(path);
+            }
+            if we_step == 2 {
+                // Edit result received — emit summary.
+                self.write_edit_step.store(0, Ordering::SeqCst);
+                return stream_owned(
+                    "write-edit sequence complete: wrote the file and edited it with 6 lines of context on each side.\n"
+                        .to_string(),
+                );
+            }
+
             let step = self.sequence_step.load(Ordering::SeqCst);
             if step > 0 {
                 return self.advance_sequence(step, &last.content.clone());
@@ -704,6 +840,24 @@ impl super::LlmProvider for TestProvider {
             }
 
             "write" => write_file_stream(),
+
+            "write-edit" => {
+                // Generate a random temp file path, store it, then stream write_file.
+                let fname = format!(
+                    "tau-test-write-edit-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0)
+                );
+                let path = std::env::temp_dir()
+                    .join(fname)
+                    .to_string_lossy()
+                    .into_owned();
+                *self.write_edit_path.lock().unwrap() = path.clone();
+                self.write_edit_step.store(1, Ordering::SeqCst);
+                write_edit_write_stream(path)
+            }
 
             "read" => read_file_stream(READ_SHORT_FIXTURE),
 
