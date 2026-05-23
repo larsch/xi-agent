@@ -131,6 +131,12 @@ impl OpenAiProvider {
                 for choice in chunk.choices {
                     let delta = choice.delta;
 
+                    if let Some(reasoning) = delta.reasoning_content
+                        && !reasoning.is_empty()
+                    {
+                        events.push(LlmEvent::ThinkingToken(reasoning));
+                    }
+
                     if let Some(content) = delta.content
                         && !content.is_empty() {
                             events.push(LlmEvent::Token {
@@ -244,6 +250,7 @@ struct ChunkUsage {
 #[derive(Deserialize, Default)]
 struct Delta {
     content: Option<String>,
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
 }

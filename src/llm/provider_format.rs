@@ -112,11 +112,16 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                 };
 
                 if content.is_some() || tool_calls_opt.is_some() {
-                    result.push(serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "role": "assistant",
                         "content": content,
                         "tool_calls": tool_calls_opt,
-                    }));
+                    });
+                    if let Some(thinking) = msg.thinking.as_deref().filter(|t| !t.is_empty()) {
+                        entry["reasoning_content"] =
+                            serde_json::Value::String(thinking.to_string());
+                    }
+                    result.push(entry);
                     result.extend(tool_results);
                 }
 
@@ -598,6 +603,24 @@ mod tests {
         assert_eq!(wire[0]["role"], "assistant");
         assert_eq!(wire[0]["content"], "thinking");
         assert_eq!(wire[1]["role"], "tool");
+    }
+
+    #[test]
+    fn openai_wire_reasoning_content_echoed_when_present() {
+        let mut msg = Message::assistant("answer");
+        msg.thinking = Some("chain of thought".to_string());
+        let wire = to_openai_wire(&[msg]);
+        assert_eq!(wire[0]["reasoning_content"], "chain of thought");
+    }
+
+    #[test]
+    fn openai_wire_reasoning_content_absent_when_empty() {
+        let mut msg = Message::assistant("answer");
+        msg.thinking = Some(String::new());
+        let wire = to_openai_wire(&[msg]);
+        assert!(
+            wire[0].get("reasoning_content").is_none() || wire[0]["reasoning_content"].is_null()
+        );
     }
 
     #[test]
