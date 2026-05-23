@@ -1,16 +1,15 @@
 # tau
 
-**tau** is an experimental AI agent for the terminal, heavily inspired by
+**tau** is a focused AI agent for the terminal, heavily inspired by
 [pi](https://pi.dev/). It provides a minimalistic text-based UI for agentic
 interactions with local and remote models, supporting tool calls, session
 persistence, and interactive authentication.
 
-**tau** is under active development, misses some features and polish, but is fully
-functional for basic use and being used as the daily driver for its author. See
-the [ROADMAP](docs/ROADMAP.md) for planned features and improvements.
+**tau** is generally completed as intended, but may lack some features from
+other similar agents.
 
 * Supported providers: built-in hosted providers plus configured named provider instances
-* Built-in tools: read_file, write_file, edit_file, find_files, ask_user, bash/cmd/powershell
+* Built-in tools: read_file, write_file, edit_file, find_files, ask_user, exec, python, bash/cmd/powershell
 * Standard `AGENTS.md` support
 * Standard `SKILL.md` support (see below)
 * Custom tools: define your own tools (see below)

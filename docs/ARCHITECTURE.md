@@ -325,11 +325,3 @@ assistant tool-call/tool-result pairing, derives cumulative `<read-files>` and
 `<modified-files>` sections from persisted file-tool events, and can be
 triggered manually with `/compact [instructions]` to add user guidance to the
 summary prompt.
-
-## What Is Not Here Yet
-
-- **OS keyring-backed secret storage** — auth is now tau-owned and supports
-  in-app `/login`, but secrets still live in `auth.json` rather than the
-  platform keyring. See [ROADMAP](ROADMAP.md).
-
-See [ROADMAP](ROADMAP.md) for prioritised work items.
