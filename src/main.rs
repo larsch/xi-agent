@@ -465,22 +465,9 @@ async fn main() -> io::Result<()> {
                     .unwrap_or(instance);
                 if let Some(url) = url.as_deref() {
                     inst.base_url = Some(url.to_string());
-                    // Keep legacy per-preset config in sync.
-                    match inst.backend_preset {
-                        provider_instance::BackendPreset::Ollama => {
-                            config.ollama.record_endpoint(url.to_string());
-                        }
-                        provider_instance::BackendPreset::OpenWebUi => {
-                            config.open_webui.record_endpoint(url.to_string());
-                        }
-                        _ => {}
-                    }
                 }
                 if let Some(api_key) = api_key {
                     inst.api_key = Some(api_key.clone());
-                    if inst.backend_preset == provider_instance::BackendPreset::OpenWebUi {
-                        config.open_webui.api_key = Some(api_key);
-                    }
                 }
                 config.upsert_provider(inst.clone());
                 config.provider = Some(inst.id.clone());

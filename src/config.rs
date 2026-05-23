@@ -16,20 +16,17 @@ pub struct TauConfig {
     #[serde(default)]
     pub providers: Vec<ProviderInstance>,
 
-    // Provider-specific persisted settings that are still used for endpoint
-    // history and similar UI convenience state.
+    // Provider-specific persisted settings (legacy per-preset config; kept for
+    // backward-compatible TOML parsing and any UI convenience state that still
+    // reads from them).
     #[serde(default)]
     pub openai: OpenAiConfig,
     #[serde(default)]
     pub copilot: CopilotConfig,
     #[serde(default)]
-    pub ollama: OllamaConfig,
-    #[serde(default)]
     pub codex: CodexConfig,
     #[serde(default)]
     pub gemini: GeminiConfig,
-    #[serde(default)]
-    pub open_webui: OpenWebUiConfig,
 }
 
 impl TauConfig {
@@ -73,30 +70,6 @@ pub struct CopilotConfig {
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
-pub struct OllamaConfig {
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    /// Recently used Ollama endpoints, most-recent first.  Capped at
-    /// [`OllamaConfig::MAX_RECENT_ENDPOINTS`] entries.
-    #[serde(default)]
-    pub recent_endpoints: Vec<String>,
-}
-
-impl OllamaConfig {
-    /// Maximum number of recent endpoints to remember.
-    pub const MAX_RECENT_ENDPOINTS: usize = 5;
-
-    /// Push `url` to the front of `recent_endpoints`, dedup, and cap the list.
-    /// Also sets `base_url` to `url`.
-    pub fn record_endpoint(&mut self, url: String) {
-        self.base_url = Some(url.clone());
-        self.recent_endpoints.retain(|e| e != &url);
-        self.recent_endpoints.insert(0, url);
-        self.recent_endpoints.truncate(Self::MAX_RECENT_ENDPOINTS);
-    }
-}
-
-#[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct CodexConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
@@ -106,32 +79,6 @@ pub struct CodexConfig {
 pub struct GeminiConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
-pub struct OpenWebUiConfig {
-    /// Base URL of the Open WebUI instance (e.g. `https://my-webui.example.com`).
-    pub base_url: Option<String>,
-    /// API token used as `Authorization: Bearer <api_key>`.
-    pub api_key: Option<String>,
-    /// Last-selected model.
-    pub model: Option<String>,
-    /// Recently used Open WebUI endpoints, most-recent first.
-    #[serde(default)]
-    pub recent_endpoints: Vec<String>,
-}
-
-impl OpenWebUiConfig {
-    pub const MAX_RECENT_ENDPOINTS: usize = 5;
-
-    /// Push `url` to the front of `recent_endpoints`, dedup, and cap the list.
-    /// Also sets `base_url` to `url`.
-    pub fn record_endpoint(&mut self, url: String) {
-        self.base_url = Some(url.clone());
-        self.recent_endpoints.retain(|e| e != &url);
-        self.recent_endpoints.insert(0, url);
-        self.recent_endpoints.truncate(Self::MAX_RECENT_ENDPOINTS);
-    }
 }
 
 impl TauConfig {
@@ -177,7 +124,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OllamaConfig, TauConfig};
+    use super::TauConfig;
     use crate::provider_instance::{ApiType, BackendPreset};
 
     // ── Instance-format config tests ─────────────────────────────────────────
@@ -243,15 +190,7 @@ recent_endpoints = ["http://localhost:11434", "http://gpu-box:11434"]
             Some("https://cloudcode-pa.googleapis.com")
         );
         assert_eq!(cfg.gemini.model.as_deref(), Some("gemini-2.5-pro"));
-        assert_eq!(
-            cfg.ollama.base_url.as_deref(),
-            Some("http://localhost:11434")
-        );
-        assert_eq!(cfg.ollama.model.as_deref(), Some("llama3.1"));
-        assert_eq!(
-            cfg.ollama.recent_endpoints,
-            vec!["http://localhost:11434", "http://gpu-box:11434"]
-        );
+        // Legacy [ollama] section is silently ignored — no provider instance synthesised.
         assert!(cfg.providers.is_empty());
     }
 
@@ -371,39 +310,5 @@ base_url = "http://gpu-box:11434"
             .expect("renamed provider present");
         assert_eq!(inst.base_url.as_deref(), Some("http://gpu-box:11434"));
         assert_eq!(cfg.providers.len(), 1);
-    }
-
-    // ── Legacy tests (kept for backward compatibility) ────────────────────────
-
-    #[test]
-    fn ollama_record_endpoint_prepends_and_deduplicates() {
-        let mut cfg = OllamaConfig::default();
-        cfg.record_endpoint("http://localhost:11434".into());
-        cfg.record_endpoint("http://gpu-box:11434".into());
-        cfg.record_endpoint("http://localhost:11434".into()); // duplicate → moved to front
-        assert_eq!(
-            cfg.recent_endpoints,
-            vec!["http://localhost:11434", "http://gpu-box:11434"]
-        );
-        assert_eq!(cfg.base_url.as_deref(), Some("http://localhost:11434"));
-    }
-
-    #[test]
-    fn ollama_record_endpoint_caps_at_max() {
-        let mut cfg = OllamaConfig::default();
-        for i in 0..=OllamaConfig::MAX_RECENT_ENDPOINTS {
-            cfg.record_endpoint(format!("http://host-{i}:11434"));
-        }
-        assert_eq!(
-            cfg.recent_endpoints.len(),
-            OllamaConfig::MAX_RECENT_ENDPOINTS
-        );
-    }
-
-    #[test]
-    fn ollama_record_endpoint_sets_base_url() {
-        let mut cfg = super::OllamaConfig::default();
-        cfg.record_endpoint("http://localhost:11434".to_string());
-        assert_eq!(cfg.base_url.as_deref(), Some("http://localhost:11434"));
     }
 }
