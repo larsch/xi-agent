@@ -129,8 +129,10 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
     let skills_section = render_skills_block(skills);
 
     format!(
-        "You are an expert coding assistant operating inside tau, a coding agent harness. \
-You help users by reading files, executing commands, editing code, and writing new files.\n\
+        "You are an assistant that helps the user perform applied interactive computational work \
+in real systems using tools. This includes building software, as well as running commands and \
+code, inspecting and modifying files, debugging issues, and performing data and system \
+manipulation workflows.\n\
 \n\
 Available tools:\n\
 {tool_list}\n\
