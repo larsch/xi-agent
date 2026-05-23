@@ -65,6 +65,7 @@ impl App {
     /// loading indicator when the list hasn't been fetched yet.
     pub fn enter_model_selection_mode(&mut self) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         let items = if let Some(err) = &self.completion.model_fetch_error {
             vec![CompletionItem::error_indicator(err)]
         } else if let Some(models) = &self.completion.available_models {
@@ -105,6 +106,7 @@ impl App {
     /// Open the thinking-level selection menu.
     pub fn enter_thinking_selection_mode(&mut self) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         let items = ThinkingLevel::all()
             .iter()
             .map(|lvl| CompletionItem {
@@ -127,6 +129,7 @@ impl App {
     /// explicit action to add a new instance.
     pub fn enter_provider_selection_mode(&mut self, instances: &[ProviderInstance]) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         let mut items = Vec::with_capacity(instances.len() + 1);
         items.push(CompletionItem {
             label: "Add provider…".to_string(),
@@ -265,6 +268,7 @@ impl App {
     /// Show the backend-type menu for the pending provider instance.
     pub fn enter_provider_backend_preset_selection_mode(&mut self) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         let items = BackendPreset::user_visible()
             .iter()
             .map(|service| CompletionItem {
@@ -286,6 +290,7 @@ impl App {
     /// Show the API-type menu for the pending provider instance.
     pub fn enter_provider_api_type_selection_mode(&mut self, backend_preset: &BackendPreset) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         let items = backend_preset
             .def()
             .allowed_apis
@@ -325,6 +330,7 @@ impl App {
 
     pub fn enter_provider_removal_confirmation_mode(&mut self, instance: &ProviderInstance) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         self.provider.pending_setup = None;
         self.provider.pending_removal = Some(PendingProviderRemoval {
             id: instance.id.clone(),
@@ -425,6 +431,7 @@ impl App {
     /// Open provider picker for `/login` command.
     pub fn enter_login_selection_mode(&mut self) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
         self.login.enter_login_selection_mode(&mut self.selection);
     }
 
@@ -778,6 +785,7 @@ impl App {
 
     /// Open the action selection menu for the active login panel.
     pub fn enter_login_action_menu(&mut self) {
+        self.session.live_turn.notices.clear();
         self.login.enter_login_action_menu(&mut self.selection);
     }
 

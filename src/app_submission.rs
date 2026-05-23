@@ -63,6 +63,7 @@ impl App {
     /// responsible for calling `check_token_preflight` before this.
     pub(crate) fn launch_turn(&mut self, provider: &DynProvider) {
         self.clear_abort_status_notice();
+        self.session.live_turn.notices.clear();
         self.ensure_event_log_for_submit();
         assert!(
             self.session.session_state.is_some(),

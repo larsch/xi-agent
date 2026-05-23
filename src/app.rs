@@ -421,6 +421,7 @@ impl App {
 
     pub fn enter_resume_selection_mode(&mut self) {
         self.reset_textarea();
+        self.session.live_turn.notices.clear();
 
         let items = if let Some(store) = self.session.session_store.as_ref() {
             let mut sessions = store.list_sessions();
