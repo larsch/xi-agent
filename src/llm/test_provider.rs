@@ -186,44 +186,52 @@ Alignment may vary by terminal, font, and render state.\n\
 
 // ── Help text ─────────────────────────────────────────────────────────────────
 
-const HELP_TEXT: &str = r#"Test provider commands:
+const HELP_TEXT: &str = r#"# Test Provider Commands
 
-  help                  Show this help
-  markdown              Stream a rich markdown document
-  emoji                 Show emoji alignment test for all tool label glyphs
-  echo <text>           Stream text back token by token
-  slow <text>           Stream text with artificial delays
-  thinking <text>       Emit thinking tokens then a text answer
-  status <msg>          Emit a StatusUpdate event then confirm
-  error                 Emit a provider error
-  system                Show the full system prompt
+## General
 
-  ask [question]        ask_user with options + freeform
-  ask-context [question] ask_user with context + options + freeform
-  ask-type [question]   ask_user freeform only (no options)
-  ask-notype [question] ask_user options only (no freeform)
+| Command | Description |
+|---------|-------------|
+| `help` | Show this help |
+| `markdown` | Stream a rich markdown document |
+| `emoji` | Show emoji alignment test for all tool label glyphs |
+| `echo <text>` | Stream text back token by token |
+| `slow <text>` | Stream text with artificial delays |
+| `thinking <text>` | Emit thinking tokens then a text answer |
+| `status <msg>` | Emit a `StatusUpdate` event then confirm |
+| `error` | Emit a provider error |
+| `system` | Show the full system prompt |
 
-  bash <command>        Execute a bash command (real)
-  powershell <command>  Execute a powershell command (real)
-  cmd <command>         Execute a cmd command (real)
-  exec <prog> [args…]   Execute a program directly via argv (shellword-split, no shell)
+## User interaction
 
-  bash-background-job   4-step scripted loop: start sleep 60 in background,
-                        check it is running, kill it, confirm it is gone
+| Command | Description |
+|---------|-------------|
+| `ask [question]` | `ask_user` with options + freeform |
+| `ask-context [question]` | `ask_user` with context + options + freeform |
+| `ask-type [question]` | `ask_user` freeform only (no options) |
+| `ask-notype [question]` | `ask_user` options only (no freeform) |
 
-  write                 Issue a write_file tool call that writes a file to
-                        the system temp directory
-  write-edit            Stream write_file then edit_file (both in streaming
-                        mode, ~4-8 chars/chunk at 20 chunks/sec) on a random
-                        /tmp file; edit uses 6 lines of context each side
-  read                  Issue a read_file tool call on a short fixture (≤8 lines)
-  read-long             Issue a read_file tool call on a 20-line fixture
-                        (exercises head-truncation and range suffix)
-  find                  Issue a find_files tool call on the temp directory
-  edit                  Issue an edit_file tool call with short old/new text
-                        (use after 'write'; exercises compact diff body)
-  edit-long             Issue an edit_file tool call with 6 lines per side
-                        (exercises per-side truncation markers)
+## Shell commands
+
+| Command | Description |
+|---------|-------------|
+| `bash <command>` | Execute a real bash command |
+| `powershell <command>` | Execute a real PowerShell command |
+| `cmd <command>` | Execute a real cmd command |
+| `exec <prog> [args…]` | Execute a program via argv (shellword-split, no shell) |
+| `bash-background-job` | 4-step scripted loop: start `sleep 60` in background, check it is running, kill it, confirm it is gone |
+
+## File tool calls
+
+| Command | Description |
+|---------|-------------|
+| `write` | Issue a `write_file` tool call to the system temp directory |
+| `write-edit` | Stream `write_file` then `edit_file` (~4–8 chars/chunk at 20 chunks/sec); edit uses 6 lines of context each side |
+| `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
+| `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
+| `find` | Issue a `find_files` tool call on the temp directory |
+| `edit` | Issue an `edit_file` tool call with short old/new text (use after `write`; exercises compact diff body) |
+| `edit-long` | Issue an `edit_file` tool call with 6 lines per side (exercises per-side truncation markers) |
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
