@@ -130,7 +130,7 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
 
     format!(
         "You are an assistant that helps the user perform applied interactive computational work \
-in real systems using tools. This includes building software, as well as running commands and \
+in real systems. This includes building software, as well as running commands and \
 code, inspecting and modifying files, debugging issues, and performing data and system \
 manipulation workflows.\n\
 \n\
