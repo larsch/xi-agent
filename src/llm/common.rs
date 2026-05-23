@@ -47,7 +47,7 @@ pub fn infer_initiator(messages: &[Message]) -> &'static str {
 pub fn normalize_tool_name(name: &str) -> &str {
     match name {
         "👀" => "read_file",
-        "✏️" | "✍️" => "write_file",
+        "✏️" | "✍️" | "📄" => "write_file",
         "📝" => "edit_file",
         "💻" => "bash",
         "🔍" => "find_files",

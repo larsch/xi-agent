@@ -311,6 +311,7 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
     } else {
         input_width.saturating_sub(prefix.width()).max(1)
     };
+    let cursor = (cursor.0, cursor.1);
     let wrapped = wrap_input_for_render(&input_lines, cursor, wrap_width);
     let wrapped_lines = wrapped.lines;
     let wrapped_cursor = wrapped.cursor;

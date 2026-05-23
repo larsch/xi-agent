@@ -89,10 +89,9 @@ fn tail_truncate(text: &str) -> String {
 pub fn tool_emoji(name: &str) -> &'static str {
     match name {
         "read" | "read_file" => "👀",
-        "write" | "write_file" => "✏️",
+        "write" | "write_file" => "📄",
         "edit" | "edit_file" => "📝",
-        "bash" | "cmd" | "powershell" => "💻",
-        "exec" => "⚙️",
+        "bash" | "cmd" | "powershell" | "exec" => "💻",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
         _ => "⚙️",
@@ -257,13 +256,13 @@ mod tests {
                 "args": ["%s %s", "hello world", "$PATH"]
             }),
         );
-        assert_eq!(label, "⚙️ printf '%s %s' 'hello world' '$PATH'");
+        assert_eq!(label, "💻 printf '%s %s' 'hello world' '$PATH'");
     }
 
     #[test]
     fn exec_label_uses_program_when_no_args() {
         let label = tool_invocation_label("exec", &json!({"program": "git"}));
-        assert_eq!(label, "⚙️ git");
+        assert_eq!(label, "💻 git");
     }
 
     #[test]
