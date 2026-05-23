@@ -50,6 +50,8 @@ impl Tool for CustomTool {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .detach_from_tty()
+                .env("TERM", "dumb")
+                .env("NO_COLOR", "1")
                 .spawn()
             {
                 Ok(c) => c,

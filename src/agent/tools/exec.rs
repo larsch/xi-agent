@@ -103,7 +103,9 @@ impl Tool for ExecTool {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true)
-                .detach_from_tty();
+                .detach_from_tty()
+                .env("TERM", "dumb")
+                .env("NO_COLOR", "1");
 
             if let Some(ref dir) = cwd {
                 cmd.current_dir(dir);
