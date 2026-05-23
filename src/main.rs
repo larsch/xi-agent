@@ -1610,7 +1610,7 @@ async fn run_print_mode(
 
     let session_events = vec![crate::session_event::SessionEvent::UserMessage {
         content: prompt.clone(),
-        timestamp: 0,
+        timestamp: crate::app_agent_handlers::now_ts(),
     }];
 
     let loop_config = AgentLoopConfig {

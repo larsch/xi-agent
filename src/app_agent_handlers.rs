@@ -10,15 +10,20 @@ use crate::llm::{AssistantPhase, DisplayRange, UsageStats};
 use crate::provider_manager::{active_provider_display_name, format_provider_error_for_display};
 use crate::session_event::SessionEvent;
 
+/// Current wall-clock time as seconds since UNIX epoch.
+pub(crate) fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 impl App {
     // ── Agent event handling ──────────────────────────────────────────────────
 
     /// Current wall-clock time as seconds since UNIX epoch.
     pub(crate) fn now_ts() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        now_ts()
     }
 
     /// Flush `pending_turn_events` to the event log and clear the buffer.
