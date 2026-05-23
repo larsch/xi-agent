@@ -130,12 +130,13 @@ pub(super) fn build_log_lines(
                 let has_answer = !content.is_empty();
 
                 if !thinking.is_empty() {
-                    append_message_dim(
-                        &mut lines,
-                        &format!("🧠 {}", sanitize_for_display(thinking)),
-                        "",
-                        width,
-                    );
+                    let thinking_display = {
+                        let sanitized = sanitize_for_display(thinking);
+                        let all_lines: Vec<&str> = sanitized.lines().collect();
+                        let skip = all_lines.len().saturating_sub(5);
+                        format!("🧠 {}", all_lines[skip..].join("\n"))
+                    };
+                    append_message_dim(&mut lines, &thinking_display, "", width);
                     if has_answer {
                         lines.push(Line::default());
                     }
