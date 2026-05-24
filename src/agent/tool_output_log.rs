@@ -8,7 +8,7 @@ use std::{fs, path::PathBuf};
 ///
 /// # Directory selection
 /// 1. `$XDG_RUNTIME_DIR/tau/tool-output/{session_id}/`  (Linux, when set)
-/// 2. `{temp_dir}/tau-tool-output-{session_id}/`         (macOS, Windows, fallback)
+/// 2. `{temp_dir}/xi-tool-output-{session_id}/`         (macOS, Windows, fallback)
 pub struct ToolOutputLog {
     dir: PathBuf,
 }
@@ -88,12 +88,12 @@ fn resolve_dir(session_id: &str) -> PathBuf {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         let base = PathBuf::from(runtime);
         if base.is_absolute() {
-            return base.join("tau").join("tool-output").join(session_id);
+            return base.join("xi").join("tool-output").join(session_id);
         }
     }
 
     // Fallback: system temp dir.
-    std::env::temp_dir().join(format!("tau-tool-output-{session_id}"))
+    std::env::temp_dir().join(format!("xi-tool-output-{session_id}"))
 }
 
 /// Replace characters that are unsafe in filenames with `_`.

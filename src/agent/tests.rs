@@ -504,8 +504,8 @@ fn test_read_agents_md() {
     let temp_working = tempdir().unwrap();
     let working_path = temp_working.path();
 
-    // Simulate ~/.tau/AGENTS.md
-    let tau_agents_md = home_path.join(".tau/AGENTS.md");
+    // Simulate ~/.xi/AGENTS.md
+    let tau_agents_md = home_path.join(".xi/AGENTS.md");
     fs::create_dir_all(tau_agents_md.parent().unwrap()).unwrap();
     fs::write(&tau_agents_md, "Global agents configuration\n").unwrap();
 
@@ -534,8 +534,8 @@ fn test_read_agents_md_from_nested_cwd_includes_parent_chain_in_order() {
     let temp_home = tempdir().unwrap();
     let home_path = temp_home.path();
 
-    // Simulate ~/.tau/AGENTS.md
-    let tau_agents_md = home_path.join(".tau/AGENTS.md");
+    // Simulate ~/.xi/AGENTS.md
+    let tau_agents_md = home_path.join(".xi/AGENTS.md");
     fs::create_dir_all(tau_agents_md.parent().unwrap()).unwrap();
     fs::write(&tau_agents_md, "Global config\n").unwrap();
 

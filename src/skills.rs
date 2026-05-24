@@ -19,11 +19,11 @@ pub struct SkillMeta {
 /// `SKILL.md` with YAML frontmatter.
 ///
 /// Skill roots:
-/// - `~/.tau/skills`
+/// - `~/.xi/skills`
 /// - `~/.agents/skills`
 /// - `%USERPROFILE%\\.agents\\skills` (Windows)
 /// - `./.agents/skills`
-/// - `./.tau/skills`
+/// - `./.xi/skills`
 ///
 /// Returns an empty vec when no skill roots exist or are readable.
 pub fn load_skills() -> Vec<SkillMeta> {
@@ -35,7 +35,7 @@ fn skill_dirs() -> Vec<PathBuf> {
 
     if let Some(home) = env::var_os("HOME").filter(|s| !s.is_empty()) {
         let home = PathBuf::from(home);
-        dirs.push(home.join(".tau").join("skills"));
+        dirs.push(home.join(".xi").join("skills"));
         dirs.push(home.join(".agents").join("skills"));
     }
 
@@ -47,7 +47,7 @@ fn skill_dirs() -> Vec<PathBuf> {
 
     if let Ok(cwd) = env::current_dir() {
         dirs.push(cwd.join(".agents").join("skills"));
-        dirs.push(cwd.join(".tau").join("skills"));
+        dirs.push(cwd.join(".xi").join("skills"));
     }
 
     dirs

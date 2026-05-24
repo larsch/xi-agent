@@ -1,8 +1,18 @@
 [package]
-name = "tau"
-version = "0.1.0"
+name = "xi-agent"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-only"
+description = "A focused AI agent for the terminal"
+repository = "https://github.com/larsch/xi-agent"
+readme = "README.md"
+keywords = ["ai", "agent", "terminal", "llm", "cli"]
+categories = ["command-line-utilities"]
+exclude = [".github/", "docs/", "AGENTS.md"]
+
+[[bin]]
+name = "xi"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"

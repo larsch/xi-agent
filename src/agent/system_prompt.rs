@@ -9,12 +9,12 @@ use crate::skills::SkillMeta;
 pub fn read_agents_md(cwd: &str, test_home: Option<&Path>) -> String {
     let mut content = String::new();
 
-    // Check for ~/.tau/AGENTS.md
+    // Check for ~/.xi/AGENTS.md
     let home_dir_buf = test_home
         .map(|p| p.to_path_buf())
         .or_else(|| BaseDirs::new().map(|bd| bd.home_dir().to_path_buf()));
     if let Some(home_dir) = home_dir_buf.as_deref() {
-        let global_agents_md = home_dir.join(".tau/AGENTS.md");
+        let global_agents_md = home_dir.join(".xi/AGENTS.md");
         if global_agents_md.exists()
             && let Ok(file_content) = fs::read_to_string(&global_agents_md)
         {

@@ -18,7 +18,7 @@ use crate::{
 
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_REFERER: &str = "https://github.com/larsch/tau";
-const OPENROUTER_TITLE: &str = "tau";
+const OPENROUTER_TITLE: &str = "xi";
 
 /// Return the context-window size (in tokens) for a known model name.
 ///

@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn session_state_builds_both_projections_from_event_log() {
         let path =
-            std::env::temp_dir().join(format!("tau-session-state-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("xi-session-state-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn session_state_append_batch_reconciles_transient_display_state() {
         let path = std::env::temp_dir().join(format!(
-            "tau-session-state-batch-reconcile-{}.jsonl",
+            "xi-session-state-batch-reconcile-{}.jsonl",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn session_state_compaction_invalidates_llm_projection() {
         let path = std::env::temp_dir().join(format!(
-            "tau-session-state-compaction-{}.jsonl",
+            "xi-session-state-compaction-{}.jsonl",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn append_immediate_updates_display_incrementally() {
         let path =
-            std::env::temp_dir().join(format!("tau-ss-incr-display-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("xi-ss-incr-display-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn append_immediate_updates_llm_incrementally() {
         let path =
-            std::env::temp_dir().join(format!("tau-ss-incr-llm-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("xi-ss-incr-llm-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn compaction_via_append_immediate_updates_llm_projection() {
         let path =
-            std::env::temp_dir().join(format!("tau-ss-compact-llm-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("xi-ss-compact-llm-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn compaction_via_append_immediate_appears_in_display() {
         let path = std::env::temp_dir().join(format!(
-            "tau-ss-compact-display-{}.jsonl",
+            "xi-ss-compact-display-{}.jsonl",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn append_batch_does_not_duplicate_committed_messages() {
         let path =
-            std::env::temp_dir().join(format!("tau-ss-batch-dedup-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("xi-ss-batch-dedup-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());

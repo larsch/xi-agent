@@ -112,7 +112,7 @@ impl SessionManager {
         }
 
         // Persistence unavailable: create an ephemeral event log.
-        let path = std::env::temp_dir().join(format!("tau-ephemeral-session-{session_id}.jsonl"));
+        let path = std::env::temp_dir().join(format!("xi-ephemeral-session-{session_id}.jsonl"));
         match crate::event_log::EventLog::load(&path) {
             Ok(log) => {
                 self.session_state = Some(SessionState::from_event_log(log));

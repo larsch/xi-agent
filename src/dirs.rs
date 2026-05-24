@@ -8,17 +8,17 @@ use directories::ProjectDirs;
 /// `None` only when the platform cannot resolve a home directory (extremely
 /// rare in practice).
 pub static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
-    LazyLock::new(|| ProjectDirs::from("", "", "tau"));
+    LazyLock::new(|| ProjectDirs::from("", "", "xi"));
 
 /// Returns a reference to the shared [`ProjectDirs`], or an error if the
 /// platform failed to resolve a home directory.
 pub fn project_dirs() -> anyhow::Result<&'static ProjectDirs> {
     PROJECT_DIRS
         .as_ref()
-        .context("Could not resolve platform directories for tau")
+        .context("Could not resolve platform directories for xi")
 }
 
-/// Print all paths tau uses to stdout, one labelled entry per line.
+/// Print all paths xi uses to stdout, one labelled entry per line.
 /// Called by `--print-dirs`.
 pub fn print_dirs() {
     let Some(dirs) = PROJECT_DIRS.as_ref() else {
@@ -42,25 +42,25 @@ pub fn print_dirs() {
         }),
         (
             "logs",
-            "tau-debug-*  — debug logs (enabled by TAU_DEBUG=1)",
+            "xi-debug-*   — debug logs (enabled by XI_DEBUG=1)",
             &|| dirs.cache_dir().to_path_buf(),
         ),
         (
             "tools (1)",
-            "~/.tau/tools/  — user-defined tools (home)",
+            "~/.xi/tools/   — user-defined tools (home)",
             &|| {
                 std::env::var_os("HOME")
-                    .map(|h| std::path::PathBuf::from(h).join(".tau").join("tools"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("~/.tau/tools"))
+                    .map(|h| std::path::PathBuf::from(h).join(".xi").join("tools"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("~/.xi/tools"))
             },
         ),
         (
             "tools (2)",
-            ".tau/tools/    — user-defined tools (project-local)",
+            ".xi/tools/     — user-defined tools (project-local)",
             &|| {
                 std::env::current_dir()
-                    .map(|d| d.join(".tau").join("tools"))
-                    .unwrap_or_else(|_| std::path::PathBuf::from(".tau/tools"))
+                    .map(|d| d.join(".xi").join("tools"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".xi/tools"))
             },
         ),
         (

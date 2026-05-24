@@ -16,7 +16,7 @@ This repository is a AI agent harness for the terminal, built with Rust.
 
 ## Debugging
 
-- Debug logs are written to `~/.cache/tau`.
+- Debug logs are written to `~/.cache/xi`.
 
 ## Commit preflight checks
 

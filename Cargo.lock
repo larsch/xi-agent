@@ -2962,45 +2962,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau"
-version = "0.1.0"
-dependencies = [
- "ammonia",
- "anyhow",
- "arboard",
- "async-stream",
- "base64",
- "chrono",
- "clap",
- "crossterm",
- "directories",
- "futures-util",
- "getrandom 0.2.17",
- "globset",
- "ignore",
- "jawohl",
- "libc",
- "log",
- "pulldown-cmark",
- "ratatui",
- "ratatui-textarea",
- "reqwest",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "sha2",
- "shlex",
- "similar",
- "tempfile",
- "textwrap",
- "tokio",
- "toml",
- "unicode-width",
- "urlencoding",
- "windows",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4409,6 +4370,45 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xi-agent"
+version = "0.2.0"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "arboard",
+ "async-stream",
+ "base64",
+ "chrono",
+ "clap",
+ "crossterm",
+ "directories",
+ "futures-util",
+ "getrandom 0.2.17",
+ "globset",
+ "ignore",
+ "jawohl",
+ "libc",
+ "log",
+ "pulldown-cmark",
+ "ratatui",
+ "ratatui-textarea",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "shlex",
+ "similar",
+ "tempfile",
+ "textwrap",
+ "tokio",
+ "toml",
+ "unicode-width",
+ "urlencoding",
+ "windows",
+]
 
 [[package]]
 name = "yoke"

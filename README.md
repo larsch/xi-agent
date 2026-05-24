@@ -1,14 +1,11 @@
-# tau
+# xi-agent
 
-[![Rust](https://github.com/larsch/tau-agent/actions/workflows/rust.yml/badge.svg)](https://github.com/larsch/tau-agent/actions/workflows/rust.yml)
+[![Rust](https://github.com/larsch/xi-agent/actions/workflows/rust.yml/badge.svg)](https://github.com/larsch/xi-agent/actions/workflows/rust.yml)
 
-**tau** is a focused AI agent for the terminal, heavily inspired by
+**xi** is a focused AI agent for the terminal, heavily inspired by
 [pi](https://pi.dev/). It provides a minimalistic text-based UI for agentic
 interactions with local and remote models, supporting tool calls, session
 persistence, and interactive authentication.
-
-**tau** is generally completed as intended, but may lack some features from
-other similar agents.
 
 * Supported providers: built-in hosted providers plus configured named provider instances
 * Built-in tools: read_file, write_file, edit_file, find_files, ask_user, exec, python, bash/cmd/powershell
@@ -23,7 +20,13 @@ AGPL-3.0-only. See [LICENSE](LICENSE).
 
 ## Installation
 
-Install from source:
+Install from [crates.io](https://crates.io/crates/xi-agent):
+
+```sh
+cargo install xi-agent
+```
+
+Or install from source:
 
 ```sh
 cargo install --path .
@@ -36,7 +39,7 @@ cargo install --path .
 | `-P` | `--provider <PROVIDER>` | Configured provider instance id to use |
 | `-m` | `--model <MODEL>` | Model name to use (e.g. gpt-4o, llama3.1) |
 | `-p` | `--print <PROMPT>...` | Run in non-interactive mode: send PROMPT, stream the response to stdout, and exit. Accepts multiple words without shell quoting |
-| | `--print-dirs` | Print the file-system paths tau uses and exit |
+| | `--print-dirs` | Print the file-system paths xi uses and exit |
 | `-h` | `--help` | Print help |
 | `-V` | `--version` | Print version |
 
@@ -73,21 +76,21 @@ cargo install --path .
 
 Add custom agent capabilities and expertise by placing [SKILL.md](https://agentskills.io/) files in these directories; reference them with `/skill:<name>`:
 
-- `~/.tau/skills`
+- `~/.xi/skills`
 - `~/.agents/skills`
 - `%USERPROFILE%\\.agents\\skills` (Windows)
 - `./.agents/skills`
-- `./.tau/skills`
+- `./.xi/skills`
 
 ## Custom tools
 
 Add custom tools by placing executable files in these directories (in this order):
 
-- `~/.tau/tools`
+- `~/.xi/tools`
 - `~/.agents/tools`
 - `%USERPROFILE%\\.agents\\tools` (Windows)
 - `./.agents/tools`
-- `./.tau/tools`
+- `./.xi/tools`
 
 Tools must respond to a `--describe` option and output a JSON description of the
 tool's interface, including its name, description, and expected input
@@ -119,8 +122,8 @@ The tool will receive input in JSON format according to its declared
 Send a single prompt and stream the response to stdout:
 
 ```sh
-tau --print "explain the Cargo.toml"
-tau -p "what does src/agent/mod.rs do"
+xi --print "explain the Cargo.toml"
+xi -p "what does src/agent/mod.rs do"
 ```
 
 Tool calls are printed to stderr; final output goes to stdout, making it

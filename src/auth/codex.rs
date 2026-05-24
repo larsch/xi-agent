@@ -60,7 +60,7 @@ pub async fn login(
         qp.append_pair("state", &state);
         qp.append_pair("id_token_add_organizations", "true");
         qp.append_pair("codex_cli_simplified_flow", "true");
-        qp.append_pair("originator", "tau");
+        qp.append_pair("originator", "xi");
     }
 
     on_event(CodexLoginEvent::OpenBrowser(url.to_string()));

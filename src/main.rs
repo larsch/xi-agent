@@ -42,6 +42,7 @@ mod llm;
 mod log_view_state;
 mod login_state;
 mod markdown;
+mod migrate;
 mod process;
 mod projection;
 mod provider;
@@ -77,7 +78,7 @@ use thinking::ThinkingLevel;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
-/// tau — a terminal-based AI coding agent
+/// xi — a terminal-based AI coding agent
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -94,7 +95,7 @@ struct Cli {
     #[arg(long, short = 'p', value_name = "PROMPT", num_args = 1..)]
     print: Option<Vec<String>>,
 
-    /// Print the file-system paths tau uses and exit.
+    /// Print the file-system paths xi uses and exit.
     #[arg(long)]
     print_dirs: bool,
 }
@@ -117,6 +118,7 @@ fn build_file_tracker() -> FileTracker {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    migrate::run();
     debug_log::init_logging();
 
     let cli = Cli::parse();

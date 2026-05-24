@@ -491,9 +491,9 @@ fn build_request(
         "request": {
             "contents": contents,
         },
-        "userAgent": "tau",
+        "userAgent": "xi",
         "requestId": format!(
-            "tau-{}",
+            "xi-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
