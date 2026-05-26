@@ -174,23 +174,6 @@ pub enum SessionEvent {
     },
 }
 
-impl SessionEvent {
-    /// Return the timestamp of the event.
-    #[allow(dead_code)]
-    pub fn timestamp(&self) -> u64 {
-        match self {
-            Self::UserMessage { timestamp, .. } => *timestamp,
-            Self::AssistantMessage { timestamp, .. } => *timestamp,
-            Self::ToolCall { timestamp, .. } => *timestamp,
-            Self::ToolResult { timestamp, .. } => *timestamp,
-            Self::TurnError { timestamp, .. } => *timestamp,
-            Self::CompactionSummary { timestamp, .. } => *timestamp,
-            Self::ModelChanged { timestamp, .. } => *timestamp,
-            Self::ThinkingLevelChanged { timestamp, .. } => *timestamp,
-        }
-    }
-}
-
 /// What triggered a compaction.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -448,14 +431,4 @@ mod tests {
         );
     }
 
-    // ── timestamp() accessor ──────────────────────────────────────────────────
-
-    #[test]
-    fn timestamp_accessor_returns_correct_value() {
-        let ev = SessionEvent::UserMessage {
-            content: String::new(),
-            timestamp: 12345,
-        };
-        assert_eq!(ev.timestamp(), 12345);
-    }
 }

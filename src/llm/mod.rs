@@ -267,15 +267,6 @@ impl Message {
         self
     }
 
-    /// Returns `true` when this message carries tool-call or tool-result
-    /// content, i.e. its role is [`Role::ToolCall`] or [`Role::ToolResult`].
-    ///
-    /// Useful as a quick guard before accessing tool-specific fields such as
-    /// `tool_call_id`, `tool_name`, `tool_args`, or `is_error`.
-    #[allow(dead_code)]
-    pub fn is_tool_related(&self) -> bool {
-        matches!(self.role, Role::ToolCall | Role::ToolResult)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -287,19 +278,6 @@ pub enum Role {
     ToolCall,
     /// A tool result sent back to the model after executing a tool call.
     ToolResult,
-}
-
-impl Role {
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::ToolCall => "assistant", // serialised as assistant with tool_calls
-            Role::ToolResult => "tool",
-        }
-    }
 }
 
 /// Events emitted by a streaming LLM response.
@@ -396,35 +374,6 @@ pub mod test_provider;
 mod tests {
     use super::*;
 
-    // ── Role::as_str ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn role_as_str_system() {
-        assert_eq!(Role::System.as_str(), "system");
-    }
-
-    #[test]
-    fn role_as_str_user() {
-        assert_eq!(Role::User.as_str(), "user");
-    }
-
-    #[test]
-    fn role_as_str_assistant() {
-        assert_eq!(Role::Assistant.as_str(), "assistant");
-    }
-
-    #[test]
-    fn role_as_str_tool_call_is_assistant() {
-        // ToolCall messages are sent to the API as role "assistant" with a
-        // tool_calls array — the Role variant is only for internal bookkeeping.
-        assert_eq!(Role::ToolCall.as_str(), "assistant");
-    }
-
-    #[test]
-    fn role_as_str_tool_result_is_tool() {
-        assert_eq!(Role::ToolResult.as_str(), "tool");
-    }
-
     // ── Message constructors ─────────────────────────────────────────────────
 
     #[test]
@@ -492,26 +441,5 @@ mod tests {
         assert_eq!(decoded.tool_call_id, original.tool_call_id);
         assert_eq!(decoded.tool_name, original.tool_name);
         assert_eq!(decoded.tool_args, original.tool_args);
-    }
-
-    // ── is_tool_related ───────────────────────────────────────────────────────
-
-    #[test]
-    fn is_tool_related_true_for_tool_call() {
-        let m = Message::tool_call("id-1", "bash", serde_json::json!({}));
-        assert!(m.is_tool_related());
-    }
-
-    #[test]
-    fn is_tool_related_true_for_tool_result() {
-        let m = Message::tool_result("id-1", "output", false);
-        assert!(m.is_tool_related());
-    }
-
-    #[test]
-    fn is_tool_related_false_for_user_assistant_system() {
-        assert!(!Message::user("hello").is_tool_related());
-        assert!(!Message::assistant("hello").is_tool_related());
-        assert!(!Message::system("rules").is_tool_related());
     }
 }

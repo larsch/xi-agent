@@ -29,22 +29,7 @@ impl ToolContent {
         }
     }
 
-    /// Return `true` when this is a `Text` variant.
-    #[allow(dead_code)]
-    pub fn is_text(&self) -> bool {
-        matches!(self, Self::Text(_))
-    }
-
     /// Convenience: unwrap as a `&str`, panicking if this is an image.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn unwrap_text(&self) -> &str {
-        match self {
-            Self::Text(s) => s.as_str(),
-            Self::Image { .. } => panic!("expected Text, got Image"),
-        }
-    }
-
     /// Base64-encode the image data.  Returns `None` for text content.
     pub fn image_base64(&self) -> Option<(&str, String)> {
         match self {
@@ -241,7 +226,6 @@ pub struct ToolCallContext {
 
 impl ToolCallContext {
     /// Construct a context with no live-output sender (suitable for tests).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn noop(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),

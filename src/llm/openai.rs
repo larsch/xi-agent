@@ -342,7 +342,7 @@ mod tests {
     use super::infer_initiator;
     use crate::llm::common::normalize_tool_name;
     use crate::llm::provider_format::to_openai_wire;
-    use crate::llm::{Message, Role};
+    use crate::llm::{Message};
 
     #[test]
     fn normalize_tool_name_maps_emoji_aliases_and_passthrough() {
@@ -421,7 +421,7 @@ mod tests {
         let messages = vec![Message::system("rules"), Message::user("hello")];
         let out = to_openai_wire(&messages);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0]["role"], Role::System.as_str());
-        assert_eq!(out[1]["role"], Role::User.as_str());
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[1]["role"], "user");
     }
 }

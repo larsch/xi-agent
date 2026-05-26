@@ -31,10 +31,6 @@ pub struct ToolBodyConfig {
     pub tail_lines: usize,
     /// Max lines per side for edit_file diff body.
     pub diff_lines: usize,
-    /// Max lines shown for shell command intent (bash/cmd/powershell).
-    /// Reserved for future use when streaming command intent body is implemented.
-    #[allow(dead_code)]
-    pub intent_shell_lines: usize,
 }
 
 impl Default for ToolBodyConfig {
@@ -44,7 +40,6 @@ impl Default for ToolBodyConfig {
             head_lines: 8,
             tail_lines: 8,
             diff_lines: 4,
-            intent_shell_lines: 5,
         }
     }
 }

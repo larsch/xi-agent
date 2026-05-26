@@ -7,6 +7,7 @@ This repository is a AI agent harness for the terminal, built with Rust.
 - Fix all compiler warnings before committing.
 - Fix all clippy issues before committing (`cargo clippy`).
 - Ensure all tests pass before committing (`cargo test`).
+- Remove unused code rather than suppressing it. Only use `#[allow(dead_code)]` when the compiler cannot see a real use (e.g. serde-populated fields, test helpers that must live outside `#[cfg(test)]`). Always add a comment explaining why.
 
 ## Working modes
 

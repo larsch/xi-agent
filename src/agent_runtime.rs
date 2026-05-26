@@ -68,7 +68,6 @@ impl AgentRuntime {
     }
 
     /// Returns true when an agent task is currently running.
-    #[allow(dead_code)]
     pub(crate) fn is_running(&self) -> bool {
         self.agent_task.is_some()
     }

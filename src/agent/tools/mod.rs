@@ -227,7 +227,6 @@ pub async fn register_builtin_tools(
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests {
     use super::{parse_args, translate_serde_message};
     use serde::Deserialize;
@@ -293,6 +292,11 @@ mod tests {
 
     #[test]
     fn parse_args_wrong_type_integer_got_string() {
+        // Verify successful parse reads back correctly
+        let ok: Multi = parse_args(serde_json::json!({"name":"a","count":1,"flag":true})).unwrap();
+        assert_eq!(ok.name, "a");
+        assert_eq!(ok.count, 1);
+        assert!(ok.flag);
         // `count` is u64, send string
         let msg = err_content::<Multi>(serde_json::json!({"name":"a","count":"hi","flag":true}));
         assert!(msg.contains("Invalid arguments"), "{msg}");
@@ -338,6 +342,8 @@ mod tests {
         struct WithVec {
             tags: Vec<String>,
         }
+        let ok: WithVec = parse_args(serde_json::json!({"tags": ["a", "b"]})).unwrap();
+        assert_eq!(ok.tags, ["a", "b"]);
         let msg = err_content::<WithVec>(serde_json::json!({"tags": "oops"}));
         assert!(msg.contains("Invalid arguments"), "{msg}");
         assert!(msg.contains("`tags`"), "field name missing: {msg}");
@@ -353,6 +359,8 @@ mod tests {
         struct WithMap {
             meta: std::collections::HashMap<String, String>,
         }
+        let ok: WithMap = parse_args(serde_json::json!({"meta": {"k": "v"}})).unwrap();
+        assert_eq!(ok.meta["k"], "v");
         let msg = err_content::<WithMap>(serde_json::json!({"meta": []}));
         assert!(msg.contains("Invalid arguments"), "{msg}");
         assert!(msg.contains("`meta`"), "field name missing: {msg}");
