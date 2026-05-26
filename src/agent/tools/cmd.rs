@@ -1,9 +1,8 @@
 use std::pin::Pin;
-use std::process::Stdio;
 
 use serde_json::Value;
 
-use super::subprocess::run_child;
+use super::subprocess::SubprocessCommand;
 use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 pub struct CmdTool;
@@ -60,22 +59,13 @@ impl Tool for CmdTool {
             };
 
             let wrapped_command = format!("\"{command}\"");
-            let child = match tokio::process::Command::new("cmd.exe")
-                .arg("/D") // Disable AutoRun commands from registry.
-                .arg("/S") // Preserve predictable quote handling with /C.
+            SubprocessCommand::new("cmd.exe")
+                .arg("/D")
+                .arg("/S")
                 .arg("/C")
-                .raw_arg(&wrapped_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => return ToolResult::err(format!("Failed to spawn cmd.exe: {e}")),
-            };
-
-            run_child(child, ctx).await
+                .raw_arg(wrapped_command)
+                .run(ctx)
+                .await
         })
     }
 }

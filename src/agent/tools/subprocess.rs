@@ -42,6 +42,8 @@ use crate::process::DetachFromTty;
 pub struct SubprocessCommand {
     program: String,
     args: Vec<String>,
+    #[cfg(target_os = "windows")]
+    raw_args: Vec<String>,
     envs: HashMap<String, String>,
     current_dir: Option<String>,
     stdin_data: Option<Vec<u8>>,
@@ -55,6 +57,8 @@ impl SubprocessCommand {
         Self {
             program: program.into(),
             args: Vec::new(),
+            #[cfg(target_os = "windows")]
+            raw_args: Vec::new(),
             envs: HashMap::new(),
             current_dir: None,
             stdin_data: None,
@@ -69,6 +73,7 @@ impl SubprocessCommand {
     }
 
     /// Append multiple arguments.
+    #[cfg(not(target_os = "windows"))]
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -78,13 +83,27 @@ impl SubprocessCommand {
         self
     }
 
+    /// Append a raw argument using platform-specific native command-line
+    /// handling.
+    ///
+    /// Maps to `tokio::process::Command::raw_arg`, which is needed for
+    /// commands like `cmd.exe /S /C` where quoting semantics must be
+    /// preserved exactly.
+    #[cfg(target_os = "windows")]
+    pub fn raw_arg(mut self, arg: impl Into<String>) -> Self {
+        self.raw_args.push(arg.into());
+        self
+    }
+
     /// Set an environment variable (merged with the inherited environment).
+    #[cfg(not(target_os = "windows"))]
     pub fn env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.envs.insert(key.into(), val.into());
         self
     }
 
     /// Set the working directory for the child process.
+    #[cfg(not(target_os = "windows"))]
     pub fn current_dir(mut self, dir: impl Into<String>) -> Self {
         self.current_dir = Some(dir.into());
         self
@@ -129,6 +148,11 @@ impl SubprocessCommand {
             cmd.env(k, v);
         }
 
+        #[cfg(target_os = "windows")]
+        for raw_arg in &self.raw_args {
+            cmd.raw_arg(raw_arg);
+        }
+
         if let Some(ref dir) = self.current_dir {
             cmd.current_dir(dir);
         }
@@ -160,17 +184,6 @@ impl SubprocessCommand {
 
 // ── Output collection ─────────────────────────────────────────────────────────
 
-/// Collect output from an already-spawned child process and return a
-/// [`ToolResult`].
-///
-/// This is the escape hatch for callers that need platform-specific spawn
-/// configuration (e.g. `cmd.exe` with `.raw_arg()`) before handing off to
-/// the standard drain+render+truncate pipeline.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub async fn run_child(child: tokio::process::Child, ctx: ToolCallContext) -> ToolResult {
-    collect_output(child, ctx, false).await
-}
-
 /// Drain `child`'s stdout and stderr, forward live chunks if `ctx` has a
 /// sender, then build the final [`ToolResult`].
 ///
@@ -186,7 +199,7 @@ async fn collect_output(
     let (out_bytes, err_bytes, exit_code) = collect_unix(child, &ctx).await;
 
     #[cfg(not(unix))]
-    let (out_bytes, err_bytes, exit_code) = collect_other(child).await;
+    let (out_bytes, err_bytes, exit_code) = collect_other(child, &ctx).await;
 
     let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
     let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
@@ -341,9 +354,14 @@ async fn collect_unix(
 // ── Non-Unix: simple wait_with_output ────────────────────────────────────────
 
 #[cfg(not(unix))]
-async fn collect_other(mut child: tokio::process::Child) -> (Vec<u8>, Vec<u8>, i32) {
+async fn collect_other(
+    child: tokio::process::Child,
+    ctx: &ToolCallContext,
+) -> (Vec<u8>, Vec<u8>, i32) {
     match child.wait_with_output().await {
         Ok(output) => {
+            send_chunk(ctx, &output.stdout);
+            send_chunk(ctx, &output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
             (output.stdout, output.stderr, exit_code)
         }

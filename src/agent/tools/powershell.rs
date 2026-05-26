@@ -1,9 +1,8 @@
 use std::pin::Pin;
-use std::process::Stdio;
 
 use serde_json::Value;
 
-use super::subprocess::run_child;
+use super::subprocess::SubprocessCommand;
 use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 
 pub struct PowerShellTool;
@@ -62,21 +61,12 @@ impl Tool for PowerShellTool {
                 Err(e) => return *e,
             };
 
-            let child = match tokio::process::Command::new("powershell.exe")
+            SubprocessCommand::new("powershell.exe")
                 .arg("-NoProfile")
                 .arg("-Command")
-                .arg(&command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => return ToolResult::err(format!("Failed to spawn powershell.exe: {e}")),
-            };
-
-            run_child(child, ctx).await
+                .arg(command)
+                .run(ctx)
+                .await
         })
     }
 }
