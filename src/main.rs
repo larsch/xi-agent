@@ -159,7 +159,7 @@ async fn main() -> io::Result<()> {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| ".".to_string());
-    let window_title = format!("𝜏 - {window_folder}");
+    let window_title = format!("ξ - {window_folder}");
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

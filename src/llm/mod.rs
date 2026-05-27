@@ -266,7 +266,6 @@ impl Message {
         self.image_data = Some(data);
         self
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

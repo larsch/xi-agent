@@ -340,9 +340,9 @@ impl LlmProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::infer_initiator;
+    use crate::llm::Message;
     use crate::llm::common::normalize_tool_name;
     use crate::llm::provider_format::to_openai_wire;
-    use crate::llm::{Message};
 
     #[test]
     fn normalize_tool_name_maps_emoji_aliases_and_passthrough() {
