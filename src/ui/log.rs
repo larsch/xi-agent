@@ -614,7 +614,10 @@ fn render_diff_body(
         }
     }
     if !full_output && old_total > max_lines_per_side {
-        out.push(placeholder_line(format!("… {old_total} total lines")));
+        out.push(placeholder_colored_line(
+            format!("… {old_total} total lines"),
+            Color::LightRed,
+        ));
     }
 
     // New side (green, + prefix).
@@ -630,13 +633,26 @@ fn render_diff_body(
         }
     }
     if !full_output && new_total > max_lines_per_side {
-        out.push(placeholder_line(format!("… {new_total} total lines")));
+        out.push(placeholder_colored_line(
+            format!("… {new_total} total lines"),
+            Color::LightGreen,
+        ));
     }
 
     // Show common tail marker.
     if common_tail > 0 {
         out.push(placeholder_line(format!("… {common_tail} common lines")));
     }
+}
+
+/// Build a dimmed italic placeholder line with a specific foreground color.
+fn placeholder_colored_line(text: impl Into<String>, color: Color) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default()
+            .fg(color)
+            .add_modifier(Modifier::ITALIC | Modifier::DIM),
+    ))
 }
 
 /// Build a single tool-result line with `│` marker.
