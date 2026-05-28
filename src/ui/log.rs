@@ -646,17 +646,13 @@ fn tool_result_line(content: impl Into<String>, color: Color) -> Line<'static> {
 fn placeholder_line(text: impl Into<String>) -> Line<'static> {
     Line::from(Span::styled(
         text.into(),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC | Modifier::DIM),
+        Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM),
     ))
 }
 
 /// Build a dimmed italic placeholder line with a `│` marker prefix.
 fn placeholder_result_line(text: impl Into<String>) -> Line<'static> {
-    let style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC | Modifier::DIM);
+    let style = Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM);
     Line::from(vec![
         Span::styled("│", style),
         Span::styled(text.into(), style),
