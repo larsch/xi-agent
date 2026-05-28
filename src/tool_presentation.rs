@@ -21,30 +21,51 @@ pub fn extract_partial_field(partial_json: &str, field: &str) -> Option<String> 
     value.get(field)?.as_str().map(|s| s.to_string())
 }
 
+/// Return a short pending action label shown before argument streaming begins.
+///
+/// Uses an action verb (e.g. "reading…") rather than the raw internal tool
+/// name so the intent is clear and it visually reads as "in progress".
+pub fn tool_pending_label(name: &str) -> String {
+    let emoji = tool_emoji(name);
+    let action = match name {
+        "bash" | "cmd" | "powershell" | "exec" | "python" => "running…",
+        "ask_user" => "asking…",
+        "read" | "read_file" => "reading…",
+        "write" | "write_file" => "writing…",
+        "edit" | "edit_file" => "editing…",
+        "find" | "find_files" => "finding…",
+        _ => "working…",
+    };
+    format!("{emoji} {action}")
+}
+
 /// Build a display label for a tool call whose arguments are still streaming.
 ///
 /// `partial_json` is the accumulated raw argument JSON so far.
 /// `streaming_field` is the field name to extract for display (from
 /// `ToolDefinition::streaming_field`). If `None`, falls back to the
 /// completed-args display.
+///
+/// Returns `(label, is_placeholder)` where `is_placeholder` is `true` when
+/// the target field has not yet arrived and the label is a pending action hint.
 pub fn tool_invocation_label_partial(
     name: &str,
     partial_json: &str,
     streaming_field: Option<&str>,
-) -> String {
+) -> (String, bool) {
     let emoji = tool_emoji(name);
 
     let Some(field) = streaming_field else {
-        return format!("{emoji} {name}");
+        return (tool_pending_label(name), true);
     };
 
     let text = match extract_partial_field(partial_json, field) {
         Some(t) => t,
-        None => return format!("{emoji} {name}"),
+        None => return (tool_pending_label(name), true),
     };
 
     if text.is_empty() {
-        return format!("{emoji} {name}");
+        return (tool_pending_label(name), true);
     }
 
     let detail = if uses_head_truncation(name) {
@@ -56,9 +77,9 @@ pub fn tool_invocation_label_partial(
     };
 
     if detail.is_empty() {
-        format!("{emoji} {name}")
+        (tool_pending_label(name), true)
     } else {
-        format!("{emoji} {detail}")
+        (format!("{emoji} {detail}"), false)
     }
 }
 

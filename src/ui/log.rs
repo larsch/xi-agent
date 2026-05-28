@@ -207,6 +207,7 @@ fn render_tool_call(
     }
 
     // Regular tool call intent line.
+    let mut is_placeholder = false;
     let label = if name == "local_shell" {
         let prefix = msg
             .tool_args
@@ -228,11 +229,13 @@ fn render_tool_call(
     } else if let Some(snapshot) = msg.tool_partial_snapshot.as_ref() {
         tool_presentation::tool_invocation_label(name, snapshot)
     } else if let Some(partial) = msg.tool_partial_args.as_deref() {
-        tool_presentation::tool_invocation_label_partial(
+        let (lbl, ph) = tool_presentation::tool_invocation_label_partial(
             name,
             partial,
             msg.tool_streaming_field.as_deref(),
-        )
+        );
+        is_placeholder = ph;
+        lbl
     } else {
         match msg.tool_args.as_ref() {
             Some(args) => tool_presentation::tool_invocation_label(name, args),
@@ -276,7 +279,11 @@ fn render_tool_call(
     } else {
         Color::Cyan
     };
-    append_message_colored(out, &intent_label, width, color);
+    if is_placeholder {
+        append_message_colored_dim(out, &intent_label, width, color);
+    } else {
+        append_message_colored(out, &intent_label, width, color);
+    }
 
     // Show streaming write_file intent body.
     // Content is available either from finalized tool_args or, while still
@@ -766,6 +773,48 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 
 fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: usize, color: Color) {
     let style = Style::default().fg(color);
+    let segments: Vec<&str> = if content.is_empty() {
+        vec![""]
+    } else {
+        content.split('\n').collect()
+    };
+    let visible: Vec<usize> = if content.is_empty() {
+        vec![0]
+    } else {
+        segments
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, seg)| {
+                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
+                if seg.is_empty() && !has_nonempty_after {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .collect()
+    };
+
+    for seg_idx in visible {
+        let normalized = normalize_terminal_segment(segments[seg_idx], 0);
+        let chunks = wrap_str(&normalized, width);
+        for chunk in chunks {
+            out.push(Line::from(vec![Span::styled(chunk, style)]));
+        }
+    }
+}
+
+/// Like `append_message_colored` but adds italic + dim modifiers to indicate
+/// a placeholder (the tool's target argument has not yet streamed in).
+fn append_message_colored_dim(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    color: Color,
+) {
+    let style = Style::default()
+        .fg(color)
+        .add_modifier(Modifier::ITALIC | Modifier::DIM);
     let segments: Vec<&str> = if content.is_empty() {
         vec![""]
     } else {
