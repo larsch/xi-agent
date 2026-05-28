@@ -19,7 +19,7 @@ const ASK_USER_BG: Color = Color::Rgb(27, 71, 31);
 /// Display configuration for tool body rendering.
 ///
 /// All line-count limits apply to the visible window; when a body exceeds
-/// the limit the overflow is replaced by a `... (N lines total)` marker.
+/// the limit the overflow is replaced by a `… N total lines` marker.
 /// Setting `full_output = true` disables all limits.
 #[derive(Debug, Clone)]
 pub struct ToolBodyConfig {
@@ -497,10 +497,7 @@ fn render_head_truncated_body(
         }
     }
     if !full_output && total > max_lines {
-        out.push(tool_result_line(
-            format!("... ({total} lines total)"),
-            color,
-        ));
+        out.push(placeholder_result_line(format!("… {total} total lines")));
     }
 }
 
@@ -520,10 +517,7 @@ fn render_tail_truncated_body(
     let total = lines.len();
     let limit = if full_output { total } else { max_lines };
     if !full_output && total > max_lines {
-        out.push(tool_result_line(
-            format!("... ({total} lines total)"),
-            color,
-        ));
+        out.push(placeholder_result_line(format!("… {total} total lines")));
     }
     let start = if full_output || total <= max_lines {
         0
@@ -589,12 +583,9 @@ fn render_diff_body(
         max_lines_per_side
     };
 
-    // Show hidden head marker.
+    // Show common head marker.
     if common_head > 0 {
-        out.push(Line::from(Span::styled(
-            format!("  ... ({common_head} common lines hidden)"),
-            Style::default().fg(Color::DarkGray),
-        )));
+        out.push(placeholder_line(format!("… {common_head} common lines")));
     }
 
     // Old side (red, - prefix).
@@ -610,10 +601,7 @@ fn render_diff_body(
         }
     }
     if !full_output && old_total > max_lines_per_side {
-        out.push(Line::from(Span::styled(
-            format!("... ({old_total} lines total)"),
-            Style::default().fg(Color::LightRed),
-        )));
+        out.push(placeholder_line(format!("… {old_total} total lines")));
     }
 
     // New side (green, + prefix).
@@ -629,18 +617,12 @@ fn render_diff_body(
         }
     }
     if !full_output && new_total > max_lines_per_side {
-        out.push(Line::from(Span::styled(
-            format!("... ({new_total} lines total)"),
-            Style::default().fg(Color::LightGreen),
-        )));
+        out.push(placeholder_line(format!("… {new_total} total lines")));
     }
 
-    // Show hidden tail marker.
+    // Show common tail marker.
     if common_tail > 0 {
-        out.push(Line::from(Span::styled(
-            format!("  ... ({common_tail} common lines hidden)"),
-            Style::default().fg(Color::DarkGray),
-        )));
+        out.push(placeholder_line(format!("… {common_tail} common lines")));
     }
 }
 
@@ -650,6 +632,27 @@ fn tool_result_line(content: impl Into<String>, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled("│", style),
         Span::styled(content.into(), style),
+    ])
+}
+
+/// Build a dimmed italic placeholder line for truncation indicators.
+fn placeholder_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC | Modifier::DIM),
+    ))
+}
+
+/// Build a dimmed italic placeholder line with a `│` marker prefix.
+fn placeholder_result_line(text: impl Into<String>) -> Line<'static> {
+    let style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC | Modifier::DIM);
+    Line::from(vec![
+        Span::styled("│", style),
+        Span::styled(text.into(), style),
     ])
 }
 
@@ -1138,7 +1141,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(text.last().unwrap().contains("20 lines total"));
+        assert!(text.last().unwrap().contains("20 total lines"));
     }
 
     #[test]
@@ -1156,7 +1159,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(!text.iter().any(|t| t.contains("lines total")));
+        assert!(!text.iter().any(|t| t.contains("total lines")));
     }
 
     #[test]
@@ -1200,7 +1203,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(text.last().unwrap().contains("12 lines total"));
+        assert!(text.last().unwrap().contains("12 total lines"));
     }
 
     // ── edit_file diff ────────────────────────────────────────────────────────
@@ -1254,7 +1257,7 @@ mod tests {
             })
             .collect();
         // Two truncation markers: one per side
-        let marker_count = text.iter().filter(|t| t.contains("lines total")).count();
+        let marker_count = text.iter().filter(|t| t.contains("total lines")).count();
         assert_eq!(marker_count, 2);
     }
 
@@ -1303,7 +1306,7 @@ mod tests {
         // Marker should be first body line (tail-truncated)
         let body: Vec<&String> = text.iter().skip(1).collect();
         assert!(
-            body[0].contains("20 lines total"),
+            body[0].contains("20 total lines"),
             "expected marker first, got: {}",
             body[0]
         );
@@ -1337,7 +1340,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(!text.iter().any(|t| t.contains("lines total")));
+        assert!(!text.iter().any(|t| t.contains("total lines")));
         // 20 content lines + 1 intent = 21
         assert_eq!(lines.len(), 21);
     }

@@ -1076,7 +1076,7 @@ mod tests {
 
         let lines = log::build_log_lines(&messages, false, 300, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("20 lines total"), "{rendered}");
+        assert!(rendered.contains("20 total lines"), "{rendered}");
     }
 
     #[test]
@@ -1106,7 +1106,7 @@ mod tests {
         let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n... (6 lines total)"),
+            rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines"),
             "{rendered}"
         );
         assert!(!rendered.contains("l6"), "{rendered}");

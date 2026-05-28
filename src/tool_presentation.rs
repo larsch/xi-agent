@@ -193,7 +193,7 @@ fn multiline_shell_command(input: &str) -> String {
         .collect();
 
     if lines.len() > MAX_MULTILINE_SHELL_COMMAND_LINES {
-        shown.push(format!("... ({} lines total)", lines.len()));
+        shown.push(format!("… {} total lines", lines.len()));
     }
 
     shown.join("\n")
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn shell_label_truncates_after_five_lines_with_line_count() {
         let label = tool_invocation_label("bash", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
-        assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n... (6 lines total)");
+        assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines");
     }
 
     #[test]
