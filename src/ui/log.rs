@@ -596,66 +596,62 @@ fn render_diff_body(
         max_lines_per_side
     };
 
-    // Show common head marker.
+    // Red block.
     if common_head > 0 {
-        out.push(placeholder_line(format!("… {common_head} common lines")));
+        out.push(placeholder_result_line(
+            format!("… {common_head} common lines"),
+            Color::LightRed,
+        ));
     }
-
-    // Old side (red, - prefix).
     for line in old_diff.iter().take(old_limit) {
-        let text = format!("- {line}");
-        let normalized = normalize_terminal_segment(&text, 0);
-        let chunks = wrap_str(&normalized, width);
+        let normalized = normalize_terminal_segment(line, 0);
+        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
         for chunk in chunks {
-            out.push(Line::from(Span::styled(
-                chunk,
-                Style::default().fg(Color::LightRed),
-            )));
+            out.push(tool_result_line(chunk, Color::LightRed));
         }
     }
     if !full_output && old_total > max_lines_per_side {
-        out.push(placeholder_colored_line(
+        out.push(placeholder_result_line(
             format!("… {old_total} total lines"),
             Color::LightRed,
         ));
     }
+    if common_tail > 0 {
+        out.push(placeholder_result_line(
+            format!("… {common_tail} common lines"),
+            Color::LightRed,
+        ));
+    }
 
-    // New side (green, + prefix).
+    // Green block.
+    if common_head > 0 {
+        out.push(placeholder_result_line(
+            format!("… {common_head} common lines"),
+            Color::LightGreen,
+        ));
+    }
     for line in new_diff.iter().take(new_limit) {
-        let text = format!("+ {line}");
-        let normalized = normalize_terminal_segment(&text, 0);
-        let chunks = wrap_str(&normalized, width);
+        let normalized = normalize_terminal_segment(line, 0);
+        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
         for chunk in chunks {
-            out.push(Line::from(Span::styled(
-                chunk,
-                Style::default().fg(Color::LightGreen),
-            )));
+            out.push(tool_result_line(chunk, Color::LightGreen));
         }
     }
     if !full_output && new_total > max_lines_per_side {
-        out.push(placeholder_colored_line(
+        out.push(placeholder_result_line(
             format!("… {new_total} total lines"),
             Color::LightGreen,
         ));
     }
-
-    // Show common tail marker.
     if common_tail > 0 {
-        out.push(placeholder_line(format!("… {common_tail} common lines")));
+        out.push(placeholder_result_line(
+            format!("… {common_tail} common lines"),
+            Color::LightGreen,
+        ));
     }
 }
 
-/// Build a dimmed italic placeholder line with a specific foreground color.
-fn placeholder_colored_line(text: impl Into<String>, color: Color) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(color)
-            .add_modifier(Modifier::ITALIC | Modifier::DIM),
-    ))
-}
-
-/// Build a single tool-result line with `│` marker.
+/// Build a regular content line with a `│` margin marker, both in `color`.
 fn tool_result_line(content: impl Into<String>, color: Color) -> Line<'static> {
     let style = Style::default().fg(color);
     Line::from(vec![
@@ -664,22 +660,15 @@ fn tool_result_line(content: impl Into<String>, color: Color) -> Line<'static> {
     ])
 }
 
-/// Build a dimmed italic placeholder line for truncation indicators.
-fn placeholder_line(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM),
-    ))
-}
-
-/// Build a dimmed italic placeholder line with a `│` marker prefix.
-/// The `│` marker uses `color` (matching the surrounding output), while the
-/// text is dimmed and italic.
+/// Build a truncation/context placeholder line with a `┆` margin marker.
+/// The `┆` is rendered in `color`; the text is rendered in `color` + dim + italic.
 fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'static> {
     let marker_style = Style::default().fg(color);
-    let text_style = Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM);
+    let text_style = Style::default()
+        .fg(color)
+        .add_modifier(Modifier::ITALIC | Modifier::DIM);
     Line::from(vec![
-        Span::styled("│", marker_style),
+        Span::styled("┆", marker_style),
         Span::styled(text.into(), text_style),
     ])
 }
@@ -1296,8 +1285,14 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(text.iter().any(|t| t.starts_with("- ")), "expected - line");
-        assert!(text.iter().any(|t| t.starts_with("+ ")), "expected + line");
+        assert!(
+            text.iter().any(|t| t.contains("old line")),
+            "expected old line"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("new line")),
+            "expected new line"
+        );
     }
 
     #[test]
