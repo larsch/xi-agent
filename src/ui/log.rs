@@ -504,7 +504,10 @@ fn render_head_truncated_body(
         }
     }
     if !full_output && total > max_lines {
-        out.push(placeholder_result_line(format!("… {total} total lines")));
+        out.push(placeholder_result_line(
+            format!("… {total} total lines"),
+            color,
+        ));
     }
 }
 
@@ -524,7 +527,10 @@ fn render_tail_truncated_body(
     let total = lines.len();
     let limit = if full_output { total } else { max_lines };
     if !full_output && total > max_lines {
-        out.push(placeholder_result_line(format!("… {total} total lines")));
+        out.push(placeholder_result_line(
+            format!("… {total} total lines"),
+            color,
+        ));
     }
     let start = if full_output || total <= max_lines {
         0
@@ -651,11 +657,14 @@ fn placeholder_line(text: impl Into<String>) -> Line<'static> {
 }
 
 /// Build a dimmed italic placeholder line with a `│` marker prefix.
-fn placeholder_result_line(text: impl Into<String>) -> Line<'static> {
-    let style = Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM);
+/// The `│` marker uses `color` (matching the surrounding output), while the
+/// text is dimmed and italic.
+fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'static> {
+    let marker_style = Style::default().fg(color);
+    let text_style = Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM);
     Line::from(vec![
-        Span::styled("│", style),
-        Span::styled(text.into(), style),
+        Span::styled("│", marker_style),
+        Span::styled(text.into(), text_style),
     ])
 }
 
