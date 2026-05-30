@@ -186,7 +186,11 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
             msgs.push(msg);
         }
         SessionEvent::ToolCall { id, name, args, .. } => {
-            msgs.push(Message::tool_call(id.clone(), name.clone(), args.clone()));
+            let mut msg = Message::tool_call(id.clone(), name.clone(), args.clone());
+            if id.starts_with("attach_") {
+                msg.hidden = true;
+            }
+            msgs.push(msg);
         }
         SessionEvent::ToolResult {
             id,
@@ -197,6 +201,9 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
         } => {
             let mut msg = Message::tool_result(id.clone(), content.clone(), *is_error);
             msg.display_range = display_range.clone();
+            if id.starts_with("attach_") {
+                msg.hidden = true;
+            }
             msgs.push(msg);
         }
         SessionEvent::TurnError { message, .. } => {
@@ -870,5 +877,56 @@ mod tests {
         proj.apply_new_events(&[assistant_ev("hi")]);
         assert_eq!(proj.len(), 1);
         assert_eq!(proj.messages()[0].content, "hi");
+    }
+
+    #[test]
+    fn synthetic_attachment_events_are_hidden_in_display_projection() {
+        let events = vec![
+            tool_call_ev("attach_0", "read_file"),
+            tool_result_ev("attach_0", "fn main() {}"),
+            user_ev("look at @src/main.rs"),
+        ];
+        let msgs = project_display_messages(&events);
+        // All three events produce a Message, but the two attach_ ones are hidden.
+        let attach_msgs: Vec<_> = msgs
+            .iter()
+            .filter(|m| {
+                m.tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("attach_"))
+            })
+            .collect();
+        assert_eq!(
+            attach_msgs.len(),
+            2,
+            "expected ToolCall + ToolResult messages"
+        );
+        for m in &attach_msgs {
+            assert!(
+                m.hidden,
+                "attach_ message should be hidden: {:?}",
+                m.content
+            );
+        }
+        // The user message itself is not hidden.
+        let user_msg = msgs
+            .iter()
+            .find(|m| m.role == crate::llm::Role::User)
+            .unwrap();
+        assert!(!user_msg.hidden);
+    }
+
+    #[test]
+    fn synthetic_attachment_events_are_present_in_llm_projection() {
+        let events = vec![
+            tool_call_ev("attach_0", "read_file"),
+            tool_result_ev("attach_0", "fn main() {}"),
+            user_ev("look at @src/main.rs"),
+        ];
+        let msgs = project_llm_messages(&events);
+        // LLM sees the tool call, tool result, and user message.
+        assert!(msgs.iter().any(|m| m.role == crate::llm::Role::ToolCall));
+        assert!(msgs.iter().any(|m| m.role == crate::llm::Role::ToolResult));
+        assert!(msgs.iter().any(|m| m.role == crate::llm::Role::User));
     }
 }

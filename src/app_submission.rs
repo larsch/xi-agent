@@ -1,13 +1,14 @@
 //! Agent task submission, abort, steering, and scroll methods split out of `app.rs`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::agent::{AgentLoopConfig, ToolOutputLog, run_agent_loop};
 use crate::app::{App, DynProvider, RetryTarget, StreamingStatus};
+use crate::at_file::{AtFileResult, parse_at_tokens, resolve_at_tokens};
 use crate::live_turn::LiveToolResult;
 use crate::llm::Role;
 use crate::session_event::SessionEvent;
-
 impl App {
     // ── LLM submission ────────────────────────────────────────────────────────
 
@@ -118,6 +119,93 @@ impl App {
         self.start_agent_task(provider);
     }
 
+    /// Parse `@<path>` tokens from `text`, read each file, and inject a
+    /// synthetic `read_file` `ToolCall` + `ToolResult` event pair before the
+    /// user message.  Image files embed the image as a data URI directly in
+    /// the text content; text files are inlined verbatim.
+    ///
+    /// Errors produce a visible notice but do not abort submission.
+    fn inject_at_file_attachments(&mut self, text: &str) {
+        let tokens = parse_at_tokens(text);
+        if tokens.is_empty() {
+            return;
+        }
+
+        let cwd = Path::new(&self.session.current_cwd).to_path_buf();
+        let results = resolve_at_tokens(&tokens, &cwd);
+
+        // Ensure the event log exists before appending events.
+        self.session.ensure_event_log_for_submit();
+
+        let ts = Self::now_ts();
+
+        for (idx, result) in results.iter().enumerate() {
+            let call_id = format!("attach_{idx}");
+            let path = result.path().to_string();
+
+            // Synthetic args JSON — mirrors what a real read_file call would use.
+            let args = serde_json::json!({ "path": path });
+
+            // Push the synthetic ToolCall event.
+            self.session.append_event_immediate(SessionEvent::ToolCall {
+                id: call_id.clone(),
+                name: "read_file".to_string(),
+                args,
+                timestamp: ts,
+            });
+
+            match result {
+                AtFileResult::Text { content, .. } => {
+                    self.session
+                        .append_event_immediate(SessionEvent::ToolResult {
+                            id: call_id,
+                            name: "read_file".to_string(),
+                            content: content.clone(),
+                            is_error: false,
+                            display_range: None,
+                            timestamp: ts,
+                        });
+                }
+                AtFileResult::Image {
+                    base64, mime_type, ..
+                } => {
+                    // Inline the image as a data URI directly in the content
+                    // text so it works with any provider (some OpenAI-compatible
+                    // backends don't accept structured content arrays in tool
+                    // results).
+                    let data_uri = format!("data:{mime_type};base64,{base64}");
+                    let content = format!("![{path}]({data_uri})\n\n[Image: {path}]");
+                    self.session
+                        .append_event_immediate(SessionEvent::ToolResult {
+                            id: call_id,
+                            name: "read_file".to_string(),
+                            content,
+                            is_error: false,
+                            display_range: None,
+                            timestamp: ts,
+                        });
+                    // No need for pending_attachment_images — image is inline.
+                }
+                AtFileResult::Error { message, .. } => {
+                    // Push an error ToolResult so the LLM sees the failure.
+                    self.session
+                        .append_event_immediate(SessionEvent::ToolResult {
+                            id: call_id,
+                            name: "read_file".to_string(),
+                            content: format!("error reading {path}: {message}"),
+                            is_error: true,
+                            display_range: None,
+                            timestamp: ts,
+                        });
+                    // Also show a notice in the UI.
+                    self.push_notice(crate::llm::Message::assistant(format!(
+                        "[attachment error: {path}: {message}]"
+                    )));
+                }
+            }
+        }
+    }
+
     /// Take the textarea content and start the agent loop.
     pub fn submit(&mut self, provider: &DynProvider) {
         let lines: Vec<String> = self.textarea.lines().to_vec();
@@ -127,6 +215,7 @@ impl App {
             return;
         }
 
+        self.inject_at_file_attachments(&trimmed);
         self.append_user_message(trimmed);
         self.persist_messages();
         self.reset_textarea();

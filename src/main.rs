@@ -21,6 +21,8 @@ use std::{
 
 mod agent;
 mod agent_runtime;
+mod at_file;
+
 mod agent_turn_state;
 mod app;
 mod app_agent_handlers;
