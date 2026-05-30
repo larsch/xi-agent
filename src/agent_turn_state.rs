@@ -2,9 +2,10 @@ use crate::app::StreamingStatus;
 
 /// Groups the three fields that track the progress of a live agent turn.
 ///
-/// All three are set and cleared together (both set when a turn starts,
-/// both `status`/`last_output_at` cleared when a turn ends, `tick`
-/// wraps continuously).
+/// Writes go through methods to keep the invariants clear:
+/// `start()` / `end()` for turn lifecycle, `record_output()` for visible
+/// output arriving, `set_status()` for mid-turn status updates.
+/// Fields remain readable (`pub(crate)`) for pattern matches in UI/tests.
 pub(crate) struct AgentTurnState {
     /// Current streaming state; `None` when no turn is active.
     pub(crate) status: Option<StreamingStatus>,
@@ -31,6 +32,28 @@ impl AgentTurnState {
             self.status,
             Some(StreamingStatus::Waiting | StreamingStatus::Message(_))
         )
+    }
+
+    /// Begin a new agent turn: set status to Waiting and clear last_output_at.
+    pub(crate) fn start(&mut self) {
+        self.status = Some(StreamingStatus::Waiting);
+        self.last_output_at = None;
+    }
+
+    /// End the current turn: clear status and last_output_at.
+    pub(crate) fn end(&mut self) {
+        self.status = None;
+        self.last_output_at = None;
+    }
+
+    /// Update the mid-turn status message without touching last_output_at.
+    pub(crate) fn set_status(&mut self, status: Option<StreamingStatus>) {
+        self.status = status;
+    }
+
+    /// Record that visible output has just arrived.
+    pub(crate) fn record_output(&mut self) {
+        self.last_output_at = Some(std::time::Instant::now());
     }
 
     /// Advance the throbber animation frame.  Called on every UI tick while active.

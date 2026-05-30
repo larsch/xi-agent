@@ -903,7 +903,7 @@ impl App {
         self.session.pending_turn_events.clear();
         self.runtime.queued_steering.clear();
         self.runtime.steering_tx = None;
-        self.agent_turn.status = None;
+        self.agent_turn.set_status(None);
         self.latest_usage = None;
         self.reset_textarea();
         self.log_view.auto_scroll = true;

@@ -1595,7 +1595,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.agent_turn.status = Some(StreamingStatus::Waiting);
+            app.agent_turn.start();
             install_test_agent_task(&mut app);
             app.textarea.insert_str("/model gpt");
 
@@ -1636,7 +1636,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.agent_turn.status = Some(StreamingStatus::Waiting);
+            app.agent_turn.start();
             install_test_agent_task(&mut app);
             app.textarea.insert_str("hello");
 
@@ -1668,7 +1668,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.agent_turn.status = Some(StreamingStatus::Waiting);
+            app.agent_turn.start();
             install_test_agent_task(&mut app);
             // Simulate an in-flight tool call via pending_turn_events.
             app.session
@@ -1720,7 +1720,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.agent_turn.status = Some(StreamingStatus::Waiting);
+            app.agent_turn.start();
             install_test_agent_task(&mut app);
             app.session
                 .pending_turn_events
@@ -1789,7 +1789,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.agent_turn.status = Some(StreamingStatus::Waiting);
+            app.agent_turn.start();
             install_test_agent_task(&mut app);
             // Simulate a ToolCall with its result already in pending_turn_events.
             app.session
@@ -1843,7 +1843,7 @@ mod tests {
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
             app.session.live_turn.assistant_content = "partial".to_string();
-            app.agent_turn.status = Some(StreamingStatus::Waiting);
+            app.agent_turn.start();
             install_test_agent_task(&mut app);
 
             app.abort_agent_loop();
@@ -2101,7 +2101,7 @@ mod tests {
         app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
             crate::event_log::EventLog::load(&path).expect("load event log"),
         ));
-        app.agent_turn.status = Some(StreamingStatus::Waiting);
+        app.agent_turn.start();
         app.session.live_turn.assistant_content = "partial".to_string();
         app.session
             .pending_turn_events
@@ -2146,8 +2146,7 @@ mod tests {
     #[test]
     fn empty_status_update_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.agent_turn.status = Some(StreamingStatus::Waiting);
-        app.agent_turn.last_output_at = None;
+        app.agent_turn.start();
 
         assert!(app.throbber_visible());
 
@@ -2159,8 +2158,7 @@ mod tests {
     #[test]
     fn non_empty_status_update_temporarily_hides_throbber() {
         let mut app = make_app();
-        app.agent_turn.status = Some(StreamingStatus::Waiting);
-        app.agent_turn.last_output_at = None;
+        app.agent_turn.start();
 
         assert!(app.throbber_visible());
 
@@ -2174,8 +2172,7 @@ mod tests {
     #[test]
     fn whitespace_text_token_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.agent_turn.status = Some(StreamingStatus::Waiting);
-        app.agent_turn.last_output_at = None;
+        app.agent_turn.start();
 
         app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
             text: "   \n".to_string(),
@@ -2188,8 +2185,7 @@ mod tests {
     #[test]
     fn whitespace_thinking_token_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.agent_turn.status = Some(StreamingStatus::Waiting);
-        app.agent_turn.last_output_at = None;
+        app.agent_turn.start();
 
         app.apply_agent_event(crate::agent::types::AgentEvent::ThinkingToken(
             "\n\n".to_string(),
@@ -2203,10 +2199,11 @@ mod tests {
         let mut app = make_app();
         assert!(!app.provider_status_visible());
 
-        app.agent_turn.status = Some(StreamingStatus::Message("compacting…".to_string()));
+        app.agent_turn
+            .set_status(Some(StreamingStatus::Message("compacting…".to_string())));
         assert!(app.provider_status_visible());
 
-        app.agent_turn.status = None;
+        app.agent_turn.set_status(None);
         assert!(!app.provider_status_visible());
     }
 

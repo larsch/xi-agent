@@ -68,7 +68,7 @@ impl App {
             self.session.session_state.is_some(),
             "launch_turn called before session_state was initialised"
         );
-        self.agent_turn.status = Some(StreamingStatus::Waiting);
+        self.agent_turn.start();
         self.login.auth_retry_budget = 1;
         self.latest_usage = None;
         self.log_view.auto_scroll = true;
@@ -112,7 +112,7 @@ impl App {
             return;
         }
 
-        self.agent_turn.status = Some(StreamingStatus::Waiting);
+        self.agent_turn.start();
         self.login.auth_retry_budget = 1;
         self.log_view.auto_scroll = true;
         self.start_agent_task(provider);
@@ -239,7 +239,7 @@ impl App {
             self.agent_turn.status,
             Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
         ) {
-            self.agent_turn.status = None;
+            self.agent_turn.set_status(None);
         }
     }
 
@@ -250,9 +250,10 @@ impl App {
                 let _ = tx.send(true);
             }
             handle.abort();
-            self.agent_turn.status = Some(StreamingStatus::CompletedMessage(
-                "[agent loop aborted]".to_string(),
-            ));
+            self.agent_turn
+                .set_status(Some(StreamingStatus::CompletedMessage(
+                    "[agent loop aborted]".to_string(),
+                )));
             self.agent_turn.last_output_at = None;
             self.runtime.steering_tx = None;
             self.runtime.queued_steering.clear();

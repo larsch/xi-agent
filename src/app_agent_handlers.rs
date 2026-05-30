@@ -109,7 +109,7 @@ impl App {
 
     fn on_thinking_token(&mut self, token: String) {
         if !token.trim().is_empty() {
-            self.agent_turn.last_output_at = Some(std::time::Instant::now());
+            self.agent_turn.record_output();
         }
         self.session
             .live_turn
@@ -124,7 +124,7 @@ impl App {
 
     fn on_text_token(&mut self, text: String, phase: AssistantPhase) {
         if !text.trim().is_empty() {
-            self.agent_turn.last_output_at = Some(std::time::Instant::now());
+            self.agent_turn.record_output();
         }
         self.session.live_turn.assistant_content.push_str(&text);
         if phase != AssistantPhase::Unknown {
@@ -159,7 +159,7 @@ impl App {
     }
 
     fn on_steering_consumed(&mut self, text: String) {
-        self.agent_turn.last_output_at = Some(std::time::Instant::now());
+        self.agent_turn.record_output();
         if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
             self.runtime.queued_steering.remove(pos);
         }
@@ -177,18 +177,19 @@ impl App {
 
     fn on_status_update(&mut self, msg: String) {
         if !msg.is_empty() {
-            self.agent_turn.last_output_at = Some(std::time::Instant::now());
+            self.agent_turn.record_output();
         }
-        self.agent_turn.status = if msg.is_empty() {
-            Some(StreamingStatus::Waiting)
+        self.agent_turn.set_status(Some(if msg.is_empty() {
+            StreamingStatus::Waiting
         } else {
-            Some(StreamingStatus::Message(msg))
-        };
+            StreamingStatus::Message(msg)
+        }));
     }
 
     fn on_compacting(&mut self) {
-        self.agent_turn.last_output_at = Some(std::time::Instant::now());
-        self.agent_turn.status = Some(StreamingStatus::Message("compacting…".to_string()));
+        self.agent_turn.record_output();
+        self.agent_turn
+            .set_status(Some(StreamingStatus::Message("compacting…".to_string())));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -230,7 +231,7 @@ impl App {
     }
 
     fn on_tool_call_start(&mut self, id: String, name: String, args: serde_json::Value) {
-        self.agent_turn.last_output_at = Some(std::time::Instant::now());
+        self.agent_turn.record_output();
         // The live entry was already created by on_tool_call_intent when the
         // LLM started the tool block. Update it with the complete args.
         // If for some reason no intent entry exists (e.g. provider that skips
@@ -268,7 +269,7 @@ impl App {
     }
 
     fn on_tool_call_end(&mut self, id: String, result: crate::agent::types::ToolResult) {
-        self.agent_turn.last_output_at = Some(std::time::Instant::now());
+        self.agent_turn.record_output();
         let display_range = result.truncation.as_ref().map(|tr| DisplayRange {
             first_line: tr.first_kept_line,
             last_line: tr.first_kept_line + tr.output_lines - 1,
@@ -316,14 +317,14 @@ impl App {
     }
 
     fn on_external_file_change(&mut self, notification: String) {
-        self.agent_turn.last_output_at = Some(std::time::Instant::now());
+        self.agent_turn.record_output();
         // External file change notifications are user-visible context
         // injected into the conversation — treat as UserMessage.
         self.append_user_message(notification);
     }
 
     fn on_turn_end(&mut self) {
-        self.agent_turn.status = Some(StreamingStatus::Waiting);
+        self.agent_turn.start();
         // Finalise the assistant message in the pending buffer before
         // flushing, using the current in-memory messages state.
         self.finalise_assistant_turn_event();
@@ -332,8 +333,7 @@ impl App {
     }
 
     fn on_agent_done(&mut self) {
-        self.agent_turn.status = None;
-        self.agent_turn.last_output_at = None;
+        self.agent_turn.end();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;
@@ -344,8 +344,7 @@ impl App {
     }
 
     fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
-        self.agent_turn.status = None;
-        self.agent_turn.last_output_at = None;
+        self.agent_turn.end();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;
@@ -363,7 +362,7 @@ impl App {
                 self.login.auth_retry_budget
             );
             self.login.auth_retry_budget -= 1;
-            self.agent_turn.status = None;
+            self.agent_turn.set_status(None);
             // Refresh triggered; retry will happen automatically after refresh completes.
             // Discard pending events and in-flight turn state — the turn will be retried.
             self.session.pending_turn_events.clear();
@@ -374,7 +373,7 @@ impl App {
                 &self.provider.instances,
             );
             let rendered = format_provider_error_for_display(&provider_label, &e);
-            self.agent_turn.status = None;
+            self.agent_turn.set_status(None);
             // Discard any partially accumulated assistant/tool events
             // and append a TurnError instead. Provider errors are already
             // shown in the output area via the committed TurnError, so do not
