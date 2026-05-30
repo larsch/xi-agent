@@ -39,7 +39,7 @@ impl App {
                 .pending_manual_compaction_instructions
                 .take(),
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
-            system_prompt: self.system_prompt.clone(),
+            system_prompt: self.agent_config.system_prompt.clone(),
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.steering_tx = Some(steering_tx);

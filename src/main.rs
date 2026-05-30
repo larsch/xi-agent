@@ -224,7 +224,7 @@ async fn main() -> io::Result<()> {
     let loaded_skills = skills::load_skills();
     let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
     app.agent_config.tools = tools;
-    app.system_prompt = Some(system_prompt);
+    app.agent_config.system_prompt = Some(system_prompt);
     app.loaded_skills = loaded_skills;
     app.provider.instances = config.providers.clone();
     maybe_warn_thinking_unsupported(&mut app);
@@ -278,7 +278,7 @@ async fn main() -> io::Result<()> {
                 let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
                 let skills_count = loaded_skills.len();
                 app.agent_config.tools = tools;
-                app.system_prompt = Some(system_prompt);
+                app.agent_config.system_prompt = Some(system_prompt);
                 app.loaded_skills = loaded_skills;
                 app.push_notice(Message::assistant(format!(
                     "[reloaded context: {} skill{}, {} custom tool{}]",

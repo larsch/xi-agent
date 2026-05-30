@@ -107,8 +107,6 @@ pub struct App {
     /// calls, tool results, etc.); used to suppress the throbber while output
     /// is actively arriving and re-show it after a short idle time.
     pub(crate) last_output_at: Option<std::time::Instant>,
-    /// Optional system prompt prepended to every request.
-    pub(crate) system_prompt: Option<String>,
     /// All provider-related state: instances, active instance/model/thinking,
     /// and transient setup-flow state.
     pub(crate) provider: ProviderManager,
@@ -171,7 +169,6 @@ impl App {
             streaming_status: None,
             throbber_tick: 0,
             last_output_at: None,
-            system_prompt: None,
             provider: ProviderManager::new(initial_instance, initial_model, initial_thinking),
             agent_config,
             loaded_skills: Vec::new(),
