@@ -239,7 +239,10 @@ fn render_tool_call(
     } else {
         match msg.tool_args.as_ref() {
             Some(args) => tool_presentation::tool_invocation_label(name, args),
-            None => tool_presentation::tool_invocation_label(name, &serde_json::Value::Null),
+            None => {
+                is_placeholder = true;
+                tool_presentation::tool_pending_label(name)
+            }
         }
     };
 
