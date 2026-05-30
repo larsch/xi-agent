@@ -1240,6 +1240,16 @@ fn handle_chat_submit(
     KeyDispatch::Continue
 }
 
+fn thinking_supported_for_current_provider(app: &App, config: &XiConfig) -> bool {
+    config
+        .find_provider(&app.provider.current_instance.id)
+        .map(|inst| {
+            thinking_support_for_instance(inst, &app.provider.current_model)
+                == ThinkingSupport::Applied
+        })
+        .unwrap_or(false)
+}
+
 fn handle_slash_submit(
     app: &mut App,
     provider: &Arc<dyn LlmProvider + Send + Sync>,
@@ -1272,14 +1282,10 @@ fn handle_slash_submit(
             app.enter_provider_selection_mode(&config.providers);
         }
         Some(CommandAction::Thinking(raw)) => {
-            let thinking_supported = config
-                .find_provider(&app.provider.current_instance.id)
-                .map(|inst| {
-                    thinking_support_for_instance(inst, &app.provider.current_model)
-                        == ThinkingSupport::Applied
-                })
-                .unwrap_or(false);
-            if !thinking_supported {
+            if !thinking_supported_for_current_provider(app, config) {
+                app.push_notice(llm::Message::assistant(
+                    "[thinking is not supported by the current provider/model]".to_string(),
+                ));
                 return KeyDispatch::Continue;
             }
             match ThinkingLevel::parse(&raw) {
@@ -1291,18 +1297,12 @@ fn handle_slash_submit(
                 }
             }
         }
-        Some(CommandAction::ThinkingNoArg) => {
-            let thinking_supported = config
-                .find_provider(&app.provider.current_instance.id)
-                .map(|inst| {
-                    thinking_support_for_instance(inst, &app.provider.current_model)
-                        == ThinkingSupport::Applied
-                })
-                .unwrap_or(false);
-            if thinking_supported {
-                app.enter_thinking_selection_mode();
-            }
+        Some(CommandAction::ThinkingNoArg)
+            if thinking_supported_for_current_provider(app, config) =>
+        {
+            app.enter_thinking_selection_mode();
         }
+        Some(CommandAction::ThinkingNoArg) => {}
         Some(CommandAction::Login(provider_name)) => {
             app.start_login(&provider_name);
         }
