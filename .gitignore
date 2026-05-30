@@ -30,4 +30,4 @@ tau-session-*.html
 # Todo / scratch files
 .todo
 .worktrees/
-.plans
+.plans/
