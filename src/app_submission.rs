@@ -44,7 +44,6 @@ impl App {
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.steering_tx = Some(steering_tx);
         self.runtime.queued_steering.clear();
-        self.bump_log_revision();
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         self.runtime.cancel_tx = Some(cancel_tx);
@@ -91,7 +90,6 @@ impl App {
 
         if tx.send(trimmed.clone()).is_ok() {
             self.runtime.queued_steering.push(trimmed);
-            self.bump_log_revision();
             self.reset_textarea();
             self.log_view.auto_scroll = true;
         }
@@ -175,7 +173,6 @@ impl App {
             && (last.content.starts_with("[Error:") || last.content.starts_with("[token refresh"))
         {
             self.session.live_turn.notices.pop();
-            self.bump_log_revision();
             self.persist_messages();
         }
 
@@ -262,7 +259,6 @@ impl App {
             self.append_abort_results_for_pending_tool_calls();
             self.finalise_assistant_turn_event();
             self.flush_turn_events();
-            self.bump_log_revision();
             self.persist_messages();
         }
     }

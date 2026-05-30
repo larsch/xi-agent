@@ -892,7 +892,6 @@ impl App {
                     .push(Message::assistant(format!("[export failed: {e}]")));
             }
         }
-        self.bump_log_revision();
         self.persist_messages();
     }
 
@@ -908,7 +907,6 @@ impl App {
         self.latest_usage = None;
         self.reset_textarea();
         self.log_view.auto_scroll = true;
-        self.bump_log_revision();
         self.refresh_resume_availability();
     }
 }

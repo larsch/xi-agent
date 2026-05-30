@@ -44,6 +44,10 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 }
 
 fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
+    // Flush any pending session-mutation dirty flag into the log cache.
+    if app.session.take_dirty() {
+        app.log_view.invalidate();
+    }
     let step_cursor = app.step_cursor;
     if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, sc, _))
         if *rev == app.log_view.log_cache.revision && *w == width && *sc == step_cursor)
@@ -1240,7 +1244,6 @@ mod tests {
                 "tool output that used to be much longer",
                 false,
             )]);
-        app.mark_log_dirty();
 
         terminal
             .draw(|f| draw(f, &mut app))
@@ -1251,7 +1254,6 @@ mod tests {
             .live_turn
             .notices
             .extend(vec![Message::tool_result("1", "short", false)]);
-        app.mark_log_dirty();
 
         terminal
             .draw(|f| draw(f, &mut app))

@@ -116,7 +116,6 @@ impl App {
             .assistant_thinking
             .get_or_insert_with(String::new)
             .push_str(&token);
-        self.bump_log_revision();
     }
 
     fn on_usage(&mut self, usage: UsageStats) {
@@ -131,7 +130,6 @@ impl App {
         if phase != AssistantPhase::Unknown {
             self.session.live_turn.assistant_phase = phase;
         }
-        self.bump_log_revision();
     }
 
     fn on_tool_call_intent(&mut self, id: String, name: String, streaming_field: Option<String>) {
@@ -147,7 +145,6 @@ impl App {
             running_output: String::new(),
             result: None,
         });
-        self.bump_log_revision();
     }
 
     fn on_tool_call_args_delta(&mut self, id: String, partial_json: String) {
@@ -159,7 +156,6 @@ impl App {
                 entry.partial_snapshot = Some(parsed);
             }
         }
-        self.bump_log_revision();
     }
 
     fn on_steering_consumed(&mut self, text: String) {
@@ -177,7 +173,6 @@ impl App {
         }
         // Steering messages are user messages — append immediately.
         self.append_user_message(text);
-        self.bump_log_revision();
     }
 
     fn on_status_update(&mut self, msg: String) {
@@ -189,13 +184,11 @@ impl App {
         } else {
             Some(StreamingStatus::Message(msg))
         };
-        self.bump_log_revision();
     }
 
     fn on_compacting(&mut self) {
         self.last_output_at = Some(std::time::Instant::now());
         self.streaming_status = Some(StreamingStatus::Message("compacting…".to_string()));
-        self.bump_log_revision();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -233,7 +226,6 @@ impl App {
             total_tokens: Some(tokens_after),
         });
         self.log_view.auto_scroll = true;
-        self.bump_log_revision();
         self.persist_messages();
     }
 
@@ -267,13 +259,11 @@ impl App {
                 args,
                 timestamp: Self::now_ts(),
             });
-        self.bump_log_revision();
     }
 
     fn on_tool_output_chunk(&mut self, id: String, chunk: String) {
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.running_output.push_str(&chunk);
-            self.bump_log_revision();
         }
     }
 
@@ -323,7 +313,6 @@ impl App {
                 display_range,
                 timestamp: Self::now_ts(),
             });
-        self.bump_log_revision();
     }
 
     fn on_external_file_change(&mut self, notification: String) {
@@ -331,7 +320,6 @@ impl App {
         // External file change notifications are user-visible context
         // injected into the conversation — treat as UserMessage.
         self.append_user_message(notification);
-        self.bump_log_revision();
     }
 
     fn on_turn_end(&mut self) {
@@ -350,7 +338,6 @@ impl App {
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;
         self.runtime.queued_steering.clear();
-        self.bump_log_revision();
         // The final TurnEnd already flushed the turn buffer.
         // Done only cleans up live streaming state.
         self.persist_messages();
@@ -363,7 +350,6 @@ impl App {
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;
         self.runtime.queued_steering.clear();
-        self.bump_log_revision();
 
         let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
 
@@ -399,7 +385,6 @@ impl App {
                 message: format!("[Error: {rendered}]"),
                 timestamp: Self::now_ts(),
             });
-            self.bump_log_revision();
             self.persist_messages();
         }
     }

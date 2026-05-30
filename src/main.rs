@@ -58,6 +58,7 @@ mod shell_state;
 mod skills;
 mod thinking;
 mod tool_presentation;
+mod tracked;
 mod ui;
 
 use agent::tools::custom::custom_tool_dirs;
@@ -245,7 +246,6 @@ async fn main() -> io::Result<()> {
                     e
                 );
                 app.push_notice(llm::Message::assistant(msg.clone()));
-                app.mark_log_dirty();
                 Arc::new(UnavailableProvider { message: msg }) as Arc<dyn LlmProvider + Send + Sync>
             }
         };
@@ -287,7 +287,6 @@ async fn main() -> io::Result<()> {
                     custom_count,
                     if custom_count == 1 { "" } else { "s" },
                 )));
-                app.mark_log_dirty();
                 app.completion.available_models = None;
             }
 
@@ -354,7 +353,6 @@ async fn main() -> io::Result<()> {
                     app.push_notice(Message::assistant(format!(
                         "[failed to persist config.toml: {e}]"
                     )));
-                    app.mark_log_dirty();
                 }
                 app.provider.current_instance = config
                     .find_provider(&instance.id)
@@ -373,7 +371,6 @@ async fn main() -> io::Result<()> {
                     app.provider.current_instance.id,
                     app.provider.current_instance.backend_preset.label(),
                 )));
-                app.mark_log_dirty();
             }
 
             Ok(RunResult::UpdateProvider {
@@ -395,7 +392,6 @@ async fn main() -> io::Result<()> {
                     app.push_notice(Message::assistant(format!(
                         "[failed to persist config.toml: {e}]"
                     )));
-                    app.mark_log_dirty();
                 }
                 app.provider.current_instance = config
                     .find_provider(&instance.id)
@@ -414,7 +410,6 @@ async fn main() -> io::Result<()> {
                     app.provider.current_instance.id,
                     app.provider.current_instance.backend_preset.label(),
                 )));
-                app.mark_log_dirty();
             }
 
             Ok(RunResult::RemoveProvider(id)) => {
@@ -429,7 +424,6 @@ async fn main() -> io::Result<()> {
                         app.push_notice(Message::assistant(format!(
                             "[failed to persist config.toml: {e}]"
                         )));
-                        app.mark_log_dirty();
                     }
                     app.provider.current_instance = resolve_default_provider_instance(&config);
                     app.provider.current_model =
@@ -442,7 +436,6 @@ async fn main() -> io::Result<()> {
                     app.completion.available_models = None;
                     maybe_warn_thinking_unsupported(&mut app);
                     app.push_notice(Message::assistant(format!("[removed provider {id}]")));
-                    app.mark_log_dirty();
                 }
             }
 
@@ -478,7 +471,6 @@ async fn main() -> io::Result<()> {
                     app.push_notice(Message::assistant(format!(
                         "[failed to persist config.toml: {e}]"
                     )));
-                    app.mark_log_dirty();
                 }
                 app.provider.current_instance = inst;
                 app.provider.instances = config.providers.clone();
@@ -497,7 +489,6 @@ async fn main() -> io::Result<()> {
                     "[provider {}{endpoint_msg}]",
                     app.provider.current_instance.id,
                 )));
-                app.mark_log_dirty();
             }
         }
     }
@@ -1297,7 +1288,6 @@ fn handle_slash_submit(
                     app.push_notice(llm::Message::assistant(format!(
                         "[invalid thinking level: '{raw}' (use off|minimal|low|medium|high|xhigh)]"
                     )));
-                    app.mark_log_dirty();
                 }
             }
         }
@@ -1336,14 +1326,12 @@ fn handle_slash_submit(
                     }
                     Err(e) => {
                         app.push_notice(llm::Message::assistant(format!("[skill error: {e}]")));
-                        app.mark_log_dirty();
                     }
                 },
                 None => {
                     app.push_notice(llm::Message::assistant(format!(
                         "[unknown skill: '{name}']"
                     )));
-                    app.mark_log_dirty();
                 }
             }
         }
@@ -1473,7 +1461,6 @@ fn persist_provider_model_selection_v2(config: &mut XiConfig, app: &mut App) {
         app.push_notice(Message::assistant(format!(
             "[failed to persist config.toml: {e}]"
         )));
-        app.mark_log_dirty();
     }
 }
 

@@ -29,6 +29,7 @@ use crate::selection_state::{SelectionKind, SelectionState};
 use crate::session_event::SessionEvent;
 use crate::session_manager::SessionManager;
 use crate::shell_state::ShellState;
+use crate::tracked::Tracked;
 
 // ── Streaming status ──────────────────────────────────────────────────────────
 
@@ -135,7 +136,7 @@ pub struct App {
     // ── Session persistence + state ───────────────────────────────────────────
     /// All session-related state: persistence store, committed state, live
     /// turn overlay, and pending event buffer.
-    pub(crate) session: SessionManager,
+    pub(crate) session: Tracked<SessionManager>,
 
     // ── Ask-user interaction state ──────────────────────────────────────────
     pub(crate) ask_user: AskUserState,
@@ -156,14 +157,6 @@ pub struct App {
 pub(crate) type DynProvider = Arc<dyn LlmProvider + Send + Sync + 'static>;
 
 impl App {
-    pub(crate) fn bump_log_revision(&mut self) {
-        self.log_view.invalidate();
-    }
-
-    pub fn mark_log_dirty(&mut self) {
-        self.log_view.invalidate();
-    }
-
     pub fn new(
         initial_instance: ProviderInstance,
         initial_model: impl Into<String>,
@@ -188,7 +181,7 @@ impl App {
             show_info: false,
             latest_usage: None,
             login: LoginState::new(),
-            session: SessionManager::new(),
+            session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
             runtime: AgentRuntime::new(),
             step_cursor: None,
@@ -303,7 +296,6 @@ impl App {
                     .push(Message::assistant(format!(
                         "[session persistence unavailable: {e}]"
                     )));
-                self.bump_log_revision();
             }
         }
     }
@@ -380,7 +372,6 @@ impl App {
             self.session.live_turn.notices.push(Message::assistant(
                 "[no resumable session in this working folder]",
             ));
-            self.bump_log_revision();
             return;
         };
         self.resume_session_by_id(&meta.id);
@@ -397,7 +388,6 @@ impl App {
                 self.session.current_session_id = Some(session_id.to_string());
                 self.log_view.auto_scroll = true;
                 self.log_view.log_scroll = 0;
-                self.bump_log_revision();
             }
             Err(e) => {
                 self.session
@@ -406,7 +396,6 @@ impl App {
                     .push(Message::assistant(format!(
                         "[failed to resume session: {e}]"
                     )));
-                self.bump_log_revision();
             }
         }
         self.refresh_resume_availability();
@@ -640,7 +629,6 @@ impl App {
         let mut out_msg = Message::tool_result(call_id, body, output.exit_code != 0);
         out_msg.include_in_llm = false;
         self.session.live_turn.notices.push(out_msg);
-        self.bump_log_revision();
 
         self.persist_messages();
         self.exit_shell_mode();
