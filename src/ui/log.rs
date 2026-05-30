@@ -599,58 +599,65 @@ fn render_diff_body(
         max_lines_per_side
     };
 
-    // Red block.
-    if common_head > 0 {
-        out.push(placeholder_result_line(
-            format!("… {common_head} common lines"),
-            Color::LightRed,
-        ));
-    }
-    for line in old_diff.iter().take(old_limit) {
-        let normalized = normalize_terminal_segment(line, 0);
-        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
-        for chunk in chunks {
-            out.push(tool_result_line(chunk, Color::LightRed));
+    let is_pure_addition = old_total == 0;
+    let is_pure_removal = new_total == 0;
+
+    // Red block (omit common-line placeholders when it's a pure addition).
+    if old_total > 0 {
+        if common_head > 0 && !is_pure_removal {
+            out.push(placeholder_result_line(
+                format!("… {common_head} common lines"),
+                Color::LightRed,
+            ));
         }
-    }
-    if !full_output && old_total > max_lines_per_side {
-        out.push(placeholder_result_line(
-            format!("… {old_total} total lines"),
-            Color::LightRed,
-        ));
-    }
-    if common_tail > 0 {
-        out.push(placeholder_result_line(
-            format!("… {common_tail} common lines"),
-            Color::LightRed,
-        ));
+        for line in old_diff.iter().take(old_limit) {
+            let normalized = normalize_terminal_segment(line, 0);
+            let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
+            for chunk in chunks {
+                out.push(tool_result_line(chunk, Color::LightRed));
+            }
+        }
+        if !full_output && old_total > max_lines_per_side {
+            out.push(placeholder_result_line(
+                format!("… {old_total} total lines"),
+                Color::LightRed,
+            ));
+        }
+        if common_tail > 0 && !is_pure_removal {
+            out.push(placeholder_result_line(
+                format!("… {common_tail} common lines"),
+                Color::LightRed,
+            ));
+        }
     }
 
-    // Green block.
-    if common_head > 0 {
-        out.push(placeholder_result_line(
-            format!("… {common_head} common lines"),
-            Color::LightGreen,
-        ));
-    }
-    for line in new_diff.iter().take(new_limit) {
-        let normalized = normalize_terminal_segment(line, 0);
-        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
-        for chunk in chunks {
-            out.push(tool_result_line(chunk, Color::LightGreen));
+    // Green block (omit common-line placeholders when it's a pure removal).
+    if new_total > 0 {
+        if common_head > 0 && !is_pure_addition {
+            out.push(placeholder_result_line(
+                format!("… {common_head} common lines"),
+                Color::LightGreen,
+            ));
         }
-    }
-    if !full_output && new_total > max_lines_per_side {
-        out.push(placeholder_result_line(
-            format!("… {new_total} total lines"),
-            Color::LightGreen,
-        ));
-    }
-    if common_tail > 0 {
-        out.push(placeholder_result_line(
-            format!("… {common_tail} common lines"),
-            Color::LightGreen,
-        ));
+        for line in new_diff.iter().take(new_limit) {
+            let normalized = normalize_terminal_segment(line, 0);
+            let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
+            for chunk in chunks {
+                out.push(tool_result_line(chunk, Color::LightGreen));
+            }
+        }
+        if !full_output && new_total > max_lines_per_side {
+            out.push(placeholder_result_line(
+                format!("… {new_total} total lines"),
+                Color::LightGreen,
+            ));
+        }
+        if common_tail > 0 && !is_pure_addition {
+            out.push(placeholder_result_line(
+                format!("… {common_tail} common lines"),
+                Color::LightGreen,
+            ));
+        }
     }
 }
 
@@ -1327,6 +1334,64 @@ mod tests {
         // Two truncation markers: one per side
         let marker_count = text.iter().filter(|t| t.contains("total lines")).count();
         assert_eq!(marker_count, 2);
+    }
+
+    #[test]
+    fn edit_file_pure_addition_no_common_lines_placeholders() {
+        // old_text is empty → pure addition; common-line placeholders must not appear.
+        let call = Message::tool_call(
+            "c1",
+            "edit_file",
+            serde_json::json!({"path": "foo.rs", "old_text": "prefix\n", "new_text": "prefix\nnew line\n"}),
+        );
+        let result = Message::tool_result("c1", "ok", false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            !text.iter().any(|t| t.contains("common lines")),
+            "pure addition should not show common-lines placeholders; got: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("new line")),
+            "should show added line"
+        );
+    }
+
+    #[test]
+    fn edit_file_pure_removal_no_common_lines_placeholders() {
+        // new_text is empty → pure removal; common-line placeholders must not appear.
+        let call = Message::tool_call(
+            "c1",
+            "edit_file",
+            serde_json::json!({"path": "foo.rs", "old_text": "prefix\nold line\n", "new_text": "prefix\n"}),
+        );
+        let result = Message::tool_result("c1", "ok", false);
+        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            !text.iter().any(|t| t.contains("common lines")),
+            "pure removal should not show common-lines placeholders; got: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("old line")),
+            "should show removed line"
+        );
     }
 
     #[test]
