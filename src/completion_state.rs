@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ratatui_textarea::TextArea;
 
 use crate::completion::{self, CompletionItem};
@@ -67,12 +69,14 @@ impl CompletionState {
     /// - `loaded_skills` — list of skill names for `/skill` completion
     /// - `thinking_supported` — whether the current provider supports thinking levels
     /// - `instances` — provider instances for `/provider` completion
+    /// - `cwd` — current working directory (used for `@<file>` completions)
     pub fn update(
         &mut self,
         textarea: &TextArea<'_>,
         loaded_skills: &[SkillMeta],
         thinking_supported: bool,
         instances: &[ProviderInstance],
+        cwd: &str,
     ) {
         let lines = textarea.lines().to_vec();
         let input = if lines.len() == 1 {
@@ -88,6 +92,7 @@ impl CompletionState {
             loaded_skills,
             thinking_supported,
             instances,
+            Path::new(cwd),
         );
         if new.len() != self.completions.len() {
             self.completion_selected = 0;

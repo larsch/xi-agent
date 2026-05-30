@@ -674,11 +674,13 @@ impl App {
     /// Recompute the completion list from the current textarea content and
     /// cached model list. Call this after every keystroke.
     pub fn update_completions(&mut self) {
+        let cwd = self.session.current_cwd.clone();
         self.completion.update(
             &self.textarea,
             &self.loaded_skills,
             self.provider.thinking_supported,
             &self.provider.instances,
+            &cwd,
         );
     }
 
@@ -791,6 +793,9 @@ impl App {
 
     /// Replace the textarea with the selected item's `complete_to` text and
     /// move the cursor to the end of the line. No-ops on loading indicators.
+    ///
+    /// For `@<file>` completions, replaces only the `@` token portion of the
+    /// input rather than the entire textarea, preserving surrounding text.
     pub fn apply_completion(&mut self) {
         let item = match self
             .completion
@@ -800,10 +805,60 @@ impl App {
             Some(i) if !i.loading && !i.complete_to.is_empty() => i,
             _ => return,
         };
-        let text = item.complete_to.clone();
-        self.textarea = TextArea::new(vec![text]);
+
+        let lines: Vec<String> = self.textarea.lines().to_vec();
+        let input = lines.join("\n");
+
+        // Check if the textarea contains an @ token that triggered file completions.
+        if let Some(range) = Self::find_at_token(&input) {
+            // Replace just the @token portion with @ + completed path.
+            let completed_path = &item.complete_to;
+            let new_text = format!(
+                "{}@{}{}",
+                &input[..range.0],
+                completed_path,
+                &input[range.1..]
+            );
+            self.textarea = TextArea::new(new_text.lines().map(|s| s.to_string()).collect());
+        } else {
+            // Standard completion: replace entire textarea.
+            let text = item.complete_to.clone();
+            self.textarea = TextArea::new(vec![text]);
+        }
+
         self.textarea.move_cursor(CursorMove::End);
         self.update_completions();
+    }
+
+    /// Find the byte range of the last `@<path>` token in `input`.
+    ///
+    /// Returns `(start, end)` where `start` is the position of `@` and `end`
+    /// is the position after the end of the path fragment.  The token must be
+    /// preceded by start-of-string or ASCII whitespace.
+    fn find_at_token(input: &str) -> Option<(usize, usize)> {
+        let bytes = input.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        let mut result: Option<(usize, usize)> = None;
+
+        while i < len {
+            if bytes[i] == b'@' {
+                let preceded_by_space = i == 0 || bytes[i - 1].is_ascii_whitespace();
+                if preceded_by_space && i + 1 < len {
+                    let start = i;
+                    let mut end = i + 1;
+                    while end < len && !bytes[end].is_ascii_whitespace() && bytes[end] != b'"' {
+                        end += 1;
+                    }
+                    result = Some((start, end));
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        result
     }
 
     // ── Step-back navigation ──────────────────────────────────────────────────
