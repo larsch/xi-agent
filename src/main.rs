@@ -33,6 +33,7 @@ mod commands;
 mod completion;
 mod completion_state;
 mod config;
+mod context_window;
 mod debug_log;
 mod dirs;
 mod event_log;

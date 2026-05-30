@@ -9,7 +9,7 @@ use super::{
     },
     provider_format::to_anthropic_wire,
 };
-use crate::provider::{context_window_for_model, scaled_token_budget};
+use crate::context_window::{context_window_for_model, scaled_token_budget};
 
 // ── Typed SSE event structs ───────────────────────────────────────────────────
 

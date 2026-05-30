@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 
+use crate::context_window::{context_window_for_model, scaled_token_budget};
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message};
 use crate::projection::project_llm_messages;
-use crate::provider::{context_window_for_model, scaled_token_budget};
 use crate::session_event::{CompactionTrigger, SessionEvent};
 
 const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
