@@ -138,10 +138,17 @@ impl LiveTurnState {
                 Message::tool_call(entry.id.clone(), entry.name.clone(), entry.args.clone());
             // If the result is not yet present, args may still be streaming.
             // Attach partial_args for the UI to render a live preview.
-            if entry.result.is_none() && !entry.partial_args.is_empty() {
-                tool_msg.tool_partial_args = Some(entry.partial_args.clone());
-                tool_msg.tool_partial_snapshot = entry.partial_snapshot.clone();
-                tool_msg.tool_streaming_field = entry.streaming_field.clone();
+            if entry.result.is_none() {
+                if !entry.partial_args.is_empty() {
+                    tool_msg.tool_partial_args = Some(entry.partial_args.clone());
+                    tool_msg.tool_partial_snapshot = entry.partial_snapshot.clone();
+                    tool_msg.tool_streaming_field = entry.streaming_field.clone();
+                } else {
+                    // No args have arrived yet — mark as partial so the UI
+                    // shows a pending placeholder rather than the raw tool name.
+                    tool_msg.tool_partial_args = Some(String::new());
+                    tool_msg.tool_streaming_field = entry.streaming_field.clone();
+                }
             }
             msgs.push(tool_msg);
             if let Some(result) = &entry.result {
