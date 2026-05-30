@@ -263,6 +263,10 @@ async fn main() -> io::Result<()> {
             app.start_model_fetch(&provider);
         }
 
+        if app.should_auto_query_model() {
+            app.start_model_fetch(&provider);
+        }
+
         match run(&mut terminal, &mut app, &provider, &config).await {
             Ok(RunResult::Quit) | Err(_) => break,
 
@@ -341,6 +345,9 @@ async fn main() -> io::Result<()> {
                     persist_provider_model_selection_v2(&mut config, &mut app);
                     app.provider.instances = config.providers.clone();
                     maybe_warn_thinking_unsupported(&mut app);
+                    if app.should_auto_query_model() {
+                        app.start_model_fetch(&provider);
+                    }
                 }
                 // Unknown id: silently ignore and loop (provider unchanged).
             }

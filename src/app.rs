@@ -683,6 +683,15 @@ impl App {
     }
 
     /// Returns true if a model-list fetch should be triggered now.
+    /// Returns true when a model-list fetch should be triggered automatically
+    /// because the current provider instance has no model explicitly configured.
+    pub fn should_auto_query_model(&self) -> bool {
+        self.provider.current_instance.model.is_none()
+            && !self.completion.models_loading
+            && self.completion.available_models.is_none()
+            && self.selection.kind != Some(SelectionKind::Model)
+    }
+
     pub fn should_fetch_models(&self) -> bool {
         if self.completion.available_models.is_some()
             || self.completion.models_loading
@@ -736,6 +745,16 @@ impl App {
             }
         }
         self.update_completions();
+
+        // If no model is configured and the fetch succeeded, open the model
+        // picker automatically so the user can choose one.
+        if self.provider.current_instance.model.is_none()
+            && self.completion.available_models.is_some()
+            && !self.selection.active
+        {
+            self.enter_model_selection_mode();
+            return;
+        }
 
         if self.selection.active && self.selection.kind == Some(SelectionKind::Model) {
             if let Some(err) = &self.completion.model_fetch_error {
