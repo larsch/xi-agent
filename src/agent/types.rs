@@ -224,8 +224,9 @@ pub struct ToolCallContext {
     pub tx: Option<UnboundedSender<crate::app_event::AppEvent>>,
 }
 
+#[cfg(test)]
 impl ToolCallContext {
-    /// Construct a context with no live-output sender (suitable for tests).
+    /// Construct a context with no live-output sender (for tests).
     pub fn noop(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -253,16 +254,6 @@ pub trait Tool: Send + Sync {
         ctx: ToolCallContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
 
-    /// Execute the tool without live output (convenience for tests and callers
-    /// that don't need streaming).  Calls [`run`](Self::run) with a noop context.
-    #[allow(dead_code)]
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        self.run(args, ToolCallContext::noop(""))
-    }
-
     /// Execute the tool with a live-output context.  Production callers use
     /// this so output chunks are forwarded to the UI.
     fn execute_live(
@@ -271,6 +262,15 @@ pub trait Tool: Send + Sync {
         ctx: ToolCallContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         self.run(args, ctx)
+    }
+
+    /// Execute without live output (for tests only — uses a noop context).
+    #[cfg(test)]
+    fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+        self.run(args, ToolCallContext::noop(""))
     }
     /// Whether the agent loop should save this tool's full output to a log
     /// file and append the path to the result.  Defaults to `false`; shell
@@ -338,8 +338,8 @@ impl DefaultToolExecutor {
         }
     }
 
-    /// Create a new executor with the given hooks.
-    #[allow(dead_code)]
+    /// Create an executor with optional before/after hooks (for tests only).
+    #[cfg(test)]
     pub fn with_hooks(
         before_tool_call: Option<BeforeToolCall>,
         after_tool_call: Option<AfterToolCall>,

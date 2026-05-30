@@ -141,7 +141,6 @@ pub struct App {
     // ── Ask-user interaction state ──────────────────────────────────────────
     pub(crate) ask_user: AskUserState,
 
-    // ── Add-provider setup state ─────────────────────────────────────────────
     // ── Runtime/task state ───────────────────────────────────────────────────
     pub(crate) runtime: AgentRuntime,
 
