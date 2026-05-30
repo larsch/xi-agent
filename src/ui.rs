@@ -48,7 +48,7 @@ fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
     if app.session.take_dirty() {
         app.log_view.invalidate();
     }
-    let step_cursor = app.step_cursor;
+    let step_cursor = app.step_back.cursor;
     if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, sc, _))
         if *rev == app.log_view.log_cache.revision && *w == width && *sc == step_cursor)
     {
@@ -146,7 +146,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     if app.log_view.auto_scroll {
         app.log_view.log_scroll = max_scroll;
-    } else if app.step_cursor.is_some() && app.log_view.log_scroll == usize::MAX {
+    } else if app.step_back.cursor.is_some() && app.log_view.log_scroll == usize::MAX {
         // Centre the step-cursor boundary in the viewport.
         let kept_count = app
             .display_messages_split()

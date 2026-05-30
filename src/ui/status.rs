@@ -16,13 +16,13 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let hint_style = Style::default()
         .fg(Color::Rgb(100, 140, 100))
         .add_modifier(ratatui::style::Modifier::ITALIC);
-    let frame = THROBBER_FRAMES[(app.throbber_tick as usize) % THROBBER_FRAMES.len()];
+    let frame = THROBBER_FRAMES[(app.agent_turn.tick as usize) % THROBBER_FRAMES.len()];
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     if app.throbber_visible() {
         spans.push(Span::styled(format!("{frame}"), throbber_style));
     }
-    if let Some(cursor_idx) = app.step_cursor {
+    if let Some(cursor_idx) = app.step_back.cursor {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
@@ -58,7 +58,7 @@ pub(super) fn render_provider_status(f: &mut ratatui::Frame, area: Rect, app: &A
         .fg(Color::Rgb(160, 160, 180))
         .add_modifier(ratatui::style::Modifier::ITALIC);
 
-    let provider_message = match &app.streaming_status {
+    let provider_message = match &app.agent_turn.status {
         Some(StreamingStatus::Message(s) | StreamingStatus::CompletedMessage(s)) => {
             Some(s.as_str())
         }

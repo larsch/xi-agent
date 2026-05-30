@@ -17,6 +17,7 @@ use crate::{
 };
 
 use crate::agent_runtime::AgentRuntime;
+use crate::agent_turn_state::AgentTurnState;
 use crate::ask_user_state::AskUserState;
 use crate::completion_state::CompletionState;
 use crate::log_view_state::LogViewState;
@@ -29,6 +30,7 @@ use crate::selection_state::{SelectionKind, SelectionState};
 use crate::session_event::SessionEvent;
 use crate::session_manager::SessionManager;
 use crate::shell_state::ShellState;
+use crate::step_back_state::StepBackState;
 use crate::tracked::Tracked;
 
 // ── Streaming status ──────────────────────────────────────────────────────────
@@ -99,14 +101,8 @@ pub struct App {
     pub(crate) input_mode: InputMode,
     /// Log pane scroll and cache state.
     pub(crate) log_view: LogViewState,
-    /// Current streaming state; `None` when no turn is active.
-    pub(crate) streaming_status: Option<StreamingStatus>,
-    /// Throbber animation frame index, advanced on every UI tick while streaming.
-    pub(crate) throbber_tick: u8,
-    /// Instant of the last visible agent output (text/thinking tokens, tool
-    /// calls, tool results, etc.); used to suppress the throbber while output
-    /// is actively arriving and re-show it after a short idle time.
-    pub(crate) last_output_at: Option<std::time::Instant>,
+    /// Active agent turn state: streaming status, throbber tick, last output time.
+    pub(crate) agent_turn: AgentTurnState,
     /// All provider-related state: instances, active instance/model/thinking,
     /// and transient setup-flow state.
     pub(crate) provider: ProviderManager,
@@ -143,11 +139,7 @@ pub struct App {
     pub(crate) runtime: AgentRuntime,
 
     // ── Step-back state ──────────────────────────────────────────────────────
-    /// Index into the current session event log pointing at the `UserMessage`
-    /// that serves as the resubmission point.  `None` when not stepping.
-    pub(crate) step_cursor: Option<usize>,
-    /// Input field content saved when stepping began, restored on cancel.
-    pub(crate) saved_input: Option<String>,
+    pub(crate) step_back: StepBackState,
 }
 
 // Convenience alias used throughout this module.
@@ -166,9 +158,7 @@ impl App {
             shell: ShellState::new(),
             input_mode: InputMode::Chat,
             log_view: LogViewState::new(),
-            streaming_status: None,
-            throbber_tick: 0,
-            last_output_at: None,
+            agent_turn: AgentTurnState::new(),
             provider: ProviderManager::new(initial_instance, initial_model, initial_thinking),
             agent_config,
             loaded_skills: Vec::new(),
@@ -180,24 +170,18 @@ impl App {
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
             runtime: AgentRuntime::new(),
-            step_cursor: None,
-            saved_input: None,
+            step_back: StepBackState::default(),
         }
     }
 
     /// Returns true when an agent turn is active (streaming or waiting for first token).
     pub fn streaming(&self) -> bool {
-        matches!(
-            self.streaming_status,
-            Some(StreamingStatus::Waiting | StreamingStatus::Message(_))
-        )
+        self.agent_turn.is_active()
     }
 
     /// Advance the throbber animation frame.  Called on every UI tick.
     pub fn tick(&mut self) {
-        if self.streaming() {
-            self.throbber_tick = self.throbber_tick.wrapping_add(1);
-        }
+        self.agent_turn.advance_tick();
     }
 
     /// Record a model/provider change in the event log.
@@ -232,17 +216,8 @@ impl App {
     /// - Machine working **silently** (streaming, no visible output for a short interval):
     ///   throbber visible — signals that work is in progress.
     pub fn throbber_visible(&self) -> bool {
-        if !self.streaming() {
-            return false;
-        }
-        // The agent loop is paused waiting for user input — don't spin.
-        if self.has_pending_ask() || self.ask_user_freeform_mode() {
-            return false;
-        }
-        match self.last_output_at {
-            None => true,
-            Some(t) => t.elapsed() >= std::time::Duration::from_millis(240),
-        }
+        self.agent_turn
+            .throbber_visible(self.has_pending_ask() || self.ask_user_freeform_mode())
     }
 
     /// Returns true when provider/system status text should be visible.
@@ -251,7 +226,7 @@ impl App {
             return false;
         }
         matches!(
-            self.streaming_status,
+            self.agent_turn.status,
             Some(StreamingStatus::Message(_) | StreamingStatus::CompletedMessage(_))
         )
     }
@@ -314,7 +289,7 @@ impl App {
     /// `discarded_messages` covers events from the step cursor onward (rendered dimmed).
     /// Returns `None` when not stepping.
     pub fn display_messages_split(&self) -> Option<(Vec<Message>, Vec<Message>)> {
-        let idx = self.step_cursor?;
+        let idx = self.step_back.cursor?;
         let ss = self.session.session_state.as_ref()?;
         let events = ss.events();
         let kept = crate::projection::project_display_messages(&events[..idx]);
@@ -835,7 +810,7 @@ impl App {
 
     /// Returns true when step-back navigation is currently active.
     pub(crate) fn is_stepping(&self) -> bool {
-        self.step_cursor.is_some()
+        self.step_back.is_stepping()
     }
 
     /// Step back to the previous `UserMessage` boundary.
@@ -851,11 +826,11 @@ impl App {
         if boundaries.is_empty() {
             return;
         }
-        let current = self.step_cursor;
+        let current = self.step_back.cursor;
         let new_cursor = match current {
             None => {
                 // Save current input before first step
-                self.saved_input = Some(self.textarea.lines().join("\n"));
+                self.step_back.save_input(self.textarea.lines().join("\n"));
                 // Step to the last UserMessage
                 *boundaries.last().unwrap()
             }
@@ -867,7 +842,7 @@ impl App {
                 }
             }
         };
-        self.step_cursor = Some(new_cursor);
+        self.step_back.cursor = Some(new_cursor);
         self.repopulate_input_from_cursor();
         self.scroll_to_step_cursor();
         self.log_view.invalidate();
@@ -881,13 +856,13 @@ impl App {
         if self.runtime.is_running() {
             return;
         }
-        let Some(cur) = self.step_cursor else {
+        let Some(cur) = self.step_back.cursor else {
             return;
         };
         let boundaries = self.user_message_boundaries();
         match boundaries.iter().find(|&&i| i > cur) {
             Some(&next) => {
-                self.step_cursor = Some(next);
+                self.step_back.cursor = Some(next);
                 self.repopulate_input_from_cursor();
                 self.scroll_to_step_cursor();
                 self.log_view.invalidate();
@@ -901,11 +876,10 @@ impl App {
 
     /// Cancel step-back mode, restoring the original input and full view.
     pub(crate) fn cancel_stepping(&mut self) {
-        if let Some(saved) = self.saved_input.take() {
+        if let Some(saved) = self.step_back.cancel() {
             self.textarea = TextArea::new(vec![saved]);
             self.textarea.move_cursor(CursorMove::End);
         }
-        self.step_cursor = None;
         self.log_view.auto_scroll = true;
         self.log_view.invalidate();
     }
@@ -913,7 +887,7 @@ impl App {
     /// Repopulate the input field with the `UserMessage` content at the
     /// current step cursor position.
     fn repopulate_input_from_cursor(&mut self) {
-        let Some(idx) = self.step_cursor else {
+        let Some(idx) = self.step_back.cursor else {
             return;
         };
         let Some(ss) = self.session.session_state.as_ref() else {
@@ -944,7 +918,7 @@ impl App {
     /// Returns the new `UserMessage` content, or `None` if not in step mode or
     /// session state is unavailable.
     pub(crate) fn commit_step_branch(&mut self) -> Option<String> {
-        let idx = self.step_cursor?;
+        let idx = self.step_back.cursor?;
         let new_content = self.textarea.lines().join("\n");
         if new_content.trim().is_empty() {
             return None;
@@ -975,8 +949,7 @@ impl App {
         }
 
         // Clear step state
-        self.step_cursor = None;
-        self.saved_input = None;
+        self.step_back.clear();
         self.log_view.auto_scroll = true;
         self.log_view.invalidate();
 
@@ -1622,7 +1595,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_turn.status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             app.textarea.insert_str("/model gpt");
 
@@ -1663,7 +1636,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_turn.status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             app.textarea.insert_str("hello");
 
@@ -1678,7 +1651,7 @@ mod tests {
                 "agent task should be removed when stream is aborted"
             );
             assert!(matches!(
-                app.streaming_status,
+                app.agent_turn.status,
                 Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
             ));
         });
@@ -1695,7 +1668,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_turn.status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             // Simulate an in-flight tool call via pending_turn_events.
             app.session
@@ -1747,7 +1720,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_turn.status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             app.session
                 .pending_turn_events
@@ -1816,7 +1789,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_turn.status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
             // Simulate a ToolCall with its result already in pending_turn_events.
             app.session
@@ -1870,7 +1843,7 @@ mod tests {
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
             app.session.live_turn.assistant_content = "partial".to_string();
-            app.streaming_status = Some(StreamingStatus::Waiting);
+            app.agent_turn.status = Some(StreamingStatus::Waiting);
             install_test_agent_task(&mut app);
 
             app.abort_agent_loop();
@@ -1887,7 +1860,7 @@ mod tests {
                     .any(|m| m.role == Role::Assistant && m.content == "partial")
             );
             assert!(matches!(
-                app.streaming_status,
+                app.agent_turn.status,
                 Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
             ));
 
@@ -1896,7 +1869,7 @@ mod tests {
             app.launch_turn(&provider);
 
             assert!(matches!(
-                app.streaming_status,
+                app.agent_turn.status,
                 Some(StreamingStatus::Waiting)
             ));
         });
@@ -2128,7 +2101,7 @@ mod tests {
         app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
             crate::event_log::EventLog::load(&path).expect("load event log"),
         ));
-        app.streaming_status = Some(StreamingStatus::Waiting);
+        app.agent_turn.status = Some(StreamingStatus::Waiting);
         app.session.live_turn.assistant_content = "partial".to_string();
         app.session
             .pending_turn_events
@@ -2173,8 +2146,8 @@ mod tests {
     #[test]
     fn empty_status_update_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.streaming_status = Some(StreamingStatus::Waiting);
-        app.last_output_at = None;
+        app.agent_turn.status = Some(StreamingStatus::Waiting);
+        app.agent_turn.last_output_at = None;
 
         assert!(app.throbber_visible());
 
@@ -2186,8 +2159,8 @@ mod tests {
     #[test]
     fn non_empty_status_update_temporarily_hides_throbber() {
         let mut app = make_app();
-        app.streaming_status = Some(StreamingStatus::Waiting);
-        app.last_output_at = None;
+        app.agent_turn.status = Some(StreamingStatus::Waiting);
+        app.agent_turn.last_output_at = None;
 
         assert!(app.throbber_visible());
 
@@ -2201,8 +2174,8 @@ mod tests {
     #[test]
     fn whitespace_text_token_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.streaming_status = Some(StreamingStatus::Waiting);
-        app.last_output_at = None;
+        app.agent_turn.status = Some(StreamingStatus::Waiting);
+        app.agent_turn.last_output_at = None;
 
         app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
             text: "   \n".to_string(),
@@ -2215,8 +2188,8 @@ mod tests {
     #[test]
     fn whitespace_thinking_token_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.streaming_status = Some(StreamingStatus::Waiting);
-        app.last_output_at = None;
+        app.agent_turn.status = Some(StreamingStatus::Waiting);
+        app.agent_turn.last_output_at = None;
 
         app.apply_agent_event(crate::agent::types::AgentEvent::ThinkingToken(
             "\n\n".to_string(),
@@ -2230,10 +2203,10 @@ mod tests {
         let mut app = make_app();
         assert!(!app.provider_status_visible());
 
-        app.streaming_status = Some(StreamingStatus::Message("compacting…".to_string()));
+        app.agent_turn.status = Some(StreamingStatus::Message("compacting…".to_string()));
         assert!(app.provider_status_visible());
 
-        app.streaming_status = None;
+        app.agent_turn.status = None;
         assert!(!app.provider_status_visible());
     }
 
@@ -2497,8 +2470,8 @@ mod tests {
 
         app.step_back();
 
-        assert_eq!(app.saved_input.as_deref(), Some("current input"));
-        assert_eq!(app.step_cursor, Some(2));
+        assert_eq!(app.step_back.saved_input.as_deref(), Some("current input"));
+        assert_eq!(app.step_back.cursor, Some(2));
         assert_eq!(app.textarea.lines().join(""), "second");
     }
 
@@ -2513,7 +2486,7 @@ mod tests {
         app.step_back();
         app.step_back();
 
-        assert_eq!(app.step_cursor, Some(0));
+        assert_eq!(app.step_back.cursor, Some(0));
         assert_eq!(app.textarea.lines().join(""), "first");
     }
 
@@ -2523,7 +2496,7 @@ mod tests {
         app.step_back();
         app.step_back(); // Should not go further
 
-        assert_eq!(app.step_cursor, Some(0));
+        assert_eq!(app.step_back.cursor, Some(0));
     }
 
     #[test]
@@ -2539,12 +2512,12 @@ mod tests {
         app.step_back(); // cursor -> 2
         app.step_back(); // cursor -> 0
         app.step_forward(); // cursor -> 2
-        assert_eq!(app.step_cursor, Some(2));
+        assert_eq!(app.step_back.cursor, Some(2));
         assert_eq!(app.textarea.lines().join(""), "second");
 
         app.step_forward(); // past end -> clear
-        assert!(app.step_cursor.is_none());
-        assert!(app.saved_input.is_none());
+        assert!(app.step_back.cursor.is_none());
+        assert!(app.step_back.saved_input.is_none());
         assert_eq!(app.textarea.lines().join(""), "current input");
     }
 
@@ -2554,10 +2527,10 @@ mod tests {
         app.textarea = ratatui_textarea::TextArea::new(vec!["my draft".to_string()]);
 
         app.step_back();
-        assert_eq!(app.step_cursor, Some(0));
+        assert_eq!(app.step_back.cursor, Some(0));
 
         app.cancel_stepping();
-        assert!(app.step_cursor.is_none());
+        assert!(app.step_back.cursor.is_none());
         assert_eq!(app.textarea.lines().join(""), "my draft");
     }
 
@@ -2567,6 +2540,6 @@ mod tests {
         install_test_agent_task(&mut app);
 
         app.step_back();
-        assert!(app.step_cursor.is_none());
+        assert!(app.step_back.cursor.is_none());
     }
 }
