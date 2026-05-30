@@ -123,6 +123,11 @@ pub struct Message {
     /// Display-only; never sent to the LLM or persisted.
     #[serde(skip)]
     pub tool_streaming_field: Option<String>,
+    /// Live stdout/stderr output accumulated while the tool is still running.
+    /// Cleared and replaced by the tool result once it arrives.
+    /// Display-only; never sent to the LLM or persisted.
+    #[serde(skip)]
+    pub tool_running_output: Option<String>,
     // ── Tool-result fields (Role::ToolResult) ─────────────────────────────────
     /// True when the tool returned an error.
     /// Meaningful only for [`Role::ToolResult`]; always `false` for other roles.
@@ -159,6 +164,7 @@ impl Message {
             tool_partial_args: None,
             tool_partial_snapshot: None,
             tool_streaming_field: None,
+            tool_running_output: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -179,6 +185,7 @@ impl Message {
             tool_partial_args: None,
             tool_partial_snapshot: None,
             tool_streaming_field: None,
+            tool_running_output: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -199,6 +206,7 @@ impl Message {
             tool_partial_args: None,
             tool_partial_snapshot: None,
             tool_streaming_field: None,
+            tool_running_output: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -224,6 +232,7 @@ impl Message {
             tool_partial_args: None,
             tool_partial_snapshot: None,
             tool_streaming_field: None,
+            tool_running_output: None,
             is_error: false,
             display_range: None,
             image_data: None,
@@ -249,6 +258,7 @@ impl Message {
             tool_partial_args: None,
             tool_partial_snapshot: None,
             tool_streaming_field: None,
+            tool_running_output: None,
             is_error,
             display_range: None,
             image_data: None,

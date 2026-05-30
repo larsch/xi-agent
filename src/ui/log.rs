@@ -361,6 +361,25 @@ fn render_tool_call(
             );
         }
     }
+
+    // Show live subprocess output while the tool is still running (no result yet).
+    if let Some(output) = msg.tool_running_output.as_deref()
+        && !output.is_empty()
+        && !matches!(
+            messages.get(idx + 1),
+            Some(next) if next.role == Role::ToolResult
+        )
+    {
+        let body_color = Color::DarkGray;
+        render_head_truncated_body(
+            out,
+            output,
+            cfg.head_lines,
+            cfg.full_output,
+            body_color,
+            width,
+        );
+    }
 }
 
 // ── Tool result rendering ─────────────────────────────────────────────────────

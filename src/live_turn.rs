@@ -150,6 +150,10 @@ impl LiveTurnState {
                     tool_msg.tool_streaming_field = entry.streaming_field.clone();
                 }
             }
+            // Attach live running output while the result is still pending.
+            if entry.result.is_none() && !entry.running_output.is_empty() {
+                tool_msg.tool_running_output = Some(entry.running_output.clone());
+            }
             msgs.push(tool_msg);
             if let Some(result) = &entry.result {
                 let mut msg =
