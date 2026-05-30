@@ -117,6 +117,12 @@ impl Tool for EditTool {
             let normalized_old_text = normalize_to_lf(&old_text);
             let normalized_new_text = normalize_to_lf(&new_text);
 
+            if normalized_old_text == normalized_new_text {
+                return ToolResult::err(
+                    "old_text and new_text are identical — no edit would be made.",
+                );
+            }
+
             let count = normalized_content
                 .matches(normalized_old_text.as_str())
                 .count();
@@ -306,6 +312,24 @@ mod tests {
         assert_eq!(
             required,
             &vec![json!("path"), json!("old_text"), json!("new_text")]
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_identical_old_and_new_is_error() {
+        let f = write_temp("hello world\n");
+        let tool = make_tool();
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "old_text": "hello",
+            "new_text": "hello"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_error, "expected error for identical old/new text");
+        assert!(
+            result.content.as_text().contains("identical"),
+            "expected 'identical' in error: {}",
+            result.content.as_text()
         );
     }
 
