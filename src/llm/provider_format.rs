@@ -6,14 +6,108 @@
 //! are resolved before being sent to any provider.
 //!
 //! Protocol families:
-//! - [`to_openai_wire`]   — OpenAI Chat Completions
+//! - [`to_openai_wire`]    — OpenAI Chat Completions
 //! - [`to_anthropic_wire`] — Anthropic Messages API
-//! - [`to_gemini_wire`]   — Google Gemini `contents` array
-//! - [`to_codex_wire`]    — OpenAI Responses API (Codex / GPT-5 style)
-//! - [`to_ollama_wire`]   — Ollama `/api/chat` (OpenAI-like with `thinking` and object `arguments`)
+//! - [`to_gemini_wire`]    — Google Gemini `contents` array
+//! - [`to_codex_wire`]     — OpenAI Responses API (Codex / GPT-5 style)
+//! - [`to_ollama_wire`]    — Ollama `/api/chat` (OpenAI-like with `thinking` and object `arguments`)
+//!
+//! ## Per-provider deviations
+//!
+//! | Feature                        | OpenAI | Anthropic | Gemini | Codex | Ollama |
+//! |-------------------------------|--------|-----------|--------|-------|--------|
+//! | System messages               | kept   | skipped†  | skipped† | skipped† | kept |
+//! | Tool-call arguments encoding  | string | object    | object | string | object |
+//! | Image in tool result          | `image_url` block | `image` block | — | — | `image_url` block |
+//! | Thinking/reasoning echoed as  | `reasoning_content` | — | — | — | `thinking` |
+//! | Standalone ToolCall fallback  | yes    | yes       | n/a‡   | n/a‡  | yes    |
+//! | Standalone ToolResult fallback| yes    | yes       | n/a‡   | n/a‡  | yes    |
+//! | Grouping model                | grouped | grouped  | flat   | flat  | grouped |
+//!
+//! † System messages are extracted by the caller and passed as a separate field.
+//! ‡ Gemini and Codex iterate messages individually; standalone tool messages
+//!   are emitted directly without grouping.
 
 use super::common::normalize_tool_name;
 use super::{ImageData, Message, Role};
+
+// ── Shared traversal ──────────────────────────────────────────────────────────
+
+/// One logical conversation unit produced by [`group_messages`].
+///
+/// The `Assistant` variant groups an assistant message with any immediately
+/// following interleaved `ToolCall`/`ToolResult` pairs.  Each pair is
+/// `(call, result)` where `result` may be `None` when no `ToolResult`
+/// immediately follows the call.
+///
+/// `StandaloneToolCall` and `StandaloneToolResult` cover orphaned messages that
+/// appear without a surrounding `Assistant` turn — a defensive fallback for
+/// histories that were not produced by the normal agent loop.
+enum Turn<'a> {
+    System(&'a Message),
+    User(&'a Message),
+    Assistant {
+        msg: &'a Message,
+        tool_pairs: Vec<(&'a Message, Option<&'a Message>)>,
+    },
+    StandaloneToolCall(&'a Message),
+    StandaloneToolResult(&'a Message),
+}
+
+/// Group a flat message slice into logical [`Turn`]s.
+///
+/// The traversal consumes an `Assistant` message plus any immediately
+/// following interleaved `ToolCall` / `ToolResult` pairs into a single
+/// `Turn::Assistant`.  All other roles produce one turn each.
+fn group_messages(messages: &[Message]) -> Vec<Turn<'_>> {
+    let mut turns = Vec::new();
+    let mut i = 0;
+
+    while i < messages.len() {
+        let msg = &messages[i];
+
+        match msg.role {
+            Role::System => {
+                turns.push(Turn::System(msg));
+                i += 1;
+            }
+            Role::User => {
+                turns.push(Turn::User(msg));
+                i += 1;
+            }
+            Role::Assistant => {
+                let mut j = i + 1;
+                let mut tool_pairs: Vec<(&Message, Option<&Message>)> = Vec::new();
+
+                while j < messages.len() && messages[j].role == Role::ToolCall {
+                    let call = &messages[j];
+                    j += 1;
+                    let result = if j < messages.len() && messages[j].role == Role::ToolResult {
+                        let r = &messages[j];
+                        j += 1;
+                        Some(r)
+                    } else {
+                        None
+                    };
+                    tool_pairs.push((call, result));
+                }
+
+                turns.push(Turn::Assistant { msg, tool_pairs });
+                i = j;
+            }
+            Role::ToolCall => {
+                turns.push(Turn::StandaloneToolCall(msg));
+                i += 1;
+            }
+            Role::ToolResult => {
+                turns.push(Turn::StandaloneToolResult(msg));
+                i += 1;
+            }
+        }
+    }
+
+    turns
+}
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -49,10 +143,13 @@ fn anthropic_tool_result_content(tr: &Message) -> serde_json::Value {
     }
 }
 
+// ── OpenAI Chat Completions ───────────────────────────────────────────────────
+
+/// Convert a xi-agent `Message` history to the OpenAI Chat Completions wire format.
 ///
 /// The OpenAI API requires that tool calls and their accompanying text live in
 /// *one* assistant message, followed by one `"role":"tool"` message per result.
-/// Tau stores them as separate `Role::Assistant` + `Role::ToolCall` +
+/// xi-agent stores them as separate `Role::Assistant` + `Role::ToolCall` +
 /// `Role::ToolResult` messages, interleaved when there are multiple calls in a
 /// single turn.  This function:
 ///
@@ -64,20 +161,26 @@ fn anthropic_tool_result_content(tr: &Message) -> serde_json::Value {
 /// 3. Skips empty assistant messages that have no content and no tool calls.
 pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
-    let mut i = 0;
 
-    while i < messages.len() {
-        let msg = &messages[i];
-
-        match msg.role {
-            Role::Assistant => {
-                let mut j = i + 1;
+    for turn in group_messages(messages) {
+        match turn {
+            Turn::System(msg) => {
+                result.push(serde_json::json!({
+                    "role": "system",
+                    "content": msg.content,
+                }));
+            }
+            Turn::User(msg) => {
+                result.push(serde_json::json!({
+                    "role": "user",
+                    "content": msg.content,
+                }));
+            }
+            Turn::Assistant { msg, tool_pairs } => {
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
 
-                while j < messages.len() && messages[j].role == Role::ToolCall {
-                    let tc = &messages[j];
-                    let call_idx = tool_calls.len();
+                for (call_idx, (tc, tr_opt)) in tool_pairs.iter().enumerate() {
                     tool_calls.push(serde_json::json!({
                         "id": tc.tool_call_id.clone().unwrap_or_else(|| format!("call_{call_idx}")),
                         "type": "function",
@@ -86,17 +189,13 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                             "arguments": tc.tool_args.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "{}".to_string()),
                         }
                     }));
-                    j += 1;
-
-                    if j < messages.len() && messages[j].role == Role::ToolResult {
-                        let tr = &messages[j];
+                    if let Some(tr) = tr_opt {
                         let tr_content = openai_tool_result_content(tr);
                         tool_results.push(serde_json::json!({
                             "role": "tool",
                             "content": tr_content,
                             "tool_call_id": tr.tool_call_id,
                         }));
-                        j += 1;
                     }
                 }
 
@@ -124,12 +223,8 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     result.push(entry);
                     result.extend(tool_results);
                 }
-
-                i = j;
             }
-
-            Role::ToolCall => {
-                let tc = msg;
+            Turn::StandaloneToolCall(tc) => {
                 result.push(serde_json::json!({
                     "role": "assistant",
                     "content": serde_json::Value::Null,
@@ -142,34 +237,14 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         }
                     }],
                 }));
-                i += 1;
             }
-
-            Role::ToolResult => {
-                let tr = msg;
+            Turn::StandaloneToolResult(tr) => {
                 let tr_content = openai_tool_result_content(tr);
                 result.push(serde_json::json!({
                     "role": "tool",
                     "content": tr_content,
                     "tool_call_id": tr.tool_call_id,
                 }));
-                i += 1;
-            }
-
-            Role::System => {
-                result.push(serde_json::json!({
-                    "role": "system",
-                    "content": msg.content,
-                }));
-                i += 1;
-            }
-
-            Role::User => {
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": msg.content,
-                }));
-                i += 1;
             }
         }
     }
@@ -187,25 +262,17 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 /// `content` array entry; tool results are emitted as a `"role":"user"` block.
 pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
-    let mut i = 0;
 
-    while i < messages.len() {
-        let msg = &messages[i];
-
-        match msg.role {
-            Role::System => {
-                i += 1;
-            }
-
-            Role::User => {
+    for turn in group_messages(messages) {
+        match turn {
+            Turn::System(_) => {}
+            Turn::User(msg) => {
                 result.push(serde_json::json!({
                     "role": "user",
                     "content": msg.content,
                 }));
-                i += 1;
             }
-
-            Role::Assistant => {
+            Turn::Assistant { msg, tool_pairs } => {
                 let mut content: Vec<serde_json::Value> = Vec::new();
 
                 if !msg.content.is_empty() {
@@ -215,21 +282,15 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     }));
                 }
 
-                i += 1;
-
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
-                while i < messages.len() && messages[i].role == Role::ToolCall {
-                    let tc = &messages[i];
+                for (tc, tr_opt) in &tool_pairs {
                     content.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.tool_call_id.as_deref().unwrap_or("call_0"),
                         "name": normalize_tool_name(tc.tool_name.as_deref().unwrap_or("")),
                         "input": tc.tool_args.clone().unwrap_or_default(),
                     }));
-                    i += 1;
-
-                    if i < messages.len() && messages[i].role == Role::ToolResult {
-                        let tr = &messages[i];
+                    if let Some(tr) = tr_opt {
                         let tr_content = anthropic_tool_result_content(tr);
                         tool_results.push(serde_json::json!({
                             "type": "tool_result",
@@ -237,7 +298,6 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                             "content": tr_content,
                             "is_error": tr.is_error,
                         }));
-                        i += 1;
                     }
                 }
 
@@ -257,9 +317,7 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     }));
                 }
             }
-
-            Role::ToolCall => {
-                let tc = msg;
+            Turn::StandaloneToolCall(tc) => {
                 result.push(serde_json::json!({
                     "role": "assistant",
                     "content": [{
@@ -269,11 +327,8 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         "input": tc.tool_args.clone().unwrap_or_default(),
                     }],
                 }));
-                i += 1;
             }
-
-            Role::ToolResult => {
-                let tr = msg;
+            Turn::StandaloneToolResult(tr) => {
                 let tr_content = anthropic_tool_result_content(tr);
                 result.push(serde_json::json!({
                     "role": "user",
@@ -284,7 +339,6 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         "is_error": tr.is_error,
                     }],
                 }));
-                i += 1;
             }
         }
     }
@@ -301,6 +355,9 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 /// parts.  A side-table maps tool-call IDs to names so that `ToolResult`
 /// messages can include the correct `name` field even when `tool_name` is
 /// absent on the result message.
+///
+/// Gemini iterates messages individually (flat model) rather than grouping
+/// assistant turns — see the deviation table in the module doc.
 pub fn to_gemini_wire(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut contents = Vec::new();
     let mut tool_names_by_id: std::collections::HashMap<String, String> =
@@ -387,6 +444,9 @@ pub fn to_gemini_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 /// `"type":"message"` with `output_text` content; tool calls are
 /// `"type":"function_call"` items; tool results are
 /// `"type":"function_call_output"` items.
+///
+/// Codex iterates messages individually (flat model) — see the deviation
+/// table in the module doc.
 pub fn to_codex_wire(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     let mut msg_idx = 0usize;
@@ -455,20 +515,26 @@ pub fn to_codex_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 ///   string (unlike OpenAI Chat Completions).
 pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
-    let mut i = 0;
 
-    while i < messages.len() {
-        let msg = &messages[i];
-
-        match msg.role {
-            Role::Assistant => {
-                let mut j = i + 1;
+    for turn in group_messages(messages) {
+        match turn {
+            Turn::System(msg) => {
+                result.push(serde_json::json!({
+                    "role": "system",
+                    "content": msg.content,
+                }));
+            }
+            Turn::User(msg) => {
+                result.push(serde_json::json!({
+                    "role": "user",
+                    "content": msg.content,
+                }));
+            }
+            Turn::Assistant { msg, tool_pairs } => {
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
 
-                while j < messages.len() && messages[j].role == Role::ToolCall {
-                    let tc = &messages[j];
-                    let call_idx = tool_calls.len();
+                for (call_idx, (tc, tr_opt)) in tool_pairs.iter().enumerate() {
                     tool_calls.push(serde_json::json!({
                         "id": tc.tool_call_id.clone().unwrap_or_else(|| format!("call_{call_idx}")),
                         "type": "function",
@@ -478,17 +544,13 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                             "arguments": tc.tool_args.clone().unwrap_or_else(|| serde_json::json!({})),
                         }
                     }));
-                    j += 1;
-
-                    if j < messages.len() && messages[j].role == Role::ToolResult {
-                        let tr = &messages[j];
+                    if let Some(tr) = tr_opt {
                         let tr_content = openai_tool_result_content(tr);
                         tool_results.push(serde_json::json!({
                             "role": "tool",
                             "content": tr_content,
                             "tool_call_id": tr.tool_call_id,
                         }));
-                        j += 1;
                     }
                 }
 
@@ -516,12 +578,8 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     result.push(entry);
                     result.extend(tool_results);
                 }
-
-                i = j;
             }
-
-            Role::ToolCall => {
-                let tc = msg;
+            Turn::StandaloneToolCall(tc) => {
                 result.push(serde_json::json!({
                     "role": "assistant",
                     "content": serde_json::Value::Null,
@@ -534,34 +592,14 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         }
                     }],
                 }));
-                i += 1;
             }
-
-            Role::ToolResult => {
-                let tr = msg;
+            Turn::StandaloneToolResult(tr) => {
                 let tr_content = openai_tool_result_content(tr);
                 result.push(serde_json::json!({
                     "role": "tool",
                     "content": tr_content,
                     "tool_call_id": tr.tool_call_id,
                 }));
-                i += 1;
-            }
-
-            Role::System => {
-                result.push(serde_json::json!({
-                    "role": "system",
-                    "content": msg.content,
-                }));
-                i += 1;
-            }
-
-            Role::User => {
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": msg.content,
-                }));
-                i += 1;
             }
         }
     }
