@@ -65,10 +65,12 @@ pub struct ToolResult {
     pub is_truncated: bool,
     /// Truncation metadata when `is_truncated` is true.
     pub truncation: Option<TruncationResult>,
-    /// Full pre-truncation stdout, set when `saves_output` is true.
-    pub raw_stdout: Option<String>,
-    /// Full pre-truncation stderr, set when `saves_output` is true.
-    pub raw_stderr: Option<String>,
+    /// Full pre-truncation stdout; set by subprocess tools, consumed and
+    /// cleared by `with_log_notice`. Always `None` after execution.
+    pub(crate) raw_stdout: Option<String>,
+    /// Full pre-truncation stderr; set by subprocess tools, consumed and
+    /// cleared by `with_log_notice`. Always `None` after execution.
+    pub(crate) raw_stderr: Option<String>,
 }
 
 impl ToolResult {
@@ -140,6 +142,9 @@ impl ToolResult {
     /// `tool_id` is the opaque call identifier used as the log-file key.
     /// `cmd_summary` is an optional human-readable command label that appears
     /// in the notice (e.g. `" of \`ls -la\`"`).
+    ///
+    /// `raw_stdout`/`raw_stderr` are consumed and cleared from the result;
+    /// they are never present on the value returned from this function.
     pub fn with_log_notice(
         self,
         tool_id: &str,
@@ -198,6 +203,8 @@ impl ToolResult {
             ToolContent::Image { .. } => self.content.clone(),
         };
 
+        // raw_stdout/raw_stderr are consumed here; the returned value never
+        // carries them so they are not cloned into ToolCallEnd events.
         Self {
             content,
             is_error: self.is_error,
@@ -513,21 +520,17 @@ mod tests {
     use crate::agent::tools::truncate::TruncationResult;
 
     fn truncated_result() -> ToolResult {
-        ToolResult {
-            content: super::ToolContent::Text("line1\nline2".to_string()),
-            is_error: false,
-            is_truncated: true,
-            truncation: Some(TruncationResult {
+        ToolResult::ok_truncated(
+            TruncationResult {
                 content: "line1\nline2".to_string(),
                 truncated: true,
                 total_lines: 100,
-
                 output_lines: 2,
                 first_kept_line: 99,
-            }),
-            raw_stdout: Some("line1\nline2".to_string()),
-            raw_stderr: Some(String::new()),
-        }
+            },
+            "line1\nline2".to_string(),
+            String::new(),
+        )
     }
 
     #[test]

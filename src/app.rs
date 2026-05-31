@@ -2006,14 +2006,7 @@ mod tests {
         });
         app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallEnd {
             id: "call_1".to_string(),
-            result: crate::agent::types::ToolResult {
-                content: crate::agent::types::ToolContent::Text("ok".to_string()),
-                is_error: false,
-                is_truncated: false,
-                truncation: None,
-                raw_stdout: None,
-                raw_stderr: None,
-            },
+            result: crate::agent::types::ToolResult::ok_str("ok"),
         });
         app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
 
