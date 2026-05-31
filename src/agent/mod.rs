@@ -149,7 +149,7 @@ async fn emit_compaction(
     let _ = tx.send(AppEvent::Agent(AgentEvent::Compacting));
     let outcome = compaction::compact_events(
         provider,
-        session_events.to_vec(),
+        session_events,
         model,
         trigger_reason,
         user_instructions,

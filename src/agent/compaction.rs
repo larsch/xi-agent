@@ -82,7 +82,7 @@ pub fn context_window_and_budgets(model: &str) -> (usize, usize, usize) {
 
 pub async fn compact_events(
     provider: Arc<dyn LlmProvider>,
-    events: Vec<SessionEvent>,
+    events: &[SessionEvent],
     model: &str,
     trigger_reason: CompactionTrigger,
     user_instructions: Option<String>,
