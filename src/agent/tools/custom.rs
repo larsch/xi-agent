@@ -33,10 +33,6 @@ impl Tool for CustomTool {
         self.schema.clone()
     }
 
-    fn saves_output(&self) -> bool {
-        true
-    }
-
     fn run(
         &self,
         args: Value,

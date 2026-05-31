@@ -70,10 +70,6 @@ impl Tool for ExecTool {
         })
     }
 
-    fn saves_output(&self) -> bool {
-        true
-    }
-
     fn streaming_field(&self) -> Option<String> {
         Some("args".to_string())
     }

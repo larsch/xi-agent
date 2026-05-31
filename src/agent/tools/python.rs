@@ -173,10 +173,6 @@ impl Tool for PythonTool {
         self.schema.clone()
     }
 
-    fn saves_output(&self) -> bool {
-        true
-    }
-
     fn streaming_field(&self) -> Option<String> {
         Some("script".to_string())
     }

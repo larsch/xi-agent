@@ -42,10 +42,6 @@ impl Tool for PowerShellTool {
         })
     }
 
-    fn saves_output(&self) -> bool {
-        true
-    }
-
     fn streaming_field(&self) -> Option<String> {
         Some("command".to_string())
     }

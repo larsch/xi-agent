@@ -262,12 +262,6 @@ pub trait Tool: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         self.run(args, ToolCallContext::noop(""))
     }
-    /// Whether the agent loop should save this tool's full output to a log
-    /// file and append the path to the result.  Defaults to `false`; shell
-    /// and custom tools override this to `true`.
-    fn saves_output(&self) -> bool {
-        false
-    }
     /// The argument field whose string value should be streamed live to the
     /// display as JSON argument deltas arrive. `None` means no partial display.
     fn streaming_field(&self) -> Option<String> {
@@ -374,12 +368,8 @@ impl ToolExecutor for DefaultToolExecutor {
                             tx,
                         };
                         let r = tool.run(args.clone(), ctx).await;
-                        if tool.saves_output() {
-                            let cmd_summary = args.get("command").and_then(|v| v.as_str());
-                            r.with_log_notice(id, cmd_summary, &mut log.lock().unwrap())
-                        } else {
-                            r
-                        }
+                        let cmd_summary = args.get("command").and_then(|v| v.as_str());
+                        r.with_log_notice(id, cmd_summary, &mut log.lock().unwrap())
                     }
                     None => ToolResult::err(format!("Unknown tool: '{name}'")),
                 }
