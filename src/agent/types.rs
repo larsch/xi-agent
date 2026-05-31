@@ -254,16 +254,6 @@ pub trait Tool: Send + Sync {
         ctx: ToolCallContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
 
-    /// Execute the tool with a live-output context.  Production callers use
-    /// this so output chunks are forwarded to the UI.
-    fn execute_live(
-        &self,
-        args: serde_json::Value,
-        ctx: ToolCallContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        self.run(args, ctx)
-    }
-
     /// Execute without live output (for tests only — uses a noop context).
     #[cfg(test)]
     fn execute(
@@ -383,7 +373,7 @@ impl ToolExecutor for DefaultToolExecutor {
                             id: id.to_string(),
                             tx,
                         };
-                        let r = tool.execute_live(args.clone(), ctx).await;
+                        let r = tool.run(args.clone(), ctx).await;
                         if tool.saves_output() {
                             let cmd_summary = args.get("command").and_then(|v| v.as_str());
                             r.with_log_notice(id, cmd_summary, &mut log.lock().unwrap())
