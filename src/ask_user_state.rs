@@ -21,7 +21,7 @@ use crate::agent::types::{AskUserOption, AskUserResponse};
 ///
 /// They remain on `App` accessing ask-user fields via `self.ask_user.*`.
 pub(crate) struct PendingAsk {
-    #[allow(dead_code)] // only read in tests
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) question: String,
     pub(crate) options: Vec<AskUserOption>,
     pub(crate) allow_freeform: bool,
