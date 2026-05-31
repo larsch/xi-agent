@@ -149,11 +149,11 @@ fn default_true() -> bool {
     true
 }
 
-impl Message {
-    pub fn user(content: impl Into<String>) -> Self {
+impl Default for Message {
+    fn default() -> Self {
         Self {
             role: Role::User,
-            content: content.into(),
+            content: String::new(),
             thinking: None,
             assistant_phase: None,
             hidden: false,
@@ -168,6 +168,16 @@ impl Message {
             is_error: false,
             display_range: None,
             image_data: None,
+        }
+    }
+}
+
+impl Message {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            ..Self::default()
         }
     }
 
@@ -175,20 +185,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: content.into(),
-            thinking: None,
-            assistant_phase: None,
-            hidden: false,
-            include_in_llm: true,
-            tool_call_id: None,
-            tool_name: None,
-            tool_args: None,
-            tool_partial_args: None,
-            tool_partial_snapshot: None,
-            tool_streaming_field: None,
-            tool_running_output: None,
-            is_error: false,
-            display_range: None,
-            image_data: None,
+            ..Self::default()
         }
     }
 
@@ -196,20 +193,7 @@ impl Message {
         Self {
             role: Role::System,
             content: content.into(),
-            thinking: None,
-            assistant_phase: None,
-            hidden: false,
-            include_in_llm: true,
-            tool_call_id: None,
-            tool_name: None,
-            tool_args: None,
-            tool_partial_args: None,
-            tool_partial_snapshot: None,
-            tool_streaming_field: None,
-            tool_running_output: None,
-            is_error: false,
-            display_range: None,
-            image_data: None,
+            ..Self::default()
         }
     }
 
@@ -221,21 +205,10 @@ impl Message {
     ) -> Self {
         Self {
             role: Role::ToolCall,
-            content: String::new(),
-            thinking: None,
-            assistant_phase: None,
-            hidden: false,
-            include_in_llm: true,
             tool_call_id: Some(id.into()),
             tool_name: Some(name.into()),
             tool_args: Some(args),
-            tool_partial_args: None,
-            tool_partial_snapshot: None,
-            tool_streaming_field: None,
-            tool_running_output: None,
-            is_error: false,
-            display_range: None,
-            image_data: None,
+            ..Self::default()
         }
     }
 
@@ -248,20 +221,9 @@ impl Message {
         Self {
             role: Role::ToolResult,
             content: content.into(),
-            thinking: None,
-            assistant_phase: None,
-            hidden: false,
-            include_in_llm: true,
             tool_call_id: Some(call_id.into()),
-            tool_name: None,
-            tool_args: None,
-            tool_partial_args: None,
-            tool_partial_snapshot: None,
-            tool_streaming_field: None,
-            tool_running_output: None,
             is_error,
-            display_range: None,
-            image_data: None,
+            ..Self::default()
         }
     }
 
