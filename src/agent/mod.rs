@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::app_event::AppEvent;
+use crate::app_event::{AppEvent, SendIgnore};
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition, UsageStats};
 use crate::projection::LlmProjection;
 use crate::session_event::{CompactionTrigger, SessionEvent};
@@ -75,7 +75,7 @@ fn drain_steering_messages(
 ) -> bool {
     let mut consumed = false;
     while let Ok(text) = steering_rx.try_recv() {
-        let _ = tx.send(AppEvent::Agent(AgentEvent::SteeringConsumed {
+        tx.send_ignore(AppEvent::Agent(AgentEvent::SteeringConsumed {
             text: text.clone(),
         }));
         session_events.push(SessionEvent::UserMessage {
@@ -118,13 +118,13 @@ fn skip_remaining_tool_calls(
     reason: &'static str,
 ) {
     for (skip_id, skip_name, skip_args) in pending_tool_calls.iter().skip(next_idx).cloned() {
-        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
+        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
             id: skip_id.clone(),
             name: skip_name.clone(),
             args: skip_args.clone(),
         }));
         let skipped = ToolResult::err(reason);
-        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
+        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
             id: skip_id.clone(),
             result: skipped.clone(),
         }));
@@ -133,7 +133,7 @@ fn skip_remaining_tool_calls(
 }
 
 fn send_compaction_failed_status(tx: &UnboundedSender<AppEvent>, message: &str) {
-    let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
+    tx.send_ignore(AppEvent::Agent(AgentEvent::StatusUpdate(format!(
         "compaction failed: {message}; continuing without compaction."
     ))));
 }
@@ -146,7 +146,7 @@ async fn emit_compaction(
     trigger_reason: CompactionTrigger,
     user_instructions: Option<String>,
 ) -> Result<compaction::CompactionOutcome, crate::llm::ProviderError> {
-    let _ = tx.send(AppEvent::Agent(AgentEvent::Compacting));
+    tx.send_ignore(AppEvent::Agent(AgentEvent::Compacting));
     let outcome = compaction::compact_events(
         provider,
         session_events,
@@ -155,7 +155,7 @@ async fn emit_compaction(
         user_instructions,
     )
     .await?;
-    let _ = tx.send(AppEvent::Agent(AgentEvent::CompactionDone(outcome.clone())));
+    tx.send_ignore(AppEvent::Agent(AgentEvent::CompactionDone(outcome.clone())));
     Ok(outcome)
 }
 
@@ -190,7 +190,7 @@ async fn stream_assistant_turn(
     while let Some(ev) = stream.next().await {
         match ev {
             LlmEvent::Token { text, phase } => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::TextToken {
+                tx.send_ignore(AppEvent::Agent(AgentEvent::TextToken {
                     text: text.clone(),
                     phase,
                 }));
@@ -200,18 +200,18 @@ async fn stream_assistant_turn(
                 }
             }
             LlmEvent::ThinkingToken(t) => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::ThinkingToken(t.clone())));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::ThinkingToken(t.clone())));
                 assistant_thinking
                     .get_or_insert_with(String::new)
                     .push_str(&t);
             }
             LlmEvent::Usage(usage) => {
                 latest_usage = Some(usage);
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Usage(usage)));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::Usage(usage)));
             }
             LlmEvent::ToolCallStart { id, name } => {
                 let streaming_field = streaming_fields.get(&name).and_then(|f| f.clone());
-                let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallIntent {
+                tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallIntent {
                     id,
                     name,
                     streaming_field,
@@ -220,7 +220,7 @@ async fn stream_assistant_turn(
                 tool_intent_seen = true;
             }
             LlmEvent::ToolCallArgsDelta { id, partial_json } => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallArgsDelta {
+                tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallArgsDelta {
                     id,
                     partial_json,
                 }));
@@ -236,7 +236,7 @@ async fn stream_assistant_turn(
                 return TurnOutcome::Error(e);
             }
             LlmEvent::StatusUpdate(msg) => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::StatusUpdate(msg)));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::StatusUpdate(msg)));
             }
         }
     }
@@ -287,7 +287,7 @@ async fn execute_tool_batch(
     session_events: &mut Vec<SessionEvent>,
 ) -> BatchOutcome {
     for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
-        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallStart {
+        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
             id: id.clone(),
             name: name.clone(),
             args: args.clone(),
@@ -305,7 +305,7 @@ async fn execute_tool_batch(
             )
             .await;
 
-        let _ = tx.send(AppEvent::Agent(AgentEvent::ToolCallEnd {
+        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
             id: id.clone(),
             result: result.clone(),
         }));
@@ -381,7 +381,7 @@ pub async fn run_agent_loop(
             Ok(_) => {}
             Err(e) => send_compaction_failed_status(&tx, &e.message),
         }
-        let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
+        tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
         return;
     }
 
@@ -400,7 +400,7 @@ pub async fn run_agent_loop(
                 content: notification.clone(),
                 timestamp: 0,
             });
-            let _ = tx.send(AppEvent::Agent(AgentEvent::ExternalFileChange {
+            tx.send_ignore(AppEvent::Agent(AgentEvent::ExternalFileChange {
                 paths,
                 notification,
             }));
@@ -426,12 +426,12 @@ pub async fn run_agent_loop(
 
         match turn {
             TurnOutcome::Error(e) => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::Error(e)));
                 return;
             }
 
             TurnOutcome::ToolIntentWithNoCall => {
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Error(
+                tx.send_ignore(AppEvent::Agent(AgentEvent::Error(
                     crate::llm::ProviderError::other(
                         "agent",
                         "Tool call was indicated but not completed \
@@ -471,7 +471,7 @@ pub async fn run_agent_loop(
                     }
                     Err(compaction_error) => {
                         send_compaction_failed_status(&tx, &compaction_error.message);
-                        let _ = tx.send(AppEvent::Agent(AgentEvent::Error(e)));
+                        tx.send_ignore(AppEvent::Agent(AgentEvent::Error(e)));
                         return;
                     }
                 }
@@ -496,11 +496,11 @@ pub async fn run_agent_loop(
                 // If a steering message arrived while the LLM was generating,
                 // keep the loop alive so it is processed.
                 if drain_steering_messages(&mut steering_rx, &mut session_events, &tx) {
-                    let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
+                    tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
                     continue;
                 }
 
-                let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
 
                 // Threshold-based auto-compaction after a completed turn.
                 if config.auto_compaction_enabled {
@@ -526,7 +526,7 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                let _ = tx.send(AppEvent::Agent(AgentEvent::Done));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
                 return;
             }
 
@@ -557,7 +557,7 @@ pub async fn run_agent_loop(
                 .await;
 
                 config.file_tracker.lock().unwrap().refresh_baselines();
-                let _ = tx.send(AppEvent::Agent(AgentEvent::TurnEnd));
+                tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
 
                 match batch_outcome {
                     BatchOutcome::Completed => {}
