@@ -344,9 +344,6 @@ async fn collect_unix(
         }
     }
 
-    drop(stdout_handle);
-    drop(stderr_handle);
-
     let exit_code = status.code().unwrap_or(-1);
     (out_buf, err_buf, exit_code)
 }
