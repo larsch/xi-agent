@@ -271,7 +271,7 @@ pub trait Tool: Send + Sync {
     }
     /// The argument field whose string value should be streamed live to the
     /// display as JSON argument deltas arrive. `None` means no partial display.
-    fn streaming_field(&self) -> Option<String> {
+    fn streaming_field(&self) -> Option<&'static str> {
         None
     }
 }

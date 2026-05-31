@@ -173,8 +173,8 @@ impl Tool for PythonTool {
         self.schema.clone()
     }
 
-    fn streaming_field(&self) -> Option<String> {
-        Some("script".to_string())
+    fn streaming_field(&self) -> Option<&'static str> {
+        Some("script")
     }
 
     fn run(

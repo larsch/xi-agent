@@ -88,8 +88,8 @@ impl Tool for AskUserTool {
         })
     }
 
-    fn streaming_field(&self) -> Option<String> {
-        Some("question".to_string())
+    fn streaming_field(&self) -> Option<&'static str> {
+        Some("question")
     }
 
     fn run(

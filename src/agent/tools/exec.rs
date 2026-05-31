@@ -70,8 +70,8 @@ impl Tool for ExecTool {
         })
     }
 
-    fn streaming_field(&self) -> Option<String> {
-        Some("args".to_string())
+    fn streaming_field(&self) -> Option<&'static str> {
+        Some("args")
     }
 
     fn run(

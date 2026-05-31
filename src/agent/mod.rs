@@ -358,7 +358,7 @@ pub async fn run_agent_loop(
             name: t.name().to_string(),
             description: t.description().to_string(),
             parameters: t.parameters_schema(),
-            streaming_field: t.streaming_field(),
+            streaming_field: t.streaming_field().map(str::to_owned),
         })
         .collect();
 

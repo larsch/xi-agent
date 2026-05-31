@@ -39,8 +39,8 @@ impl Tool for CmdTool {
         })
     }
 
-    fn streaming_field(&self) -> Option<String> {
-        Some("command".to_string())
+    fn streaming_field(&self) -> Option<&'static str> {
+        Some("command")
     }
 
     fn run(
