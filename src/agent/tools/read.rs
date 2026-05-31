@@ -41,6 +41,13 @@ fn detect_image_mime_type(data: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// Split `content` into lines, preserving each line's original terminator.
+///
+/// Handles `\n`, `\r\n`, and bare `\r` as line endings. The standard library's
+/// `str::split_inclusive('\n')` handles `\n` and `\r\n` correctly (the `\r`
+/// stays attached to the preceding line) but does not treat bare `\r` as a
+/// line ending. This function is used instead so that files with old Mac-style
+/// `\r`-only line endings are split correctly.
 fn split_lines_preserving_endings(content: &str) -> Vec<&str> {
     if content.is_empty() {
         return Vec::new();

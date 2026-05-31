@@ -88,9 +88,9 @@ pub async fn compact_events(
     user_instructions: Option<String>,
 ) -> Result<CompactionOutcome, crate::llm::ProviderError> {
     let (context_window, reserve_tokens, keep_recent_tokens) = context_window_and_budgets(model);
-    let tokens_before = estimate_session_tokens(&events);
+    let tokens_before = estimate_session_tokens(events);
 
-    let (previous_summary, previous_files, tail_events) = split_at_latest_compaction(&events);
+    let (previous_summary, previous_files, tail_events) = split_at_latest_compaction(events);
     let units = build_units(&tail_events);
     if units.is_empty() && previous_summary.is_none() {
         return Err(crate::llm::ProviderError::other(
