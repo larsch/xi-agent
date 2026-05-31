@@ -155,18 +155,7 @@ async fn emit_compaction(
         user_instructions,
     )
     .await?;
-    let _ = tx.send(AppEvent::Agent(AgentEvent::CompactionDone {
-        summary: outcome.summary.clone(),
-        trigger_reason: outcome.trigger_reason.clone(),
-        context_window: outcome.context_window,
-        reserve_tokens: outcome.reserve_tokens,
-        keep_recent_tokens: outcome.keep_recent_tokens,
-        tokens_before: outcome.tokens_before,
-        tokens_after: outcome.tokens_after,
-        retained_event_count: outcome.retained_event_count,
-        read_files: outcome.read_files.clone(),
-        modified_files: outcome.modified_files.clone(),
-    }));
+    let _ = tx.send(AppEvent::Agent(AgentEvent::CompactionDone(outcome.clone())));
     Ok(outcome)
 }
 

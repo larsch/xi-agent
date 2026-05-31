@@ -3,9 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use crate::agent::compaction::CompactionOutcome;
 use crate::agent::tools::truncate::TruncationResult;
 use crate::llm::{AssistantPhase, UsageStats};
-use crate::session_event::CompactionTrigger;
 
 // ── Tool result ───────────────────────────────────────────────────────────────
 
@@ -451,18 +451,7 @@ pub enum AgentEvent {
     /// The loop is performing a compaction pass.
     Compacting,
     /// A compaction summary was produced and should be appended to the session log.
-    CompactionDone {
-        summary: String,
-        trigger_reason: CompactionTrigger,
-        context_window: usize,
-        reserve_tokens: usize,
-        keep_recent_tokens: usize,
-        tokens_before: usize,
-        tokens_after: usize,
-        retained_event_count: usize,
-        read_files: Vec<String>,
-        modified_files: Vec<String>,
-    },
+    CompactionDone(CompactionOutcome),
     // ── Tool lifecycle ─────────────────────────────────────────────────────────
     /// The model requested a tool call; execution is about to begin.
     ToolCallStart {

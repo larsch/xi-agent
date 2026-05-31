@@ -2,6 +2,7 @@
 
 use tokio::sync::mpsc::error::TryRecvError;
 
+use crate::agent::compaction::CompactionOutcome;
 use crate::agent::types::AgentEvent;
 use crate::app::{App, RetryTarget, StreamingStatus};
 use crate::app_event::AppEvent;
@@ -71,29 +72,7 @@ impl App {
             AgentEvent::SteeringConsumed { text } => self.on_steering_consumed(text),
             AgentEvent::StatusUpdate(msg) => self.on_status_update(msg),
             AgentEvent::Compacting => self.on_compacting(),
-            AgentEvent::CompactionDone {
-                summary,
-                trigger_reason,
-                context_window,
-                reserve_tokens,
-                keep_recent_tokens,
-                tokens_before,
-                tokens_after,
-                retained_event_count,
-                read_files,
-                modified_files,
-            } => self.on_compaction_done(
-                summary,
-                trigger_reason,
-                context_window,
-                reserve_tokens,
-                keep_recent_tokens,
-                tokens_before,
-                tokens_after,
-                retained_event_count,
-                read_files,
-                modified_files,
-            ),
+            AgentEvent::CompactionDone(outcome) => self.on_compaction_done(outcome),
             AgentEvent::ToolCallStart { id, name, args } => self.on_tool_call_start(id, name, args),
             AgentEvent::ToolOutputChunk { id, chunk } => self.on_tool_output_chunk(id, chunk),
             AgentEvent::ToolCallEnd { id, result } => self.on_tool_call_end(id, result),
@@ -193,30 +172,19 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn on_compaction_done(
-        &mut self,
-        summary: String,
-        trigger_reason: crate::session_event::CompactionTrigger,
-        context_window: usize,
-        reserve_tokens: usize,
-        keep_recent_tokens: usize,
-        tokens_before: usize,
-        tokens_after: usize,
-        retained_event_count: usize,
-        read_files: Vec<String>,
-        modified_files: Vec<String>,
-    ) {
+    fn on_compaction_done(&mut self, outcome: CompactionOutcome) {
+        let tokens_after = outcome.tokens_after;
         let ev = SessionEvent::CompactionSummary {
-            summary,
-            trigger_reason,
-            context_window,
-            reserve_tokens,
-            keep_recent_tokens,
-            tokens_before,
-            tokens_after,
-            retained_event_count: Some(retained_event_count),
-            read_files,
-            modified_files,
+            summary: outcome.summary,
+            trigger_reason: outcome.trigger_reason,
+            context_window: outcome.context_window,
+            reserve_tokens: outcome.reserve_tokens,
+            keep_recent_tokens: outcome.keep_recent_tokens,
+            tokens_before: outcome.tokens_before,
+            tokens_after: outcome.tokens_after,
+            retained_event_count: Some(outcome.retained_event_count),
+            read_files: outcome.read_files,
+            modified_files: outcome.modified_files,
             timestamp: Self::now_ts(),
         };
         self.append_event_immediate(ev);

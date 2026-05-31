@@ -914,15 +914,11 @@ async fn run_print_mode_loop(
             AgentEvent::Compacting => {
                 eprintln!("compacting…");
             }
-            AgentEvent::CompactionDone {
-                tokens_before,
-                tokens_after,
-                ..
-            } => {
+            AgentEvent::CompactionDone(outcome) => {
                 eprintln!(
                     "compacted: {}k → {}k tokens",
-                    tokens_before / 1000,
-                    tokens_after / 1000
+                    outcome.tokens_before / 1000,
+                    outcome.tokens_after / 1000
                 );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
@@ -1064,15 +1060,11 @@ async fn run_print_mode_loop_inner(
             AgentEvent::Compacting => {
                 eprintln!("compacting…");
             }
-            AgentEvent::CompactionDone {
-                tokens_before,
-                tokens_after,
-                ..
-            } => {
+            AgentEvent::CompactionDone(outcome) => {
                 eprintln!(
                     "compacted: {}k → {}k tokens",
-                    tokens_before / 1000,
-                    tokens_after / 1000
+                    outcome.tokens_before / 1000,
+                    outcome.tokens_after / 1000
                 );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
