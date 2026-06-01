@@ -54,6 +54,10 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
     if m.contains("gemini") {
         return Some(1_000_000);
     }
+    // DeepSeek V4 models: 1M context (kludge until upstream metadata is available).
+    if m.starts_with("deepseek-v4-flash") || m.starts_with("deepseek-v4-pro") {
+        return Some(1_000_000);
+    }
     if m.contains("claude-3-5") || m.contains("claude-3.5") {
         return Some(200_000);
     }
@@ -148,6 +152,17 @@ mod tests {
     fn context_window_claude3_unchanged() {
         assert_eq!(context_window_for_model("claude-3-5-sonnet"), Some(200_000));
         assert_eq!(context_window_for_model("claude-3-opus"), Some(200_000));
+    }
+
+    #[test]
+    fn context_window_deepseek_v4_returns_1m() {
+        assert_eq!(
+            context_window_for_model("deepseek-v4-flash"),
+            Some(1_000_000)
+        );
+        assert_eq!(context_window_for_model("deepseek-v4-pro"), Some(1_000_000));
+        // Older DeepSeek models (no V4) should not match.
+        assert_eq!(context_window_for_model("deepseek-v3"), None);
     }
 
     // ── scaled_token_budget ──────────────────────────────────────────────────
