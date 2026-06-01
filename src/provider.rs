@@ -107,10 +107,17 @@ pub fn thinking_support_for_instance(instance: &ProviderInstance, model: &str) -
 
 /// Build a provider for a named [`ProviderInstance`], dispatching on its
 /// [`ApiType`].
+/// Build a provider for a named [`ProviderInstance`], dispatching on its
+/// [`ApiType`].
+///
+/// `session_id` — when `Some`, sets the `prompt_cache_key` on OpenAI-compatible
+/// backends so that requests for the same session are routed to the same cached-prefix
+/// server, improving cache hit rates across the lifetime of the session.
 pub fn build_provider_for_instance(
     instance: &ProviderInstance,
     thinking: ThinkingLevel,
     _config: &XiConfig,
+    session_id: Option<&str>,
 ) -> anyhow::Result<Arc<dyn LlmProvider + Send + Sync>> {
     let model = instance.effective_model();
 
@@ -174,7 +181,11 @@ pub fn build_provider_for_instance(
                     instance.id
                 )
             })?;
-            Ok(Arc::new(OpenAiProvider::new(base_url, model, api_key)))
+            let mut p = OpenAiProvider::new(base_url, model, api_key);
+            if let Some(sid) = session_id {
+                p = p.with_prompt_cache_key(sid);
+            }
+            Ok(Arc::new(p))
         }
         BackendPreset::OpenRouter => {
             let base_url = instance
@@ -187,7 +198,7 @@ pub fn build_provider_for_instance(
                     instance.id
                 )
             })?;
-            Ok(Arc::new(OpenAiProvider::new_with_headers(
+            let mut p = OpenAiProvider::new_with_headers(
                 base_url,
                 model,
                 api_key,
@@ -195,7 +206,11 @@ pub fn build_provider_for_instance(
                     ("HTTP-Referer".to_string(), OPENROUTER_REFERER.to_string()),
                     ("X-Title".to_string(), OPENROUTER_TITLE.to_string()),
                 ],
-            )))
+            );
+            if let Some(sid) = session_id {
+                p = p.with_prompt_cache_key(sid);
+            }
+            Ok(Arc::new(p))
         }
 
         // ── Ollama ────────────────────────────────────────────────────────

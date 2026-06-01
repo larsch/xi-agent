@@ -84,6 +84,7 @@ impl From<CodexUsage> for UsageStats {
             input_tokens: input,
             output_tokens: output,
             total_tokens: total,
+            cached_tokens: None,
         }
     }
 }

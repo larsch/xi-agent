@@ -50,6 +50,14 @@ struct MessageStartPayload {
 #[derive(Deserialize)]
 struct MessageUsage {
     input_tokens: Option<usize>,
+    /// Tokens read from the prompt cache (cache hit).  Present when a cache
+    /// entry was found for part of the prompt prefix.
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
+    /// Tokens written into the prompt cache (cache creation).  Present when
+    /// uncached content was stored for future requests.
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +97,12 @@ struct MessageDeltaPayload {
 #[derive(Deserialize)]
 struct MessageDeltaUsage {
     output_tokens: Option<usize>,
+    /// The message_delta event may include updated cache-read and cache-creation
+    /// counts that override the values from message_start.
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +164,10 @@ impl AnthropicProvider {
                 "messages": anthropic_messages,
                 "max_tokens": max_tokens,
                 "stream": true,
+                // Enable automatic prompt caching (5-minute default TTL).
+                // The API places the breakpoint on the last cacheable block and
+                // advances it as the conversation grows.
+                "cache_control": { "type": "ephemeral" },
             });
 
             if let Some(sys) = system {
@@ -192,9 +210,13 @@ impl AnthropicProvider {
 
             // Track streaming tool_use blocks: content index → accumulated state.
             let mut tool_blocks: HashMap<u64, ToolBlock> = HashMap::new();
-            // Input token count from the message_start event; combined with
-            // output tokens from message_delta/message_stop before emitting Usage.
-            let mut input_tokens_from_start: Option<usize> = None;
+            // Token-usage state accumulated from message_start and message_delta
+            // events.  message_start provides initial counts; message_delta may
+            // override them and adds output_tokens.
+            let mut input_tokens: Option<usize> = None;
+            let mut cache_read_tokens: Option<usize> = None;
+            // cache_creation_tokens is captured for future cost-reporting use.
+            let mut _cache_creation_tokens: Option<usize> = None;
 
             let mut stream = stream_sse_lines("Anthropic", response, move |data, events| {
                 if data == "[DONE]" {
@@ -213,7 +235,9 @@ impl AnthropicProvider {
                 match ev {
                     AnthropicEvent::MessageStart { message } => {
                         if let Some(usage) = message.usage {
-                            input_tokens_from_start = usage.input_tokens;
+                            input_tokens = usage.input_tokens;
+                            cache_read_tokens = usage.cache_read_input_tokens;
+                            _cache_creation_tokens = usage.cache_creation_input_tokens;
                         }
                     }
 
@@ -272,7 +296,22 @@ impl AnthropicProvider {
                     }
 
                     AnthropicEvent::MessageDelta { delta, usage } => {
-                        if let Some(usage_stats) = build_usage_from_delta(usage, &mut input_tokens_from_start) {
+                        // Merge any cache-token updates from the delta event
+                        // into our running values.  The API may update these at
+                        // this point in the stream.
+                        if let Some(ref u) = usage {
+                            if let Some(v) = u.cache_read_input_tokens {
+                                cache_read_tokens = Some(v);
+                            }
+                            if let Some(v) = u.cache_creation_input_tokens {
+                                _cache_creation_tokens = Some(v);
+                            }
+                        }
+                        if let Some(usage_stats) = build_usage_from_delta(
+                            usage,
+                            &mut input_tokens,
+                            &mut cache_read_tokens,
+                        ) {
                             events.push(LlmEvent::Usage(usage_stats));
                         }
                         if delta.stop_reason.as_deref() == Some("max_tokens")
@@ -314,26 +353,33 @@ impl AnthropicProvider {
 }
 
 /// Build a `UsageStats` from a `MessageDelta` usage payload, merging in the
-/// input tokens captured from the earlier `MessageStart` event.
+/// input and cache counts captured from the earlier `MessageStart` event.
+///
+/// The `cache_read` parameter is consumed (taken) here to match the
+/// once-per-stream semantics: the function is called once from
+/// `message_delta`.
 fn build_usage_from_delta(
     usage: Option<MessageDeltaUsage>,
-    input_tokens_from_start: &mut Option<usize>,
+    input_tokens: &mut Option<usize>,
+    cache_read_tokens: &mut Option<usize>,
 ) -> Option<UsageStats> {
     let output = usage.as_ref().and_then(|u| u.output_tokens);
-    let input = input_tokens_from_start.take();
+    let input = input_tokens.take();
+    let cached = cache_read_tokens.take();
     let total = match (input, output) {
         (Some(i), Some(o)) => Some(i.saturating_add(o)),
         (Some(i), None) => Some(i),
         (None, Some(o)) => Some(o),
         (None, None) => None,
     };
-    if input.is_none() && output.is_none() {
+    if input.is_none() && output.is_none() && cached.is_none() {
         None
     } else {
         Some(UsageStats {
             input_tokens: input,
             output_tokens: output,
             total_tokens: total,
+            cached_tokens: cached,
         })
     }
 }
@@ -414,6 +460,33 @@ mod tests {
             panic!("wrong variant")
         };
         assert_eq!(message.usage.unwrap().input_tokens, Some(42));
+    }
+
+    #[test]
+    fn message_start_captures_cache_fields() {
+        let ev = parse(
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":30}}}"#,
+        );
+        let AnthropicEvent::MessageStart { message } = ev else {
+            panic!("wrong variant")
+        };
+        let usage = message.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.cache_read_input_tokens, Some(50));
+        assert_eq!(usage.cache_creation_input_tokens, Some(30));
+    }
+
+    #[test]
+    fn message_start_missing_cache_fields_default_to_none() {
+        // Cache fields are optional; they default to None when absent.
+        let ev = parse(r#"{"type":"message_start","message":{"usage":{"input_tokens":10}}}"#);
+        let AnthropicEvent::MessageStart { message } = ev else {
+            panic!("wrong variant")
+        };
+        let usage = message.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(10));
+        assert!(usage.cache_read_input_tokens.is_none());
+        assert!(usage.cache_creation_input_tokens.is_none());
     }
 
     #[test]
@@ -503,6 +576,34 @@ mod tests {
     }
 
     #[test]
+    fn message_delta_with_cache_fields() {
+        let ev = parse(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}"#,
+        );
+        let AnthropicEvent::MessageDelta { delta: _, usage } = ev else {
+            panic!("wrong variant")
+        };
+        let u = usage.unwrap();
+        assert_eq!(u.output_tokens, Some(20));
+        assert_eq!(u.cache_read_input_tokens, Some(200));
+        assert_eq!(u.cache_creation_input_tokens, Some(100));
+    }
+
+    #[test]
+    fn message_delta_missing_cache_fields_default_to_none() {
+        let ev = parse(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+        );
+        let AnthropicEvent::MessageDelta { delta: _, usage } = ev else {
+            panic!("wrong variant")
+        };
+        let u = usage.unwrap();
+        assert_eq!(u.output_tokens, Some(5));
+        assert!(u.cache_read_input_tokens.is_none());
+        assert!(u.cache_creation_input_tokens.is_none());
+    }
+
+    #[test]
     fn message_stop_variant() {
         let ev = parse(r#"{"type":"message_stop"}"#);
         assert!(matches!(ev, AnthropicEvent::MessageStop));
@@ -527,24 +628,61 @@ mod tests {
     #[test]
     fn build_usage_merges_input_and_output() {
         let mut input = Some(100usize);
+        let mut cached = Some(30usize);
         let usage = build_usage_from_delta(
             Some(MessageDeltaUsage {
                 output_tokens: Some(20),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
             }),
             &mut input,
+            &mut cached,
         );
         let u = usage.unwrap();
         assert_eq!(u.input_tokens, Some(100));
         assert_eq!(u.output_tokens, Some(20));
         assert_eq!(u.total_tokens, Some(120));
-        // input_tokens_from_start should be consumed
+        assert_eq!(u.cached_tokens, Some(30));
+        // Both sources should be consumed.
         assert!(input.is_none());
+        assert!(cached.is_none());
     }
 
     #[test]
     fn build_usage_returns_none_when_no_data() {
         let mut input = None;
-        let usage = build_usage_from_delta(None, &mut input);
+        let mut cached = None;
+        let usage = build_usage_from_delta(None, &mut input, &mut cached);
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn build_usage_includes_cache_hits() {
+        let mut input = Some(200usize);
+        let mut cached = Some(50usize);
+        let usage = build_usage_from_delta(
+            Some(MessageDeltaUsage {
+                output_tokens: Some(30),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }),
+            &mut input,
+            &mut cached,
+        );
+        let u = usage.unwrap();
+        assert_eq!(u.cached_tokens, Some(50));
+        assert_eq!(u.total_tokens, Some(230)); // 200 + 30 (cached not included)
+    }
+
+    #[test]
+    fn build_usage_cache_only_no_input_or_output() {
+        let mut input = None;
+        let mut cached = Some(42usize);
+        let usage = build_usage_from_delta(None, &mut input, &mut cached);
+        let u = usage.unwrap();
+        assert_eq!(u.cached_tokens, Some(42));
+        assert!(u.input_tokens.is_none());
+        assert!(u.output_tokens.is_none());
+        assert!(u.total_tokens.is_none());
     }
 }

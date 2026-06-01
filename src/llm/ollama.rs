@@ -189,6 +189,7 @@ fn parse_ndjson_line(line: &str, events: &mut Vec<LlmEvent>) -> bool {
                             (Some(i), Some(o)) => Some(i.saturating_add(o)),
                             _ => None,
                         },
+                        cached_tokens: None,
                     }));
                 }
                 events.push(LlmEvent::Done);

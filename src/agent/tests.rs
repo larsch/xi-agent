@@ -164,6 +164,7 @@ async fn agent_loop_forwards_usage_event() {
             input_tokens: Some(10),
             output_tokens: Some(5),
             total_tokens: Some(15),
+            cached_tokens: None,
         }),
         LlmEvent::Token {
             text: "hello".to_string(),
@@ -179,7 +180,8 @@ async fn agent_loop_forwards_usage_event() {
             AgentEvent::Usage(UsageStats {
                 input_tokens: Some(10),
                 output_tokens: Some(5),
-                total_tokens: Some(15)
+                total_tokens: Some(15),
+                ..
             })
         )),
         "expected forwarded usage event"

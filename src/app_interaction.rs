@@ -853,6 +853,10 @@ impl App {
     /// lets the display projection update from that source of truth. When
     /// persistence is unavailable, falls back to a transient visible message.
     pub(crate) fn append_user_message(&mut self, content: String) {
+        // A new user message begins a fresh turn; clear any stale cache-miss
+        // warning from the previous turn so the next response is evaluated
+        // on its own merit.
+        self.cache_miss_warning = false;
         self.session.append_user_message(content, Self::now_ts());
     }
 

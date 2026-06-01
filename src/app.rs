@@ -123,6 +123,10 @@ pub struct App {
     pub(crate) show_info: bool,
     /// Best-effort token usage reported for the latest completed turn.
     pub(crate) latest_usage: Option<UsageStats>,
+    /// Set when the previous turn should have populated the prompt cache but
+    /// the current response shows zero cached tokens.  Cleared when the user
+    /// submits a new message.
+    pub(crate) cache_miss_warning: bool,
 
     // ── Login panel ───────────────────────────────────────────────────────────
     pub(crate) login: LoginState,
@@ -166,6 +170,7 @@ impl App {
             selection: SelectionState::new(),
             show_info: false,
             latest_usage: None,
+            cache_miss_warning: false,
             login: LoginState::new(),
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
@@ -2389,6 +2394,7 @@ mod tests {
             input_tokens: Some(1),
             output_tokens: Some(2),
             total_tokens: Some(3),
+            cached_tokens: None,
         });
 
         app.finalise_assistant_turn_event();
@@ -2418,6 +2424,7 @@ mod tests {
                 input_tokens: Some(1),
                 output_tokens: Some(2),
                 total_tokens: Some(3),
+                cached_tokens: None,
             })
         );
     }

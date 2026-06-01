@@ -367,6 +367,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if app.show_info {
         let context_window = context_window_for_model(&app.provider.current_model);
         let used_tokens = app.latest_usage.and_then(|u| u.used_tokens());
+        let cached_tokens = app.latest_usage.and_then(|u| u.cached_tokens);
         let thinking = app
             .provider
             .thinking_supported
@@ -377,6 +378,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             thinking,
             context_window,
             used_tokens,
+            cached_tokens,
+            app.cache_miss_warning,
             width,
         );
         f.render_widget(Paragraph::new(vec![info_line]), info_area);
@@ -1357,20 +1360,67 @@ mod tests {
 
     #[test]
     fn info_context_value_without_usage_shows_window_only() {
-        assert_eq!(info::format_context_value(Some(128_000), None), "128k");
+        assert_eq!(
+            info::format_context_value(Some(128_000), None, None, false),
+            "128k"
+        );
     }
 
     #[test]
     fn info_context_value_with_usage_shows_ratio_and_percent() {
         assert_eq!(
-            info::format_context_value(Some(128_000), Some(32_000)),
+            info::format_context_value(Some(128_000), Some(32_000), None, false),
             "32k / 128k (25%)"
         );
     }
 
     #[test]
     fn info_context_value_unknown_window_stays_unknown() {
-        assert_eq!(info::format_context_value(None, Some(123)), "unknown");
+        assert_eq!(
+            info::format_context_value(None, Some(123), None, false),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn info_context_value_shows_cached_suffix() {
+        assert_eq!(
+            info::format_context_value(Some(128_000), Some(32_000), Some(16_000), false),
+            "32k / 128k (25%) [16k⚡]"
+        );
+    }
+
+    #[test]
+    fn info_context_value_cached_zero_omits_suffix() {
+        assert_eq!(
+            info::format_context_value(Some(128_000), Some(32_000), Some(0), false),
+            "32k / 128k (25%)"
+        );
+    }
+
+    #[test]
+    fn info_context_value_unknown_window_with_cached() {
+        assert_eq!(
+            info::format_context_value(None, None, Some(4_000), false),
+            "unknown [4k⚡]"
+        );
+    }
+
+    #[test]
+    fn info_context_value_shows_warning_on_cache_miss() {
+        assert_eq!(
+            info::format_context_value(Some(128_000), Some(32_000), Some(0), true),
+            "32k / 128k (25%) ⚠️"
+        );
+    }
+
+    #[test]
+    fn info_context_value_warning_overrides_cached_suffix() {
+        // Warning takes precedence over cached suffix when both are set.
+        assert_eq!(
+            info::format_context_value(Some(128_000), Some(64_000), Some(16_000), true),
+            "64k / 128k (50%) ⚠️"
+        );
     }
 
     #[test]
@@ -1381,6 +1431,8 @@ mod tests {
             Some("medium"),
             Some(128_000),
             Some(64_000),
+            None,
+            false,
             200,
         );
         let text = line_text(&line);
@@ -1389,7 +1441,16 @@ mod tests {
 
     #[test]
     fn info_line_omits_thinking_when_unavailable() {
-        let line = info::build_info_line("openai", "gpt-4o", None, Some(128_000), None, 200);
+        let line = info::build_info_line(
+            "openai",
+            "gpt-4o",
+            None,
+            Some(128_000),
+            None,
+            None,
+            false,
+            200,
+        );
         let text = line_text(&line);
         assert!(!text.contains("thinking"), "{text}");
     }

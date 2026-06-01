@@ -99,6 +99,46 @@ impl App {
 
     fn on_usage(&mut self, usage: UsageStats) {
         self.latest_usage = Some(usage);
+
+        // Detect unexpected prompt cache misses: the current response shows
+        // zero cached tokens even though a recent previous turn (within the
+        // 5-minute TTL) should have populated the cache.
+        if usage.cached_tokens == Some(0) {
+            let current_input = usage.input_tokens.unwrap_or(0);
+            // Only warn when the current input is large enough that caching
+            // would be meaningful (>= the Sonnet 4.6 minimum threshold).
+            if current_input >= 1024 {
+                // Scan the session event log for a recent previous assistant
+                // turn whose total tokens exceeded the minimum threshold.
+                let now = now_ts();
+                let found_recent_turn = self.session.session_state.as_ref().is_some_and(|ss| {
+                    ss.events().iter().rev().any(|ev| {
+                        if let SessionEvent::AssistantMessage {
+                            usage: Some(prev),
+                            timestamp,
+                            ..
+                        } = ev
+                        {
+                            let within_ttl = now.saturating_sub(*timestamp) < 300;
+                            let prev_had_enough = prev.total_tokens.unwrap_or(0) >= 1024;
+                            within_ttl && prev_had_enough
+                        } else {
+                            false
+                        }
+                    })
+                });
+                self.cache_miss_warning = found_recent_turn;
+                if found_recent_turn {
+                    log::warn!(
+                        "prompt cache miss: input={}, a previous turn <5min ago should have populated the cache",
+                        current_input,
+                    );
+                }
+            }
+        } else {
+            // Any non-zero (or absent) cache report clears the warning.
+            self.cache_miss_warning = false;
+        }
     }
 
     fn on_text_token(&mut self, text: String, phase: AssistantPhase) {
@@ -193,6 +233,7 @@ impl App {
             input_tokens: Some(tokens_after),
             output_tokens: None,
             total_tokens: Some(tokens_after),
+            cached_tokens: None,
         });
         self.log_view.auto_scroll = true;
         self.persist_messages();

@@ -45,6 +45,10 @@ pub struct UsageStats {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
     pub total_tokens: Option<usize>,
+    /// Number of prompt tokens served from the provider's prompt cache.
+    /// Only populated when the provider reports cache hit information
+    /// (e.g. OpenAI `usage.prompt_tokens_details.cached_tokens`).
+    pub cached_tokens: Option<usize>,
 }
 
 impl UsageStats {

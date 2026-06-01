@@ -14,6 +14,11 @@ pub struct OpenAiProvider {
     model: String,
     api_key: String,
     extra_headers: Vec<(String, String)>,
+    /// Optional stable key used to influence OpenAI prompt-cache routing.
+    /// When set, the value is sent as `prompt_cache_key` in every request,
+    /// which helps the API route to the same machine that already cached the
+    /// prompt prefix for this session.
+    prompt_cache_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -37,8 +42,20 @@ impl OpenAiProvider {
             model: model.into(),
             api_key: api_key.into(),
             extra_headers,
+            prompt_cache_key: None,
             client: build_http_client(),
         }
+    }
+
+    /// Set a stable `prompt_cache_key` for this provider instance.
+    ///
+    /// The key is sent with every request to help OpenAI route requests to the
+    /// same server that already holds the cached prompt prefix, improving cache
+    /// hit rates.  A session ID is a good choice — it is stable across
+    /// restarts of the application for the same session file.
+    pub fn with_prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
     }
 
     fn stream_inner(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>) -> LlmStream {
@@ -46,6 +63,7 @@ impl OpenAiProvider {
         let model = self.model.clone();
         let api_key = self.api_key.clone();
         let extra_headers = self.extra_headers.clone();
+        let prompt_cache_key = self.prompt_cache_key.clone();
         let client = self.client.clone();
 
         Box::pin(async_stream::stream! {
@@ -61,6 +79,7 @@ impl OpenAiProvider {
                 } else {
                     Some(tools.iter().map(to_oai_tool).collect())
                 },
+                prompt_cache_key,
             };
 
             if let Ok(json) = serde_json::to_string_pretty(&body) {
@@ -125,6 +144,9 @@ impl OpenAiProvider {
                         input_tokens: usage.prompt_tokens,
                         output_tokens: usage.completion_tokens,
                         total_tokens: usage.total_tokens,
+                        cached_tokens: usage
+                            .prompt_tokens_details
+                            .and_then(|d| d.cached_tokens),
                     }));
                 }
 
@@ -205,6 +227,10 @@ struct ChatRequest {
     stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OaiToolDef>>,
+    /// Stable key used to influence prompt-cache routing on the OpenAI side.
+    /// See <https://platform.openai.com/docs/guides/prompt-caching>.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -245,6 +271,14 @@ struct ChunkUsage {
     prompt_tokens: Option<usize>,
     completion_tokens: Option<usize>,
     total_tokens: Option<usize>,
+    /// Nested details carrying per-category token counts.
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+/// Nested object inside `usage.prompt_tokens_details`.
+#[derive(Deserialize, Default)]
+struct PromptTokensDetails {
+    cached_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
