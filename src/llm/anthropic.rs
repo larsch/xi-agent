@@ -164,14 +164,25 @@ impl AnthropicProvider {
                 "messages": anthropic_messages,
                 "max_tokens": max_tokens,
                 "stream": true,
-                // Enable automatic prompt caching (5-minute default TTL).
-                // The API places the breakpoint on the last cacheable block and
-                // advances it as the conversation grows.
-                "cache_control": { "type": "ephemeral" },
             });
 
             if let Some(sys) = system {
-                body["system"] = serde_json::Value::String(sys);
+                // System prompt as an array of text blocks with a cache
+                // breakpoint so the instruction prefix is cached across turns.
+                body["system"] = serde_json::json!([
+                    {
+                        "type": "text",
+                        "text": sys,
+                        "cache_control": { "type": "ephemeral" }
+                    }
+                ]);
+            }
+
+            // Add a cache breakpoint on the last user content block so the
+            // conversation history (system prompt, tool definitions, previous
+            // turns) is cached across requests.
+            if let Some(messages_array) = body["messages"].as_array_mut() {
+                apply_cache_breakpoint(messages_array);
             }
 
             if !tools.is_empty() {
@@ -349,6 +360,54 @@ impl AnthropicProvider {
 
             yield LlmEvent::Done;
         })
+    }
+}
+
+/// Add a `cache_control` breakpoint to the last user message in an Anthropic
+/// messages array so that the conversation prefix (system prompt, tool
+/// definitions, previous turns) is cached across requests.
+///
+/// For a string-typed `content` the message is wrapped into an array of text
+/// blocks with `cache_control` on the single element.  For an already-array
+/// `content` the annotation is added to the last cacheable block (text, image,
+/// or tool_result).
+fn apply_cache_breakpoint(messages: &mut [serde_json::Value]) {
+    let last_user = match messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+    {
+        Some(m) => m,
+        None => return,
+    };
+
+    let content = match last_user.get_mut("content") {
+        Some(c) => c,
+        None => return,
+    };
+
+    if content.is_string() {
+        let text = std::mem::take(content);
+        let text = text.as_str().unwrap_or_default().to_string();
+        *content = serde_json::json!([
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" }
+            }
+        ]);
+    } else if let Some(blocks) = content.as_array_mut()
+        && let Some(last_block) = blocks.last_mut()
+        && last_block
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| matches!(t, "text" | "image" | "tool_result"))
+        && let Some(obj) = last_block.as_object_mut()
+    {
+        obj.insert(
+            "cache_control".to_string(),
+            serde_json::json!({ "type": "ephemeral" }),
+        );
     }
 }
 
