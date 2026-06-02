@@ -686,6 +686,15 @@ fn resolve_model_for_instance(cli_override: Option<&str>, instance: &ProviderIns
         .unwrap_or_else(|| instance.backend_preset.default_model().to_string())
 }
 
+fn with_resolved_model(
+    cli_override: Option<&str>,
+    instance: &ProviderInstance,
+) -> ProviderInstance {
+    let mut resolved = instance.clone();
+    resolved.model = Some(resolve_model_for_instance(cli_override, instance));
+    resolved
+}
+
 /// Instance-based variant of `persist_provider_model_selection`.
 ///
 /// Updates the named instance's model in the providers list and persists config.
@@ -813,17 +822,20 @@ async fn run_print_mode(
     model_override: Option<&str>,
     config: &XiConfig,
 ) -> io::Result<()> {
-    let current_instance = resolve_provider_instance(Some(provider_override), config)
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
-    let current_model = resolve_model_for_instance(model_override, &current_instance);
-    let current_thinking = resolve_thinking_level_for_model(config, &current_model);
-    let provider_name = current_instance.backend_preset.id().to_string();
+    let resolved_instance = with_resolved_model(
+        model_override,
+        &resolve_provider_instance(Some(provider_override), config)
+            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?,
+    );
+    let current_thinking =
+        resolve_thinking_level_for_model(config, resolved_instance.effective_model());
+    let provider_name = resolved_instance.backend_preset.id().to_string();
 
     // Proactive preflight: refresh the token before building the provider so
     // that build_provider reads fresh credentials from the auth store.
     preflight_token_refresh(&provider_name).await;
 
-    let provider = build_provider_for_instance(&current_instance, current_thinking, config, None)
+    let provider = build_provider_for_instance(&resolved_instance, current_thinking, config, None)
         .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
@@ -846,7 +858,7 @@ async fn run_print_mode(
         file_tracker: headless_tracker,
         tool_output_log: headless_log,
         session_events,
-        current_model: current_instance.effective_model().to_string(),
+        current_model: resolved_instance.effective_model().to_string(),
         auto_compaction_enabled: true,
         manual_compaction_instructions: None,
         executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
@@ -854,7 +866,7 @@ async fn run_print_mode(
     };
 
     let provider_ctx = PrintModeProviderCtx {
-        instance: &current_instance,
+        instance: &resolved_instance,
         thinking: current_thinking,
         xi_config: config,
         name: &provider_name,
@@ -1105,7 +1117,7 @@ async fn run_print_mode_loop_inner(
 mod tests {
     use super::{
         provider_display_name, resolve_default_provider_instance, resolve_model_for_instance,
-        resolve_provider_instance, resolve_thinking_level_for_model,
+        resolve_provider_instance, resolve_thinking_level_for_model, with_resolved_model,
     };
     use crate::input::normalize_paste_text;
     use crate::{
@@ -1208,6 +1220,28 @@ mod tests {
         let inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
         let model = resolve_model_for_instance(None, &inst);
         assert_eq!(model, BackendPreset::Copilot.default_model());
+    }
+
+    #[test]
+    fn with_resolved_model_applies_cli_override() {
+        let mut inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
+        inst.model = Some("gpt-4o".to_string());
+
+        let resolved = with_resolved_model(Some("gpt-5"), &inst);
+
+        assert_eq!(resolved.model.as_deref(), Some("gpt-5"));
+        assert_eq!(resolved.effective_model(), "gpt-5");
+    }
+
+    #[test]
+    fn with_resolved_model_preserves_instance_model_without_override() {
+        let mut inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
+        inst.model = Some("gpt-4o".to_string());
+
+        let resolved = with_resolved_model(None, &inst);
+
+        assert_eq!(resolved.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(resolved.effective_model(), "gpt-4o");
     }
 
     #[test]
