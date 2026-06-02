@@ -71,7 +71,6 @@ impl App {
         );
         self.agent_turn.start();
         self.login.auth_retry_budget = 1;
-        self.latest_usage = None;
         self.log_view.auto_scroll = true;
         self.start_agent_task(provider);
     }
