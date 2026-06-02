@@ -69,6 +69,17 @@ struct CodexUsage {
     // Fallback field names used by some proxy versions.
     prompt_tokens: Option<usize>,
     completion_tokens: Option<usize>,
+    /// Prompt-token breakdown, including cached-token count.
+    /// Used by the OpenAI Responses API (and Codex proxy) to report prompt
+    /// cache hits via `input_tokens_details.cached_tokens`.
+    #[serde(default)]
+    input_tokens_details: Option<CodexInputTokensDetails>,
+}
+
+#[derive(Deserialize, Default)]
+struct CodexInputTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<usize>,
 }
 
 impl From<CodexUsage> for UsageStats {
@@ -84,7 +95,7 @@ impl From<CodexUsage> for UsageStats {
             input_tokens: input,
             output_tokens: output,
             total_tokens: total,
-            cached_tokens: None,
+            cached_tokens: u.input_tokens_details.and_then(|d| d.cached_tokens),
         }
     }
 }
@@ -605,11 +616,67 @@ mod tests {
             total_tokens: None,
             prompt_tokens: Some(5),
             completion_tokens: Some(10),
+            input_tokens_details: None,
         };
         let stats = UsageStats::from(usage);
         assert_eq!(stats.input_tokens, Some(5));
         assert_eq!(stats.output_tokens, Some(10));
         assert_eq!(stats.total_tokens, Some(15));
+        assert_eq!(stats.cached_tokens, None);
+    }
+
+    #[test]
+    fn usage_parses_cached_tokens_from_input_tokens_details() {
+        let usage = CodexUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            total_tokens: Some(120),
+            prompt_tokens: None,
+            completion_tokens: None,
+            input_tokens_details: Some(CodexInputTokensDetails {
+                cached_tokens: Some(30),
+            }),
+        };
+        let stats = UsageStats::from(usage);
+        assert_eq!(stats.input_tokens, Some(100));
+        assert_eq!(stats.output_tokens, Some(20));
+        assert_eq!(stats.total_tokens, Some(120));
+        assert_eq!(stats.cached_tokens, Some(30));
+    }
+
+    #[test]
+    fn usage_handles_missing_input_tokens_details() {
+        let usage = CodexUsage {
+            input_tokens: Some(50),
+            output_tokens: Some(10),
+            total_tokens: Some(60),
+            prompt_tokens: None,
+            completion_tokens: None,
+            input_tokens_details: None,
+        };
+        let stats = UsageStats::from(usage);
+        assert_eq!(stats.input_tokens, Some(50));
+        assert_eq!(stats.cached_tokens, None);
+    }
+
+    #[test]
+    fn usage_deserializes_cached_tokens_from_json() {
+        let json = r#"{"input_tokens":200,"output_tokens":30,"total_tokens":230,"input_tokens_details":{"cached_tokens":80}}"#;
+        let usage: CodexUsage = serde_json::from_str(json).unwrap();
+        let stats = UsageStats::from(usage);
+        assert_eq!(stats.input_tokens, Some(200));
+        assert_eq!(stats.output_tokens, Some(30));
+        assert_eq!(stats.total_tokens, Some(230));
+        assert_eq!(stats.cached_tokens, Some(80));
+    }
+
+    #[test]
+    fn usage_deserializes_without_input_tokens_details() {
+        let json = r#"{"input_tokens":200,"output_tokens":30,"total_tokens":230}"#;
+        let usage: CodexUsage = serde_json::from_str(json).unwrap();
+        let stats = UsageStats::from(usage);
+        assert_eq!(stats.input_tokens, Some(200));
+        assert_eq!(stats.cached_tokens, None);
     }
 
     #[test]
