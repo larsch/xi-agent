@@ -2166,6 +2166,56 @@ mod tests {
     }
 
     #[test]
+    fn submit_injects_attachment_events_after_user_message() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("note.txt");
+            std::fs::write(&path, "attached contents\n").expect("write attachment");
+
+            let mut app = make_app();
+            app.session.current_cwd = tmp.path().to_string_lossy().to_string();
+            app.textarea.insert_str("please inspect @note.txt");
+
+            let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+                std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+
+            app.submit(&provider);
+
+            let events = app
+                .session
+                .session_state
+                .as_ref()
+                .expect("session state")
+                .events();
+            let user_idx = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        crate::session_event::SessionEvent::UserMessage { content, .. }
+                            if content == "please inspect @note.txt"
+                    )
+                })
+                .expect("submitted user message present");
+            assert!(matches!(
+                events.get(user_idx + 1),
+                Some(crate::session_event::SessionEvent::ToolCall { id, name, .. })
+                    if id == "attach_0" && name == "read_file"
+            ));
+            assert!(matches!(
+                events.get(user_idx + 2),
+                Some(crate::session_event::SessionEvent::ToolResult { id, content, is_error, .. })
+                    if id == "attach_0" && content == "attached contents\n" && !is_error
+            ));
+
+            if let Some(handle) = app.runtime.agent_task.take() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
     fn provider_error_clears_live_turn_and_commits_turn_error_event() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("session.jsonl");

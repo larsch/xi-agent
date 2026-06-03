@@ -883,9 +883,9 @@ mod tests {
     #[test]
     fn synthetic_attachment_events_are_hidden_in_display_projection() {
         let events = vec![
+            user_ev("look at @src/main.rs"),
             tool_call_ev("attach_0", "read_file"),
             tool_result_ev("attach_0", "fn main() {}"),
-            user_ev("look at @src/main.rs"),
         ];
         let msgs = project_display_messages(&events);
         // All three events produce a Message, but the two attach_ ones are hidden.
@@ -920,14 +920,15 @@ mod tests {
     #[test]
     fn synthetic_attachment_events_are_present_in_llm_projection() {
         let events = vec![
+            user_ev("look at @src/main.rs"),
             tool_call_ev("attach_0", "read_file"),
             tool_result_ev("attach_0", "fn main() {}"),
-            user_ev("look at @src/main.rs"),
         ];
         let msgs = project_llm_messages(&events);
-        // LLM sees the tool call, tool result, and user message.
-        assert!(msgs.iter().any(|m| m.role == crate::llm::Role::ToolCall));
-        assert!(msgs.iter().any(|m| m.role == crate::llm::Role::ToolResult));
-        assert!(msgs.iter().any(|m| m.role == crate::llm::Role::User));
+        // LLM sees the user message first, then the synthetic tool call/result.
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, crate::llm::Role::User);
+        assert_eq!(msgs[1].role, crate::llm::Role::ToolCall);
+        assert_eq!(msgs[2].role, crate::llm::Role::ToolResult);
     }
 }

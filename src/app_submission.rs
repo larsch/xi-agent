@@ -119,9 +119,10 @@ impl App {
     }
 
     /// Parse `@<path>` tokens from `text`, read each file, and inject a
-    /// synthetic `read_file` `ToolCall` + `ToolResult` event pair before the
-    /// user message.  Image files embed the image as a data URI directly in
-    /// the text content; text files are inlined verbatim.
+    /// synthetic `read_file` `ToolCall` + `ToolResult` event pair after the
+    /// user message, as if the agent had already performed those reads.
+    /// Image files embed the image as a data URI directly in the text
+    /// content; text files are inlined verbatim.
     ///
     /// Errors produce a visible notice but do not abort submission.
     fn inject_at_file_attachments(&mut self, text: &str) {
@@ -214,8 +215,8 @@ impl App {
             return;
         }
 
+        self.append_user_message(trimmed.clone());
         self.inject_at_file_attachments(&trimmed);
-        self.append_user_message(trimmed);
         self.persist_messages();
         self.reset_textarea();
 
