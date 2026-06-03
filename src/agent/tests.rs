@@ -48,6 +48,47 @@ impl LlmProvider for MockProvider {
     }
 }
 
+struct DelayedMockProvider {
+    turns: Arc<Mutex<std::collections::VecDeque<Vec<LlmEvent>>>>,
+    delay: std::time::Duration,
+}
+
+impl DelayedMockProvider {
+    fn new(turns: Vec<Vec<LlmEvent>>, delay: std::time::Duration) -> Self {
+        Self {
+            turns: Arc::new(Mutex::new(turns.into())),
+            delay,
+        }
+    }
+}
+
+impl LlmProvider for DelayedMockProvider {
+    fn stream_chat(&self, messages: Vec<Message>) -> LlmStream {
+        self.stream_chat_with_tools(messages, vec![])
+    }
+
+    fn stream_chat_with_tools(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+    ) -> LlmStream {
+        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        let delay = self.delay;
+        Box::pin(stream::unfold(
+            (events.into_iter(), delay),
+            |(mut iter, delay)| async move {
+                let ev = iter.next()?;
+                tokio::time::sleep(delay).await;
+                Some((ev, (iter, delay)))
+            },
+        ))
+    }
+
+    fn list_models(&self) -> ModelListFuture {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
+
 struct SlowTool;
 
 impl Tool for SlowTool {
@@ -262,7 +303,7 @@ async fn agent_loop_forwards_tool_intent_before_tool_start() {
 }
 
 #[tokio::test]
-async fn steering_during_tool_batch_skips_remaining_tools() {
+async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
     let provider = MockProvider::new(vec![
         vec![
             LlmEvent::ToolCall {
@@ -322,21 +363,30 @@ async fn steering_during_tool_batch_skips_remaining_tools() {
         }
     }
 
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::SteeringConsumed { text } if text == "interrupt")),
-        "expected SteeringConsumed event"
-    );
-
-    let skipped_second = events.iter().any(|e| {
+    let second_tool_ok = events.iter().any(|e| {
         matches!(
             e,
             AgentEvent::ToolCallEnd { id, result, .. }
-            if id == "call_2" && result.is_error && result.content.as_text().contains("Skipped due to queued user message")
+            if id == "call_2" && !result.is_error && result.content.as_text().contains("slow:b")
         )
     });
-    assert!(skipped_second, "expected second tool call to be skipped");
+    assert!(
+        second_tool_ok,
+        "expected second tool call to complete normally"
+    );
+
+    let turn_end_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnEnd))
+        .expect("expected TurnEnd event");
+    let steering_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::SteeringConsumed { text } if text == "interrupt"))
+        .expect("expected SteeringConsumed event");
+    assert!(
+        turn_end_idx < steering_idx,
+        "expected steering to be consumed after TurnEnd"
+    );
 
     assert!(matches!(events.last(), Some(AgentEvent::Done)));
 }
@@ -415,6 +465,86 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
     );
 
     assert!(matches!(events.last(), Some(AgentEvent::TurnEnd)));
+}
+
+#[tokio::test]
+async fn steering_after_streamed_text_is_consumed_after_turn_end() {
+    let provider = DelayedMockProvider::new(
+        vec![
+            vec![
+                LlmEvent::ThinkingToken("thinking".to_string()),
+                LlmEvent::Token {
+                    text: "answer".to_string(),
+                    phase: AssistantPhase::Final,
+                },
+                LlmEvent::Done,
+            ],
+            vec![
+                LlmEvent::Token {
+                    text: "follow-up".to_string(),
+                    phase: AssistantPhase::Final,
+                },
+                LlmEvent::Done,
+            ],
+        ],
+        std::time::Duration::from_millis(20),
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let config = AgentLoopConfig {
+        tools: HashMap::new(),
+        file_tracker: make_tracker(),
+        tool_output_log: make_log(),
+        executor: make_executor(),
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_instructions: None,
+        system_prompt: None,
+    };
+
+    let handle = tokio::spawn(async move {
+        run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    steering_tx
+        .send("test".to_string())
+        .expect("queue steering");
+
+    handle.await.expect("agent loop join");
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
+    }
+
+    let answer_idx = events
+        .iter()
+        .rposition(|e| matches!(e, AgentEvent::TextToken { text, .. } if text == "answer"))
+        .expect("expected answer token");
+    let first_turn_end_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnEnd))
+        .expect("expected first TurnEnd");
+    let steering_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::SteeringConsumed { text } if text == "test"))
+        .expect("expected SteeringConsumed event");
+
+    assert!(
+        answer_idx < first_turn_end_idx,
+        "expected answer before TurnEnd"
+    );
+    assert!(
+        first_turn_end_idx < steering_idx,
+        "expected steering to be consumed after TurnEnd"
+    );
+    assert!(matches!(events.last(), Some(AgentEvent::Done)));
 }
 
 #[tokio::test]

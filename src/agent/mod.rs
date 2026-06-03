@@ -58,12 +58,10 @@ enum TurnOutcome {
 /// The result of executing a batch of tool calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchOutcome {
-    /// All tool calls completed normally; continue the loop.
+    /// All tool calls completed normally.
     Completed,
     /// The user cancelled; the loop should stop.
     Cancelled,
-    /// A steering message arrived; the loop should continue from the top.
-    SteeringQueued,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -108,28 +106,6 @@ fn record_tool_call_result(
         display_range: None,
         timestamp: 0,
     });
-}
-
-fn skip_remaining_tool_calls(
-    pending_tool_calls: &[(String, String, serde_json::Value)],
-    next_idx: usize,
-    tx: &UnboundedSender<AppEvent>,
-    session_events: &mut Vec<SessionEvent>,
-    reason: &'static str,
-) {
-    for (skip_id, skip_name, skip_args) in pending_tool_calls.iter().skip(next_idx).cloned() {
-        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
-            id: skip_id.clone(),
-            name: skip_name.clone(),
-            args: skip_args.clone(),
-        }));
-        let skipped = ToolResult::err(reason);
-        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
-            id: skip_id.clone(),
-            result: skipped.clone(),
-        }));
-        record_tool_call_result(session_events, &skip_id, &skip_name, skip_args, skipped);
-    }
 }
 
 fn send_compaction_failed_status(tx: &UnboundedSender<AppEvent>, message: &str) {
@@ -276,14 +252,14 @@ async fn stream_assistant_turn(
 /// Execute a batch of tool calls sequentially and return a [`BatchOutcome`].
 ///
 /// Sends `ToolCallStart`/`ToolCallEnd` events and appends `ToolCall`/`ToolResult`
-/// entries to `session_events` for each call.  Checks for cancellation and
-/// steering interruptions between calls.
+/// entries to `session_events` for each call. Checks for cancellation between
+/// calls, but queued steering is deferred until the current turn boundary so
+/// already-emitted tool calls complete in order.
 async fn execute_tool_batch(
     config: &AgentLoopConfig,
     pending_tool_calls: &[(String, String, serde_json::Value)],
     tx: &UnboundedSender<AppEvent>,
     cancel_rx: &tokio::sync::watch::Receiver<bool>,
-    steering_rx: &mut UnboundedReceiver<String>,
     session_events: &mut Vec<SessionEvent>,
 ) -> BatchOutcome {
     for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
@@ -311,27 +287,29 @@ async fn execute_tool_batch(
         }));
         record_tool_call_result(session_events, &id, &name, args, result);
 
-        // Check for cancellation / steering interruption before next call.
+        // Check for cancellation before the next call.
         if *cancel_rx.borrow() {
-            skip_remaining_tool_calls(
-                pending_tool_calls,
-                idx + 1,
-                tx,
-                session_events,
-                "Interrupted by user",
-            );
+            for (skip_id, skip_name, skip_args) in pending_tool_calls.iter().skip(idx + 1).cloned()
+            {
+                tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
+                    id: skip_id.clone(),
+                    name: skip_name.clone(),
+                    args: skip_args.clone(),
+                }));
+                let interrupted = ToolResult::err("Interrupted by user");
+                tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
+                    id: skip_id.clone(),
+                    result: interrupted.clone(),
+                }));
+                record_tool_call_result(
+                    session_events,
+                    &skip_id,
+                    &skip_name,
+                    skip_args,
+                    interrupted,
+                );
+            }
             return BatchOutcome::Cancelled;
-        }
-
-        if drain_steering_messages(steering_rx, session_events, tx) {
-            skip_remaining_tool_calls(
-                pending_tool_calls,
-                idx + 1,
-                tx,
-                session_events,
-                "Skipped due to queued user message.",
-            );
-            return BatchOutcome::SteeringQueued;
         }
     }
 
@@ -493,14 +471,14 @@ pub async fn run_agent_loop(
 
                 config.file_tracker.lock().unwrap().refresh_baselines();
 
+                tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
+
                 // If a steering message arrived while the LLM was generating,
-                // keep the loop alive so it is processed.
+                // consume it only after the completed assistant turn has been
+                // committed via TurnEnd so transcript order remains natural.
                 if drain_steering_messages(&mut steering_rx, &mut session_events, &tx) {
-                    tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
                     continue;
                 }
-
-                tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
 
                 // Threshold-based auto-compaction after a completed turn.
                 if config.auto_compaction_enabled {
@@ -546,23 +524,18 @@ pub async fn run_agent_loop(
                 });
 
                 // ── Execute tool batch ────────────────────────────────────────
-                let batch_outcome = execute_tool_batch(
-                    &config,
-                    &calls,
-                    &tx,
-                    &cancel_rx,
-                    &mut steering_rx,
-                    &mut session_events,
-                )
-                .await;
+                let batch_outcome =
+                    execute_tool_batch(&config, &calls, &tx, &cancel_rx, &mut session_events).await;
 
                 config.file_tracker.lock().unwrap().refresh_baselines();
                 tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
 
-                match batch_outcome {
-                    BatchOutcome::Completed => {}
-                    BatchOutcome::Cancelled => return,
-                    BatchOutcome::SteeringQueued => continue,
+                if let BatchOutcome::Cancelled = batch_outcome {
+                    return;
+                }
+
+                if drain_steering_messages(&mut steering_rx, &mut session_events, &tx) {
+                    continue;
                 }
             }
         }

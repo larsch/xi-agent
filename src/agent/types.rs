@@ -440,7 +440,8 @@ pub enum AgentEvent {
     },
     /// A partial JSON argument chunk for an in-progress tool call.
     ToolCallArgsDelta { id: String, partial_json: String },
-    /// A queued steering message was consumed and inserted into loop history.
+    /// A queued steering message was consumed at a turn boundary and inserted
+    /// into loop history.
     SteeringConsumed { text: String },
     /// A transient status message from the provider (e.g. "Rate limited, retrying in 7s…").
     /// Should be shown to the user but is not part of the conversation history.
