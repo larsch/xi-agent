@@ -10,6 +10,9 @@
   sends a stable session ID to improve cache routing. Unexpected cache
   misses (zero cached tokens despite a recent cache-populating turn)
   surface a ⚠️ suffix in the info bar context display.
+- **Session resume context usage**: the info bar now shows the last known
+  token utilisation immediately when resuming a session, instead of showing
+  only the context window size until the next turn completes.
 - **DeepSeek V4 context window**: hard-coded 1M token fallback entries for
   `deepseek-v4-flash` and `deepseek-v4-pro` (kludge until upstream metadata
   is available).

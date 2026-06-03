@@ -359,6 +359,9 @@ impl App {
         };
         match store.load_events(session_id) {
             Ok(log) => {
+                // Capture last known token usage from the loaded events
+                // before moving the event log into session_state.
+                self.latest_usage = Self::find_last_usage_from_events(&log.events);
                 self.session.session_state = Some(SessionState::from_event_log(log));
                 self.session.live_turn.clear_all();
                 self.session.current_session_id = Some(session_id.to_string());
@@ -375,6 +378,33 @@ impl App {
             }
         }
         self.refresh_resume_availability();
+    }
+
+    /// Scan session events for the last known token usage data.
+    ///
+    /// Checks the most recent [`AssistantMessage`] that has `usage` data,
+    /// then falls back to the most recent [`CompactionSummary`]'s
+    /// `tokens_after` so that the info bar can show a meaningful context
+    /// utilisation value immediately on session resume.
+    ///
+    /// [`AssistantMessage`]: SessionEvent::AssistantMessage
+    /// [`CompactionSummary`]: SessionEvent::CompactionSummary
+    fn find_last_usage_from_events(events: &[SessionEvent]) -> Option<UsageStats> {
+        for ev in events.iter().rev() {
+            match ev {
+                SessionEvent::AssistantMessage { usage: Some(u), .. } => return Some(*u),
+                SessionEvent::CompactionSummary { tokens_after, .. } => {
+                    return Some(UsageStats {
+                        input_tokens: Some(*tokens_after),
+                        output_tokens: None,
+                        total_tokens: Some(*tokens_after),
+                        cached_tokens: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     pub fn enter_resume_selection_mode(&mut self) {
