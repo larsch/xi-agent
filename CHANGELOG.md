@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.4.0 — Unreleased
+
+### Added
+
+- **Prompt cache support**: OpenAI and Anthropic providers now report
+  cached-token counts in the info bar. Anthropic sends automatic ephemeral
+  `cache_control` annotations on every request (matching API spec), OpenAI
+  sends a stable session ID to improve cache routing. Unexpected cache
+  misses (zero cached tokens despite a recent cache-populating turn)
+  surface a ⚠️ suffix in the info bar context display.
+- **DeepSeek V4 context window**: hard-coded 1M token fallback entries for
+  `deepseek-v4-flash` and `deepseek-v4-pro` (kludge until upstream metadata
+  is available).
+- **Alt+S shortcut**: toggle the info bar on and off without `/info`.
+
+### Fixed
+
+- **Steering race condition**: pressing Enter during streaming now defers
+  the user message until the current assistant turn and all its tool calls
+  are committed, preventing transcript corruption and tool-call skipping.
+  Explicit cancellation still interrupts immediately.
+- **Attachment ordering**: synthesized `read_file` events from `@filename`
+  attachments are now placed after the submitted user prompt in the event
+  stream, matching provider expectations.
+- **`--print` model override**: the `--model` flag now correctly overrides
+  the configured model in non-interactive mode.
+- **Anthropic `cache_control` placement**: removed the invalid top-level
+  `cache_control` field and moved it to individual content blocks, fixing
+  400 errors from the Copilot Anthropic proxy and restoring prompt caching
+  on both direct and proxied routes.
+- **Info bar token persistence**: previous-turn token usage (input size,
+  cached size) remains visible when starting a new prompt, instead of
+  clearing at turn launch. Still resets correctly on `/new`.
+- **Codex prompt cache hits**: parse `input_tokens_details.cached_tokens`
+  from the OpenAI Responses API in the Codex provider, so cache-hit
+  indicators appear for Copilot GPT-5.x models.
+
 ## v0.3.0 — 2026-05-31
 
 ### Added
