@@ -215,6 +215,12 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         "role": "assistant",
                         "content": content,
                         "tool_calls": tool_calls_opt,
+                        // Always include reasoning_content so reasoning
+                        // models (e.g. DeepSeek-v4-pro) don't reject the
+                        // request.  Use an empty string when there is no
+                        // thinking content (matches the model's own
+                        // initial delta pattern).
+                        "reasoning_content": "",
                     });
                     if let Some(thinking) = msg.thinking.as_deref().filter(|t| !t.is_empty()) {
                         entry["reasoning_content"] =
@@ -228,6 +234,7 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                 result.push(serde_json::json!({
                     "role": "assistant",
                     "content": serde_json::Value::Null,
+                    "reasoning_content": "",
                     "tool_calls": [{
                         "id": tc.tool_call_id.clone().unwrap_or_else(|| "call_0".to_string()),
                         "type": "function",
@@ -656,9 +663,8 @@ mod tests {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some(String::new());
         let wire = to_openai_wire(&[msg]);
-        assert!(
-            wire[0].get("reasoning_content").is_none() || wire[0]["reasoning_content"].is_null()
-        );
+        // reasoning_content is always present; empty string when no thinking.
+        assert_eq!(wire[0]["reasoning_content"], "");
     }
 
     #[test]

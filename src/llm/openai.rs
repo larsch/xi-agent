@@ -19,6 +19,10 @@ pub struct OpenAiProvider {
     /// which helps the API route to the same machine that already cached the
     /// prompt prefix for this session.
     prompt_cache_key: Option<String>,
+    /// Optional reasoning effort level (e.g. "low", "medium", "high") sent
+    /// as `reasoning_effort` in the request body.  Only meaningful for
+    /// models that support reasoning/thinking (e.g. DeepSeek-R1, o-series).
+    reasoning_effort: Option<String>,
     client: reqwest::Client,
 }
 
@@ -43,6 +47,7 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             extra_headers,
             prompt_cache_key: None,
+            reasoning_effort: None,
             client: build_http_client(),
         }
     }
@@ -58,13 +63,31 @@ impl OpenAiProvider {
         self
     }
 
+    /// Set a reasoning effort level for this provider instance.
+    ///
+    /// The value is sent as `reasoning_effort` in the request body (e.g.
+    /// "low", "medium", "high").  Only models that support reasoning/
+    /// thinking (e.g. DeepSeek-R1, OpenAI o-series) will act on it.
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
     fn stream_inner(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>) -> LlmStream {
         let url = format!("{}/chat/completions", self.base_url);
         let model = self.model.clone();
         let api_key = self.api_key.clone();
         let extra_headers = self.extra_headers.clone();
         let prompt_cache_key = self.prompt_cache_key.clone();
+        let reasoning_effort = self.reasoning_effort.clone();
         let client = self.client.clone();
+
+        log::debug!(
+            "OpenAiProvider::stream_inner: model={} prompt_cache_key={:?} reasoning_effort={:?}",
+            model,
+            prompt_cache_key,
+            reasoning_effort,
+        );
 
         Box::pin(async_stream::stream! {
             let oai_messages: Vec<serde_json::Value> = to_openai_wire(&messages);
@@ -80,6 +103,7 @@ impl OpenAiProvider {
                     Some(tools.iter().map(to_oai_tool).collect())
                 },
                 prompt_cache_key,
+                reasoning_effort,
             };
 
             if let Ok(json) = serde_json::to_string_pretty(&body) {
@@ -231,6 +255,10 @@ struct ChatRequest {
     /// See <https://platform.openai.com/docs/guides/prompt-caching>.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
+    /// Reasoning effort level ("low", "medium", "high") for models that
+    /// support configurable reasoning/thinking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize)]

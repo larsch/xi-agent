@@ -91,8 +91,22 @@ pub fn thinking_support_for_instance(instance: &ProviderInstance, model: &str) -
                         "copilot chat-completions route does not expose reasoning.effort",
                     ),
                 }
+            } else if instance.backend_preset == BackendPreset::OpenAi
+                || instance.backend_preset == BackendPreset::OpenRouter
+            {
+                // OpenAI API and OpenRouter support `reasoning_effort` in the
+                // chat completions request body (OpenAI o-series convention).
+                ThinkingSupport::Applied
             } else {
-                ThinkingSupport::Ignored("openai-compatible provider does not map thinking levels")
+                // Generic OpenAI-compatible endpoints (e.g. DeepSeek) may or
+                // may not support `reasoning_effort`.  Many don't — they still
+                // produce `reasoning_content` in responses autonomously, but
+                // sending the parameter triggers a 400 error.  Mark thinking
+                // as unsupported so the parameter is not sent; the model's
+                // autonomous reasoning tokens are still parsed from responses.
+                ThinkingSupport::Ignored(
+                    "generic openai-compatible: reasoning_effort not reliably supported",
+                )
             }
         }
         ApiType::AnthropicCompatible => {
@@ -182,8 +196,28 @@ pub fn build_provider_for_instance(
                 )
             })?;
             let mut p = OpenAiProvider::new(base_url, model, api_key);
-            if let Some(sid) = session_id {
-                p = p.with_prompt_cache_key(sid);
+            log::debug!(
+                "provider build: id={} backend={:?} api={:?} thinking={:?} session_id={:?}",
+                instance.id,
+                instance.backend_preset,
+                instance.api_type,
+                thinking,
+                session_id,
+            );
+            // Only send reasoning_effort and prompt_cache_key for OpenAI API;
+            // generic openai-compatible endpoints (e.g. DeepSeek) may reject them.
+            if instance.backend_preset == BackendPreset::OpenAi {
+                log::debug!(
+                    "provider build: enabling reasoning_effort+prompt_cache_key for OpenAi backend"
+                );
+                p = p.with_reasoning_effort(thinking.to_reasoning_effort_string());
+                if let Some(sid) = session_id {
+                    p = p.with_prompt_cache_key(sid);
+                }
+            } else {
+                log::debug!(
+                    "provider build: skipping reasoning_effort+prompt_cache_key (backend is not OpenAi)"
+                );
             }
             Ok(Arc::new(p))
         }
@@ -207,6 +241,7 @@ pub fn build_provider_for_instance(
                     ("X-Title".to_string(), OPENROUTER_TITLE.to_string()),
                 ],
             );
+            p = p.with_reasoning_effort(thinking.to_reasoning_effort_string());
             if let Some(sid) = session_id {
                 p = p.with_prompt_cache_key(sid);
             }
