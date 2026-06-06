@@ -128,8 +128,21 @@ pub(super) fn build_log_lines(
                     let thinking_display = {
                         let sanitized = sanitize_for_display(thinking);
                         let all_lines: Vec<&str> = sanitized.lines().collect();
-                        let skip = all_lines.len().saturating_sub(5);
-                        format!("🧠 {}", all_lines[skip..].join("\n"))
+                        // Wrap each logical line to terminal width, then take only the
+                        // last 5 *displayed* lines for visual stability as the model streams.
+                        // Without this, a long logical line that wraps to multiple display
+                        // lines causes the output height to jump as new characters arrive.
+                        let wrap_width = width.saturating_sub(2).max(1); // account for "🧠 " prefix
+                        let mut wrapped: Vec<String> = Vec::new();
+                        for logical in all_lines {
+                            if logical.is_empty() {
+                                wrapped.push(String::new());
+                            } else {
+                                wrapped.extend(wrap_str(logical, wrap_width));
+                            }
+                        }
+                        let skip = wrapped.len().saturating_sub(5);
+                        format!("🧠 {}", wrapped[skip..].join("\n"))
                     };
                     append_message_dim(&mut lines, &thinking_display, "", width);
                     if has_answer {
