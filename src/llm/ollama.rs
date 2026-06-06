@@ -47,6 +47,60 @@ impl OllamaProvider {
     }
 }
 
+/// Attempt to populate the global context-window cache for `model_name`
+/// by calling `{base_url}/api/show`.  Failures are logged at debug level
+/// and do not disturb the caller.
+///
+/// This is the canonical context-window discovery routine, shared by
+/// [`OllamaProvider::list_models`] and by providers that proxy through
+/// an Ollama-compatible backend (e.g. Open WebUI).
+pub async fn fetch_and_cache_context_window(
+    base_url: &str,
+    model_name: &str,
+    api_key: Option<&str>,
+) {
+    let show_url = format!("{}/api/show", base_url.trim_end_matches('/'));
+    let client = build_http_client();
+
+    let mut req = client
+        .post(&show_url)
+        .json(&serde_json::json!({ "model": model_name, "verbose": false }));
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<ShowResponse>().await {
+            Ok(show) => {
+                let ctx = show
+                    .model_info
+                    .iter()
+                    .find(|(k, _)| k.ends_with(".context_length"))
+                    .and_then(|(_, v)| v.as_u64())
+                    .map(|n| n as usize);
+                if let Some(ctx_len) = ctx {
+                    log::debug!("ollama model {model_name} context_length={ctx_len}");
+                    if let Ok(mut map) = context_cache().write() {
+                        map.insert(model_name.to_string(), ctx_len);
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!("ollama /api/show parse error for {model_name}: {e}");
+            }
+        },
+        Ok(resp) => {
+            log::debug!(
+                "ollama /api/show returned {} for {model_name}",
+                resp.status()
+            );
+        }
+        Err(e) => {
+            log::debug!("ollama /api/show request failed for {model_name}: {e}");
+        }
+    }
+}
+
 // ── Serde types ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -315,7 +369,7 @@ impl LlmProvider for OllamaProvider {
 
     fn list_models(&self) -> ModelListFuture {
         let tags_url = format!("{}/api/tags", self.base_url);
-        let show_url = format!("{}/api/show", self.base_url);
+        let base_url = self.base_url.clone();
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         Box::pin(async move {
@@ -332,50 +386,9 @@ impl LlmProvider for OllamaProvider {
             // For each model, fetch /api/show to get its context window size.
             // We do this best-effort: failures are logged and skipped.
             for model_name in &models {
-                let mut req = client
-                    .post(&show_url)
-                    .json(&serde_json::json!({ "model": model_name, "verbose": false }));
-                if let Some(key) = &api_key {
-                    req = req.bearer_auth(key);
-                }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        match resp.json::<ShowResponse>().await {
-                            Ok(show) => {
-                                // The context length is stored under the
-                                // architecture-prefixed key, e.g.
-                                // "llama.context_length", "gemma3.context_length", etc.
-                                // We scan for any key ending with ".context_length".
-                                let ctx = show
-                                    .model_info
-                                    .iter()
-                                    .find(|(k, _)| k.ends_with(".context_length"))
-                                    .and_then(|(_, v)| v.as_u64())
-                                    .map(|n| n as usize);
-                                if let Some(ctx_len) = ctx {
-                                    log::debug!(
-                                        "ollama model {model_name} context_length={ctx_len}"
-                                    );
-                                    if let Ok(mut map) = context_cache().write() {
-                                        map.insert(model_name.clone(), ctx_len);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::debug!("ollama /api/show parse error for {model_name}: {e}");
-                            }
-                        }
-                    }
-                    Ok(resp) => {
-                        log::debug!(
-                            "ollama /api/show returned {} for {model_name}",
-                            resp.status()
-                        );
-                    }
-                    Err(e) => {
-                        log::debug!("ollama /api/show request failed for {model_name}: {e}");
-                    }
-                }
+                // Delegate to the shared context-window discovery helper so
+                // other paths (e.g. Open WebUI → OpenAI API) can also use it.
+                fetch_and_cache_context_window(&base_url, model_name, api_key.as_deref()).await;
             }
 
             Ok(models)

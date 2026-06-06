@@ -8,7 +8,7 @@ use crate::{
         codex::{CodexProvider, DEFAULT_BASE_URL as CODEX_DEFAULT_BASE_URL},
         copilot::CopilotProvider,
         gemini::{DEFAULT_BASE_URL as GEMINI_DEFAULT_BASE_URL, GeminiProvider},
-        ollama::OllamaProvider,
+        ollama::{self, OllamaProvider},
         openai::OpenAiProvider,
         test_provider::TestProvider,
     },
@@ -280,6 +280,28 @@ pub fn build_provider_for_instance(
                 _ => {
                     let api_base = format!("{}/api", base.trim_end_matches('/'));
                     let api_key = instance.api_key.clone().unwrap_or_default();
+
+                    // Also try to populate the Ollama context-window cache.
+                    // Open WebUI proxies the Ollama-native API at /ollama/api
+                    // even when the OpenAI-compatible /api endpoint is used.
+                    let model_owned = model.to_string();
+                    let ollama_base = format!("{}/ollama", base.trim_end_matches('/'));
+                    let api_key_for_task = if api_key.is_empty() {
+                        None
+                    } else {
+                        Some(api_key.clone())
+                    };
+                    if OllamaProvider::cached_context_window(&model_owned).is_none() {
+                        tokio::spawn(async move {
+                            ollama::fetch_and_cache_context_window(
+                                &ollama_base,
+                                &model_owned,
+                                api_key_for_task.as_deref(),
+                            )
+                            .await;
+                        });
+                    }
+
                     Ok(Arc::new(OpenAiProvider::new(api_base, model, api_key)))
                 }
             }
