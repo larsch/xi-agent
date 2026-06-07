@@ -169,7 +169,10 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
     format!(
         "\n\
 \nThe following skills provide specialized instructions for specific tasks.\n\
-Use the read_file tool to load a skill's file when the task matches its description.\n\
+Each skill's description names the task type, problem domain, or situation it handles. \
+Load any skill whose description overlaps with what the user is asking about. \
+When multiple descriptions are relevant, load all of them.\n\
+Use the read_file tool to load a skill's file.\n\
 When a skill file references a relative path, resolve it against the skill directory \
 (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
 \n<available_skills>\n{entries}\n</available_skills>"
@@ -308,7 +311,10 @@ mod tests {
         assert!(prompt.contains("<name>plan</name>"));
         assert!(prompt.contains("<description>Create an implementation plan</description>"));
         assert!(prompt.contains("<location>/tmp/skills/plan/SKILL.md</location>"));
-        assert!(prompt.contains("Use the read_file tool to load a skill's file"));
+        assert!(prompt.contains("Each skill's description names the task type, problem domain, or situation it handles."));
+        assert!(prompt.contains("Load any skill whose description overlaps with what the user is asking about."));
+        assert!(prompt.contains("When multiple descriptions are relevant, load all of them."));
+        assert!(prompt.contains("Use the read_file tool to load a skill's file."));
     }
 
     #[test]
