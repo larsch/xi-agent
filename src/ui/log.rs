@@ -240,7 +240,14 @@ fn render_tool_call(
             format!("⚙ {prefix} {command}")
         }
     } else if let Some(snapshot) = msg.tool_partial_snapshot.as_ref() {
-        tool_presentation::tool_invocation_label(name, snapshot)
+        let label = tool_presentation::tool_invocation_label(name, snapshot);
+        // During streaming, a partial snapshot may contain an empty target
+        // field (e.g. {"path": ""}) which produces the pending label.
+        // Detect this and render it in italic/dim like other placeholders.
+        if label == tool_presentation::tool_pending_label(name) {
+            is_placeholder = true;
+        }
+        label
     } else if let Some(partial) = msg.tool_partial_args.as_deref() {
         let (lbl, ph) = tool_presentation::tool_invocation_label_partial(
             name,

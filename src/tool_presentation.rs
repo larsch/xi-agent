@@ -185,12 +185,17 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
 }
 
 /// Build the user-facing one-line tool invocation label.
+///
+/// When no meaningful detail can be extracted from `args` the pending action
+/// label (e.g. "👀 reading…") is returned instead of the raw tool name.
+/// This keeps the display consistent during streaming where the target
+/// argument field may still be empty or absent.
 pub fn tool_invocation_label(name: &str, args: &Value) -> String {
-    let emoji = tool_emoji(name);
     let detail = tool_detail(name, args);
     if detail.is_empty() {
-        format!("{emoji} {name}")
+        tool_pending_label(name)
     } else {
+        let emoji = tool_emoji(name);
         format!("{emoji} {detail}")
     }
 }
