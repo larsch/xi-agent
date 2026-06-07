@@ -17,24 +17,19 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, InputMode},
+    config::DisplayConfig,
     context_window::context_window_for_model,
     selection_state::MAX_SELECTION_VISIBLE,
 };
 
 use self::{
     info::build_info_line,
-    input::{
-        ASK_USER_INPUT_BG, INPUT_BG, SHELL_INPUT_BG, render_input_panel, split_scrollbar_column,
-        style_textarea,
-    },
+    input::{render_input_panel, split_scrollbar_column, style_textarea},
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
     log::{ToolBodyConfig, build_log_lines, dim_lines},
-    login::{LOGIN_HEADER_BG, build_login_content_lines},
+    login::build_login_content_lines,
     menu::{build_completion_lines, build_selection_lines},
 };
-
-/// Background colour of the selection menu header.
-const SELECTION_HEADER_BG: Color = Color::Rgb(20, 45, 20);
 
 fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     Line::from(Span::styled(
@@ -43,7 +38,11 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
-fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
+fn build_log_lines_cached<'a>(
+    app: &'a mut App,
+    width: usize,
+    display: &DisplayConfig,
+) -> &'a Vec<Line<'static>> {
     // Flush any pending session-mutation dirty flag into the log cache.
     if app.session.take_dirty() {
         app.log_view.invalidate();
@@ -57,12 +56,14 @@ fn build_log_lines_cached(app: &mut App, width: usize) -> &Vec<Line<'static>> {
             ..ToolBodyConfig::default()
         };
         let lines = if let Some((kept, discarded)) = app.display_messages_split() {
-            let mut lines = build_log_lines(&kept, false, width, &cfg);
-            lines.extend(dim_lines(build_log_lines(&discarded, false, width, &cfg)));
+            let mut lines = build_log_lines(&kept, false, width, &cfg, &app.theme, display);
+            lines.extend(dim_lines(build_log_lines(
+                &discarded, false, width, &cfg, &app.theme, display,
+            )));
             lines
         } else {
             let combined = app.display_messages_combined();
-            build_log_lines(&combined, app.streaming(), width, &cfg)
+            build_log_lines(&combined, app.streaming(), width, &cfg, &app.theme, display)
         };
         let rev = app.log_view.log_cache.revision;
         app.log_view.log_cache.cached_lines = Some((rev, width, step_cursor, lines));
@@ -140,8 +141,9 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
     let log_width = log_content_area.width as usize;
     app.log_view.last_log_height = inner_height;
+    let display = app.display.clone();
 
-    let total_lines = build_log_lines_cached(app, log_width).len();
+    let total_lines = build_log_lines_cached(app, log_width, &display).len();
     let max_scroll = total_lines.saturating_sub(inner_height);
 
     if app.log_view.auto_scroll {
@@ -155,7 +157,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     full_output: app.log_view.full_output,
                     ..ToolBodyConfig::default()
                 };
-                build_log_lines(&kept, false, log_width, &cfg).len()
+                build_log_lines(&kept, false, log_width, &cfg, &app.theme, &display).len()
             })
             .unwrap_or(0);
         let half_height = inner_height / 2;
@@ -170,7 +172,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let has_scrollbar = total_lines > inner_height && !app.log_view.auto_scroll;
     let log_scroll = app.log_view.log_scroll;
     let visible_lines: Vec<Line<'static>> = {
-        let all = build_log_lines_cached(app, log_width);
+        let all = build_log_lines_cached(app, log_width, &display);
         if total_lines <= inner_height {
             let padding = inner_height - total_lines;
             let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
@@ -202,6 +204,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if layout.completion_height > 0 {
         if !app.completion.completions.is_empty() {
             let popup_lines = build_completion_lines(
+                &app.theme.menu,
                 &app.completion.completions,
                 app.completion.completion_selected,
                 width,
@@ -245,23 +248,27 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         };
         let query_width = query.width();
         let gap = width.saturating_sub(title.width() + query_width + hints.width());
+        let header_bg = app
+            .theme
+            .menu
+            .selection
+            .header
+            .bg
+            .unwrap_or(Color::Rgb(20, 45, 20));
         let header_line = Line::from(vec![
             Span::styled(
                 title,
                 Style::default()
                     .fg(Color::White)
-                    .bg(SELECTION_HEADER_BG)
+                    .bg(header_bg)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
-            Span::styled(" ".repeat(gap), Style::default().bg(SELECTION_HEADER_BG)),
-            Span::styled(
-                query,
-                Style::default().fg(Color::Yellow).bg(SELECTION_HEADER_BG),
-            ),
+            Span::styled(" ".repeat(gap), Style::default().bg(header_bg)),
+            Span::styled(query, Style::default().fg(Color::Yellow).bg(header_bg)),
             Span::styled(
                 hints.to_string(),
                 Style::default()
-                    .bg(SELECTION_HEADER_BG)
+                    .bg(header_bg)
                     .add_modifier(ratatui::style::Modifier::DIM),
             ),
         ]);
@@ -276,6 +283,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         };
 
         let selection_lines = build_selection_lines(
+            &app.theme.menu.selection,
             &app.selection.items,
             app.selection.selected,
             app.selection.scroll,
@@ -300,19 +308,25 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         let provider = app.login.provider.as_deref().unwrap_or("provider");
         let title = format!("  Authenticating: {provider}");
         let gap = width.saturating_sub(title.width() + LOGIN_HINTS.width());
+        let header_bg = app
+            .theme
+            .login
+            .header
+            .bg
+            .unwrap_or(ratatui::style::Color::Rgb(20, 30, 60));
         let header_line = Line::from(vec![
             Span::styled(
                 title,
                 Style::default()
                     .fg(Color::White)
-                    .bg(LOGIN_HEADER_BG)
+                    .bg(header_bg)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
-            Span::styled(" ".repeat(gap), Style::default().bg(LOGIN_HEADER_BG)),
+            Span::styled(" ".repeat(gap), Style::default().bg(header_bg)),
             Span::styled(
                 LOGIN_HINTS,
                 Style::default()
-                    .bg(LOGIN_HEADER_BG)
+                    .bg(header_bg)
                     .add_modifier(ratatui::style::Modifier::DIM),
             ),
         ]);
@@ -324,11 +338,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     if !app.login.active && !app.ask_user_selection_no_freeform() {
         let panel_bg = if app.input_mode == InputMode::Shell {
-            SHELL_INPUT_BG
+            app.theme.input.shell.bg.unwrap_or(Color::Rgb(24, 34, 32))
         } else if app.ask_user_freeform_mode() {
-            ASK_USER_INPUT_BG
+            app.theme
+                .input
+                .ask_user
+                .bg
+                .unwrap_or(Color::Rgb(50, 30, 15))
         } else {
-            INPUT_BG
+            app.theme.input.normal.bg.unwrap_or(Color::Rgb(30, 30, 40))
         };
         f.render_widget(
             Paragraph::new(halfblock_line(width, '▄', panel_bg)),
@@ -355,11 +373,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if !app.login.active && !app.ask_user_selection_no_freeform() {
         let is_shell = app.input_mode == InputMode::Shell;
         let panel_bg = if is_shell {
-            SHELL_INPUT_BG
+            app.theme.input.shell.bg.unwrap_or(Color::Rgb(24, 34, 32))
         } else if app.ask_user_freeform_mode() {
-            ASK_USER_INPUT_BG
+            app.theme
+                .input
+                .ask_user
+                .bg
+                .unwrap_or(Color::Rgb(50, 30, 15))
         } else {
-            INPUT_BG
+            app.theme.input.normal.bg.unwrap_or(Color::Rgb(30, 30, 40))
         };
         render_input_panel(f, input_area, app, panel_bg);
     }
@@ -373,6 +395,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             .thinking_supported
             .then_some(app.provider.current_thinking.as_str());
         let info_line = build_info_line(
+            &app.theme.info,
             &app.provider.current_instance.id,
             &app.provider.current_model,
             thinking,
@@ -391,10 +414,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::ui::{
-        log::{USER_BG, append_tool_result_block},
-        menu::{SELECTION_BG, SELECTION_SEL_BG},
-    };
+    use crate::ui::log::append_tool_result_block;
     use crate::{
         agent::AgentLoopConfig,
         auth::AuthFlow,
@@ -412,6 +432,7 @@ mod tests {
     }
 
     fn make_app() -> App {
+        use crate::config::DisplayConfig;
         let instance = crate::provider_instance::ProviderInstance::new(
             "copilot",
             crate::provider_instance::BackendPreset::Copilot,
@@ -437,6 +458,7 @@ mod tests {
                 hooks: HashMap::new(),
                 session_id: String::new(),
             },
+            DisplayConfig::default(),
         )
     }
 
@@ -849,7 +871,7 @@ mod tests {
             error: false,
             match_range: None,
         }];
-        let lines = build_completion_lines(&items, 0, 80);
+        let lines = build_completion_lines(&crate::theme::MenuTheme::default(), &items, 0, 80);
         assert!(!line_text(&lines[0]).contains('—'));
     }
 
@@ -863,7 +885,7 @@ mod tests {
             error: false,
             match_range: None,
         }];
-        let lines = build_completion_lines(&items, 0, 80);
+        let lines = build_completion_lines(&crate::theme::MenuTheme::default(), &items, 0, 80);
         let row = line_text(&lines[0]);
         assert!(row.contains("loading models…"));
         assert!(!row.contains('—'));
@@ -890,7 +912,7 @@ mod tests {
             },
         ];
 
-        let lines = build_completion_lines(&items, 0, 120);
+        let lines = build_completion_lines(&crate::theme::MenuTheme::default(), &items, 0, 120);
         let first = line_text(&lines[0]);
         let second = line_text(&lines[1]);
         assert_eq!(first.find('—'), second.find('—'));
@@ -909,7 +931,8 @@ mod tests {
             })
             .collect();
 
-        let lines = build_selection_lines(&items, 0, 5, 80);
+        let lines =
+            build_selection_lines(&crate::theme::SelectionTheme::default(), &items, 0, 5, 80);
         assert_eq!(lines.len(), MAX_SELECTION_VISIBLE);
         assert!(line_text(&lines[0]).contains("item-5"));
         assert!(line_text(lines.last().expect("expected last line")).contains("item-16"));
@@ -928,7 +951,8 @@ mod tests {
             })
             .collect();
 
-        let lines = build_selection_lines(&items, 6, 5, 80);
+        let lines =
+            build_selection_lines(&crate::theme::SelectionTheme::default(), &items, 6, 5, 80);
         assert!(line_text(&lines[1]).contains("▶ item-6"));
         assert!(!line_text(&lines[0]).contains('▶'));
     }
@@ -944,7 +968,8 @@ mod tests {
             match_range: None,
         }];
 
-        let lines = build_selection_lines(&items, 0, 0, 80);
+        let lines =
+            build_selection_lines(&crate::theme::SelectionTheme::default(), &items, 0, 0, 80);
         let row = line_text(&lines[0]);
         assert!(row.contains("fetching…"));
         assert!(!row.contains("▶ "));
@@ -973,7 +998,13 @@ mod tests {
 
         // Use selected = usize::MAX so neither row gets the ▶ cursor prefix,
         // avoiding multi-byte offset skew in the byte-position comparison.
-        let lines = build_selection_lines(&items, usize::MAX, 0, 80);
+        let lines = build_selection_lines(
+            &crate::theme::SelectionTheme::default(),
+            &items,
+            usize::MAX,
+            0,
+            80,
+        );
         let first = line_text(&lines[0]);
         let second = line_text(&lines[1]);
         assert_eq!(first.find('—'), second.find('—'));
@@ -988,6 +1019,8 @@ mod tests {
             false,
             80,
             &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
         );
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "💬 shown");
@@ -1000,6 +1033,8 @@ mod tests {
             true,
             80,
             &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
         );
         assert!(lines.is_empty());
     }
@@ -1011,6 +1046,8 @@ mod tests {
             true,
             8,
             &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
         );
         let rows_with_cursor: Vec<usize> = lines
             .iter()
@@ -1029,6 +1066,8 @@ mod tests {
             false,
             10,
             &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
         );
         assert_eq!(line_text(&lines[0]), "▄▄▄▄▄▄▄▄▄▄");
         assert_eq!(line_text(&lines[1]), "hi        ");
@@ -1048,7 +1087,14 @@ mod tests {
             ),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            120,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         assert!(line_text(&lines[0]).contains("[10-20/300]"));
     }
 
@@ -1065,7 +1111,14 @@ mod tests {
             ),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            120,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(!rendered.contains("[lines 10-20 of 300]"));
         assert!(rendered.contains("│alpha"));
@@ -1083,7 +1136,14 @@ mod tests {
             Message::tool_result("1", &long_output, false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 300, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            300,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("20 total lines"), "{rendered}");
     }
@@ -1096,7 +1156,14 @@ mod tests {
             json!({"command": "echo one\necho two\necho three"}),
         )];
 
-        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            120,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
             rendered.contains("💻 echo one\necho two\necho three"),
@@ -1112,7 +1179,14 @@ mod tests {
             json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
         )];
 
-        let lines = log::build_log_lines(&messages, false, 120, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            120,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
             rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines"),
@@ -1124,7 +1198,14 @@ mod tests {
     #[test]
     fn assistant_lines_are_prefixed_with_speech_bubble() {
         let messages = vec![Message::assistant("hello")];
-        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
 
@@ -1132,7 +1213,14 @@ mod tests {
     fn assistant_provisional_phase_uses_thought_bubble() {
         let mut msg = Message::assistant("working");
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let lines = log::build_log_lines(&[msg], false, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &[msg],
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         assert_eq!(line_text(&lines[0]), "💭 working");
     }
 
@@ -1140,7 +1228,14 @@ mod tests {
     fn assistant_unknown_phase_streaming_uses_thought_bubble() {
         let mut msg = Message::assistant("streaming");
         msg.assistant_phase = Some(AssistantPhase::Unknown);
-        let lines = log::build_log_lines(&[msg], true, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &[msg],
+            true,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
     }
 
@@ -1149,7 +1244,14 @@ mod tests {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some("planning".to_string());
         let messages = vec![msg];
-        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         assert_eq!(line_text(&lines[0]), "🧠 planning");
         assert_eq!(line_text(&lines[2]), "💬 answer");
     }
@@ -1289,7 +1391,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         let rightmost_x = 19;
         for y in 0..8 {
-            assert_ne!(buf[(rightmost_x, y)].bg, USER_BG);
+            assert_ne!(buf[(rightmost_x, y)].bg, Color::Rgb(50, 50, 64));
         }
     }
 
@@ -1353,10 +1455,17 @@ mod tests {
 
         let buf = terminal.backend().buffer();
         let rightmost_x = 29;
+        let sel_bg = crate::theme::SelectionTheme::default()
+            .bg
+            .unwrap_or(ratatui::style::Color::Reset);
+        let sel_sel_bg = crate::theme::SelectionTheme::default()
+            .selected
+            .bg
+            .unwrap_or(ratatui::style::Color::Reset);
         for y in 0..20 {
             let bg = buf[(rightmost_x, y)].bg;
-            assert_ne!(bg, SELECTION_BG);
-            assert_ne!(bg, SELECTION_SEL_BG);
+            assert_ne!(bg, sel_bg);
+            assert_ne!(bg, sel_sel_bg);
         }
     }
 
@@ -1428,6 +1537,7 @@ mod tests {
     #[test]
     fn info_line_renders_context_utilization_when_available() {
         let line = info::build_info_line(
+            &crate::theme::InfoTheme::default(),
             "copilot",
             "gpt-4o",
             Some("medium"),
@@ -1444,6 +1554,7 @@ mod tests {
     #[test]
     fn info_line_omits_thinking_when_unavailable() {
         let line = info::build_info_line(
+            &crate::theme::InfoTheme::default(),
             "openai",
             "gpt-4o",
             None,
@@ -1513,7 +1624,14 @@ mod tests {
             Message::tool_result("1", "\n\n  output line  \n\n", false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         // Leading/trailing newlines are stripped; leading spaces (indentation)
         // on the first content line are preserved.
         let result_lines: Vec<_> = lines
@@ -1536,7 +1654,14 @@ mod tests {
             Message::tool_result("1", "    indented output", false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
@@ -1557,7 +1682,14 @@ mod tests {
             Message::tool_result("1", "load: 1.0\n", false),
         ];
 
-        let lines = log::build_log_lines(&messages, false, 80, &log::ToolBodyConfig::default());
+        let lines = log::build_log_lines(
+            &messages,
+            false,
+            80,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("│load: 1.0"), "{rendered}");
         // No extra blank line after the content.
@@ -1581,9 +1713,9 @@ mod tests {
             reply: reply_tx,
         });
 
-        // Before typing: input should have INPUT_BG.
+        // Before typing: input should have ask_user bg (Rgb(50, 30, 15)).
         let buf_before = render_to_buffer(&mut app, 40, 8);
-        // After typing: input should have ASK_USER_INPUT_BG.
+        // After typing: input should have ask_user bg.
         app.begin_ask_freeform_typing();
         app.textarea.insert_char('x');
         let buf_after = render_to_buffer(&mut app, 40, 8);
@@ -1596,13 +1728,13 @@ mod tests {
             })
             .expect("should find input row");
 
-        // The cell background on the input row should be ASK_USER_INPUT_BG.
+        // The cell background on the input row should be the ask_user bg.
         let bg_after = buf_after[(0, input_row)].bg;
         let bg_before = buf_before[(0, input_row)].bg;
         assert_eq!(
             bg_after,
             ratatui::style::Color::Rgb(50, 30, 15),
-            "input bg after typing should be ASK_USER_INPUT_BG, got {bg_after:?}"
+            "input bg after typing should be ask_user bg (Rgb(50, 30, 15)), got {bg_after:?}"
         );
         assert_ne!(
             bg_after, bg_before,

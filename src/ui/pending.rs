@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -8,15 +8,22 @@ use ratatui::{
 use crate::app::App;
 
 pub(super) fn render(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let steering_style = Style::default()
-        .fg(Color::Rgb(200, 200, 120))
-        .add_modifier(ratatui::style::Modifier::ITALIC);
+    let steering = &app.theme.log.steering;
+    let mut style = Style::default();
+    if let Some(fg) = steering.fg {
+        style = style.fg(fg);
+    }
+    if steering.italic == Some(true) {
+        style = style.add_modifier(ratatui::style::Modifier::ITALIC);
+    }
+
+    let prefix = steering.prefix.text.as_deref().unwrap_or("🕹️ ");
 
     let steering_lines: Vec<Line<'static>> = app
         .queued_steering()
         .iter()
         .take(3)
-        .map(|msg| Line::from(Span::styled(format!("🕹️ {msg}"), steering_style)))
+        .map(|msg| Line::from(Span::styled(format!("{prefix}{msg}"), style)))
         .collect();
 
     if !steering_lines.is_empty() {

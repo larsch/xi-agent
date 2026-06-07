@@ -6,6 +6,7 @@ use crate::{
     app_event::{AppEvent, AppEventTx},
     auth::{self},
     completion::{self, CompletionItem},
+    config::DisplayConfig,
     live_turn::compose_display,
     llm::{LlmProvider, Message, UsageStats},
     provider_instance::{ApiType, BackendPreset, ProviderInstance},
@@ -13,6 +14,7 @@ use crate::{
     session_state::SessionState,
     shell,
     skills::SkillMeta,
+    theme::Theme,
     thinking::ThinkingLevel,
 };
 
@@ -144,6 +146,11 @@ pub struct App {
 
     // ── Step-back state ──────────────────────────────────────────────────────
     pub(crate) step_back: StepBackState,
+
+    // ── Theme ─────────────────────────────────────────────────────────────────
+    pub(crate) theme: Theme,
+    // ── Display thresholds ────────────────────────────────────────────────────
+    pub(crate) display: DisplayConfig,
 }
 
 // Convenience alias used throughout this module.
@@ -155,6 +162,7 @@ impl App {
         initial_model: impl Into<String>,
         initial_thinking: ThinkingLevel,
         agent_config: AgentLoopConfig,
+        display: DisplayConfig,
     ) -> Self {
         let initial_model = initial_model.into();
         Self {
@@ -176,6 +184,8 @@ impl App {
             ask_user: AskUserState::new(),
             runtime: AgentRuntime::new(),
             step_back: StepBackState::default(),
+            theme: Theme::default(),
+            display,
         }
     }
 
@@ -1133,6 +1143,7 @@ mod tests {
                 hooks: std::collections::HashMap::new(),
                 session_id: String::new(),
             },
+            crate::config::DisplayConfig::default(),
         )
     }
 

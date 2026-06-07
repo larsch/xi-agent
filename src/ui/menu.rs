@@ -4,30 +4,25 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::{completion::CompletionItem, selection_state::MAX_SELECTION_VISIBLE};
-
-/// Background colour of the completion popup (unselected rows).
-const COMPLETION_BG: Color = Color::Rgb(22, 22, 38);
-/// Background colour of the selected completion row.
-const COMPLETION_SEL_BG: Color = Color::Rgb(55, 55, 100);
-/// Foreground colour for the command usage column in the popup.
-const COMPLETION_CMD_FG: Color = Color::Rgb(120, 200, 255);
-/// Foreground colour for the description column in the popup.
-const COMPLETION_DESC_FG: Color = Color::Rgb(140, 140, 160);
-/// Foreground colour for the highlighted (matched) portion of a completion label.
-const COMPLETION_MATCH_FG: Color = Color::Rgb(255, 220, 80);
-/// Background colour of the selection menu items (unselected).
-pub(super) const SELECTION_BG: Color = Color::Rgb(18, 35, 18);
-/// Background colour of the selected item in the selection menu.
-pub(super) const SELECTION_SEL_BG: Color = Color::Rgb(30, 90, 30);
-/// Foreground colour for model names in the selection menu.
-const SELECTION_ITEM_FG: Color = Color::Rgb(140, 220, 140);
+use crate::{
+    completion::CompletionItem,
+    selection_state::MAX_SELECTION_VISIBLE,
+    theme::{MenuTheme, SelectionTheme},
+};
 
 pub(super) fn build_completion_lines(
+    theme: &MenuTheme,
     completions: &[CompletionItem],
     selected: usize,
     terminal_width: usize,
 ) -> Vec<Line<'static>> {
+    let ct = &theme.completion;
+    let completion_bg = ct.bg.unwrap_or(Color::Rgb(22, 22, 38));
+    let sel_bg = ct.selected.bg.unwrap_or(Color::Rgb(55, 55, 100));
+    let cmd_fg = ct.cmd.fg.unwrap_or(Color::Rgb(120, 200, 255));
+    let desc_fg = ct.desc.fg.unwrap_or(Color::Rgb(140, 140, 160));
+    let match_fg = ct.r#match.fg.unwrap_or(Color::Rgb(255, 220, 80));
+
     let label_col = completions
         .iter()
         .filter(|c| !c.loading)
@@ -43,11 +38,7 @@ pub(super) fn build_completion_lines(
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let bg = if i == selected {
-                COMPLETION_SEL_BG
-            } else {
-                COMPLETION_BG
-            };
+            let bg = if i == selected { sel_bg } else { completion_bg };
 
             if item.loading {
                 let fill =
@@ -86,20 +77,20 @@ pub(super) fn build_completion_lines(
                     pad = label_col.saturating_sub(mstart + matched.len())
                 );
                 vec![
-                    Span::styled(before, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
+                    Span::styled(before, Style::default().fg(cmd_fg).bg(bg)),
                     Span::styled(
                         matched,
                         Style::default()
-                            .fg(COMPLETION_MATCH_FG)
+                            .fg(match_fg)
                             .bg(bg)
                             .add_modifier(ratatui::style::Modifier::BOLD),
                     ),
-                    Span::styled(after, Style::default().fg(COMPLETION_CMD_FG).bg(bg)),
+                    Span::styled(after, Style::default().fg(cmd_fg).bg(bg)),
                 ]
             } else {
                 vec![Span::styled(
                     label_padded,
-                    Style::default().fg(COMPLETION_CMD_FG).bg(bg),
+                    Style::default().fg(cmd_fg).bg(bg),
                 )]
             };
 
@@ -119,7 +110,7 @@ pub(super) fn build_completion_lines(
                 ));
                 spans.push(Span::styled(
                     item.detail.clone(),
-                    Style::default().fg(COMPLETION_DESC_FG).bg(bg),
+                    Style::default().fg(desc_fg).bg(bg),
                 ));
                 spans.push(Span::styled(fill, Style::default().bg(bg)));
                 Line::from(spans)
@@ -129,6 +120,7 @@ pub(super) fn build_completion_lines(
 }
 
 pub(super) fn build_selection_lines(
+    theme: &SelectionTheme,
     items: &[CompletionItem],
     selected: usize,
     scroll: usize,
@@ -137,6 +129,10 @@ pub(super) fn build_selection_lines(
     const INDENT: &str = "  ";
     const PREFIX_WIDTH: usize = 2;
     const SEP: &str = "  —  ";
+
+    let sel_bg = theme.selected.bg.unwrap_or(Color::Rgb(30, 90, 30));
+    let item_bg = theme.bg.unwrap_or(Color::Rgb(18, 35, 18));
+    let item_fg = theme.item.fg.unwrap_or(Color::Rgb(140, 220, 140));
 
     let visible: Vec<_> = items
         .iter()
@@ -157,11 +153,7 @@ pub(super) fn build_selection_lines(
         .take(MAX_SELECTION_VISIBLE)
         .map(|(i, item)| {
             let is_sel = i == selected;
-            let bg = if is_sel {
-                SELECTION_SEL_BG
-            } else {
-                SELECTION_BG
-            };
+            let bg = if is_sel { sel_bg } else { item_bg };
 
             if item.loading {
                 let fill =
@@ -189,10 +181,7 @@ pub(super) fn build_selection_lines(
                 Line::from(vec![
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(prefix, Style::default().fg(Color::White).bg(bg)),
-                    Span::styled(
-                        item.label.clone(),
-                        Style::default().fg(SELECTION_ITEM_FG).bg(bg),
-                    ),
+                    Span::styled(item.label.clone(), Style::default().fg(item_fg).bg(bg)),
                     Span::styled(pad, Style::default().bg(bg)),
                     Span::styled(SEP, Style::default().fg(Color::DarkGray).bg(bg)),
                     Span::styled(item.detail.clone(), Style::default().fg(Color::Gray).bg(bg)),
@@ -204,10 +193,7 @@ pub(super) fn build_selection_lines(
                 Line::from(vec![
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(prefix, Style::default().fg(Color::White).bg(bg)),
-                    Span::styled(
-                        item.label.clone(),
-                        Style::default().fg(SELECTION_ITEM_FG).bg(bg),
-                    ),
+                    Span::styled(item.label.clone(), Style::default().fg(item_fg).bg(bg)),
                     Span::styled(fill, Style::default().bg(bg)),
                 ])
             }

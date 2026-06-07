@@ -1,6 +1,5 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -10,12 +9,9 @@ use crate::app::{App, StreamingStatus};
 const THROBBER_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
 
 pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let throbber_style = Style::default()
-        .fg(Color::Rgb(160, 200, 255))
-        .add_modifier(ratatui::style::Modifier::BOLD);
-    let hint_style = Style::default()
-        .fg(Color::Rgb(100, 140, 100))
-        .add_modifier(ratatui::style::Modifier::ITALIC);
+    let theme = &app.theme.status;
+    let throbber_style = theme.provider.to_ratatui_style();
+    let hint_style = theme.idle.to_ratatui_style();
     let frame = THROBBER_FRAMES[(app.agent_turn.tick as usize) % THROBBER_FRAMES.len()];
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -30,9 +26,7 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
         let total = boundaries.len();
         // How many boundaries are at or after the cursor (i.e. will be discarded)?
         let steps_back = boundaries.iter().filter(|&&i| i >= cursor_idx).count();
-        let step_style = Style::default()
-            .fg(Color::Rgb(220, 180, 80))
-            .add_modifier(ratatui::style::Modifier::BOLD);
+        let step_style = theme.cost.to_ratatui_style();
         spans.push(Span::styled(
             format!("[step back: {steps_back} of {total} — Enter to branch, Esc to cancel]"),
             step_style,
@@ -54,9 +48,7 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 pub(super) fn render_provider_status(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let status_text_style = Style::default()
-        .fg(Color::Rgb(160, 160, 180))
-        .add_modifier(ratatui::style::Modifier::ITALIC);
+    let status_text_style = app.theme.status.idle.to_ratatui_style();
 
     let provider_message = match &app.agent_turn.status {
         Some(StreamingStatus::Message(s) | StreamingStatus::CompletedMessage(s)) => {

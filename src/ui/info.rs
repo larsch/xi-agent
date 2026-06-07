@@ -1,14 +1,14 @@
 use ratatui::{
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
 };
 
-/// Background colour for the info bar.
-const INFO_BG: Color = Color::Rgb(20, 20, 30);
+use crate::theme::InfoTheme;
 
 /// Build the single info-bar `Line` showing provider / model / context window.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_info_line<'a>(
+    theme: &InfoTheme,
     provider: &str,
     model: &str,
     thinking: Option<&str>,
@@ -18,11 +18,20 @@ pub(super) fn build_info_line<'a>(
     cache_miss_warning: bool,
     width: usize,
 ) -> Line<'a> {
-    let sep_style = Style::default().fg(Color::Rgb(60, 60, 80)).bg(INFO_BG);
-    let key_style = Style::default().fg(Color::Rgb(100, 100, 130)).bg(INFO_BG);
-    let val_style = Style::default().fg(Color::Rgb(180, 200, 255)).bg(INFO_BG);
-    let fill_style = Style::default().bg(INFO_BG);
-    let hint_style = Style::default().fg(Color::Rgb(60, 60, 80)).bg(INFO_BG);
+    let bg = theme.bg;
+    let mut sep_style = theme.separator.to_ratatui_style();
+    let mut key_style = theme.key.to_ratatui_style();
+    let mut val_style = theme.value.to_ratatui_style();
+    let mut hint_style = theme.hint.to_ratatui_style();
+    let fill_style = Style::default().bg(bg.unwrap_or(ratatui::style::Color::Reset));
+
+    // Apply bg to all styles
+    if let Some(bg) = bg {
+        sep_style = sep_style.bg(bg);
+        key_style = key_style.bg(bg);
+        val_style = val_style.bg(bg);
+        hint_style = hint_style.bg(bg);
+    }
 
     let hint = "Ctrl+I";
     let context_value = format_context_value(

@@ -10,12 +10,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, InputMode};
 use crate::provider_manager::{ProviderSetupStep, SetupInputKind};
 
-/// Background colour of the input panel.
-pub(super) const INPUT_BG: Color = Color::Rgb(30, 30, 40);
-/// Background colour of shell input panel.
-pub(super) const SHELL_INPUT_BG: Color = Color::Rgb(24, 34, 32);
-/// Background colour of the input panel when typing a free-form ask_user response.
-pub(super) const ASK_USER_INPUT_BG: Color = Color::Rgb(50, 30, 15);
 const TAB_WIDTH: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -26,11 +20,15 @@ pub(super) struct WrappedInput {
 
 pub(super) fn style_textarea(app: &mut App) {
     let bg = if app.input_mode == InputMode::Shell {
-        SHELL_INPUT_BG
+        app.theme.input.shell.bg.unwrap_or(Color::Rgb(24, 34, 32))
     } else if app.ask_user_freeform_mode() {
-        ASK_USER_INPUT_BG
+        app.theme
+            .input
+            .ask_user
+            .bg
+            .unwrap_or(Color::Rgb(50, 30, 15))
     } else {
-        INPUT_BG
+        app.theme.input.normal.bg.unwrap_or(Color::Rgb(30, 30, 40))
     };
 
     let active: &mut TextArea<'static> = if app.input_mode == InputMode::Shell {
@@ -324,7 +322,16 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
                 Line::from(vec![
                     Span::styled(
                         prefix.clone(),
-                        Style::default().fg(Color::Cyan).bg(panel_bg),
+                        Style::default()
+                            .fg(app
+                                .theme
+                                .input
+                                .normal
+                                .field
+                                .prefix
+                                .fg
+                                .unwrap_or(ratatui::style::Color::Cyan))
+                            .bg(panel_bg),
                     ),
                     Span::styled(row, Style::default().fg(Color::White).bg(panel_bg)),
                 ])
@@ -340,13 +347,28 @@ pub(super) fn render_input_panel(f: &mut ratatui::Frame, area: Rect, app: &App, 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             prefix.clone(),
-            Style::default().fg(Color::Cyan).bg(panel_bg),
+            Style::default()
+                .fg(app
+                    .theme
+                    .input
+                    .normal
+                    .field
+                    .prefix
+                    .fg
+                    .unwrap_or(Color::Cyan))
+                .bg(panel_bg),
         )));
     }
 
     if let Some(hint) = hint {
         let hint_style = Style::default()
-            .fg(Color::Rgb(120, 140, 140))
+            .fg(app
+                .theme
+                .input
+                .normal
+                .placeholder
+                .fg
+                .unwrap_or(Color::Rgb(120, 140, 140)))
             .bg(panel_bg)
             .add_modifier(ratatui::style::Modifier::DIM);
         if let Some(first) = lines.first_mut() {

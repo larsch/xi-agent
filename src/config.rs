@@ -5,8 +5,33 @@ use anyhow::Context;
 use crate::hooks::{HookConfig, HookPoint};
 use crate::provider_instance::ProviderInstance;
 
+/// Display thresholds — presentation choices that control how much content
+/// is shown in the UI. These do not affect how much is sent to the model.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DisplayConfig {
+    /// Maximum lines of a shell command shown in the live turn view.
+    pub max_shell_command_lines: usize,
+    /// Characters before a command label switches to multi-line display.
+    pub max_one_line_chars: usize,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            max_shell_command_lines: 5,
+            max_one_line_chars: 120,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct XiConfig {
+    /// Path to the theme file. Overridden by the `--theme` CLI flag.
+    pub theme: Option<PathBuf>,
+    /// UI display thresholds.
+    #[serde(default)]
+    pub display: DisplayConfig,
+
     /// The id of the currently active provider instance.
     pub provider: Option<String>,
     pub thinking: Option<String>,

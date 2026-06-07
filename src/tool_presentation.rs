@@ -1,7 +1,13 @@
 use serde_json::Value;
 
-const MAX_MULTILINE_SHELL_COMMAND_LINES: usize = 5;
-const MAX_ONE_LINE_CHARS: usize = 120;
+use crate::config::DisplayConfig;
+
+fn max_shell_command_lines(cfg: &DisplayConfig) -> usize {
+    cfg.max_shell_command_lines
+}
+fn max_one_line_chars(cfg: &DisplayConfig) -> usize {
+    cfg.max_one_line_chars
+}
 
 /// Whether a tool uses head-truncation (show end while streaming, snap to
 /// beginning when done) or tail-truncation (always show the trailing window).
@@ -52,6 +58,7 @@ pub fn tool_invocation_label_partial(
     name: &str,
     partial_json: &str,
     streaming_field: Option<&str>,
+    display: &DisplayConfig,
 ) -> (String, bool) {
     let emoji = tool_emoji(name);
 
@@ -70,10 +77,10 @@ pub fn tool_invocation_label_partial(
 
     let detail = if uses_head_truncation(name) {
         // Head-truncation: show the trailing N lines (newest content).
-        head_truncate(&text)
+        head_truncate(&text, display)
     } else {
         // Tail-truncation: show the trailing N lines.
-        tail_truncate(&text)
+        tail_truncate(&text, display)
     };
 
     if detail.is_empty() {
@@ -85,24 +92,26 @@ pub fn tool_invocation_label_partial(
 
 /// Truncate to the last N lines for streaming display, prepending "…" if truncated.
 /// Used for shell tools during streaming where total is not yet known.
-fn head_truncate(text: &str) -> String {
+fn head_truncate(text: &str, display: &DisplayConfig) -> String {
+    let max_lines = max_shell_command_lines(display);
     let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= MAX_MULTILINE_SHELL_COMMAND_LINES {
+    if lines.len() <= max_lines {
         return text.trim_end_matches('\n').to_string();
     }
-    let start = lines.len() - MAX_MULTILINE_SHELL_COMMAND_LINES;
+    let start = lines.len() - max_lines;
     let mut result = String::from("…\n");
     result.push_str(&lines[start..].join("\n"));
     result
 }
 
 /// Truncate to the last N lines with no leading marker.
-fn tail_truncate(text: &str) -> String {
+fn tail_truncate(text: &str, display: &DisplayConfig) -> String {
+    let max_lines = max_shell_command_lines(display);
     let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= MAX_MULTILINE_SHELL_COMMAND_LINES {
+    if lines.len() <= max_lines {
         return text.trim_end_matches('\n').to_string();
     }
-    let start = lines.len() - MAX_MULTILINE_SHELL_COMMAND_LINES;
+    let start = lines.len() - max_lines;
     lines[start..].join("\n")
 }
 
@@ -123,19 +132,19 @@ pub fn tool_emoji(name: &str) -> &'static str {
 /// Extract a short, human-readable tool argument summary.
 ///
 /// Preference order matches the most meaningful fields shown to users.
-pub fn tool_detail(name: &str, args: &Value) -> String {
+pub fn tool_detail(name: &str, args: &Value, display: &DisplayConfig) -> String {
     // Shell tool calls preserve newlines so users can see the full command,
     // up to a small fixed number of lines.
     if matches!(name, "bash" | "cmd" | "powershell")
         && let Some(command) = args.get("command").and_then(|v| v.as_str())
     {
-        return multiline_shell_command(command);
+        return multiline_shell_command(command, display);
     }
 
     // exec tool calls should display the full argv-style command rendered as a
     // shell-quoted string for readability.
     if name == "exec" {
-        return exec_command_detail(args);
+        return exec_command_detail(args, display);
     }
 
     // ask_user questions must be shown in full (wrapped by the UI), never
@@ -160,8 +169,8 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
         let pattern = args.get("pattern").and_then(|v| v.as_str());
         let path = args.get("path").and_then(|v| v.as_str());
         return match (pattern, path) {
-            (Some(p), Some(d)) => format!("{} in {}", compact(p), d),
-            (Some(p), None) => compact(p),
+            (Some(p), Some(d)) => format!("{} in {}", compact(p, display), d),
+            (Some(p), None) => compact(p, display),
             (None, Some(d)) => format!("in {}", d),
             (None, None) => String::new(),
         };
@@ -169,14 +178,14 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
 
     for key in ["command", "pattern", "path", "question", "prompt"] {
         if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
-            return compact(s);
+            return compact(s, display);
         }
     }
 
     if let Some(obj) = args.as_object() {
         for value in obj.values() {
             if let Some(s) = value.as_str() {
-                return compact(s);
+                return compact(s, display);
             }
         }
     }
@@ -190,8 +199,8 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
 /// label (e.g. "👀 reading…") is returned instead of the raw tool name.
 /// This keeps the display consistent during streaming where the target
 /// argument field may still be empty or absent.
-pub fn tool_invocation_label(name: &str, args: &Value) -> String {
-    let detail = tool_detail(name, args);
+pub fn tool_invocation_label(name: &str, args: &Value, display: &DisplayConfig) -> String {
+    let detail = tool_detail(name, args, display);
     if detail.is_empty() {
         tool_pending_label(name)
     } else {
@@ -204,19 +213,17 @@ fn one_line(input: &str) -> String {
     input.replace('\n', " ").trim().to_string()
 }
 
-fn compact(input: &str) -> String {
+fn compact(input: &str, display: &DisplayConfig) -> String {
+    let max_chars = max_one_line_chars(display);
     let one_line = one_line(input);
-    if one_line.chars().count() <= MAX_ONE_LINE_CHARS {
+    if one_line.chars().count() <= max_chars {
         return one_line;
     }
-    one_line
-        .chars()
-        .take(MAX_ONE_LINE_CHARS)
-        .collect::<String>()
-        + "…"
+    one_line.chars().take(max_chars).collect::<String>() + "…"
 }
 
-fn multiline_shell_command(input: &str) -> String {
+fn multiline_shell_command(input: &str, display: &DisplayConfig) -> String {
+    let max_lines = max_shell_command_lines(display);
     let lines: Vec<&str> = input.lines().collect();
     if lines.is_empty() {
         return String::new();
@@ -224,18 +231,18 @@ fn multiline_shell_command(input: &str) -> String {
 
     let mut shown: Vec<String> = lines
         .iter()
-        .take(MAX_MULTILINE_SHELL_COMMAND_LINES)
+        .take(max_lines)
         .map(|line| (*line).to_string())
         .collect();
 
-    if lines.len() > MAX_MULTILINE_SHELL_COMMAND_LINES {
+    if lines.len() > max_lines {
         shown.push(format!("… {} total lines", lines.len()));
     }
 
     shown.join("\n")
 }
 
-fn exec_command_detail(args: &Value) -> String {
+fn exec_command_detail(args: &Value, display: &DisplayConfig) -> String {
     let Some(program) = args.get("program").and_then(|v| v.as_str()) else {
         return String::new();
     };
@@ -252,8 +259,8 @@ fn exec_command_detail(args: &Value) -> String {
     }
 
     match shlex::try_join(words.iter().copied()) {
-        Ok(command) => compact(&command),
-        Err(_) => compact(&words.join(" ")),
+        Ok(command) => compact(&command, display),
+        Err(_) => compact(&words.join(" "), display),
     }
 }
 
@@ -264,7 +271,11 @@ mod tests {
 
     #[test]
     fn label_prefers_command() {
-        let label = tool_invocation_label("bash", &json!({"command": "rg -n tool src"}));
+        let label = tool_invocation_label(
+            "bash",
+            &json!({"command": "rg -n tool src"}),
+            &DisplayConfig::default(),
+        );
         assert_eq!(label, "💻 rg -n tool src");
     }
 
@@ -273,13 +284,18 @@ mod tests {
         let label = tool_invocation_label(
             "bash",
             &json!({"command": "printf 'one\ntwo\nthree\nfour\nfive'"}),
+            &DisplayConfig::default(),
         );
         assert_eq!(label, "💻 printf 'one\ntwo\nthree\nfour\nfive'");
     }
 
     #[test]
     fn shell_label_truncates_after_five_lines_with_line_count() {
-        let label = tool_invocation_label("bash", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
+        let label = tool_invocation_label(
+            "bash",
+            &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
+            &DisplayConfig::default(),
+        );
         assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines");
     }
 
@@ -291,13 +307,18 @@ mod tests {
                 "program": "printf",
                 "args": ["%s %s", "hello world", "$PATH"]
             }),
+            &DisplayConfig::default(),
         );
         assert_eq!(label, "💻 printf '%s %s' 'hello world' '$PATH'");
     }
 
     #[test]
     fn exec_label_uses_program_when_no_args() {
-        let label = tool_invocation_label("exec", &json!({"program": "git"}));
+        let label = tool_invocation_label(
+            "exec",
+            &json!({"program": "git"}),
+            &DisplayConfig::default(),
+        );
         assert_eq!(label, "💻 git");
     }
 
@@ -306,6 +327,7 @@ mod tests {
         let label = tool_invocation_label(
             "find_files",
             &json!({"pattern": "src/**/*.rs", "path": "."}),
+            &DisplayConfig::default(),
         );
         assert_eq!(label, "🔍 src/**/*.rs in .");
     }
@@ -313,15 +335,22 @@ mod tests {
     #[test]
     fn ask_user_label_shows_full_question_without_ellipsis() {
         let question = "How do you want to run this triage session? Please choose Quick pass or Full pass, and optionally specify: item limit, include blocked items, and owner filter.";
-        let label = tool_invocation_label("ask_user", &json!({"question": question}));
+        let label = tool_invocation_label(
+            "ask_user",
+            &json!({"question": question}),
+            &DisplayConfig::default(),
+        );
         assert_eq!(label, format!("❓ {question}"));
         assert!(!label.contains('…'));
     }
 
     #[test]
     fn label_avoids_raw_json() {
-        let label =
-            tool_invocation_label("read_file", &json!({"path": "src/main.rs", "limit": 20}));
+        let label = tool_invocation_label(
+            "read_file",
+            &json!({"path": "src/main.rs", "limit": 20}),
+            &DisplayConfig::default(),
+        );
         assert!(!label.contains('{'));
         assert!(!label.contains('}'));
         assert_eq!(label, "👀 src/main.rs");

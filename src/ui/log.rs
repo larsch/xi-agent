@@ -6,13 +6,13 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     llm::{AssistantPhase, Message, Role},
+    theme::Theme,
     tool_presentation,
 };
 
-use super::input::{normalize_terminal_segment, wrap_str};
+use crate::config::DisplayConfig;
 
-pub(super) const USER_BG: Color = Color::Rgb(50, 50, 64);
-const ASK_USER_BG: Color = Color::Rgb(27, 71, 31);
+use super::input::{normalize_terminal_segment, wrap_str};
 
 // ── ToolBodyConfig ────────────────────────────────────────────────────────────
 
@@ -98,6 +98,8 @@ pub(super) fn build_log_lines(
     streaming: bool,
     width: usize,
     cfg: &ToolBodyConfig,
+    theme: &Theme,
+    display: &DisplayConfig,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -112,9 +114,8 @@ pub(super) fn build_log_lines(
                 append_message(
                     &mut lines,
                     &sanitize_for_display(&msg.content),
-                    "",
                     width,
-                    true,
+                    theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64)),
                 );
             }
             Role::System => {}
@@ -156,23 +157,60 @@ pub(super) fn build_log_lines(
                     None => AssistantPhase::Final,
                 };
                 let answer_icon = match effective_phase {
-                    AssistantPhase::Provisional => "💭",
-                    AssistantPhase::Final => "💬",
-                    AssistantPhase::Unknown if is_streaming_last => "💭",
-                    AssistantPhase::Unknown => "💬",
+                    AssistantPhase::Provisional => theme
+                        .log
+                        .assistant
+                        .provisional
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💭 ")
+                        .trim_end(),
+                    AssistantPhase::Final => theme
+                        .log
+                        .assistant
+                        .r#final
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💬 ")
+                        .trim_end(),
+                    AssistantPhase::Unknown if is_streaming_last => theme
+                        .log
+                        .assistant
+                        .provisional
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💭 ")
+                        .trim_end(),
+                    AssistantPhase::Unknown => theme
+                        .log
+                        .assistant
+                        .r#final
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💬 ")
+                        .trim_end(),
                 };
 
                 if has_answer {
                     let prefix = format!("{answer_icon} ");
-                    let md_lines = crate::markdown::render(&content, width, &prefix);
+                    let md_lines = crate::markdown::render_with_theme(
+                        &content,
+                        width,
+                        &prefix,
+                        &theme.markdown,
+                    );
                     append_markdown_answer(&mut lines, md_lines, is_streaming_last);
                 }
             }
             Role::ToolCall => {
-                render_tool_call(messages, idx, width, cfg, &mut lines);
+                render_tool_call(messages, idx, width, cfg, theme, display, &mut lines);
             }
             Role::ToolResult => {
-                render_tool_result(messages, idx, width, cfg, &mut lines);
+                render_tool_result(messages, idx, width, cfg, theme, display, &mut lines);
             }
         }
     }
@@ -187,6 +225,8 @@ fn render_tool_call(
     idx: usize,
     width: usize,
     cfg: &ToolBodyConfig,
+    theme: &Theme,
+    display: &DisplayConfig,
     out: &mut Vec<Line<'static>>,
 ) {
     let msg = &messages[idx];
@@ -204,14 +244,21 @@ fn render_tool_call(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Context: green bg, dimmed text, no icon.
+        // Context: ask_user bg, dimmed text, no icon.
         if let Some(ctx) = context {
-            append_ask_user_block_dim(out, ctx, width, ASK_USER_BG);
+            append_ask_user_block_dim(
+                out,
+                ctx,
+                width,
+                theme.log.ask_user.bg.unwrap_or(Color::Rgb(27, 71, 31)),
+                theme,
+            );
         }
 
         // Question: no background (same as normal agent responses).
         if !question.is_empty() {
-            let md_lines = crate::markdown::render(question, width, "❓ ");
+            let md_lines =
+                crate::markdown::render_with_theme(question, width, "❓ ", &theme.markdown);
             append_markdown_answer(out, md_lines, false);
         }
 
@@ -240,7 +287,7 @@ fn render_tool_call(
             format!("⚙ {prefix} {command}")
         }
     } else if let Some(snapshot) = msg.tool_partial_snapshot.as_ref() {
-        let label = tool_presentation::tool_invocation_label(name, snapshot);
+        let label = tool_presentation::tool_invocation_label(name, snapshot, display);
         // During streaming, a partial snapshot may contain an empty target
         // field (e.g. {"path": ""}) which produces the pending label.
         // Detect this and render it in italic/dim like other placeholders.
@@ -253,12 +300,13 @@ fn render_tool_call(
             name,
             partial,
             msg.tool_streaming_field.as_deref(),
+            display,
         );
         is_placeholder = ph;
         lbl
     } else {
         match msg.tool_args.as_ref() {
-            Some(args) => tool_presentation::tool_invocation_label(name, args),
+            Some(args) => tool_presentation::tool_invocation_label(name, args, display),
             None => {
                 is_placeholder = true;
                 tool_presentation::tool_pending_label(name)
@@ -300,7 +348,11 @@ fn render_tool_call(
     let color = if name == "local_shell" {
         Color::LightBlue
     } else {
-        Color::Cyan
+        theme
+            .tools
+            .get(name)
+            .headline_color()
+            .unwrap_or(Color::Cyan)
     };
     if is_placeholder {
         append_message_colored_dim(out, &intent_label, width, color);
@@ -332,7 +384,11 @@ fn render_tool_call(
             .map(|s| s.to_string())
             .or(streaming_content);
         if let Some(content) = content {
-            let body_color = Color::Cyan;
+            let body_color = theme
+                .tools
+                .get("write_file")
+                .body_color()
+                .unwrap_or(Color::Cyan);
             render_head_truncated_body(
                 out,
                 &content,
@@ -378,6 +434,7 @@ fn render_tool_call(
                 cfg.diff_lines,
                 cfg.full_output,
                 width,
+                theme,
             );
         }
     }
@@ -390,7 +447,7 @@ fn render_tool_call(
             Some(next) if next.role == Role::ToolResult
         )
     {
-        let body_color = Color::DarkGray;
+        let body_color = theme.log.diff.unchanged.fg.unwrap_or(Color::DarkGray);
         render_head_truncated_body(
             out,
             output,
@@ -409,6 +466,8 @@ fn render_tool_result(
     idx: usize,
     width: usize,
     cfg: &ToolBodyConfig,
+    theme: &Theme,
+    _display: &DisplayConfig,
     out: &mut Vec<Line<'static>>,
 ) {
     let msg = &messages[idx];
@@ -419,16 +478,21 @@ fn render_tool_result(
         .unwrap_or("unknown");
 
     // ask_user: response is committed as part of the ToolCall rendering above.
-    // Here we just append the response block (green bg, italic).
+    // Here we just append the response block.
     if prev_name == "ask_user" {
-        append_ask_user_response(out, &msg.content, width, USER_BG);
+        append_ask_user_response(
+            out,
+            &msg.content,
+            width,
+            theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64)),
+        );
         return;
     }
 
     // local_shell: existing color treatment, tail-truncated.
     if prev_name == "local_shell" {
         let color = if msg.is_error {
-            Color::LightRed
+            theme.log.diff.removed.fg.unwrap_or(Color::LightRed)
         } else {
             Color::LightBlue
         };
@@ -459,15 +523,16 @@ fn render_tool_result(
                     cfg.diff_lines,
                     cfg.full_output,
                     width,
+                    theme,
                 );
                 return;
             }
         }
         // Fallthrough to plain content on error or missing args.
         let color = if msg.is_error {
-            Color::Red
+            theme.log.diff.removed.fg.unwrap_or(Color::Red)
         } else {
-            Color::Green
+            theme.log.diff.added.fg.unwrap_or(Color::Green)
         };
         let content = sanitize_for_display(&msg.content);
         render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
@@ -481,7 +546,11 @@ fn render_tool_result(
             .and_then(|a| a.get("content"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let color = Color::Green;
+        let color = theme
+            .tools
+            .get(prev_name)
+            .body_color()
+            .unwrap_or(Color::Green);
         render_head_truncated_body(out, content, cfg.head_lines, cfg.full_output, color, width);
         return;
     }
@@ -489,9 +558,13 @@ fn render_tool_result(
     // read_file / find_files: head-truncated.
     if matches!(prev_name, "read" | "read_file" | "find" | "find_files") {
         let color = if msg.is_error {
-            Color::Red
+            theme.log.diff.removed.fg.unwrap_or(Color::Red)
         } else {
-            Color::Green
+            theme
+                .tools
+                .get(prev_name)
+                .body_color()
+                .unwrap_or(Color::Green)
         };
         let content = sanitize_for_display(&msg.content);
         render_head_truncated_body(out, &content, cfg.head_lines, cfg.full_output, color, width);
@@ -506,9 +579,13 @@ fn render_tool_result(
     // bash / cmd / powershell / exec: tail-truncated.
     if matches!(prev_name, "bash" | "cmd" | "powershell" | "exec") {
         let color = if msg.is_error {
-            Color::LightRed
+            theme.log.diff.removed.fg.unwrap_or(Color::LightRed)
         } else {
-            Color::LightBlue
+            theme
+                .tools
+                .get(prev_name)
+                .body_color()
+                .unwrap_or(Color::LightBlue)
         };
         let content = sanitize_for_display(&msg.content);
         render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
@@ -517,9 +594,13 @@ fn render_tool_result(
 
     // Custom / unknown tools: tail-truncated, green/red.
     let color = if msg.is_error {
-        Color::Red
+        theme.log.diff.removed.fg.unwrap_or(Color::Red)
     } else {
-        Color::Green
+        theme
+            .tools
+            .get(prev_name)
+            .body_color()
+            .unwrap_or(Color::Green)
     };
     let content = sanitize_for_display(&msg.content);
     render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
@@ -602,7 +683,10 @@ fn render_diff_body(
     max_lines_per_side: usize,
     full_output: bool,
     width: usize,
+    theme: &Theme,
 ) {
+    let removed_color = theme.log.diff.removed.fg.unwrap_or(Color::LightRed);
+    let added_color = theme.log.diff.added.fg.unwrap_or(Color::LightGreen);
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
 
@@ -646,60 +730,60 @@ fn render_diff_body(
     let is_pure_addition = old_total == 0;
     let is_pure_removal = new_total == 0;
 
-    // Red block (omit common-line placeholders when it's a pure addition).
+    // Removed block (omit common-line placeholders when it's a pure addition).
     if old_total > 0 {
         if common_head > 0 && !is_pure_removal {
             out.push(placeholder_result_line(
                 format!("… {common_head} common lines"),
-                Color::LightRed,
+                removed_color,
             ));
         }
         for line in old_diff.iter().take(old_limit) {
             let normalized = normalize_terminal_segment(line, 0);
             let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
             for chunk in chunks {
-                out.push(tool_result_line(chunk, Color::LightRed));
+                out.push(tool_result_line(chunk, removed_color));
             }
         }
         if !full_output && old_total > max_lines_per_side {
             out.push(placeholder_result_line(
                 format!("… {old_total} total lines"),
-                Color::LightRed,
+                removed_color,
             ));
         }
         if common_tail > 0 && !is_pure_removal {
             out.push(placeholder_result_line(
                 format!("… {common_tail} common lines"),
-                Color::LightRed,
+                removed_color,
             ));
         }
     }
 
-    // Green block (omit common-line placeholders when it's a pure removal).
+    // Added block (omit common-line placeholders when it's a pure removal).
     if new_total > 0 {
         if common_head > 0 && !is_pure_addition {
             out.push(placeholder_result_line(
                 format!("… {common_head} common lines"),
-                Color::LightGreen,
+                added_color,
             ));
         }
         for line in new_diff.iter().take(new_limit) {
             let normalized = normalize_terminal_segment(line, 0);
             let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
             for chunk in chunks {
-                out.push(tool_result_line(chunk, Color::LightGreen));
+                out.push(tool_result_line(chunk, added_color));
             }
         }
         if !full_output && new_total > max_lines_per_side {
             out.push(placeholder_result_line(
                 format!("… {new_total} total lines"),
-                Color::LightGreen,
+                added_color,
             ));
         }
         if common_tail > 0 && !is_pure_addition {
             out.push(placeholder_result_line(
                 format!("… {common_tail} common lines"),
-                Color::LightGreen,
+                added_color,
             ));
         }
     }
@@ -730,10 +814,16 @@ fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'stati
 // ── ask_user block helpers ────────────────────────────────────────────────────
 
 /// Context block: green background, dimmed text, no icon.
-fn append_ask_user_block_dim(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
+fn append_ask_user_block_dim(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    bg: Color,
+    theme: &Theme,
+) {
     let dim_bg_style = Style::default().bg(bg).add_modifier(Modifier::DIM);
     let padding_style = Style::default().bg(bg);
-    let md_lines = crate::markdown::render(content, width, "");
+    let md_lines = crate::markdown::render_with_theme(content, width, "", &theme.markdown);
     for line in md_lines {
         // Re-render with bg color and dim applied to each span.
         let dimmed: Vec<Span<'static>> = line
@@ -1040,14 +1130,8 @@ fn append_markdown_answer(
     out.extend(md_lines);
 }
 
-fn append_message(
-    out: &mut Vec<Line<'static>>,
-    content: &str,
-    suffix: &'static str,
-    width: usize,
-    user: bool,
-) {
-    let user_bg_style = Style::default().bg(USER_BG);
+fn append_message(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
+    let user_bg_style = Style::default().bg(bg);
     let segments: Vec<&str> = if content.is_empty() {
         vec![""]
     } else {
@@ -1069,41 +1153,23 @@ fn append_message(
             })
             .collect()
     };
-    let last_visible = visible.last().copied();
 
-    if user {
-        out.push(halfblock_line(width, '▄', USER_BG));
-    }
+    out.push(halfblock_line(width, '▄', bg));
 
     for seg_idx in visible {
         let segment = segments[seg_idx];
-        let is_last_visible_seg = Some(seg_idx) == last_visible;
         let normalized = normalize_terminal_segment(segment, 0);
         let chunks = wrap_str(&normalized, width);
-        let last_chunk = chunks.len() - 1;
 
-        for (chunk_idx, chunk) in chunks.iter().enumerate() {
-            let is_last_chunk = chunk_idx == last_chunk;
-            let show_suffix = !suffix.is_empty() && is_last_visible_seg && is_last_chunk;
-
-            if user {
-                let text_cols = chunk.as_str().width();
-                let padding = width.saturating_sub(text_cols);
-                let padded = format!("{}{}", chunk, " ".repeat(padding));
-                out.push(Line::from(Span::styled(padded, user_bg_style)));
-            } else {
-                let mut spans: Vec<Span<'static>> = vec![Span::raw(chunk.clone())];
-                if show_suffix {
-                    spans.push(Span::styled(suffix, Style::default().fg(Color::Yellow)));
-                }
-                out.push(Line::from(spans));
-            }
+        for chunk in chunks {
+            let text_cols = chunk.as_str().width();
+            let padding = width.saturating_sub(text_cols);
+            let padded = format!("{}{}", chunk, " ".repeat(padding));
+            out.push(Line::from(Span::styled(padded, user_bg_style)));
         }
     }
 
-    if user {
-        out.push(halfblock_line(width, '▀', USER_BG));
-    }
+    out.push(halfblock_line(width, '▀', bg));
 }
 
 pub(super) fn sanitize_for_display(text: &str) -> String {
@@ -1162,7 +1228,7 @@ mod tests {
     #[test]
     fn dim_lines_dims_bg_proportionally() {
         use ratatui::style::Style;
-        // USER_BG = Rgb(50, 50, 64)
+        // Default user bg = Rgb(50, 50, 64)
         let bg = Color::Rgb(50, 50, 64);
         let lines = vec![Line::from(vec![Span::styled(
             "hello",
@@ -1176,10 +1242,10 @@ mod tests {
     #[test]
     fn dim_lines_bar_fg_and_text_bg_match() {
         use ratatui::style::Style;
-        // Bar line: fg = USER_BG, no bg
+        // Bar line: fg matches user bg, no bg
         let user_bg = Color::Rgb(50, 50, 64);
         let bar_line = Line::from(vec![Span::styled("▄▄▄", Style::default().fg(user_bg))]);
-        // Text line: bg = USER_BG, no fg
+        // Text line: bg matches user bg, no fg
         let text_line = Line::from(vec![Span::styled("hello", Style::default().bg(user_bg))]);
         let dimmed = dim_lines(vec![bar_line, text_line]);
         let bar_fg = dimmed[0].spans[0].style.fg.unwrap();
@@ -1228,7 +1294,14 @@ mod tests {
     fn build_log_lines_hides_whitespace_only_streaming_assistant() {
         let mut msg = Message::assistant("\n   \n".to_string());
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let lines = build_log_lines(&[msg], true, 80, &cfg());
+        let lines = build_log_lines(
+            &[msg],
+            true,
+            80,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         assert!(lines.is_empty());
     }
 
@@ -1242,7 +1315,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         // 8 content lines + 1 marker = 9 body lines, plus 1 intent line = 10 total
         assert_eq!(lines.len(), 10);
         let text: Vec<String> = lines
@@ -1262,7 +1342,14 @@ mod tests {
         let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "foo.rs"}));
         let content = "line1\nline2\nline3";
         let result = Message::tool_result("c1", content, false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1284,7 +1371,14 @@ mod tests {
             last_line: 5,
             total_lines: 100,
         });
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let intent = lines[0]
             .spans
             .iter()
@@ -1306,7 +1400,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1329,7 +1430,14 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "old line", "new_text": "new line"}),
         );
         let result = Message::tool_result("c1", "Successfully edited foo.rs", false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1365,7 +1473,14 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": old, "new_text": new}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1389,7 +1504,14 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "prefix\n", "new_text": "prefix\nnew line\n"}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1418,7 +1540,14 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "prefix\nold line\n", "new_text": "prefix\n"}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1446,7 +1575,14 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "x", "new_text": "y"}),
         );
         let result = Message::tool_result("c1", "old_text not found", true);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1470,7 +1606,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1507,7 +1650,14 @@ mod tests {
             full_output: true,
             ..ToolBodyConfig::default()
         };
-        let lines = build_log_lines(&[call, result], false, 120, &full_cfg);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &full_cfg,
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1532,7 +1682,14 @@ mod tests {
             serde_json::json!({"question": "What do you want?"}),
         );
         // No following ToolResult.
-        let lines = build_log_lines(&[call], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1556,7 +1713,14 @@ mod tests {
             serde_json::json!({"question": "What do you want?"}),
         );
         let result = Message::tool_result("c1", "Option A", false);
-        let lines = build_log_lines(&[call, result], false, 120, &cfg());
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|l| {

@@ -3,7 +3,7 @@
 //! The public API is a single function:
 //!
 //! ```ignore
-//! pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>>
+//! pub fn render_with_theme(text: &str, width: usize, prefix: &str, theme: &MarkdownTheme) -> Vec<Line<'static>>
 //! ```
 //!
 //! It converts a markdown string to terminal-styled lines using pulldown-cmark
@@ -29,28 +29,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-// ── Colour palette ─────────────────────────────────────────────────────────────
-
-/// Foreground colour for inline code and code block text.
-const CODE_FG: Color = Color::Rgb(210, 160, 100);
-
-/// Table header foreground.
-const TABLE_HEADER_FG: Color = Color::Rgb(200, 210, 240);
-
-/// Table header background.
-const TABLE_HEADER_BG: Color = Color::Rgb(30, 40, 60);
-
-/// Even data row background.
-const TABLE_EVEN_BG: Color = Color::Rgb(22, 26, 34);
-
-/// Odd data row background.
-const TABLE_ODD_BG: Color = Color::Rgb(30, 35, 45);
-
-/// Data row foreground.
-const TABLE_DATA_FG: Color = Color::Rgb(210, 215, 225);
-
-/// Column separator character foreground (black — the cell bg shows instead).
-const TABLE_SEP_FG: Color = Color::Rgb(0, 0, 0);
+use crate::theme::MarkdownTheme;
 
 // ── Span accumulator for inline content ───────────────────────────────────────
 
@@ -60,13 +39,14 @@ struct InlineStyle {
     bold: bool,
     italic: bool,
     code: bool,
+    code_fg: Color,
 }
 
 impl InlineStyle {
     fn to_ratatui_style(&self) -> Style {
         let mut s = Style::default();
         if self.code {
-            s = s.fg(CODE_FG);
+            s = s.fg(self.code_fg);
         }
         if self.bold {
             s = s.add_modifier(Modifier::BOLD);
@@ -328,7 +308,7 @@ impl TableBuilder {
     /// reached its minimum width of 1.  Cells that are wider than their
     /// allotted column are wrapped to multiple terminal lines; all cells in
     /// the same logical row are padded to the same height.
-    fn render(&self, available_width: usize) -> Vec<Line<'static>> {
+    fn render(&self, available_width: usize, theme: &MarkdownTheme) -> Vec<Line<'static>> {
         if self.rows.is_empty() {
             return Vec::new();
         }
@@ -416,16 +396,16 @@ impl TableBuilder {
         for (ri, row) in self.rows.iter().enumerate() {
             let is_header = ri == 0;
             let row_bg = if is_header {
-                TABLE_HEADER_BG
+                theme.table.header.bg.unwrap_or(Color::Rgb(30, 40, 60))
             } else if ri % 2 == 0 {
-                TABLE_EVEN_BG
+                theme.table.row_even.bg.unwrap_or(Color::Rgb(22, 26, 34))
             } else {
-                TABLE_ODD_BG
+                theme.table.row_odd.bg.unwrap_or(Color::Rgb(30, 35, 45))
             };
             let row_fg = if is_header {
-                TABLE_HEADER_FG
+                theme.table.header.fg.unwrap_or(Color::Rgb(200, 210, 240))
             } else {
-                TABLE_DATA_FG
+                theme.table.data.fg.unwrap_or(Color::Rgb(210, 215, 225))
             };
             let cell_style = if is_header {
                 Style::default()
@@ -435,7 +415,9 @@ impl TableBuilder {
             } else {
                 Style::default().fg(row_fg).bg(row_bg)
             };
-            let sep_style = Style::default().fg(TABLE_SEP_FG).bg(row_bg);
+            let sep_style = Style::default()
+                .fg(theme.table.separator.fg.unwrap_or(Color::Rgb(0, 0, 0)))
+                .bg(row_bg);
 
             // Wrap each cell.
             let wrapped_cells: Vec<Vec<String>> = col_widths
@@ -484,7 +466,12 @@ impl TableBuilder {
 /// first rendered line.  When the first block is a table the prefix is emitted
 /// on its own line so that table column alignment is not disturbed.  Pass `""`
 /// when no prefix is needed.
-pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
+pub fn render_with_theme(
+    text: &str,
+    width: usize,
+    prefix: &str,
+    theme: &MarkdownTheme,
+) -> Vec<Line<'static>> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -496,8 +483,12 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
     // Inline span accumulator: (text, style)
     let mut inline_spans: Vec<(String, Style)> = Vec::new();
 
+    let code_fg = theme.code.fg.unwrap_or(Color::Rgb(210, 160, 100));
     // Current inline style stack.
-    let mut style = InlineStyle::default();
+    let mut style = InlineStyle {
+        code_fg,
+        ..InlineStyle::default()
+    };
 
     // Are we inside a code block?
     let mut in_code_block = false;
@@ -660,7 +651,10 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                 }
                 out.push(Line::from(line_spans));
                 out.push(Line::default());
-                style = InlineStyle::default();
+                style = InlineStyle {
+                    code_fg,
+                    ..InlineStyle::default()
+                };
             }
 
             Event::Start(Tag::CodeBlock(_)) => {
@@ -752,7 +746,7 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                     first_block = false;
                     out.push(Line::from(Span::raw(prefix.to_string())));
                 }
-                out.extend(table.render(width));
+                out.extend(table.render(width, theme));
                 out.push(Line::default());
                 table = TableBuilder::default();
             }
@@ -807,7 +801,7 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
                     // Each text event inside a code block is one line (pulldown-cmark
                     // includes the newline).  Render with 2-space indent, hard-wrapping
                     // lines that exceed the available width.
-                    let code_style = Style::default().fg(CODE_FG);
+                    let code_style = Style::default().fg(code_fg);
                     for line in text.split('\n') {
                         if line.is_empty() {
                             // Preserve blank lines inside code blocks.
@@ -862,7 +856,7 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
             Event::Code(t) => {
                 // Inline code.
                 let text = t.into_string();
-                let s = Style::default().fg(CODE_FG);
+                let s = Style::default().fg(code_fg);
                 if in_table {
                     table.push_text(&text);
                 } else {
@@ -935,6 +929,11 @@ mod tests {
         lines.iter().map(line_text).collect()
     }
 
+    /// Test convenience: render with the default theme.
+    fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
+        render_with_theme(text, width, prefix, &MarkdownTheme::default())
+    }
+
     // ── Plain text ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -985,7 +984,7 @@ mod tests {
         assert!(!lines.is_empty());
         let spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let code_span = spans.iter().find(|s| s.content.contains("code")).unwrap();
-        assert_eq!(code_span.style.fg, Some(CODE_FG));
+        assert_eq!(code_span.style.fg, Some(Color::Rgb(210, 160, 100)));
     }
 
     // ── Headings ────────────────────────────────────────────────────────────────
@@ -1017,7 +1016,7 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("fn main"))
             .unwrap();
-        assert_eq!(code_span.style.fg, Some(CODE_FG));
+        assert_eq!(code_span.style.fg, Some(Color::Rgb(210, 160, 100)));
     }
 
     #[test]
@@ -1063,7 +1062,7 @@ mod tests {
         let first_span = &header_line.spans[0];
         assert_eq!(
             first_span.style.bg,
-            Some(TABLE_HEADER_BG),
+            Some(Color::Rgb(30, 40, 60)),
             "header bg mismatch: {:?}",
             first_span.style
         );

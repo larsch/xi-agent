@@ -62,6 +62,7 @@ mod shell;
 mod shell_state;
 mod skills;
 mod step_back_state;
+mod theme;
 mod thinking;
 mod tool_presentation;
 mod tracked;
@@ -105,6 +106,10 @@ struct Cli {
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
     print_dirs: bool,
+
+    /// Path to a theme.toml file. Overrides the `theme` key in config.toml.
+    #[arg(long, value_name = "PATH")]
+    theme: Option<std::path::PathBuf>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -140,6 +145,25 @@ async fn main() -> io::Result<()> {
         Err(e) => {
             eprintln!("warning: failed to load config.toml: {e}");
             XiConfig::default()
+        }
+    };
+
+    // --theme flag overrides config.toml theme path
+    if let Some(theme_path) = cli.theme {
+        config.theme = Some(theme_path);
+    }
+
+    // Load theme (missing file → built-in defaults)
+    let theme_path = config.theme.clone().unwrap_or_else(|| {
+        crate::dirs::project_dirs()
+            .map(|d| d.config_dir().join("theme.toml"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("theme.toml"))
+    });
+    let theme = match crate::theme::Theme::load(&theme_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("warning: failed to load theme: {e}");
+            crate::theme::Theme::default()
         }
     };
 
@@ -215,7 +239,9 @@ async fn main() -> io::Result<()> {
             hooks: config.hooks.clone(),
             session_id: String::new(),
         },
+        config.display.clone(),
     );
+    app.theme = theme;
 
     let app_event_tx = app.app_event_tx();
     let custom_tools = load_custom_tools(&custom_tool_dirs());
@@ -948,7 +974,14 @@ async fn run_print_mode_loop(
                 );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
-                eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
+                eprintln!(
+                    "{}",
+                    tool_presentation::tool_invocation_label(
+                        &name,
+                        &args,
+                        &crate::config::DisplayConfig::default()
+                    )
+                );
             }
             AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
@@ -1104,7 +1137,14 @@ async fn run_print_mode_loop_inner(
                 );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
-                eprintln!("{}", tool_presentation::tool_invocation_label(&name, &args));
+                eprintln!(
+                    "{}",
+                    tool_presentation::tool_invocation_label(
+                        &name,
+                        &args,
+                        &crate::config::DisplayConfig::default()
+                    )
+                );
             }
             AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
