@@ -1064,6 +1064,35 @@ impl App {
 
         Some(new_content)
     }
+
+    /// Copy the last assistant response to the system clipboard.
+    ///
+    /// Prefers the currently streaming (live turn) assistant content; falls
+    /// back to the last committed assistant message.  Silently does nothing
+    /// if there is no assistant content to copy.
+    pub fn copy_last_assistant_response(&mut self) {
+        let text = if self.session.live_turn.has_assistant_content() {
+            self.session.live_turn.assistant_content.clone()
+        } else if let Some(ss) = self.session.session_state.as_ref() {
+            let msgs = ss.display_messages();
+            msgs.iter()
+                .rev()
+                .find(|m| m.role == crate::llm::Role::Assistant)
+                .map(|m| m.content.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            let _ = cb.set_text(text);
+        }
+    }
 }
 
 #[cfg(test)]

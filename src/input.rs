@@ -272,6 +272,11 @@ fn handle_global_key_shortcuts(
         return KeyDispatch::Continue;
     }
 
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.copy_last_assistant_response();
+        return KeyDispatch::Continue;
+    }
+
     if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.log_view.toggle_full_output();
         return KeyDispatch::Continue;
