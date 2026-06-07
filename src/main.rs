@@ -216,9 +216,11 @@ async fn main() -> io::Result<()> {
 
     let app_event_tx = app.app_event_tx();
     let custom_tools = load_custom_tools(&custom_tool_dirs());
+    let loaded_skills = Arc::new(skills::load_skills());
     let tools = register_builtin_tools(
         Some(app_event_tx.clone()),
         Arc::clone(&file_tracker),
+        Arc::clone(&loaded_skills),
         custom_tools,
     )
     .await;
@@ -226,11 +228,10 @@ async fn main() -> io::Result<()> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
     app.init_session_persistence(cwd.clone());
-    let loaded_skills = skills::load_skills();
     let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
     app.agent_config.tools = tools;
     app.agent_config.system_prompt = Some(system_prompt);
-    app.loaded_skills = loaded_skills;
+    app.loaded_skills = (*loaded_skills).clone();
     app.provider.instances = config.providers.clone();
     maybe_warn_thinking_unsupported(&mut app);
 
@@ -278,18 +279,19 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::ReloadContext) => {
                 let custom_tools = load_custom_tools(&custom_tool_dirs());
                 let custom_count = custom_tools.len();
+                let loaded_skills = Arc::new(skills::load_skills());
                 let tools = register_builtin_tools(
                     Some(app_event_tx.clone()),
                     Arc::clone(&file_tracker),
+                    Arc::clone(&loaded_skills),
                     custom_tools,
                 )
                 .await;
-                let loaded_skills = skills::load_skills();
                 let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
                 let skills_count = loaded_skills.len();
                 app.agent_config.tools = tools;
                 app.agent_config.system_prompt = Some(system_prompt);
-                app.loaded_skills = loaded_skills;
+                app.loaded_skills = (*loaded_skills).clone();
                 app.push_notice(Message::assistant(format!(
                     "[reloaded context: {} skill{}, {} custom tool{}]",
                     skills_count,
@@ -840,11 +842,11 @@ async fn run_print_mode(
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let headless_tracker = Arc::new(Mutex::new(build_file_tracker()));
-    let tools = register_builtin_tools(None, Arc::clone(&headless_tracker), custom_tools).await;
+    let loaded_skills = Arc::new(skills::load_skills());
+    let tools = register_builtin_tools(None, Arc::clone(&headless_tracker), Arc::clone(&loaded_skills), custom_tools).await;
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let loaded_skills = skills::load_skills();
     let headless_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless")));
     let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
 
@@ -1035,7 +1037,8 @@ async fn run_print_mode_loop_inner(
     let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let retry_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless-retry")));
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let retry_tools = register_builtin_tools(None, Arc::clone(&retry_tracker), custom_tools).await;
+    let retry_skills = Arc::new(skills::load_skills());
+    let retry_tools = register_builtin_tools(None, Arc::clone(&retry_tracker), Arc::clone(&retry_skills), custom_tools).await;
     let retry_config = AgentLoopConfig {
         tools: retry_tools,
         file_tracker: retry_tracker,

@@ -146,7 +146,7 @@ Current working directory: {cwd}"
     )
 }
 
-/// Render the `<available_skills>` prompt block from a slice of skill metadata.
+/// Render the available skills block from a slice of skill metadata.
 /// Returns an empty string when `skills` is empty.
 fn render_skills_block(skills: &[SkillMeta]) -> String {
     if skills.is_empty() {
@@ -155,14 +155,7 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
 
     let entries: String = skills
         .iter()
-        .map(|s| {
-            format!(
-                "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>",
-                escape_xml(&s.name),
-                escape_xml(&s.description),
-                escape_xml(&s.path.display().to_string())
-            )
-        })
+        .map(|s| format!("- `{}`: {}", s.name, s.description))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -172,19 +165,11 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
 Each skill's description names the task type, problem domain, or situation it handles. \
 Load any skill whose description overlaps with what the user is asking about. \
 When multiple descriptions are relevant, load all of them.\n\
-Use the read_file tool to load a skill's file.\n\
+Use the read_skill tool to load a skill's instructions by name.\n\
 When a skill file references a relative path, resolve it against the skill directory \
 (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
 \n<available_skills>\n{entries}\n</available_skills>"
     )
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 /// Return the text up to and including the first `.`, `!`, or `?`,
@@ -308,29 +293,29 @@ mod tests {
         let prompt = build_system_prompt(&tools, "/tmp", &skills);
 
         assert!(prompt.contains("<available_skills>"));
-        assert!(prompt.contains("<name>plan</name>"));
-        assert!(prompt.contains("<description>Create an implementation plan</description>"));
-        assert!(prompt.contains("<location>/tmp/skills/plan/SKILL.md</location>"));
+        assert!(prompt.contains("- `plan`: Create an implementation plan"));
+        assert!(!prompt.contains("<name>plan</name>"), "should not contain XML tags");
+        assert!(!prompt.contains("/tmp/skills/plan/SKILL.md"), "location should not appear in listing");
         assert!(prompt.contains("Each skill's description names the task type, problem domain, or situation it handles."));
         assert!(prompt.contains("Load any skill whose description overlaps with what the user is asking about."));
         assert!(prompt.contains("When multiple descriptions are relevant, load all of them."));
-        assert!(prompt.contains("Use the read_file tool to load a skill's file."));
+        assert!(prompt.contains("Use the read_skill tool to load a skill's instructions by name."));
     }
 
     #[test]
-    fn build_system_prompt_escapes_skill_xml_entities() {
+    fn build_system_prompt_skill_special_chars_not_escaped() {
         let tools = registry(&[]);
         let skills = vec![SkillMeta {
-            name: "a&b".to_string(),
-            description: "x < y \"quoted\"".to_string(),
-            path: Path::new("/tmp/skills/a&b/SKILL.md").to_path_buf(),
-            base_dir: PathBuf::from("/tmp/skills/a&b"),
+            name: "a-skill".to_string(),
+            description: "handles x < y and \"quoted\" values".to_string(),
+            path: Path::new("/tmp/skills/a-skill/SKILL.md").to_path_buf(),
+            base_dir: PathBuf::from("/tmp/skills/a-skill"),
         }];
 
         let prompt = build_system_prompt(&tools, "/tmp", &skills);
 
-        assert!(prompt.contains("<name>a&amp;b</name>"));
-        assert!(prompt.contains("<description>x &lt; y &quot;quoted&quot;</description>"));
-        assert!(prompt.contains("<location>/tmp/skills/a&amp;b/SKILL.md</location>"));
+        // Prose format — no XML escaping applied
+        assert!(prompt.contains("x < y"), "angle bracket should not be escaped");
+        assert!(prompt.contains("\"quoted\""), "quotes should not be escaped");
     }
 }

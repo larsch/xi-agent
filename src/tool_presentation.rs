@@ -115,6 +115,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "bash" | "cmd" | "powershell" | "exec" => "💻",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
+        "read_skill" => "🎓",
         _ => "⚙️",
     }
 }
@@ -143,6 +144,15 @@ pub fn tool_detail(name: &str, args: &Value) -> String {
         && let Some(question) = args.get("question").and_then(|v| v.as_str())
     {
         return one_line(question);
+    }
+
+    // read_skill: show only the skill name.
+    if name == "read_skill" {
+        return args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
     }
 
     // find_files: render pattern and/or path meaningfully.

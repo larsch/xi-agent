@@ -146,6 +146,7 @@ pub mod find;
 pub mod powershell;
 pub mod python;
 pub mod read;
+pub mod read_skill;
 pub mod subprocess;
 pub mod terminal;
 pub mod truncate;
@@ -164,6 +165,7 @@ use find::FindTool;
 use powershell::PowerShellTool;
 use python::PythonTool;
 use read::ReadFileTool;
+use read_skill::ReadSkillTool;
 use write::WriteTool;
 
 use crate::app_event::AppEventTx;
@@ -175,6 +177,7 @@ use crate::app_event::AppEventTx;
 pub async fn register_builtin_tools(
     app_event_tx: Option<AppEventTx>,
     file_tracker: Arc<Mutex<FileTracker>>,
+    skills: Arc<Vec<crate::skills::SkillMeta>>,
     custom: Vec<custom::CustomTool>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -184,6 +187,7 @@ pub async fn register_builtin_tools(
         Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
+        Arc::new(ReadSkillTool::new(Arc::clone(&skills))),
         Arc::new(AskUserTool::new(
             app_event_tx,
             Some(Arc::clone(&file_tracker)),
