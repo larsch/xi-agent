@@ -294,10 +294,20 @@ mod tests {
 
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("- `plan`: Create an implementation plan"));
-        assert!(!prompt.contains("<name>plan</name>"), "should not contain XML tags");
-        assert!(!prompt.contains("/tmp/skills/plan/SKILL.md"), "location should not appear in listing");
-        assert!(prompt.contains("Each skill's description names the task type, problem domain, or situation it handles."));
-        assert!(prompt.contains("Load any skill whose description overlaps with what the user is asking about."));
+        assert!(
+            !prompt.contains("<name>plan</name>"),
+            "should not contain XML tags"
+        );
+        assert!(
+            !prompt.contains("/tmp/skills/plan/SKILL.md"),
+            "location should not appear in listing"
+        );
+        assert!(prompt.contains(
+            "Each skill's description names the task type, problem domain, or situation it handles."
+        ));
+        assert!(prompt.contains(
+            "Load any skill whose description overlaps with what the user is asking about."
+        ));
         assert!(prompt.contains("When multiple descriptions are relevant, load all of them."));
         assert!(prompt.contains("Use the read_skill tool to load a skill's instructions by name."));
     }
@@ -315,7 +325,13 @@ mod tests {
         let prompt = build_system_prompt(&tools, "/tmp", &skills);
 
         // Prose format — no XML escaping applied
-        assert!(prompt.contains("x < y"), "angle bracket should not be escaped");
-        assert!(prompt.contains("\"quoted\""), "quotes should not be escaped");
+        assert!(
+            prompt.contains("x < y"),
+            "angle bracket should not be escaped"
+        );
+        assert!(
+            prompt.contains("\"quoted\""),
+            "quotes should not be escaped"
+        );
     }
 }

@@ -164,13 +164,22 @@ mod tests {
         let skill = write_skill_file(dir.path(), "brainstorm", "# Brainstorm\nDo the thing.");
         let tool = make_tool(vec![skill]);
 
-        let result = tool.execute(serde_json::json!({"name": "brainstorm"})).await;
-        assert!(!result.is_error, "unexpected error: {}", result.content.as_text());
+        let result = tool
+            .execute(serde_json::json!({"name": "brainstorm"}))
+            .await;
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
         let text = result.content.as_text();
         assert!(text.contains("# Brainstorm"), "missing body: {text}");
         assert!(text.contains("Do the thing."), "missing body: {text}");
         assert!(!text.contains("---"), "frontmatter not stripped: {text}");
-        assert!(!text.contains("description:"), "frontmatter not stripped: {text}");
+        assert!(
+            !text.contains("description:"),
+            "frontmatter not stripped: {text}"
+        );
     }
 
     #[tokio::test]
@@ -179,7 +188,9 @@ mod tests {
         let skill = write_skill_file(dir.path(), "build", "# Build");
         let tool = make_tool(vec![skill]);
 
-        let result = tool.execute(serde_json::json!({"name": "nonexistent"})).await;
+        let result = tool
+            .execute(serde_json::json!({"name": "nonexistent"}))
+            .await;
         assert!(result.is_error);
         let text = result.content.as_text();
         assert!(text.contains("nonexistent"), "missing queried name: {text}");

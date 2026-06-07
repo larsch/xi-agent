@@ -491,6 +491,11 @@ fn render_tool_result(
         return;
     }
 
+    // read_skill: show only the invocation label (already rendered), no body.
+    if prev_name == "read_skill" {
+        return;
+    }
+
     // bash / cmd / powershell / exec: tail-truncated.
     if matches!(prev_name, "bash" | "cmd" | "powershell" | "exec") {
         let color = if msg.is_error {
