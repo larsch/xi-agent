@@ -434,6 +434,8 @@ mod tests {
                 manual_compaction_instructions: None,
                 executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
                 system_prompt: None,
+                hooks: HashMap::new(),
+                session_id: String::new(),
             },
         )
     }

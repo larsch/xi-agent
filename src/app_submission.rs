@@ -41,6 +41,8 @@ impl App {
                 .take(),
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
             system_prompt: self.agent_config.system_prompt.clone(),
+            hooks: self.agent_config.hooks.clone(),
+            session_id: session_id.clone(),
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.steering_tx = Some(steering_tx);

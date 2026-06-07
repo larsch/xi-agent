@@ -4,6 +4,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::app_event::{AppEvent, SendIgnore};
+use crate::hooks::{HookPoint, post_tool_json, tool_json};
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, Message, ToolDefinition, UsageStats};
 use crate::projection::LlmProjection;
 use crate::session_event::{CompactionTrigger, SessionEvent};
@@ -263,6 +264,16 @@ async fn execute_tool_batch(
     session_events: &mut Vec<SessionEvent>,
 ) -> BatchOutcome {
     for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
+        // ── Pre-tool hook ────────────────────────────────────────────────────
+        crate::hooks::maybe_run_hook(
+            &config.hooks,
+            HookPoint::PreTool,
+            &config.session_id,
+            Some(tool_json(&name, &args)),
+            Some(&name),
+        )
+        .await;
+
         tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
             id: id.clone(),
             name: name.clone(),
@@ -280,6 +291,21 @@ async fn execute_tool_batch(
                 Some(tx.clone()),
             )
             .await;
+
+        // ── Post-tool hook ───────────────────────────────────────────────────
+        crate::hooks::maybe_run_hook(
+            &config.hooks,
+            HookPoint::PostTool,
+            &config.session_id,
+            Some(post_tool_json(
+                &name,
+                &args,
+                result.is_error,
+                result.is_truncated,
+            )),
+            Some(&name),
+        )
+        .await;
 
         tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
             id: id.clone(),
@@ -359,6 +385,15 @@ pub async fn run_agent_loop(
             Ok(_) => {}
             Err(e) => send_compaction_failed_status(&tx, &e.message),
         }
+        // ── On-done hook (manual compaction) ─────────────────────────────────
+        crate::hooks::maybe_run_hook(
+            &config.hooks,
+            HookPoint::OnDone,
+            &config.session_id,
+            None,
+            None,
+        )
+        .await;
         tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
         return;
     }
@@ -392,6 +427,16 @@ pub async fn run_agent_loop(
         let mut messages: Vec<Message> = config.system_prompt.iter().map(Message::system).collect();
         messages.extend_from_slice(projection.messages());
 
+        // ── Pre-turn hook ────────────────────────────────────────────────────
+        crate::hooks::maybe_run_hook(
+            &config.hooks,
+            HookPoint::PreTurn,
+            &config.session_id,
+            None,
+            None,
+        )
+        .await;
+
         // ── Stream assistant turn ─────────────────────────────────────────────
         let turn = stream_assistant_turn(
             Arc::clone(&provider),
@@ -404,11 +449,31 @@ pub async fn run_agent_loop(
 
         match turn {
             TurnOutcome::Error(e) => {
+                crate::hooks::maybe_run_hook(
+                    &config.hooks,
+                    HookPoint::OnError,
+                    &config.session_id,
+                    Some(crate::hooks::on_error_json(&e.message, None, None)),
+                    None,
+                )
+                .await;
                 tx.send_ignore(AppEvent::Agent(AgentEvent::Error(e)));
                 return;
             }
 
             TurnOutcome::ToolIntentWithNoCall => {
+                crate::hooks::maybe_run_hook(
+                    &config.hooks,
+                    HookPoint::OnError,
+                    &config.session_id,
+                    Some(crate::hooks::on_error_json(
+                        "Tool call was indicated but not completed (response may have been truncated).",
+                        None,
+                        None,
+                    )),
+                    None,
+                )
+                .await;
                 tx.send_ignore(AppEvent::Agent(AgentEvent::Error(
                     crate::llm::ProviderError::other(
                         "agent",
@@ -473,6 +538,16 @@ pub async fn run_agent_loop(
 
                 tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
 
+                // ── Post-turn hook ───────────────────────────────────────────
+                crate::hooks::maybe_run_hook(
+                    &config.hooks,
+                    HookPoint::PostTurn,
+                    &config.session_id,
+                    None,
+                    None,
+                )
+                .await;
+
                 // If a steering message arrived while the LLM was generating,
                 // consume it only after the completed assistant turn has been
                 // committed via TurnEnd so transcript order remains natural.
@@ -504,6 +579,15 @@ pub async fn run_agent_loop(
                     }
                 }
 
+                // ── On-done hook (final answer) ──────────────────────────────
+                crate::hooks::maybe_run_hook(
+                    &config.hooks,
+                    HookPoint::OnDone,
+                    &config.session_id,
+                    None,
+                    None,
+                )
+                .await;
                 tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
                 return;
             }
@@ -529,6 +613,16 @@ pub async fn run_agent_loop(
 
                 config.file_tracker.lock().unwrap().refresh_baselines();
                 tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
+
+                // ── Post-turn hook (tool calls) ──────────────────────────────
+                crate::hooks::maybe_run_hook(
+                    &config.hooks,
+                    HookPoint::PostTurn,
+                    &config.session_id,
+                    None,
+                    None,
+                )
+                .await;
 
                 if let BatchOutcome::Cancelled = batch_outcome {
                     return;

@@ -40,6 +40,7 @@ mod debug_log;
 mod dirs;
 mod event_log;
 mod export;
+mod hooks;
 mod input;
 mod live_turn;
 mod llm;
@@ -211,6 +212,8 @@ async fn main() -> io::Result<()> {
             manual_compaction_instructions: None,
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
             system_prompt: None,
+            hooks: config.hooks.clone(),
+            session_id: String::new(),
         },
     );
 
@@ -871,6 +874,8 @@ async fn run_print_mode(
         manual_compaction_instructions: None,
         executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
         system_prompt: Some(system_prompt),
+        hooks: std::collections::HashMap::new(),
+        session_id: String::new(),
     };
 
     let provider_ctx = PrintModeProviderCtx {
@@ -1061,6 +1066,8 @@ async fn run_print_mode_loop_inner(
         manual_compaction_instructions: None,
         executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
         system_prompt,
+        hooks: std::collections::HashMap::new(),
+        session_id: String::new(),
     };
 
     tokio::spawn(async move {

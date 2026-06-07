@@ -2,6 +2,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::Context;
 
+use crate::hooks::{HookConfig, HookPoint};
 use crate::provider_instance::ProviderInstance;
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
@@ -15,6 +16,12 @@ pub struct XiConfig {
     /// Named provider instances.
     #[serde(default)]
     pub providers: Vec<ProviderInstance>,
+
+    /// Agent-level hooks — user-defined commands that run at specific points
+    /// in the agent loop (e.g. pre_tool, post_tool, pre_turn, post_turn, on_error).
+    /// Each hook point supports an array of hook configurations.
+    #[serde(default)]
+    pub hooks: HashMap<HookPoint, Vec<HookConfig>>,
 
     // Provider-specific persisted settings (legacy per-preset config; kept for
     // backward-compatible TOML parsing and any UI convenience state that still
@@ -310,5 +317,72 @@ base_url = "http://gpu-box:11434"
             .expect("renamed provider present");
         assert_eq!(inst.base_url.as_deref(), Some("http://gpu-box:11434"));
         assert_eq!(cfg.providers.len(), 1);
+    }
+
+    // ── Hooks config tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn hooks_section_parses() {
+        let raw = r#"
+[[hooks.pre_tool]]
+command = "/home/user/bin/notify"
+timeout = 5
+
+[[hooks.post_tool]]
+command = "/home/user/bin/log-tool"
+
+[[hooks.on_error]]
+command = "/home/user/bin/alert"
+timeout = 10
+"#;
+        let cfg = XiConfig::from_toml_str(raw).expect("config with hooks parses");
+
+        let pre = cfg
+            .hooks
+            .get(&crate::hooks::HookPoint::PreTool)
+            .and_then(|v| v.first())
+            .unwrap();
+        assert_eq!(pre.command.as_deref(), Some("/home/user/bin/notify"));
+        assert_eq!(pre.timeout, 5);
+
+        let post = cfg
+            .hooks
+            .get(&crate::hooks::HookPoint::PostTool)
+            .and_then(|v| v.first())
+            .unwrap();
+        assert_eq!(post.command.as_deref(), Some("/home/user/bin/log-tool"));
+        assert_eq!(post.timeout, 30); // default
+
+        let err = cfg
+            .hooks
+            .get(&crate::hooks::HookPoint::OnError)
+            .and_then(|v| v.first())
+            .unwrap();
+        assert_eq!(err.command.as_deref(), Some("/home/user/bin/alert"));
+        assert_eq!(err.timeout, 10);
+
+        assert!(!cfg.hooks.contains_key(&crate::hooks::HookPoint::PreTurn));
+        assert!(!cfg.hooks.contains_key(&crate::hooks::HookPoint::PostTurn));
+    }
+
+    #[test]
+    fn hooks_round_trip() {
+        let raw = r#"
+provider = "test"
+
+[[hooks.pre_tool]]
+bash = "echo hello"
+timeout = 5
+"#;
+        let cfg = XiConfig::from_toml_str(raw).expect("parse");
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let cfg2 = XiConfig::from_toml_str(&serialized).expect("re-parse");
+        let pre = cfg2
+            .hooks
+            .get(&crate::hooks::HookPoint::PreTool)
+            .and_then(|v| v.first())
+            .expect("pre_tool hook preserved");
+        assert_eq!(pre.bash.as_deref(), Some("echo hello"));
+        assert_eq!(pre.timeout, 5);
     }
 }

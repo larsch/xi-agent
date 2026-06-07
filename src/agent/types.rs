@@ -510,6 +510,11 @@ pub struct AgentLoopConfig {
     /// System prompt prepended to all LLM requests.  When `None`, no system
     /// message is added.
     pub system_prompt: Option<String>,
+    /// Agent-level hooks — user-defined commands that run at specific points
+    /// in the agent loop (e.g. pre_tool, post_tool, pre_turn, post_turn, on_error).
+    pub hooks: HashMap<crate::hooks::HookPoint, Vec<crate::hooks::HookConfig>>,
+    /// Persistent session identifier passed to hooks via environment variable.
+    pub session_id: String,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
