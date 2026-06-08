@@ -111,12 +111,8 @@ pub(super) fn build_log_lines(
                 if msg.hidden {
                     continue;
                 }
-                append_message(
-                    &mut lines,
-                    &sanitize_for_display(&msg.content),
-                    width,
-                    theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64)),
-                );
+                let user_bg = theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64));
+                append_message_markdown(&mut lines, &msg.content, width, user_bg, &theme.markdown);
             }
             Role::System => {}
             Role::Assistant => {
@@ -1130,43 +1126,32 @@ fn append_markdown_answer(
     out.extend(md_lines);
 }
 
-fn append_message(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
-    let user_bg_style = Style::default().bg(bg);
-    let segments: Vec<&str> = if content.is_empty() {
-        vec![""]
-    } else {
-        content.split('\n').collect()
-    };
-    let visible: Vec<usize> = if content.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
-                }
-            })
-            .collect()
-    };
+fn append_message_markdown(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    bg: Color,
+    markdown_theme: &crate::theme::MarkdownTheme,
+) {
+    let md_lines = crate::markdown::render_with_theme(content, width, "", markdown_theme);
+    if md_lines.is_empty() {
+        return;
+    }
 
     out.push(halfblock_line(width, '▄', bg));
 
-    for seg_idx in visible {
-        let segment = segments[seg_idx];
-        let normalized = normalize_terminal_segment(segment, 0);
-        let chunks = wrap_str(&normalized, width);
-
-        for chunk in chunks {
-            let text_cols = chunk.as_str().width();
-            let padding = width.saturating_sub(text_cols);
-            let padded = format!("{}{}", chunk, " ".repeat(padding));
-            out.push(Line::from(Span::styled(padded, user_bg_style)));
+    for line in md_lines {
+        let text_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        let padding = width.saturating_sub(text_width);
+        let mut spans: Vec<Span<'static>> = line
+            .spans
+            .into_iter()
+            .map(|s| Span::styled(s.content, s.style.bg(bg)))
+            .collect();
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
         }
+        out.push(Line::from(spans));
     }
 
     out.push(halfblock_line(width, '▀', bg));
