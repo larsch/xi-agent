@@ -101,8 +101,9 @@ pub fn parse_at_tokens(input: &str) -> Vec<AtToken> {
 /// Rewrite user input text, replacing each successfully resolved `@<path>`
 /// token with the equivalent backtick-delimited file reference.
 ///
-/// Only tokens whose corresponding [`AtFileResult`] is *not* an error are
-/// rewritten.  Missing or unreadable files keep the original `@` notation.
+/// Tokens whose corresponding [`AtFileResult`] is an error are left as-is
+/// (the original `@` notation stays in the user prompt but no error is
+/// reported to the model).
 pub fn rewrite_user_text(text: &str, results: &[AtFileResult]) -> String {
     let tokens = parse_at_tokens(text);
     if tokens.is_empty() || results.is_empty() {
@@ -149,11 +150,20 @@ pub enum AtFileResult {
         mime_type: String,
     },
     /// The file could not be read.
-    Error { path: String, message: String },
+    Error {
+        #[allow(dead_code)]
+        path: String,
+        #[allow(dead_code)]
+        /// Human-readable error description (used in Debug output and by
+        /// external consumers; the built-in submission path silently skips
+        /// these).
+        message: String,
+    },
 }
 
 impl AtFileResult {
     /// The path this result corresponds to.
+    #[allow(dead_code)]
     pub fn path(&self) -> &str {
         match self {
             Self::Text { path, .. } | Self::Image { path, .. } | Self::Error { path, .. } => path,

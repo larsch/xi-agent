@@ -29,6 +29,9 @@
   stream, matching provider expectations.
 - **`--print` model override**: the `--model` flag now correctly overrides
   the configured model in non-interactive mode.
+- **`@file` missing-file handling**: references to nonexistent files are
+  now silently ignored (no synthetic tool call, no error notice, no
+  provider error). The `@file` text remains in the prompt unchanged.
 - **Anthropic `cache_control` placement**: removed the invalid top-level
   `cache_control` field and moved it to individual content blocks, fixing
   400 errors from the Copilot Anthropic proxy and restoring prompt caching

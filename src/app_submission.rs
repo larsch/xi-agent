@@ -126,7 +126,8 @@ impl App {
     /// Image files embed the image as a data URI directly in the text
     /// content; text files are inlined verbatim.
     ///
-    /// Errors produce a visible notice but do not abort submission.
+    /// Missing or unreadable files are silently skipped — no error is
+    /// displayed or reported to the model.
     fn inject_at_file_attachments(&mut self, results: &[AtFileResult]) {
         if results.is_empty() {
             return;
@@ -138,22 +139,17 @@ impl App {
         let ts = Self::now_ts();
 
         for (idx, result) in results.iter().enumerate() {
-            let call_id = format!("attach_{idx}");
-            let path = result.path().to_string();
-
-            // Synthetic args JSON — mirrors what a real read_file call would use.
-            let args = serde_json::json!({ "path": path });
-
-            // Push the synthetic ToolCall event.
-            self.session.append_event_immediate(SessionEvent::ToolCall {
-                id: call_id.clone(),
-                name: "read_file".to_string(),
-                args,
-                timestamp: ts,
-            });
-
             match result {
-                AtFileResult::Text { content, .. } => {
+                AtFileResult::Text { content, path } => {
+                    let call_id = format!("attach_{idx}");
+                    let args = serde_json::json!({ "path": path });
+
+                    self.session.append_event_immediate(SessionEvent::ToolCall {
+                        id: call_id.clone(),
+                        name: "read_file".to_string(),
+                        args,
+                        timestamp: ts,
+                    });
                     self.session
                         .append_event_immediate(SessionEvent::ToolResult {
                             id: call_id,
@@ -165,8 +161,19 @@ impl App {
                         });
                 }
                 AtFileResult::Image {
-                    base64, mime_type, ..
+                    base64,
+                    mime_type,
+                    path,
                 } => {
+                    let call_id = format!("attach_{idx}");
+                    let args = serde_json::json!({ "path": path });
+
+                    self.session.append_event_immediate(SessionEvent::ToolCall {
+                        id: call_id.clone(),
+                        name: "read_file".to_string(),
+                        args,
+                        timestamp: ts,
+                    });
                     // Inline the image as a data URI directly in the content
                     // text so it works with any provider (some OpenAI-compatible
                     // backends don't accept structured content arrays in tool
@@ -184,21 +191,8 @@ impl App {
                         });
                     // No need for pending_attachment_images — image is inline.
                 }
-                AtFileResult::Error { message, .. } => {
-                    // Push an error ToolResult so the LLM sees the failure.
-                    self.session
-                        .append_event_immediate(SessionEvent::ToolResult {
-                            id: call_id,
-                            name: "read_file".to_string(),
-                            content: format!("error reading {path}: {message}"),
-                            is_error: true,
-                            display_range: None,
-                            timestamp: ts,
-                        });
-                    // Also show a notice in the UI.
-                    self.push_notice(crate::llm::Message::assistant(format!(
-                        "[attachment error: {path}: {message}]"
-                    )));
+                AtFileResult::Error { .. } => {
+                    // Silently skip — no error displayed or reported to model.
                 }
             }
         }
