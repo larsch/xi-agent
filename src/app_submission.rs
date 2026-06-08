@@ -127,14 +127,10 @@ impl App {
     /// content; text files are inlined verbatim.
     ///
     /// Errors produce a visible notice but do not abort submission.
-    fn inject_at_file_attachments(&mut self, text: &str) {
-        let tokens = parse_at_tokens(text);
-        if tokens.is_empty() {
+    fn inject_at_file_attachments(&mut self, results: &[AtFileResult]) {
+        if results.is_empty() {
             return;
         }
-
-        let cwd = Path::new(&self.session.current_cwd).to_path_buf();
-        let results = resolve_at_tokens(&tokens, &cwd);
 
         // Ensure the event log exists before appending events.
         self.session.ensure_event_log_for_submit();
@@ -217,8 +213,13 @@ impl App {
             return;
         }
 
-        self.append_user_message(trimmed.clone());
-        self.inject_at_file_attachments(&trimmed);
+        let cwd = Path::new(&self.session.current_cwd).to_path_buf();
+        let tokens = parse_at_tokens(&trimmed);
+        let results = resolve_at_tokens(&tokens, &cwd);
+        let rewritten = crate::at_file::rewrite_user_text(&trimmed, &results);
+
+        self.append_user_message(rewritten);
+        self.inject_at_file_attachments(&results);
         self.persist_messages();
         self.reset_textarea();
 

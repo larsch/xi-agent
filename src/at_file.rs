@@ -22,6 +22,11 @@ pub struct AtToken {
     /// The raw path string as typed (without the leading `@` or surrounding
     /// quotes).
     pub path: String,
+    /// Byte offset of the `@` character in the original input string.
+    pub span_start: usize,
+    /// Byte offset after the last character of this token in the original
+    /// input string (i.e. the exclusive end of the `@path` / `@"path"` span).
+    pub span_end: usize,
 }
 
 /// Extract all `@<path>` tokens from `input`.
@@ -29,26 +34,36 @@ pub struct AtToken {
 /// Tokens must be preceded by start-of-string or ASCII whitespace.
 pub fn parse_at_tokens(input: &str) -> Vec<AtToken> {
     let mut tokens = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
+    let char_offsets: Vec<(usize, char)> = input.char_indices().collect();
+    let len = char_offsets.len();
     let mut i = 0;
 
     while i < len {
-        if chars[i] == '@' {
+        let (at_byte, ch) = char_offsets[i];
+        if ch == '@' {
             // Check that `@` is at start or preceded by whitespace.
-            let preceded_by_space = i == 0 || chars[i - 1].is_ascii_whitespace();
+            let preceded_by_space = i == 0 || char_offsets[i - 1].1.is_ascii_whitespace();
             if preceded_by_space && i + 1 < len {
-                let next = chars[i + 1];
+                let next = char_offsets[i + 1].1;
                 if next == '"' {
                     // Quoted form: @"..."
                     let start = i + 2;
                     let mut end = start;
-                    while end < len && chars[end] != '"' {
+                    while end < len && char_offsets[end].1 != '"' {
                         end += 1;
                     }
-                    let path: String = chars[start..end].iter().collect();
+                    let path: String = char_offsets[start..end].iter().map(|(_, c)| c).collect();
                     if !path.is_empty() {
-                        tokens.push(AtToken { path });
+                        let span_end = if end < len {
+                            char_offsets[end].0 + '"'.len_utf8()
+                        } else {
+                            input.len()
+                        };
+                        tokens.push(AtToken {
+                            path,
+                            span_start: at_byte,
+                            span_end,
+                        });
                     }
                     i = if end < len { end + 1 } else { end };
                     continue;
@@ -56,12 +71,21 @@ pub fn parse_at_tokens(input: &str) -> Vec<AtToken> {
                     // Unquoted form: @word
                     let start = i + 1;
                     let mut end = start;
-                    while end < len && !chars[end].is_ascii_whitespace() {
+                    while end < len && !char_offsets[end].1.is_ascii_whitespace() {
                         end += 1;
                     }
-                    let path: String = chars[start..end].iter().collect();
+                    let path: String = char_offsets[start..end].iter().map(|(_, c)| c).collect();
                     if !path.is_empty() {
-                        tokens.push(AtToken { path });
+                        let span_end = if end < len {
+                            char_offsets[end].0
+                        } else {
+                            input.len()
+                        };
+                        tokens.push(AtToken {
+                            path,
+                            span_start: at_byte,
+                            span_end,
+                        });
                     }
                     i = end;
                     continue;
@@ -72,6 +96,39 @@ pub fn parse_at_tokens(input: &str) -> Vec<AtToken> {
     }
 
     tokens
+}
+
+/// Rewrite user input text, replacing each successfully resolved `@<path>`
+/// token with the equivalent backtick-delimited file reference.
+///
+/// Only tokens whose corresponding [`AtFileResult`] is *not* an error are
+/// rewritten.  Missing or unreadable files keep the original `@` notation.
+pub fn rewrite_user_text(text: &str, results: &[AtFileResult]) -> String {
+    let tokens = parse_at_tokens(text);
+    if tokens.is_empty() || results.is_empty() {
+        return text.to_string();
+    }
+
+    // Collect (start, end, replacement) for each successfully resolved token.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for (tok, result) in tokens.iter().zip(results.iter()) {
+        if !matches!(result, AtFileResult::Error { .. }) {
+            replacements.push((tok.span_start, tok.span_end, format!("`{}`", tok.path)));
+        }
+    }
+
+    if replacements.is_empty() {
+        return text.to_string();
+    }
+
+    // Apply from end to start so earlier byte offsets stay valid.
+    replacements.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+
+    let mut result = text.to_string();
+    for (start, end, replacement) in &replacements {
+        result.replace_range(*start..*end, replacement);
+    }
+    result
 }
 
 // ── File resolution ───────────────────────────────────────────────────────────
@@ -199,7 +256,9 @@ mod tests {
         assert_eq!(
             tokens,
             vec![AtToken {
-                path: "src/main.rs".into()
+                path: "src/main.rs".into(),
+                span_start: 8,
+                span_end: 20,
             }]
         );
     }
@@ -210,7 +269,9 @@ mod tests {
         assert_eq!(
             tokens,
             vec![AtToken {
-                path: "Cargo.toml".into()
+                path: "Cargo.toml".into(),
+                span_start: 0,
+                span_end: 11,
             }]
         );
     }
@@ -222,10 +283,14 @@ mod tests {
             tokens,
             vec![
                 AtToken {
-                    path: "foo.rs".into()
+                    path: "foo.rs".into(),
+                    span_start: 0,
+                    span_end: 7,
                 },
                 AtToken {
-                    path: "bar.rs".into()
+                    path: "bar.rs".into(),
+                    span_start: 12,
+                    span_end: 19,
                 },
             ]
         );
@@ -237,7 +302,9 @@ mod tests {
         assert_eq!(
             tokens,
             vec![AtToken {
-                path: "path with spaces.txt".into()
+                path: "path with spaces.txt".into(),
+                span_start: 4,
+                span_end: 27,
             }]
         );
     }
@@ -282,6 +349,8 @@ mod tests {
         std::fs::write(&path, "hello world").unwrap();
         let tokens = vec![AtToken {
             path: "hello.txt".into(),
+            span_start: 0,
+            span_end: 10,
         }];
         let results = resolve_at_tokens(&tokens, dir.path());
         assert!(
@@ -294,8 +363,75 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tokens = vec![AtToken {
             path: "nope.txt".into(),
+            span_start: 0,
+            span_end: 9,
         }];
         let results = resolve_at_tokens(&tokens, dir.path());
         assert!(matches!(&results[0], AtFileResult::Error { .. }));
+    }
+
+    // ── rewrite_user_text tests ───────────────────────────────────────────
+
+    #[test]
+    fn rewrite_single_unquoted() {
+        let text = "look at @src/main.rs please";
+        let results = vec![AtFileResult::Text {
+            path: "src/main.rs".into(),
+            content: "fn main() {}".into(),
+        }];
+        assert_eq!(
+            rewrite_user_text(text, &results),
+            "look at `src/main.rs` please"
+        );
+    }
+
+    #[test]
+    fn rewrite_drops_error() {
+        let text = "@missing.txt is gone";
+        let results = vec![AtFileResult::Error {
+            path: "missing.txt".into(),
+            message: "No such file".into(),
+        }];
+        // Error tokens are left as-is (original `@` notation).
+        assert_eq!(rewrite_user_text(text, &results), "@missing.txt is gone");
+    }
+
+    #[test]
+    fn rewrite_quoted_form() {
+        let text = r#"see @"path with spaces.txt" here"#;
+        let results = vec![AtFileResult::Text {
+            path: "path with spaces.txt".into(),
+            content: "hello".into(),
+        }];
+        assert_eq!(
+            rewrite_user_text(text, &results),
+            "see `path with spaces.txt` here"
+        );
+    }
+
+    #[test]
+    fn rewrite_mixed_resolved_and_error() {
+        let text = "@good.txt and @bad.txt";
+        let results = vec![
+            AtFileResult::Text {
+                path: "good.txt".into(),
+                content: "ok".into(),
+            },
+            AtFileResult::Error {
+                path: "bad.txt".into(),
+                message: "not found".into(),
+            },
+        ];
+        assert_eq!(rewrite_user_text(text, &results), "`good.txt` and @bad.txt");
+    }
+
+    #[test]
+    fn rewrite_no_tokens_is_identity() {
+        assert_eq!(rewrite_user_text("plain text", &[]), "plain text");
+    }
+
+    #[test]
+    fn rewrite_empty_results_is_identity() {
+        assert_eq!(rewrite_user_text("@foo.txt", &[]), "@foo.txt");
     }
 }
