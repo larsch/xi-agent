@@ -69,7 +69,7 @@ impl SessionManager {
     }
 
     /// Return the current session ID, creating a new session if needed.
-    /// Falls back to `"unknown"` if persistence is unavailable.
+    /// Falls back to a random ID if persistence is unavailable.
     pub fn ensure_session_id(&mut self) -> String {
         if let Some(ref id) = self.current_session_id {
             return id.clone();
@@ -85,7 +85,9 @@ impl SessionManager {
                 }
             }
         }
-        "unknown".to_string()
+        let id = ephemeral_session_id();
+        self.current_session_id = Some(id.clone());
+        id
     }
 
     /// Ensure a `SessionState` exists for the current session before submitting
@@ -163,4 +165,23 @@ impl SessionManager {
             log::debug!("failed to append event to session state: {e}");
         }
     }
+}
+
+/// Generate a random ephemeral session ID for use when persistence is
+/// unavailable.  Uses 4 random bytes hex-encoded to keep paths short
+/// while avoiding collisions between concurrent processes.
+fn ephemeral_session_id() -> String {
+    let mut bytes = [0u8; 4];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        // Last resort: use timestamp to avoid complete collision.
+        return format!(
+            "ephemeral-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+    }
+    let suffix = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    format!("ephemeral-{suffix}")
 }

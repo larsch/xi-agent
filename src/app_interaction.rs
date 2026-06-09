@@ -821,7 +821,8 @@ impl App {
     }
 
     /// Return the current session ID, creating a new session if one does not
-    /// yet exist.  Falls back to `"unknown"` if persistence is unavailable.
+    /// yet exist.  Falls back to a random ephemeral ID if persistence is
+    /// unavailable.
     pub(crate) fn ensure_session_id(&mut self) -> String {
         self.session.ensure_session_id()
     }

@@ -2266,7 +2266,7 @@ mod tests {
                     matches!(
                         event,
                         crate::session_event::SessionEvent::UserMessage { content, .. }
-                            if content == "please inspect @note.txt"
+                            if content == "please inspect `note.txt`"
                     )
                 })
                 .expect("submitted user message present");
