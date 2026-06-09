@@ -122,6 +122,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "write" | "write_file" => "📄",
         "edit" | "edit_file" => "📝",
         "bash" | "cmd" | "powershell" | "exec" => "💻",
+        "python" => "🐍",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
         "read_skill" => "🎓",
@@ -277,6 +278,16 @@ mod tests {
             &DisplayConfig::default(),
         );
         assert_eq!(label, "💻 rg -n tool src");
+    }
+
+    #[test]
+    fn python_emoji() {
+        let label = tool_invocation_label(
+            "python",
+            &json!({"script": "print('hello')"}),
+            &DisplayConfig::default(),
+        );
+        assert!(label.starts_with("🐍"), "expected 🐍 prefix, got: {label}");
     }
 
     #[test]
