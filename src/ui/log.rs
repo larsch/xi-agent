@@ -351,7 +351,14 @@ fn render_tool_call(
             .unwrap_or(Color::Cyan)
     };
     if is_placeholder {
-        append_message_colored_dim(out, &intent_label, width, color);
+        // Render icon normally but text in italic+dim so the placeholder
+        // nature is conveyed without distorting the emoji icon itself.
+        let (icon, text) = tool_presentation::split_icon_from_label(&intent_label);
+        if !text.is_empty() {
+            append_message_colored_dim_with_icon(out, icon, text, width, color);
+        } else {
+            append_message_colored_dim(out, &intent_label, width, color);
+        }
     } else {
         append_message_colored(out, &intent_label, width, color);
     }
@@ -994,6 +1001,27 @@ fn append_message_colored_dim(
             out.push(Line::from(vec![Span::styled(chunk, style)]));
         }
     }
+}
+
+/// Like `append_message_colored_dim` but renders an icon prefix without
+/// italic/dim so the emoji stays visually clean while the placeholder text
+/// is still marked as provisional.
+fn append_message_colored_dim_with_icon(
+    out: &mut Vec<Line<'static>>,
+    icon: &str,
+    text: &str,
+    width: usize,
+    color: Color,
+) {
+    let _ = width;
+    let icon_style = Style::default().fg(color);
+    let text_style = Style::default()
+        .fg(color)
+        .add_modifier(Modifier::ITALIC | Modifier::DIM);
+    out.push(Line::from(vec![
+        Span::styled(icon.to_string(), icon_style),
+        Span::styled(format!(" {text}"), text_style),
+    ]));
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

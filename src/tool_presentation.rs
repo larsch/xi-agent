@@ -115,6 +115,18 @@ fn tail_truncate(text: &str, display: &DisplayConfig) -> String {
     lines[start..].join("\n")
 }
 
+/// Split a tool label into (icon, text) parts.
+///
+/// Tool labels are always formatted as `"{icon} {text}"` where icon is the
+/// emoji from `tool_emoji`. This splits at the first space so callers can
+/// render the icon and text with different styles.
+pub fn split_icon_from_label(label: &str) -> (&str, &str) {
+    match label.find(' ') {
+        Some(pos) => (&label[..pos], &label[pos + 1..]),
+        None => (label, ""),
+    }
+}
+
 /// Return the display emoji for a tool name.
 pub fn tool_emoji(name: &str) -> &'static str {
     match name {
@@ -365,5 +377,26 @@ mod tests {
         assert!(!label.contains('{'));
         assert!(!label.contains('}'));
         assert_eq!(label, "👀 src/main.rs");
+    }
+
+    #[test]
+    fn split_icon_from_label_splits_on_first_space() {
+        let (icon, text) = split_icon_from_label("👀 reading…");
+        assert_eq!(icon, "👀");
+        assert_eq!(text, "reading…");
+    }
+
+    #[test]
+    fn split_icon_from_label_no_space_returns_whole_label() {
+        let (icon, text) = split_icon_from_label("⚙️");
+        assert_eq!(icon, "⚙️");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn split_icon_from_label_variation_selector_emoji() {
+        let (icon, text) = split_icon_from_label("⚙️ running…");
+        assert_eq!(icon, "⚙️");
+        assert_eq!(text, "running…");
     }
 }
