@@ -19,7 +19,7 @@
 //! - Unordered (`•`) and ordered (`N.`) lists
 //! - GFM tables (compacttable style with coloured header)
 //!
-//! Unknown or raw HTML elements are silently ignored.
+//! Raw HTML/XML is rendered verbatim as literal text — HTML parsing is disabled.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -889,7 +889,18 @@ pub fn render_with_theme(
                 out.push(Line::default());
             }
 
-            // Everything else (HTML, footnotes, …) is ignored.
+            // Treat HTML/XML as literal text — effectively disabling HTML parsing
+            // by rendering raw HTML and inline HTML verbatim.
+            Event::Html(t) | Event::InlineHtml(t) => {
+                let text = t.into_string();
+                if in_table {
+                    table.push_text(&text);
+                } else {
+                    inline_spans.push((text, style.to_ratatui_style()));
+                }
+            }
+
+            // Everything else (footnotes, …) is ignored.
             _ => {}
         }
     }
@@ -1297,5 +1308,42 @@ mod tests {
                 "words run together on line {line:?}"
             );
         }
+    }
+
+    // ── HTML/XML rendering ──────────────────────────────────────────────────────
+
+    #[test]
+    fn inline_html_rendered_verbatim() {
+        // Inline HTML like <b>text</b> should be rendered as literal text,
+        // not parsed as HTML formatting.
+        let lines = render("<b>bold text</b>", 80, "");
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("");
+        assert_eq!(text, "<b>bold text</b>");
+    }
+
+    #[test]
+    fn inline_html_not_stripped() {
+        // Previously, HTML tags were silently ignored but text inside leaked.
+        // Now the entire HTML should appear literally.
+        let lines = render("<em>emphasized</em>", 80, "");
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("");
+        assert_eq!(text, "<em>emphasized</em>");
+    }
+
+    #[test]
+    fn block_html_rendered_verbatim() {
+        // Block-level HTML should be rendered literally.
+        let lines = render("<div>block content</div>", 80, "");
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("");
+        assert_eq!(text, "<div>block content</div>");
+    }
+
+    #[test]
+    fn mixed_html_and_markdown() {
+        // HTML mixed with markdown: both should render, HTML literally.
+        let lines = render("**bold** and <i>italic</i>", 80, "");
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("");
+        assert!(text.contains("bold"));
+        assert!(text.contains("<i>italic</i>"));
     }
 }
