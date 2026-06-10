@@ -134,6 +134,7 @@ fn main() {
 | `cmd <cmd>`             | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
 | `exec <prog> [args…]`   | prog + args     | Execute a program via argv (shellword-split); no shell interpretation        |
 | `bash-background-job`   | —               | 4-step scripted loop: start sleep 60, check running, kill, confirm gone     |
+| `read-skill [name]`     | name            | Issue a read_skill tool call (defaults to edit_skill if no name given)      |
 | `write`                 | —               | Issue a write_file tool call that writes a file to the system temp directory |
 | `write-edit`            | —               | Stream write_file then edit_file in streaming mode (~4-8 chars/chunk, 20 chunks/sec); uses 6 lines of context |
 
@@ -229,6 +230,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `write-edit` | Stream `write_file` then `edit_file` (~4–8 chars/chunk at 20 chunks/sec); edit uses 6 lines of context each side |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
+| `read-skill [name]` | Issue a `read_skill` tool call (defaults to `edit_skill` if no name given) |
 | `find` | Issue a `find_files` tool call on the temp directory |
 | `edit` | Issue an `edit_file` tool call with short old/new text (use after `write`; exercises compact diff body) |
 | `edit-long` | Issue an `edit_file` tool call with 6 lines per side (exercises per-side truncation markers) |
@@ -381,6 +383,22 @@ fn read_file_stream(content: &'static str) -> LlmStream {
             id: "test-1".to_string(),
             name: "read_file".to_string(),
             args: serde_json::json!({ "path": path }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Build a tool call stream for `read_skill`.
+fn read_skill_stream(name: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "read_skill".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "read_skill".to_string(),
+            args: serde_json::json!({ "name": name }),
         };
         yield LlmEvent::Done;
     })
@@ -872,6 +890,15 @@ impl super::LlmProvider for TestProvider {
             "read-long" => read_file_stream(READ_LONG_FIXTURE),
 
             "find" => find_files_stream(),
+
+            "read-skill" => {
+                let name = if rest.is_empty() {
+                    "edit_skill".to_string()
+                } else {
+                    rest
+                };
+                read_skill_stream(name)
+            }
 
             "edit" => {
                 // Short edit: both sides within the 4-line diff limit.

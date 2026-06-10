@@ -77,14 +77,19 @@ impl Tool for ReadSkillTool {
                 }
             };
 
-            let content = match std::fs::read_to_string(&skill.path) {
-                Ok(c) => c,
-                Err(e) => {
-                    return ToolResult::err(format!(
-                        "Failed to read skill '{}' from {}: {e}",
-                        name,
-                        skill.path.display()
-                    ));
+            // Embedded skills carry their body inline — no disk read needed.
+            let content = if let Some(ref embedded) = skill.embedded_body {
+                embedded.clone()
+            } else {
+                match std::fs::read_to_string(&skill.path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return ToolResult::err(format!(
+                            "Failed to read skill '{}' from {}: {e}",
+                            name,
+                            skill.path.display()
+                        ));
+                    }
                 }
             };
 
@@ -155,6 +160,7 @@ mod tests {
             description: "test skill".to_string(),
             path: path.clone(),
             base_dir: skill_dir,
+            embedded_body: None,
         }
     }
 
@@ -220,6 +226,7 @@ mod tests {
             description: "missing file".to_string(),
             path: PathBuf::from("/nonexistent/path/SKILL.md"),
             base_dir: PathBuf::from("/nonexistent/path"),
+            embedded_body: None,
         }]);
         let result = tool.execute(serde_json::json!({"name": "ghost"})).await;
         assert!(result.is_error);

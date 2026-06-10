@@ -288,6 +288,7 @@ mod tests {
             description: "Create an implementation plan".to_string(),
             path: Path::new("/tmp/skills/plan/SKILL.md").to_path_buf(),
             base_dir: PathBuf::from("/tmp/skills/plan"),
+            embedded_body: None,
         }];
 
         let prompt = build_system_prompt(&tools, "/tmp", &skills);
@@ -320,6 +321,7 @@ mod tests {
             description: "handles x < y and \"quoted\" values".to_string(),
             path: Path::new("/tmp/skills/a-skill/SKILL.md").to_path_buf(),
             base_dir: PathBuf::from("/tmp/skills/a-skill"),
+            embedded_body: None,
         }];
 
         let prompt = build_system_prompt(&tools, "/tmp", &skills);

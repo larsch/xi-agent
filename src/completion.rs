@@ -455,6 +455,7 @@ mod tests {
             description: description.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             base_dir: PathBuf::from(format!("/tmp/{name}")),
+            embedded_body: None,
         }
     }
 
