@@ -30,6 +30,14 @@ pub(crate) struct AgentRuntime {
     /// Cancellation sender for the active agent loop task.
     /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
     pub(crate) cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
+    /// Set by [`submit`] / [`submit_with_text`] when a user message has been
+    /// committed to in-memory display state but the I/O-heavy finalisation
+    /// (persist, token check, launch) is still pending.  The main loop checks
+    /// this flag to draw the message immediately before running the finalisation.
+    ///
+    /// [`submit`]: crate::app_submission::App::submit
+    /// [`submit_with_text`]: crate::app_submission::App::submit_with_text
+    pub(crate) pending_finalize: bool,
 }
 
 impl AgentRuntime {
@@ -42,6 +50,7 @@ impl AgentRuntime {
             queued_steering: Vec::new(),
             agent_task: None,
             cancel_tx: None,
+            pending_finalize: false,
         }
     }
 

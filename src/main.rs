@@ -600,11 +600,16 @@ async fn run(
     // performed when something actually changed (dirty flag).
     let mut needs_redraw = true;
 
+    let draw_frame = |terminal: &mut Terminal<_>, app: &mut App| -> io::Result<()> {
+        execute!(io::stdout(), BeginSynchronizedUpdate)?;
+        terminal.draw(|f| ui::draw(f, app))?;
+        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        Ok(())
+    };
+
     loop {
         if needs_redraw {
-            execute!(io::stdout(), BeginSynchronizedUpdate)?;
-            terminal.draw(|f| ui::draw(f, app))?;
-            execute!(io::stdout(), EndSynchronizedUpdate)?;
+            draw_frame(&mut *terminal, app)?;
             needs_redraw = false;
         }
 
@@ -635,6 +640,16 @@ async fn run(
                             apply_paste(app, provider, &text);
                         },
                     _ => {}
+                }
+
+                // If submit() prepared a user message, draw it immediately
+                // so the user sees the message appear in the log before we
+                // do the disk I/O in finalize_submission().
+                if app.runtime.pending_finalize {
+                    draw_frame(&mut *terminal, app)?;
+                    // Prevent a redundant redraw on the next loop iteration.
+                    needs_redraw = false;
+                    app.finalize_submission(provider);
                 }
             }
 

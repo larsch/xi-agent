@@ -199,7 +199,14 @@ impl App {
     }
 
     /// Take the textarea content and start the agent loop.
-    pub fn submit(&mut self, provider: &DynProvider) {
+    ///
+    /// After committing the user message to in-memory display state, this
+    /// method sets a flag so the caller can trigger an immediate screen
+    /// redraw before the I/O-heavy finalisation step.  Call
+    /// [`finalize_submission`] after the redraw to persist and launch.
+    ///
+    /// [`finalize_submission`]: App::finalize_submission
+    pub fn submit(&mut self, _provider: &DynProvider) {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n");
         let trimmed = text.trim().to_string();
@@ -214,33 +221,45 @@ impl App {
 
         self.append_user_message(rewritten);
         self.inject_at_file_attachments(&results);
-        self.persist_messages();
-        self.reset_textarea();
-
-        // Proactive token refresh check before starting the request.
-        if self.check_token_preflight(RetryTarget::AgentTurn) {
-            // Refresh triggered; request will be retried after refresh completes.
-            return;
-        }
-
-        self.launch_turn(provider);
+        self.finish_submit_commit();
     }
 
     /// Submit a pre-built text string directly to the agent loop, bypassing the
     /// textarea.  Used by `/skill:<name>` command expansion.
-    pub fn submit_with_text(&mut self, text: String, provider: &DynProvider) {
-        if text.trim().is_empty() || self.streaming() || self.login.active {
+    pub fn submit_with_text(&mut self, text: String, _provider: &DynProvider) {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() || self.streaming() || self.login.active {
             return;
         }
-
-        let trimmed = text.trim().to_string();
         self.append_user_message(trimmed);
-        self.persist_messages();
-        self.reset_textarea();
+        self.finish_submit_commit();
+    }
 
-        // Proactive token refresh check before starting the request
+    /// Shared tail for [`submit`] and [`submit_with_text`]: clear the
+    /// textarea and flag for deferred finalisation so the caller can redraw
+    /// before the I/O phase.
+    fn finish_submit_commit(&mut self) {
+        self.reset_textarea();
+        self.runtime.pending_finalize = true;
+    }
+
+    /// Complete a submission that was prepared by [`submit`] or
+    /// [`submit_with_text`].  Call this after the caller has had a chance to
+    /// redraw the screen so the user message is already visible.
+    ///
+    /// [`submit`]: App::submit
+    /// [`submit_with_text`]: App::submit_with_text
+    pub fn finalize_submission(&mut self, provider: &DynProvider) {
+        if !self.runtime.pending_finalize {
+            return;
+        }
+        self.runtime.pending_finalize = false;
+
+        self.persist_messages();
+
+        // Proactive token refresh check before starting the request.
         if self.check_token_preflight(RetryTarget::AgentTurn) {
-            // Refresh triggered; request will be retried after refresh completes
+            // Refresh triggered; request will be retried after refresh completes.
             return;
         }
 
