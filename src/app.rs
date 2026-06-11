@@ -697,6 +697,12 @@ impl App {
     /// 7) abort streaming agent loop
     pub fn handle_escape_in_chat_mode(&mut self) {
         if self.is_stepping() {
+            // Clean up any in-flight ask_user UI state before cancelling.
+            if self.has_pending_ask() {
+                self.ask_user.pending = None;
+                self.ask_user.freeform_mode = false;
+                self.exit_selection_mode();
+            }
             self.cancel_stepping();
         } else if self.has_pending_ask() {
             self.cancel_pending_ask();
@@ -909,20 +915,19 @@ impl App {
     // ── Step-back navigation ──────────────────────────────────────────────────
 
     /// Returns the event indices (into the committed event log) of all
-    /// `UserMessage` events, in order.
-    pub(crate) fn user_message_boundaries(&self) -> Vec<usize> {
+    /// step-back boundaries: `UserMessage` events and `ToolResult` events
+    /// for `ask_user` (user answers to in-turn questions), in order.
+    pub(crate) fn step_boundaries(&self) -> Vec<usize> {
         let Some(ss) = self.session.session_state.as_ref() else {
             return Vec::new();
         };
         ss.events()
             .iter()
             .enumerate()
-            .filter_map(|(i, ev)| {
-                if matches!(ev, SessionEvent::UserMessage { .. }) {
-                    Some(i)
-                } else {
-                    None
-                }
+            .filter_map(|(i, ev)| match ev {
+                SessionEvent::UserMessage { .. } => Some(i),
+                SessionEvent::ToolResult { name, .. } if name == "ask_user" => Some(i),
+                _ => None,
             })
             .collect()
     }
@@ -932,18 +937,25 @@ impl App {
         self.step_back.is_stepping()
     }
 
-    /// Step back to the previous `UserMessage` boundary.
+    /// Step back to the previous step boundary (user message or ask_user answer).
     ///
     /// On the first call, saves the current input field content so it can be
-    /// restored on cancel.  No-op when the agent loop is active or there is no
-    /// earlier `UserMessage`.
+    /// restored on cancel.  No-op when the agent loop is active or there are no
+    /// boundaries.
     pub(crate) fn step_back(&mut self) {
         if self.runtime.is_running() {
             return;
         }
-        let boundaries = self.user_message_boundaries();
+        let boundaries = self.step_boundaries();
         if boundaries.is_empty() {
             return;
+        }
+        // Clear any in-flight ask_user UI from a previous step before
+        // repopulating with the new boundary.
+        if self.has_pending_ask() && self.ask_user.reply.is_none() {
+            self.ask_user.pending = None;
+            self.ask_user.freeform_mode = false;
+            self.exit_selection_mode();
         }
         let current = self.step_back.cursor;
         let new_cursor = match current {
@@ -967,7 +979,7 @@ impl App {
         self.log_view.invalidate();
     }
 
-    /// Step forward toward the latest `UserMessage` boundary.
+    /// Step forward toward the next step boundary.
     ///
     /// When stepping past the end, clears step state and restores the saved
     /// input.  No-op when the agent loop is active.
@@ -978,7 +990,14 @@ impl App {
         let Some(cur) = self.step_back.cursor else {
             return;
         };
-        let boundaries = self.user_message_boundaries();
+        // Clear any in-flight ask_user UI from a previous step before
+        // repopulating with the new boundary.
+        if self.has_pending_ask() && self.ask_user.reply.is_none() {
+            self.ask_user.pending = None;
+            self.ask_user.freeform_mode = false;
+            self.exit_selection_mode();
+        }
+        let boundaries = self.step_boundaries();
         match boundaries.iter().find(|&&i| i > cur) {
             Some(&next) => {
                 self.step_back.cursor = Some(next);
@@ -1003,8 +1022,11 @@ impl App {
         self.log_view.invalidate();
     }
 
-    /// Repopulate the input field with the `UserMessage` content at the
-    /// current step cursor position.
+    /// Repopulate the input field with the user-provided content at the
+    /// current step cursor position (user message text or ask_user answer).
+    ///
+    /// For `ask_user` tool results, instead of populating the textarea,
+    /// restores the full ask_user prompt UI so the user can answer fresh.
     fn repopulate_input_from_cursor(&mut self) {
         let Some(idx) = self.step_back.cursor else {
             return;
@@ -1012,10 +1034,29 @@ impl App {
         let Some(ss) = self.session.session_state.as_ref() else {
             return;
         };
-        if let Some(SessionEvent::UserMessage { content, .. }) = ss.events().get(idx) {
-            let text = content.clone();
-            self.textarea = TextArea::new(vec![text]);
-            self.textarea.move_cursor(CursorMove::End);
+        match ss.events().get(idx) {
+            Some(SessionEvent::UserMessage { content, .. }) => {
+                let text = content.clone();
+                self.textarea = TextArea::new(vec![text]);
+                self.textarea.move_cursor(CursorMove::End);
+            }
+            Some(SessionEvent::ToolResult { id, name, .. }) if name == "ask_user" => {
+                // Find the preceding ToolCall with matching id to get the
+                // question and options.
+                let tool_call_args = ss.events()[..idx].iter().rev().find_map(|ev| match ev {
+                    SessionEvent::ToolCall {
+                        id: tid,
+                        name: tname,
+                        args,
+                        ..
+                    } if tid == id && tname == "ask_user" => Some(args.clone()),
+                    _ => None,
+                });
+                if let Some(args) = tool_call_args {
+                    self.restore_ask_user_from_step(&args);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2634,21 +2675,141 @@ mod tests {
         }
     }
 
-    #[test]
-    fn user_message_boundaries_empty() {
-        let app = make_app();
-        assert!(app.user_message_boundaries().is_empty());
+    fn ask_user_result_ev(id: &str, answer: &str) -> crate::session_event::SessionEvent {
+        crate::session_event::SessionEvent::ToolResult {
+            id: id.to_string(),
+            name: "ask_user".to_string(),
+            content: answer.to_string(),
+            is_error: false,
+            display_range: None,
+            timestamp: ts(),
+        }
+    }
+
+    fn ask_user_call_ev(question: &str) -> crate::session_event::SessionEvent {
+        crate::session_event::SessionEvent::ToolCall {
+            id: "ask_1".to_string(),
+            name: "ask_user".to_string(),
+            args: serde_json::json!({"question": question}),
+            timestamp: ts(),
+        }
+    }
+
+    fn ask_user_call_with_options_ev(
+        question: &str,
+        options: &[&str],
+    ) -> crate::session_event::SessionEvent {
+        let opts: Vec<serde_json::Value> = options
+            .iter()
+            .map(|o| serde_json::Value::String(o.to_string()))
+            .collect();
+        crate::session_event::SessionEvent::ToolCall {
+            id: "ask_2".to_string(),
+            name: "ask_user".to_string(),
+            args: serde_json::json!({
+                "question": question,
+                "options": opts,
+                "allowFreeform": true,
+            }),
+            timestamp: ts(),
+        }
+    }
+
+    fn other_tool_result_ev() -> crate::session_event::SessionEvent {
+        crate::session_event::SessionEvent::ToolResult {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            content: "output".to_string(),
+            is_error: false,
+            display_range: None,
+            timestamp: ts(),
+        }
     }
 
     #[test]
-    fn user_message_boundaries_correct_indices() {
+    fn step_boundaries_empty() {
+        let app = make_app();
+        assert!(app.step_boundaries().is_empty());
+    }
+
+    #[test]
+    fn step_boundaries_user_messages() {
         let app = make_app_with_events(vec![
             user_ev("first"),
             assistant_ev("reply1"),
             user_ev("second"),
             assistant_ev("reply2"),
         ]);
-        assert_eq!(app.user_message_boundaries(), vec![0, 2]);
+        assert_eq!(app.step_boundaries(), vec![0, 2]);
+    }
+
+    #[test]
+    fn step_boundaries_includes_ask_user_results() {
+        let app = make_app_with_events(vec![
+            user_ev("do it"),
+            assistant_ev(""),
+            other_tool_result_ev(), // non-ask_user tool result should be ignored
+            ask_user_call_ev("which?"),
+            ask_user_result_ev("ask_1", "my answer"),
+            assistant_ev("done"),
+            user_ev("next"),
+        ]);
+        // Boundaries: UserMessage at 0, ask_user ToolResult at 4, UserMessage at 6
+        // The other_tool_result at 2 should NOT be a boundary.
+        assert_eq!(app.step_boundaries(), vec![0, 4, 6]);
+    }
+
+    #[test]
+    fn step_back_restores_ask_user_ui_with_options() {
+        let mut app = make_app_with_events(vec![
+            user_ev("do it"),
+            assistant_ev(""),
+            ask_user_call_with_options_ev("which?", &["Option A", "Option B"]),
+            ask_user_result_ev("ask_2", "my answer"),
+            assistant_ev("done"),
+            user_ev("next"),
+        ]);
+        app.textarea = ratatui_textarea::TextArea::new(vec!["current input".to_string()]);
+
+        // Step back to the last boundary (last UserMessage at index 5), then
+        // again to the ask_user ToolResult at index 3.
+        app.step_back();
+        assert_eq!(app.step_back.cursor, Some(5));
+        app.step_back();
+        assert_eq!(app.step_back.cursor, Some(3));
+        assert!(app.selection.active);
+        assert!(app.has_pending_ask());
+        assert!(
+            app.ask_user.reply.is_none(),
+            "no reply channel in step mode"
+        );
+    }
+
+    #[test]
+    fn step_back_restores_ask_user_freeform_when_no_options() {
+        let mut app = make_app_with_events(vec![
+            user_ev("do it"),
+            assistant_ev(""),
+            ask_user_call_ev("what do you think?"),
+            ask_user_result_ev("ask_1", "my answer"),
+            assistant_ev("done"),
+            user_ev("next"),
+        ]);
+        app.textarea = ratatui_textarea::TextArea::new(vec!["current input".to_string()]);
+
+        // Step back past the last UserMessage to the ask_user ToolResult.
+        app.step_back();
+        assert_eq!(app.step_back.cursor, Some(5));
+        app.step_back();
+        assert_eq!(app.step_back.cursor, Some(3));
+        // No options → freeform-only mode; selection is inactive.
+        assert!(!app.selection.active);
+        assert!(app.has_pending_ask());
+        assert!(app.ask_user_freeform_mode());
+        assert!(
+            app.ask_user.reply.is_none(),
+            "no reply channel in step mode"
+        );
     }
 
     #[test]

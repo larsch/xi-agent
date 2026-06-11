@@ -13,6 +13,7 @@ use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
 use crate::provider_manager::{PendingProviderRemoval, PendingProviderSetup, ProviderSetupStep};
 use crate::selection_state::{MAX_SELECTION_VISIBLE, SelectionKind};
 use crate::thinking::ThinkingLevel;
+use ratatui_textarea::{CursorMove, TextArea};
 
 impl App {
     // ── Selection menu ────────────────────────────────────────────────────────
@@ -620,6 +621,105 @@ impl App {
         self.ask_user.has_pending()
     }
 
+    /// Restore the ask_user prompt UI from a ToolCall's arguments during
+    /// step-back navigation.  No reply channel is set because the agent is
+    /// not running; the answer will be handled by `finish_pending_ask` in
+    /// step mode.
+    pub(crate) fn restore_ask_user_from_step(&mut self, args: &serde_json::Value) {
+        use crate::agent::types::AskUserOption;
+
+        let question = args
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let allow_freeform = args
+            .get("allowFreeform")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let options: Vec<AskUserOption> = match args.get("options") {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::String(s) => {
+                        let title = s.trim();
+                        if title.is_empty() {
+                            None
+                        } else {
+                            Some(AskUserOption {
+                                title: title.to_string(),
+                                description: None,
+                            })
+                        }
+                    }
+                    serde_json::Value::Object(obj) => {
+                        let title = obj.get("title").and_then(serde_json::Value::as_str)?.trim();
+                        if title.is_empty() {
+                            return None;
+                        }
+                        let description = obj
+                            .get("description")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned);
+                        Some(AskUserOption {
+                            title: title.to_string(),
+                            description,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        self.ask_user.pending = Some(PendingAsk {
+            question,
+            options: options.clone(),
+            allow_freeform,
+        });
+        // No reply channel in step mode — finish_pending_ask will detect
+        // step mode and commit the step branch instead.
+        self.ask_user.reply = None;
+
+        if options.is_empty() {
+            self.ask_user.freeform_mode = true;
+            self.exit_selection_mode();
+            self.reset_textarea();
+            return;
+        }
+
+        self.reset_textarea();
+        let mut items: Vec<CompletionItem> = options
+            .iter()
+            .map(|opt| CompletionItem {
+                label: opt.title.clone(),
+                detail: opt.description.clone().unwrap_or_default(),
+                complete_to: format!("/ask_user_option {}", opt.title),
+                loading: false,
+                error: false,
+                match_range: None,
+            })
+            .collect();
+
+        if allow_freeform {
+            items.push(CompletionItem {
+                label: "Type your response…".to_string(),
+                detail: String::new(),
+                complete_to: "/ask_user_freeform".to_string(),
+                loading: false,
+                error: false,
+                match_range: None,
+            });
+        }
+
+        self.selection
+            .activate(SelectionKind::AskUser, "  Ask user  ", items);
+    }
+
     /// Returns true when the current pending ask allows a free-form typed answer.
     pub fn pending_ask_allows_freeform(&self) -> bool {
         self.ask_user.allows_freeform()
@@ -770,6 +870,35 @@ impl App {
     }
 
     fn finish_pending_ask(&mut self, answer: AskUserResponse) {
+        // Step mode with ask_user: commit the step branch with the answer
+        // instead of sending it back to the agent (which isn't running).
+        if self.ask_user.reply.is_none() && self.is_stepping() {
+            match answer {
+                AskUserResponse::Answer(text) => {
+                    // Populate textarea with the answer so commit_step_branch
+                    // can read it.
+                    self.textarea = TextArea::new(vec![text.clone()]);
+                    self.textarea.move_cursor(CursorMove::End);
+                    // Commit the step branch (creates new session from events
+                    // up to the ask_user ToolResult, excluding it).
+                    self.commit_step_branch();
+                    // Append the answer as a UserMessage to the branch session.
+                    self.append_user_message(text);
+                    self.reset_textarea();
+                    // Set pending_finalize so the main loop launches the turn
+                    // on the next iteration.
+                    self.runtime.pending_finalize = true;
+                }
+                AskUserResponse::Cancelled => {
+                    self.cancel_stepping();
+                }
+            }
+            self.ask_user.pending = None;
+            self.ask_user.freeform_mode = false;
+            self.exit_selection_mode();
+            return;
+        }
+
         if let Some(reply) = self.ask_user.reply.take() {
             let _ = reply.send(answer);
         }

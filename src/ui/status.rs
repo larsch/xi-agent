@@ -22,7 +22,7 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
-        let boundaries = app.user_message_boundaries();
+        let boundaries = app.step_boundaries();
         let total = boundaries.len();
         // How many boundaries are at or after the cursor (i.e. will be discarded)?
         let steps_back = boundaries.iter().filter(|&&i| i >= cursor_idx).count();

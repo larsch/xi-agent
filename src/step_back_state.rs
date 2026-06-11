@@ -1,11 +1,16 @@
-/// State for step-back navigation through `UserMessage` history.
+/// State for step-back navigation through conversation history.
+///
+/// Steps back to boundaries where user input was provided: `UserMessage`
+/// events (turn boundaries) and `ToolResult` events for `ask_user`
+/// (in-turn question answers).
 ///
 /// Both fields are always set and cleared together, which is the invariant
 /// this struct enforces.
 #[derive(Default)]
 pub(crate) struct StepBackState {
-    /// Index into the session event log pointing at the `UserMessage` that
-    /// serves as the resubmission point.  `None` when not stepping.
+    /// Index into the session event log pointing at the boundary event
+    /// (`UserMessage` or `ToolResult { name: "ask_user" }`) that serves as
+    /// the resubmission point.  `None` when not stepping.
     pub(crate) cursor: Option<usize>,
     /// Input field content saved when stepping began, restored on cancel.
     pub(crate) saved_input: Option<String>,
