@@ -139,6 +139,8 @@ Available tools:\n\
 \n\
 In addition to the tools above, you may have access to other custom tools depending on the project.\n\
 \n\
+All file paths are relative to the current working directory; absolute paths are also accepted.\n\
+\n\
 Guidelines:\n\
 {guidelines_text}{project_context_section}{skills_section}\n\
 Current date: {date}\n\
