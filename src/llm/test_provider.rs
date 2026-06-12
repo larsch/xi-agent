@@ -221,8 +221,14 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `cmd <command>` | Execute a real cmd command |
 | `exec <prog> [args…]` | Execute a program via argv (shellword-split, no shell) |
 | `bash-background-job` | 4-step scripted loop: start `sleep 60` in background, check it is running, kill it, confirm it is gone |
+| `stream-bash` | Streaming `bash` tool call (~4–8 chars/chunk at 20/sec); runs a 10 s script with live output |
+| `stream-python` | Streaming `python` tool call (~4–8 chars/chunk at 20/sec); runs a 10 s script with live output |
 
 ## File tool calls
+
+| Command | Description |
+|---------|-------------|
+| `python` | Issue a `python` tool call (quick single-output script) |
 
 | Command | Description |
 |---------|-------------|
@@ -596,6 +602,44 @@ fn exec_tool_stream(invocation: String) -> LlmStream {
     })
 }
 
+/// Build a streaming python tool call — a 10-second script that produces
+/// output over time to exercise both the streaming headline and live output body.
+fn streaming_python_stream() -> LlmStream {
+    streaming_tool_call(
+        "python".to_string(),
+        serde_json::json!({
+            "script": "import time\nfor i in range(1, 11):\n    print(f'line {i}: processing chunk {i}...')\n    time.sleep(1)\n"
+        }),
+    )
+}
+
+/// Build a streaming bash tool call — a 10-second script that produces
+/// output over time to exercise both the streaming headline and live output body.
+fn streaming_bash_stream() -> LlmStream {
+    streaming_tool_call(
+        "bash".to_string(),
+        serde_json::json!({
+            "command": "for i in $(seq 1 10); do echo \"line $i: $(date +%H:%M:%S)\"; sleep 1; done"
+        }),
+    )
+}
+
+/// Build a non-streaming python tool call (quick, single output).
+fn python_stream() -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "python".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "python".to_string(),
+            args: serde_json::json!({ "script": "print('hello from test provider')" }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
 // ── LlmProvider impl ──────────────────────────────────────────────────────────
 
 impl TestProvider {
@@ -864,6 +908,12 @@ impl super::LlmProvider for TestProvider {
                 self.sequence_step.store(1, Ordering::SeqCst);
                 self.advance_sequence(1, "")
             }
+
+            "stream-bash" => streaming_bash_stream(),
+
+            "stream-python" => streaming_python_stream(),
+
+            "python" => python_stream(),
 
             "write" => write_file_stream(),
 

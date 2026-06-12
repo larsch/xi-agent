@@ -248,6 +248,9 @@ impl App {
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.args = args.clone();
             entry.partial_snapshot = Some(args.clone());
+            // Args are now complete — clear the streaming buffer so the UI
+            // uses the finalized rendering path rather than the partial one.
+            entry.partial_args.clear();
         } else {
             self.session.live_turn.tool_entries.push(LiveToolEntry {
                 id: id.clone(),

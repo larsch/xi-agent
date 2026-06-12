@@ -989,14 +989,13 @@ async fn run_print_mode_loop(
                 );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
-                eprintln!(
-                    "{}",
-                    tool_presentation::tool_invocation_label(
-                        &name,
-                        &args,
-                        &crate::config::DisplayConfig::default()
-                    )
+                let (label, _) = tool_presentation::tool_invocation_label(
+                    &name,
+                    &args,
+                    None,
+                    &crate::config::DisplayConfig::default(),
                 );
+                eprintln!("{label}");
             }
             AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {
@@ -1152,14 +1151,13 @@ async fn run_print_mode_loop_inner(
                 );
             }
             AgentEvent::ToolCallStart { name, args, .. } => {
-                eprintln!(
-                    "{}",
-                    tool_presentation::tool_invocation_label(
-                        &name,
-                        &args,
-                        &crate::config::DisplayConfig::default()
-                    )
+                let (label, _) = tool_presentation::tool_invocation_label(
+                    &name,
+                    &args,
+                    None,
+                    &crate::config::DisplayConfig::default(),
                 );
+                eprintln!("{label}");
             }
             AgentEvent::ToolCallEnd { result, .. } => {
                 if result.is_error {

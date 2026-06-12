@@ -263,8 +263,12 @@ fn render_tool_call(
     }
 
     // Regular tool call intent line.
-    let mut is_placeholder = false;
-    let label = if name == "local_shell" {
+    let sf = msg
+        .tool_streaming_field
+        .as_deref()
+        .or_else(|| tool_presentation::tool_streaming_field(name));
+
+    let (label, is_placeholder) = if name == "local_shell" {
         let prefix = msg
             .tool_args
             .as_ref()
@@ -277,36 +281,18 @@ fn render_tool_call(
             .and_then(|a| a.get("command"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if prefix.is_empty() {
+        let lbl = if prefix.is_empty() {
             format!("⚙ {command}")
         } else {
             format!("⚙ {prefix} {command}")
-        }
-    } else if let Some(snapshot) = msg.tool_partial_snapshot.as_ref() {
-        let label = tool_presentation::tool_invocation_label(name, snapshot, display);
-        // During streaming, a partial snapshot may contain an empty target
-        // field (e.g. {"path": ""}) which produces the pending label.
-        // Detect this and render it in italic/dim like other placeholders.
-        if label == tool_presentation::tool_pending_label(name) {
-            is_placeholder = true;
-        }
-        label
+        };
+        (lbl, false)
     } else if let Some(partial) = msg.tool_partial_args.as_deref() {
-        let (lbl, ph) = tool_presentation::tool_invocation_label_partial(
-            name,
-            partial,
-            msg.tool_streaming_field.as_deref(),
-            display,
-        );
-        is_placeholder = ph;
-        lbl
+        tool_presentation::tool_invocation_label_from_partial(name, partial, sf, display)
     } else {
         match msg.tool_args.as_ref() {
-            Some(args) => tool_presentation::tool_invocation_label(name, args, display),
-            None => {
-                is_placeholder = true;
-                tool_presentation::tool_pending_label(name)
-            }
+            Some(args) => tool_presentation::tool_invocation_label(name, args, sf, display),
+            None => (tool_presentation::tool_pending_label(name), true),
         }
     };
 
@@ -451,10 +437,10 @@ fn render_tool_call(
         )
     {
         let body_color = theme.log.diff.unchanged.fg.unwrap_or(Color::DarkGray);
-        render_head_truncated_body(
+        render_tail_truncated_body(
             out,
             output,
-            cfg.head_lines,
+            cfg.tail_lines,
             cfg.full_output,
             body_color,
             width,
@@ -579,8 +565,8 @@ fn render_tool_result(
         return;
     }
 
-    // bash / cmd / powershell / exec: tail-truncated.
-    if matches!(prev_name, "bash" | "cmd" | "powershell" | "exec") {
+    // bash / cmd / powershell / exec / python: tail-truncated.
+    if matches!(prev_name, "bash" | "cmd" | "powershell" | "exec" | "python") {
         let color = if msg.is_error {
             theme.log.diff.removed.fg.unwrap_or(Color::LightRed)
         } else {
@@ -1649,6 +1635,51 @@ mod tests {
         );
     }
 
+    // ── python result tail truncation ──────────────────────────────────────────
+
+    #[test]
+    fn python_result_tail_truncated() {
+        let call = Message::tool_call(
+            "c1",
+            "python",
+            serde_json::json!({"script": "for i in range(1, 21): print(i)"}),
+        );
+        let content = (1..=20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Body starts after the headline line.
+        let body: Vec<&String> = text.iter().skip(1).collect();
+        assert!(
+            body[0].contains("20 total lines"),
+            "expected tail-truncated marker first, got: {}",
+            body[0]
+        );
+        assert!(
+            body.last().unwrap().contains("20"),
+            "expected last visible line to be 20, got: {}",
+            body.last().unwrap()
+        );
+    }
+
     // ── full_output toggle ────────────────────────────────────────────────────
 
     #[test]
@@ -1750,6 +1781,39 @@ mod tests {
         assert!(
             text.iter().any(|t| t.contains("Option A")),
             "response not rendered"
+        );
+    }
+
+    // ── Regression: finalized write_file headline shows path, not placeholder ─
+
+    #[test]
+    fn write_file_finalized_headline_shows_path() {
+        // When a write_file tool call has complete args (ToolCallStart
+        // arrived, partial_args cleared), the headline must show the path,
+        // not the italic "📄 writing…" placeholder.
+        let call = Message::tool_call(
+            "c1",
+            "write_file",
+            serde_json::json!({"path": "/tmp/out.rs", "content": "fn main() {}"}),
+        );
+        let result = Message::tool_result("c1", "Written 1 lines to /tmp/out.rs", false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        // The first line is the headline.
+        let headline: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            headline.contains("/tmp/out.rs"),
+            "finalized write_file headline must show path, got: {headline}"
+        );
+        assert!(
+            !headline.contains("writing…"),
+            "finalized headline must not be a placeholder, got: {headline}"
         );
     }
 }

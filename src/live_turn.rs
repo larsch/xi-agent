@@ -138,17 +138,26 @@ impl LiveTurnState {
                 Message::tool_call(entry.id.clone(), entry.name.clone(), entry.args.clone());
             // If the result is not yet present, args may still be streaming.
             // Attach partial_args for the UI to render a live preview.
+            // Once args are complete (non-empty object), leave partial_args
+            // unset so render_tool_call uses the finalized rendering path.
             if entry.result.is_none() {
-                if !entry.partial_args.is_empty() {
-                    tool_msg.tool_partial_args = Some(entry.partial_args.clone());
-                    tool_msg.tool_partial_snapshot = entry.partial_snapshot.clone();
-                    tool_msg.tool_streaming_field = entry.streaming_field.clone();
-                } else {
-                    // No args have arrived yet — mark as partial so the UI
-                    // shows a pending placeholder rather than the raw tool name.
-                    tool_msg.tool_partial_args = Some(String::new());
-                    tool_msg.tool_streaming_field = entry.streaming_field.clone();
+                let args_complete = entry
+                    .args
+                    .as_object()
+                    .map(|o| !o.is_empty())
+                    .unwrap_or(false);
+                if !args_complete {
+                    if !entry.partial_args.is_empty() {
+                        tool_msg.tool_partial_args = Some(entry.partial_args.clone());
+                        tool_msg.tool_partial_snapshot = entry.partial_snapshot.clone();
+                    } else {
+                        // No args have arrived yet — mark as partial so the UI
+                        // shows a pending placeholder rather than the raw tool name.
+                        tool_msg.tool_partial_args = Some(String::new());
+                    }
                 }
+                // streaming_field is always needed (both partial and finalized paths).
+                tool_msg.tool_streaming_field = entry.streaming_field.clone();
             }
             // Attach live running output while the result is still pending.
             if entry.result.is_none() && !entry.running_output.is_empty() {
@@ -301,5 +310,103 @@ mod tests {
         assert_eq!(combined.len(), 2);
         assert_eq!(combined[0].role, Role::User);
         assert_eq!(combined[1].role, Role::Assistant);
+    }
+
+    // ── Regression: finalized args must not carry partial_args ────────────────
+
+    #[test]
+    fn render_overlay_does_not_attach_partial_args_when_args_are_complete() {
+        // When the full args have arrived (non-empty object), render_overlay
+        // must leave tool_partial_args unset so that render_tool_call uses the
+        // finalized rendering path rather than the streaming placeholder path.
+        let mut live = LiveTurnState::new();
+        live.tool_entries.push(LiveToolEntry {
+            id: "c1".to_string(),
+            name: "write_file".to_string(),
+            // Complete args — ToolCallStart has arrived.
+            args: serde_json::json!({"path": "/tmp/out.rs", "content": "fn main() {}"}),
+            partial_args: String::new(), // cleared by on_tool_call_start
+            partial_snapshot: None,
+            streaming_field: Some("path".to_string()),
+            running_output: String::new(),
+            result: None, // result not yet arrived
+        });
+        let overlay = live.render_overlay(false);
+        assert_eq!(overlay.len(), 1);
+        let tc = &overlay[0];
+        assert_eq!(tc.role, Role::ToolCall);
+        assert!(
+            tc.tool_partial_args.is_none(),
+            "complete args must not carry partial_args; got {:?}",
+            tc.tool_partial_args
+        );
+        assert_eq!(
+            tc.tool_name.as_deref(),
+            Some("write_file"),
+            "tool name should be set"
+        );
+        assert!(
+            tc.tool_args
+                .as_ref()
+                .and_then(|a| a.get("path"))
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "tool_args should have the path field"
+        );
+    }
+
+    #[test]
+    fn render_overlay_still_attaches_partial_args_when_args_not_yet_complete() {
+        // When args are still empty (streaming hasn't delivered any fields yet),
+        // render_overlay must attach an empty partial_args so render_tool_call
+        // shows the placeholder rather than trying to extract from an empty object.
+        let mut live = LiveTurnState::new();
+        live.tool_entries.push(LiveToolEntry {
+            id: "c1".to_string(),
+            name: "write_file".to_string(),
+            args: serde_json::json!({}), // empty — no fields arrived yet
+            partial_args: String::new(),
+            partial_snapshot: None,
+            streaming_field: Some("path".to_string()),
+            running_output: String::new(),
+            result: None,
+        });
+        let overlay = live.render_overlay(false);
+        assert_eq!(overlay.len(), 1);
+        let tc = &overlay[0];
+        assert_eq!(tc.role, Role::ToolCall);
+        assert!(
+            tc.tool_partial_args.as_deref().is_some(),
+            "empty args must still carry partial_args so UI shows placeholder"
+        );
+    }
+
+    #[test]
+    fn render_overlay_still_attaches_partial_args_during_streaming() {
+        // When partial_args has accumulated content, it must be attached
+        // so the UI can show a live preview of the streaming field.
+        let mut live = LiveTurnState::new();
+        live.tool_entries.push(LiveToolEntry {
+            id: "c1".to_string(),
+            name: "write_file".to_string(),
+            args: serde_json::json!({}), // still empty — streaming in progress
+            partial_args: r#"{"path": "/tmp/out.rs""#.to_string(),
+            partial_snapshot: None,
+            streaming_field: Some("path".to_string()),
+            running_output: String::new(),
+            result: None,
+        });
+        let overlay = live.render_overlay(false);
+        assert_eq!(overlay.len(), 1);
+        let tc = &overlay[0];
+        assert_eq!(tc.role, Role::ToolCall);
+        assert!(
+            tc.tool_partial_args.as_deref().is_some(),
+            "streaming args must carry partial_args for live preview"
+        );
+        assert!(
+            tc.tool_partial_args.as_deref().unwrap().contains("path"),
+            "partial_args should contain the streaming JSON"
+        );
     }
 }

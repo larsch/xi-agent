@@ -194,11 +194,11 @@ impl Tool for PythonTool {
                     for pkg in &with {
                         c = c.arg("--with").arg(pkg);
                     }
-                    c.arg("python").arg("-")
+                    c.arg("python").arg("-u").arg("-")
                 }
                 PythonRuntime::Native {
                     cmd: python_cmd, ..
-                } => SubprocessCommand::new(python_cmd).arg("-"),
+                } => SubprocessCommand::new(python_cmd).arg("-u").arg("-"),
             };
 
             cmd.stdin_data(script.into_bytes()).run(ctx).await

@@ -9,24 +9,6 @@ fn max_one_line_chars(cfg: &DisplayConfig) -> usize {
     cfg.max_one_line_chars
 }
 
-/// Whether a tool uses head-truncation (show end while streaming, snap to
-/// beginning when done) or tail-truncation (always show the trailing window).
-fn uses_head_truncation(name: &str) -> bool {
-    matches!(name, "bash" | "cmd" | "powershell" | "exec" | "ask_user")
-}
-
-/// Extract the display string for a partial JSON argument object.
-///
-/// Uses `jawohl::complete_json` to complete the partial JSON into a valid
-/// document, parses it with `serde_json`, then extracts the target field.
-/// Returns `None` if the field is not yet present or the JSON can't be
-/// completed/parsed.
-pub fn extract_partial_field(partial_json: &str, field: &str) -> Option<String> {
-    let completed = jawohl::complete_json(partial_json).ok()?;
-    let value: Value = serde_json::from_str(&completed).ok()?;
-    value.get(field)?.as_str().map(|s| s.to_string())
-}
-
 /// Return a short pending action label shown before argument streaming begins.
 ///
 /// Uses an action verb (e.g. "reading…") rather than the raw internal tool
@@ -43,76 +25,6 @@ pub fn tool_pending_label(name: &str) -> String {
         _ => "working…",
     };
     format!("{emoji} {action}")
-}
-
-/// Build a display label for a tool call whose arguments are still streaming.
-///
-/// `partial_json` is the accumulated raw argument JSON so far.
-/// `streaming_field` is the field name to extract for display (from
-/// `ToolDefinition::streaming_field`). If `None`, falls back to the
-/// completed-args display.
-///
-/// Returns `(label, is_placeholder)` where `is_placeholder` is `true` when
-/// the target field has not yet arrived and the label is a pending action hint.
-pub fn tool_invocation_label_partial(
-    name: &str,
-    partial_json: &str,
-    streaming_field: Option<&str>,
-    display: &DisplayConfig,
-) -> (String, bool) {
-    let emoji = tool_emoji(name);
-
-    let Some(field) = streaming_field else {
-        return (tool_pending_label(name), true);
-    };
-
-    let text = match extract_partial_field(partial_json, field) {
-        Some(t) => t,
-        None => return (tool_pending_label(name), true),
-    };
-
-    if text.is_empty() {
-        return (tool_pending_label(name), true);
-    }
-
-    let detail = if uses_head_truncation(name) {
-        // Head-truncation: show the trailing N lines (newest content).
-        head_truncate(&text, display)
-    } else {
-        // Tail-truncation: show the trailing N lines.
-        tail_truncate(&text, display)
-    };
-
-    if detail.is_empty() {
-        (tool_pending_label(name), true)
-    } else {
-        (format!("{emoji} {detail}"), false)
-    }
-}
-
-/// Truncate to the last N lines for streaming display, prepending "…" if truncated.
-/// Used for shell tools during streaming where total is not yet known.
-fn head_truncate(text: &str, display: &DisplayConfig) -> String {
-    let max_lines = max_shell_command_lines(display);
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= max_lines {
-        return text.trim_end_matches('\n').to_string();
-    }
-    let start = lines.len() - max_lines;
-    let mut result = String::from("…\n");
-    result.push_str(&lines[start..].join("\n"));
-    result
-}
-
-/// Truncate to the last N lines with no leading marker.
-fn tail_truncate(text: &str, display: &DisplayConfig) -> String {
-    let max_lines = max_shell_command_lines(display);
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= max_lines {
-        return text.trim_end_matches('\n').to_string();
-    }
-    let start = lines.len() - max_lines;
-    lines[start..].join("\n")
 }
 
 /// Split a tool label into (icon, text) parts.
@@ -142,85 +54,144 @@ pub fn tool_emoji(name: &str) -> &'static str {
     }
 }
 
-/// Extract a short, human-readable tool argument summary.
+/// Return the canonical display field name for a tool, matching its
+/// [`Tool::streaming_field()`](crate::agent::types::Tool::streaming_field).
+/// Returns `None` for custom tools that don't declare a streaming field.
+pub fn tool_streaming_field(name: &str) -> Option<&'static str> {
+    match name {
+        "bash" | "cmd" | "powershell" => Some("command"),
+        "python" => Some("script"),
+        "exec" => Some("program"),
+        "ask_user" => Some("question"),
+        "read" | "read_file" => Some("path"),
+        "write" | "write_file" => Some("path"),
+        "edit" | "edit_file" => Some("path"),
+        "find" | "find_files" => Some("pattern"),
+        "read_skill" => Some("name"),
+        _ => None,
+    }
+}
+
+/// Extract the display string for a partial JSON argument object.
 ///
-/// Preference order matches the most meaningful fields shown to users.
-pub fn tool_detail(name: &str, args: &Value, display: &DisplayConfig) -> String {
-    // Shell tool calls preserve newlines so users can see the full command,
-    // up to a small fixed number of lines.
-    if matches!(name, "bash" | "cmd" | "powershell")
-        && let Some(command) = args.get("command").and_then(|v| v.as_str())
-    {
-        return multiline_shell_command(command, display);
+/// Uses `jawohl::complete_json` to complete the partial JSON into a valid
+/// document, parses it with `serde_json`, then extracts the target field.
+/// Returns `None` if the field is not yet present or the JSON can't be
+/// completed/parsed.
+pub fn extract_partial_field(partial_json: &str, field: &str) -> Option<String> {
+    let completed = jawohl::complete_json(partial_json).ok()?;
+    let value: Value = serde_json::from_str(&completed).ok()?;
+    value.get(field)?.as_str().map(|s| s.to_string())
+}
+
+/// Build the user-facing tool invocation label.
+///
+/// Uses the tool's `streaming_field` to select which argument to display.
+/// Applies per-tool formatting (multiline shell, shell-quoted exec, find_files
+/// pattern+path, ask_user no-truncation, 1-line compact for others).
+/// Always shows the **head** (beginning) of the selected value.
+///
+/// Returns `(label, is_placeholder)` where `is_placeholder` is `true` when
+/// the target field has not yet arrived and the label is a pending action hint.
+pub fn tool_invocation_label(
+    name: &str,
+    args: &Value,
+    streaming_field: Option<&str>,
+    display: &DisplayConfig,
+) -> (String, bool) {
+    let emoji = tool_emoji(name);
+
+    // Shell and script tools: multiline invocation, head-truncated with continuation marker.
+    if matches!(name, "bash" | "cmd" | "powershell" | "python") {
+        let field = streaming_field.unwrap_or("command");
+        let text = args.get(field).and_then(|v| v.as_str()).unwrap_or("");
+        if text.is_empty() {
+            return (tool_pending_label(name), true);
+        }
+        let detail = multiline_head_truncated(text, display);
+        return (format!("{emoji} {detail}"), false);
     }
 
-    // exec tool calls should display the full argv-style command rendered as a
-    // shell-quoted string for readability.
+    // exec: full shell-quoted command (program + args).
     if name == "exec" {
-        return exec_command_detail(args, display);
+        let detail = exec_command_detail(args, display);
+        if detail.is_empty() {
+            return (tool_pending_label(name), true);
+        }
+        return (format!("{emoji} {detail}"), false);
     }
 
-    // ask_user questions must be shown in full (wrapped by the UI), never
-    // truncated with an ellipsis.
-    if name == "ask_user"
-        && let Some(question) = args.get("question").and_then(|v| v.as_str())
-    {
-        return one_line(question);
+    // ask_user: full question on one line, never truncated.
+    if name == "ask_user" {
+        let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("");
+        if question.is_empty() {
+            return (tool_pending_label(name), true);
+        }
+        return (format!("{emoji} {}", one_line(question)), false);
     }
 
-    // read_skill: show only the skill name.
+    // read_skill: just the skill name.
     if name == "read_skill" {
-        return args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let skill_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if skill_name.is_empty() {
+            return (tool_pending_label(name), true);
+        }
+        return (format!("{emoji} {skill_name}"), false);
     }
 
-    // find_files: render pattern and/or path meaningfully.
+    // find_files: pattern and/or path.
     if matches!(name, "find" | "find_files") {
         let pattern = args.get("pattern").and_then(|v| v.as_str());
         let path = args.get("path").and_then(|v| v.as_str());
-        return match (pattern, path) {
-            (Some(p), Some(d)) => format!("{} in {}", compact(p, display), d),
-            (Some(p), None) => compact(p, display),
-            (None, Some(d)) => format!("in {}", d),
-            (None, None) => String::new(),
-        };
-    }
-
-    for key in ["command", "pattern", "path", "question", "prompt"] {
-        if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
-            return compact(s, display);
-        }
-    }
-
-    if let Some(obj) = args.as_object() {
-        for value in obj.values() {
-            if let Some(s) = value.as_str() {
-                return compact(s, display);
+        let detail = match (pattern, path) {
+            (Some(p), Some(d)) if !p.is_empty() && !d.is_empty() => {
+                format!("{} in {}", compact(p, display), d)
             }
+            (Some(p), _) if !p.is_empty() => compact(p, display),
+            (_, Some(d)) if !d.is_empty() => format!("in {}", d),
+            _ => String::new(),
+        };
+        if detail.is_empty() {
+            return (tool_pending_label(name), true);
         }
+        return (format!("{emoji} {detail}"), false);
     }
 
-    String::new()
+    // All other tools: extract the streaming_field value, 1-line compact.
+    let Some(field) = streaming_field else {
+        return (tool_pending_label(name), true);
+    };
+
+    let text = match args.get(field).and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t,
+        _ => return (tool_pending_label(name), true),
+    };
+
+    let detail = compact(text, display);
+    (format!("{emoji} {detail}"), false)
 }
 
-/// Build the user-facing one-line tool invocation label.
+/// Build a display label from a partial JSON argument string.
 ///
-/// When no meaningful detail can be extracted from `args` the pending action
-/// label (e.g. "👀 reading…") is returned instead of the raw tool name.
-/// This keeps the display consistent during streaming where the target
-/// argument field may still be empty or absent.
-pub fn tool_invocation_label(name: &str, args: &Value, display: &DisplayConfig) -> String {
-    let detail = tool_detail(name, args, display);
-    if detail.is_empty() {
-        tool_pending_label(name)
-    } else {
-        let emoji = tool_emoji(name);
-        format!("{emoji} {detail}")
-    }
+/// Completes and parses the partial JSON, then delegates to
+/// [`tool_invocation_label`] for consistent display logic.
+pub fn tool_invocation_label_from_partial(
+    name: &str,
+    partial_json: &str,
+    streaming_field: Option<&str>,
+    display: &DisplayConfig,
+) -> (String, bool) {
+    let args = match jawohl::complete_json(partial_json)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    {
+        Some(v) => v,
+        None => return (tool_pending_label(name), true),
+    };
+    tool_invocation_label(name, &args, streaming_field, display)
 }
+
+// ── Private formatting helpers ────────────────────────────────────────────────
 
 fn one_line(input: &str) -> String {
     input.replace('\n', " ").trim().to_string()
@@ -235,7 +206,7 @@ fn compact(input: &str, display: &DisplayConfig) -> String {
     one_line.chars().take(max_chars).collect::<String>() + "…"
 }
 
-fn multiline_shell_command(input: &str, display: &DisplayConfig) -> String {
+fn multiline_head_truncated(input: &str, display: &DisplayConfig) -> String {
     let max_lines = max_shell_command_lines(display);
     let lines: Vec<&str> = input.lines().collect();
     if lines.is_empty() {
@@ -277,107 +248,369 @@ fn exec_command_detail(args: &Value, display: &DisplayConfig) -> String {
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn label_prefers_command() {
-        let label = tool_invocation_label(
-            "bash",
-            &json!({"command": "rg -n tool src"}),
-            &DisplayConfig::default(),
-        );
-        assert_eq!(label, "💻 rg -n tool src");
+    fn sf(name: &str) -> Option<&'static str> {
+        // streaming_field per tool, matching Tool implementations
+        match name {
+            "bash" | "cmd" | "powershell" => Some("command"),
+            "exec" => Some("program"),
+            "python" => Some("script"),
+            "ask_user" => Some("question"),
+            "read" | "read_file" => Some("path"),
+            "write" | "write_file" => Some("path"),
+            "edit" | "edit_file" => Some("path"),
+            "find" | "find_files" => Some("pattern"),
+            "read_skill" => Some("name"),
+            _ => None,
+        }
     }
 
+    fn label(name: &str, args: &Value) -> (String, bool) {
+        tool_invocation_label(name, args, sf(name), &DisplayConfig::default())
+    }
+
+    // ── Shell tools ───────────────────────────────────────────────────────────
+
     #[test]
-    fn python_emoji() {
-        let label = tool_invocation_label(
-            "python",
-            &json!({"script": "print('hello')"}),
-            &DisplayConfig::default(),
-        );
-        assert!(label.starts_with("🐍"), "expected 🐍 prefix, got: {label}");
+    fn label_prefers_command() {
+        let (lbl, ph) = label("bash", &json!({"command": "rg -n tool src"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 rg -n tool src");
     }
 
     #[test]
     fn shell_label_preserves_newlines_up_to_five_lines() {
-        let label = tool_invocation_label(
+        let (lbl, ph) = label(
             "bash",
             &json!({"command": "printf 'one\ntwo\nthree\nfour\nfive'"}),
-            &DisplayConfig::default(),
         );
-        assert_eq!(label, "💻 printf 'one\ntwo\nthree\nfour\nfive'");
+        assert!(!ph);
+        assert_eq!(lbl, "💻 printf 'one\ntwo\nthree\nfour\nfive'");
     }
 
     #[test]
     fn shell_label_truncates_after_five_lines_with_line_count() {
-        let label = tool_invocation_label(
-            "bash",
-            &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
-            &DisplayConfig::default(),
-        );
-        assert_eq!(label, "💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines");
+        let (lbl, ph) = label("bash", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines");
     }
 
     #[test]
+    fn shell_placeholder_when_command_empty() {
+        let (lbl, ph) = label("bash", &json!({"command": ""}));
+        assert!(ph);
+        assert_eq!(lbl, "💻 running…");
+    }
+
+    #[test]
+    fn shell_placeholder_when_command_missing() {
+        let (lbl, ph) = label("bash", &json!({}));
+        assert!(ph);
+        assert_eq!(lbl, "💻 running…");
+    }
+
+    // ── exec ──────────────────────────────────────────────────────────────────
+
+    #[test]
     fn exec_label_shows_full_shell_quoted_command() {
-        let label = tool_invocation_label(
+        let (lbl, ph) = label(
             "exec",
             &json!({
                 "program": "printf",
                 "args": ["%s %s", "hello world", "$PATH"]
             }),
-            &DisplayConfig::default(),
         );
-        assert_eq!(label, "💻 printf '%s %s' 'hello world' '$PATH'");
+        assert!(!ph);
+        assert_eq!(lbl, "💻 printf '%s %s' 'hello world' '$PATH'");
     }
 
     #[test]
     fn exec_label_uses_program_when_no_args() {
-        let label = tool_invocation_label(
-            "exec",
-            &json!({"program": "git"}),
-            &DisplayConfig::default(),
-        );
-        assert_eq!(label, "💻 git");
+        let (lbl, ph) = label("exec", &json!({"program": "git"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 git");
     }
 
     #[test]
-    fn label_shows_pattern_and_path_for_find_files() {
-        let label = tool_invocation_label(
-            "find_files",
-            &json!({"pattern": "src/**/*.rs", "path": "."}),
-            &DisplayConfig::default(),
-        );
-        assert_eq!(label, "🔍 src/**/*.rs in .");
+    fn exec_placeholder_when_program_missing() {
+        let (lbl, ph) = label("exec", &json!({}));
+        assert!(ph);
+        assert_eq!(lbl, "💻 running…");
     }
+
+    // ── ask_user ──────────────────────────────────────────────────────────────
 
     #[test]
     fn ask_user_label_shows_full_question_without_ellipsis() {
         let question = "How do you want to run this triage session? Please choose Quick pass or Full pass, and optionally specify: item limit, include blocked items, and owner filter.";
-        let label = tool_invocation_label(
-            "ask_user",
-            &json!({"question": question}),
-            &DisplayConfig::default(),
-        );
-        assert_eq!(label, format!("❓ {question}"));
-        assert!(!label.contains('…'));
+        let (lbl, ph) = label("ask_user", &json!({"question": question}));
+        assert!(!ph);
+        assert_eq!(lbl, format!("❓ {question}"));
+        assert!(!lbl.contains('…'));
     }
 
     #[test]
+    fn ask_user_placeholder_when_question_empty() {
+        let (lbl, ph) = label("ask_user", &json!({"question": ""}));
+        assert!(ph);
+        assert_eq!(lbl, "❓ asking…");
+    }
+
+    // ── find_files ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn label_shows_pattern_and_path_for_find_files() {
+        let (lbl, ph) = label(
+            "find_files",
+            &json!({"pattern": "src/**/*.rs", "path": "."}),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "🔍 src/**/*.rs in .");
+    }
+
+    #[test]
+    fn find_files_shows_pattern_only() {
+        let (lbl, ph) = label("find_files", &json!({"pattern": "*.rs"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🔍 *.rs");
+    }
+
+    #[test]
+    fn find_files_shows_path_only() {
+        let (lbl, ph) = label("find_files", &json!({"path": "src"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🔍 in src");
+    }
+
+    #[test]
+    fn find_files_placeholder_when_both_empty() {
+        let (lbl, ph) = label("find_files", &json!({"pattern": "", "path": ""}));
+        assert!(ph);
+        assert_eq!(lbl, "🔍 finding…");
+    }
+
+    // ── read_skill ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_skill_shows_name() {
+        let (lbl, ph) = label("read_skill", &json!({"name": "workflow"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🎓 workflow");
+    }
+
+    #[test]
+    fn read_skill_placeholder_when_name_empty() {
+        let (lbl, ph) = label("read_skill", &json!({"name": ""}));
+        assert!(ph);
+        assert_eq!(lbl, "🎓 working…");
+    }
+
+    // ── Read/write/edit tools ─────────────────────────────────────────────────
+
+    #[test]
     fn label_avoids_raw_json() {
-        let label = tool_invocation_label(
-            "read_file",
-            &json!({"path": "src/main.rs", "limit": 20}),
+        let (lbl, ph) = label("read_file", &json!({"path": "src/main.rs", "limit": 20}));
+        assert!(!ph);
+        assert!(!lbl.contains('{'));
+        assert!(!lbl.contains('}'));
+        assert_eq!(lbl, "👀 src/main.rs");
+    }
+
+    #[test]
+    fn write_file_shows_path_not_content() {
+        // Regression: content must never appear in the headline for write_file.
+        let (lbl, ph) = label(
+            "write_file",
+            &json!({"path": "/tmp/out.rs", "content": "fn main() {}"}),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "📄 /tmp/out.rs");
+    }
+
+    #[test]
+    fn write_file_placeholder_when_path_missing_but_content_present() {
+        // During streaming, content may arrive before path — must show placeholder.
+        let (lbl, ph) = label("write_file", &json!({"content": "fn main() {}"}));
+        assert!(ph);
+        assert_eq!(lbl, "📄 writing…");
+    }
+
+    #[test]
+    fn edit_file_shows_path_not_old_text() {
+        let (lbl, ph) = label(
+            "edit_file",
+            &json!({"path": "src/main.rs", "old_text": "a", "new_text": "b"}),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "📝 src/main.rs");
+    }
+
+    #[test]
+    fn edit_file_placeholder_when_path_missing() {
+        let (lbl, ph) = label("edit_file", &json!({"old_text": "a", "new_text": "b"}));
+        assert!(ph);
+        assert_eq!(lbl, "📝 editing…");
+    }
+
+    // ── python ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn python_emoji() {
+        let (lbl, ph) = label("python", &json!({"script": "print('hello')"}));
+        assert!(!ph);
+        assert!(lbl.starts_with("🐍"), "expected 🐍 prefix, got: {lbl}");
+    }
+
+    #[test]
+    fn python_multiline_preserves_newlines() {
+        let (lbl, ph) = label(
+            "python",
+            &json!({"script": "import time\nfor i in range(3):\n    print(i)"}),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "🐍 import time\nfor i in range(3):\n    print(i)");
+    }
+
+    #[test]
+    fn python_multiline_truncates_with_line_count() {
+        let (lbl, ph) = label("python", &json!({"script": "l1\nl2\nl3\nl4\nl5\nl6\nl7"}));
+        assert!(!ph);
+        assert!(lbl.contains("… 7 total lines"), "got: {lbl}");
+    }
+
+    #[test]
+    fn python_placeholder_when_script_empty() {
+        let (lbl, ph) = label("python", &json!({"script": ""}));
+        assert!(ph);
+        assert_eq!(lbl, "🐍 running…");
+    }
+
+    #[test]
+    fn python_placeholder_when_script_missing() {
+        let (lbl, ph) = label("python", &json!({}));
+        assert!(ph);
+        assert_eq!(lbl, "🐍 running…");
+    }
+
+    // ── Custom / no streaming_field ───────────────────────────────────────────
+
+    #[test]
+    fn custom_tool_shows_placeholder() {
+        let (lbl, ph) = tool_invocation_label(
+            "custom_tool",
+            &json!({"some_field": "value"}),
+            None,
             &DisplayConfig::default(),
         );
-        assert!(!label.contains('{'));
-        assert!(!label.contains('}'));
-        assert_eq!(label, "👀 src/main.rs");
+        assert!(ph);
+        assert_eq!(lbl, "⚙️ working…");
     }
+
+    // ── Partial JSON wrapper ──────────────────────────────────────────────────
+
+    #[test]
+    fn partial_delegates_to_unified_label() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "write_file",
+            r#"{"path": "/tmp/x.rs"#,
+            Some("path"),
+            &DisplayConfig::default(),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "📄 /tmp/x.rs");
+    }
+
+    #[test]
+    fn partial_shows_placeholder_when_field_absent() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "write_file",
+            r#"{"content": "hello"#,
+            Some("path"),
+            &DisplayConfig::default(),
+        );
+        assert!(ph);
+        assert_eq!(lbl, "📄 writing…");
+    }
+
+    #[test]
+    fn partial_shows_placeholder_when_json_invalid() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "read_file",
+            "not json at all",
+            Some("path"),
+            &DisplayConfig::default(),
+        );
+        assert!(ph);
+        assert_eq!(lbl, "👀 reading…");
+    }
+
+    #[test]
+    fn partial_exec_shows_full_command_when_args_present() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "exec",
+            r#"{"program": "git", "args": ["log", "--oneline"]}"#,
+            Some("program"),
+            &DisplayConfig::default(),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "💻 git log --oneline");
+    }
+
+    #[test]
+    fn partial_exec_shows_placeholder_when_program_missing() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "exec",
+            r#"{"args": ["log"]}"#,
+            Some("program"),
+            &DisplayConfig::default(),
+        );
+        assert!(ph);
+        assert_eq!(lbl, "💻 running…");
+    }
+
+    #[test]
+    fn partial_find_files_shows_pattern_and_path() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "find_files",
+            r#"{"pattern": "*.rs", "path": "src"}"#,
+            Some("pattern"),
+            &DisplayConfig::default(),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "🔍 *.rs in src");
+    }
+
+    #[test]
+    fn partial_find_files_shows_placeholder_when_both_missing() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "find_files",
+            r#"{}"#,
+            Some("pattern"),
+            &DisplayConfig::default(),
+        );
+        assert!(ph);
+        assert_eq!(lbl, "🔍 finding…");
+    }
+
+    #[test]
+    fn partial_python_multiline() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "python",
+            r#"{"script": "import time\nfor i in range(3):\n    print(i)"}"#,
+            Some("script"),
+            &DisplayConfig::default(),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "🐍 import time\nfor i in range(3):\n    print(i)");
+    }
+
+    // ── split_icon_from_label ─────────────────────────────────────────────────
 
     #[test]
     fn split_icon_from_label_splits_on_first_space() {
