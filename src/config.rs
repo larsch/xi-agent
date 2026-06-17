@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use anyhow::Context;
 
 use crate::hooks::{HookConfig, HookPoint};
-use crate::provider_instance::ProviderInstance;
+use crate::provider_instance::{BackendPreset, ProviderInstance};
 
 /// Display thresholds — presentation choices that control how much content
 /// is shown in the UI. These do not affect how much is sent to the model.
@@ -87,6 +87,37 @@ impl XiConfig {
         self.providers.retain(|p| p.id != id);
         self.providers.len() < before
     }
+
+    /// Ensure built-in hosted provider instances exist in the providers list.
+    ///
+    /// Returns `true` if any were added.  Idempotent — subsequent calls
+    /// add nothing.  Built-in instances are placed before user-created ones.
+    pub fn ensure_built_in_instances(&mut self) -> bool {
+        let mut added = false;
+        for preset in BackendPreset::built_in_hosted() {
+            let id = preset.id().to_string();
+            if !self.providers.iter().any(|p| p.id == id) {
+                self.providers
+                    .push(ProviderInstance::new(id, preset.clone()));
+                added = true;
+            }
+        }
+        // Sort: built-ins before user-created, alphabetical within each group.
+        self.providers.sort_by(|a, b| {
+            let a_builtin = BackendPreset::built_in_hosted()
+                .iter()
+                .any(|p| p.id() == a.id);
+            let b_builtin = BackendPreset::built_in_hosted()
+                .iter()
+                .any(|p| p.id() == b.id);
+            match (a_builtin, b_builtin) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.id.cmp(&b.id),
+            }
+        });
+        added
+    }
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
@@ -157,7 +188,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::XiConfig;
-    use crate::provider_instance::{ApiType, BackendPreset};
+    use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
 
     // ── Instance-format config tests ─────────────────────────────────────────
 
@@ -319,6 +350,43 @@ base_url = "http://gpu-box:11434"
         assert!(cfg.remove_provider("my-ollama"));
         assert!(cfg.find_provider("my-ollama").is_none());
         assert!(!cfg.remove_provider("my-ollama")); // idempotent
+    }
+
+    #[test]
+    fn ensure_built_in_instances_adds_on_first_call() {
+        let mut cfg = XiConfig::default();
+        assert!(cfg.providers.is_empty());
+
+        let added = cfg.ensure_built_in_instances();
+        assert!(added);
+        assert_eq!(cfg.providers.len(), BackendPreset::built_in_hosted().len());
+
+        // All built-in ids are present.
+        for preset in BackendPreset::built_in_hosted() {
+            assert!(
+                cfg.find_provider(preset.id()).is_some(),
+                "missing built-in: {}",
+                preset.id()
+            );
+        }
+
+        // Built-ins are sorted before any user-created instances.
+        let mut cfg2 = XiConfig::default();
+        cfg2.upsert_provider(ProviderInstance::new("zzz-user", BackendPreset::Ollama));
+        cfg2.ensure_built_in_instances();
+        // The last entry should be the user-created one.
+        assert_eq!(cfg2.providers.last().unwrap().id, "zzz-user");
+    }
+
+    #[test]
+    fn ensure_built_in_instances_is_idempotent() {
+        let mut cfg = XiConfig::default();
+        cfg.ensure_built_in_instances();
+        let count = cfg.providers.len();
+
+        let added = cfg.ensure_built_in_instances();
+        assert!(!added);
+        assert_eq!(cfg.providers.len(), count);
     }
 
     #[test]

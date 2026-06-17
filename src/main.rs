@@ -172,34 +172,10 @@ async fn main() -> io::Result<()> {
     // Synthesise built-in hosted provider instances if they are not yet
     // present in config.  These are unconditional singletons — the user never
     // creates, names, or deletes them.
+    if config.ensure_built_in_instances()
+        && let Err(e) = config.save()
     {
-        let mut added = false;
-        for preset in BackendPreset::built_in_hosted() {
-            let id = preset.id().to_string();
-            if !config.providers.iter().any(|p| p.id == id) {
-                config
-                    .providers
-                    .push(ProviderInstance::new(id, preset.clone()));
-                added = true;
-            }
-        }
-        // Sort so built-ins come before user-created instances.
-        config.providers.sort_by(|a, b| {
-            let a_builtin = BackendPreset::built_in_hosted()
-                .iter()
-                .any(|p| p.id() == a.id);
-            let b_builtin = BackendPreset::built_in_hosted()
-                .iter()
-                .any(|p| p.id() == b.id);
-            match (a_builtin, b_builtin) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.id.cmp(&b.id),
-            }
-        });
-        if added && let Err(e) = config.save() {
-            log::debug!("failed to persist synthesised built-in instances: {e}");
-        }
+        log::debug!("failed to persist synthesised built-in instances: {e}");
     }
 
     // ── Non-interactive (--print / -p) mode ───────────────────────────────────

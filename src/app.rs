@@ -1195,6 +1195,15 @@ mod tests {
     }
 
     #[test]
+    fn fresh_app_has_no_provider_selected() {
+        let app = make_app();
+        assert!(
+            !app.provider.provider_selected,
+            "fresh App should not have a provider selected"
+        );
+    }
+
+    #[test]
     fn setup_input_kind_uses_service_specific_prompts() {
         assert_eq!(
             SetupInputKind::Name.prompt_label(None),
