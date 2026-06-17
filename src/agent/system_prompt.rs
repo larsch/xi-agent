@@ -100,7 +100,10 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
         guidelines.push("Use write_file only for new files or complete rewrites.".to_string());
     }
     if has("read_file") || has("write_file") || has("edit_file") {
-        guidelines.push("Use relative paths for files within the current working directory hierarchy.".to_string());
+        guidelines.push(
+            "Use relative paths for files within the current working directory hierarchy."
+                .to_string(),
+        );
     }
     if has("edit_file") || has("write_file") {
         guidelines.push("When summarizing your actions, output plain text directly — do NOT use bash or cat to display what you did.".to_string());
@@ -132,10 +135,7 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
     let skills_section = render_skills_block(skills);
 
     format!(
-        "You are an assistant that helps the user perform applied interactive computational work \
-in real systems. This includes building software, as well as running commands and \
-code, inspecting and modifying files, debugging issues, and performing data and system \
-manipulation workflows.\n\
+        "You are a multi-purpose assistant for computational systems, spanning data and code analysis, data processing, software development, and interaction with system environments. You interpret user intent and respond through explanation, analysis, review, suggestions, or actions.\n\
 \n\
 Available tools:\n\
 {tool_list}\n\
