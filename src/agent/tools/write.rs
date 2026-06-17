@@ -72,7 +72,7 @@ impl Tool for WriteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file to write"
+                    "description": "Path to the file. Relative paths are resolved from the current working directory."
                 },
                 "content": {
                     "type": "string",

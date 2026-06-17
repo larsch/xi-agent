@@ -113,7 +113,7 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file to read"
+                    "description": "Path to the file. Relative paths are resolved from the current working directory."
                 },
                 "offset": {
                     "type": "integer",

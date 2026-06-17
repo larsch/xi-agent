@@ -36,7 +36,7 @@ impl Tool for ExecTool {
          Arguments are passed literally — no shell quoting, escaping, or glob expansion is \
          performed. Use this tool instead of bash when arguments contain spaces, backticks, \
          quotes, dollar signs, newlines, or other characters that are fragile under shell \
-         parsing. Stdout and stderr are captured separately and merged in the response; \
+         parsing. All output (stdout and stderr) is captured and returned; \
          a non-zero exit code is appended as `exit N`. \
          Output is truncated to the last 2000 lines or 50 KiB (whichever is hit first); \
          if truncated, full stdout/stderr are saved to temp files and a notice with the \

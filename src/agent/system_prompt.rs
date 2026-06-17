@@ -99,6 +99,9 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
     if has("write_file") {
         guidelines.push("Use write_file only for new files or complete rewrites.".to_string());
     }
+    if has("read_file") || has("write_file") || has("edit_file") {
+        guidelines.push("Use relative paths for files within the current working directory hierarchy.".to_string());
+    }
     if has("edit_file") || has("write_file") {
         guidelines.push("When summarizing your actions, output plain text directly — do NOT use bash or cat to display what you did.".to_string());
     }
@@ -139,7 +142,7 @@ Available tools:\n\
 \n\
 In addition to the tools above, you may have access to other custom tools depending on the project.\n\
 \n\
-All file paths are relative to the current working directory; absolute paths are also accepted.\n\
+File paths are relative to the current working directory.\n\
 \n\
 Guidelines:\n\
 {guidelines_text}{project_context_section}{skills_section}\n\

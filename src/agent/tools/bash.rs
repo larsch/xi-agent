@@ -19,7 +19,7 @@ impl Tool for BashTool {
 
     fn description(&self) -> &str {
         "Run a shell command via `/bin/sh -c` and return compact output. \
-         Stdout and stderr are captured separately and merged in the response; \
+         All output (stdout and stderr) is captured and returned; \
          a non-zero exit code is appended as `exit N`. \
          Output is truncated to the last 2000 lines or 50 KiB (whichever is \
          hit first); if truncated, full stdout/stderr are saved to temp files \
