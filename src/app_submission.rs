@@ -7,7 +7,7 @@ use crate::agent::{AgentLoopConfig, ToolOutputLog, run_agent_loop};
 use crate::app::{App, DynProvider, RetryTarget, StreamingStatus};
 use crate::at_file::{AtFileResult, parse_at_tokens, resolve_at_tokens};
 use crate::live_turn::LiveToolResult;
-use crate::llm::Role;
+use crate::llm::{Message, Role};
 use crate::session_event::SessionEvent;
 impl App {
     // ── LLM submission ────────────────────────────────────────────────────────
@@ -222,6 +222,18 @@ impl App {
         self.append_user_message(rewritten);
         self.inject_at_file_attachments(&results);
         self.finish_submit_commit();
+    }
+
+    /// Submit a chat message from the textarea, guarding against submission
+    /// when no provider has been explicitly selected.
+    pub fn submit_chat_message(&mut self, provider: &DynProvider) {
+        if !self.provider.provider_selected {
+            self.push_notice(Message::assistant(
+                "[no provider selected — type /provider to pick one]",
+            ));
+            return;
+        }
+        self.submit(provider);
     }
 
     /// Submit a pre-built text string directly to the agent loop, bypassing the

@@ -1204,6 +1204,49 @@ mod tests {
     }
 
     #[test]
+    fn submit_chat_message_blocked_when_no_provider_selected() {
+        let mut app = make_app();
+        assert!(!app.provider.provider_selected);
+
+        let provider = std::sync::Arc::new(crate::llm::test_provider::TestProvider::new())
+            as std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync>;
+        // Populate the textarea with a non-empty message.
+        app.textarea.insert_str("hello");
+
+        // Should push a notice rather than submit.
+        let before = app.session.live_turn.notices.len();
+        app.submit_chat_message(&provider);
+        assert_eq!(
+            app.session.live_turn.notices.len(),
+            before + 1,
+            "should have pushed a notice"
+        );
+        assert!(
+            app.session
+                .live_turn
+                .notices
+                .last()
+                .unwrap()
+                .content
+                .contains("no provider selected"),
+            "notice should mention no provider selected"
+        );
+        // Pending finalise should NOT be set (no real submission happened).
+        assert!(!app.runtime.pending_finalize);
+
+        // Now set provider_selected and verify submission proceeds.
+        app.provider.provider_selected = true;
+        app.submit_chat_message(&provider);
+        // The textarea was cleared by the first call; refill.
+        app.textarea.insert_str("hello again");
+        app.submit_chat_message(&provider);
+        assert!(
+            app.runtime.pending_finalize,
+            "should have triggered submission"
+        );
+    }
+
+    #[test]
     fn setup_input_kind_uses_service_specific_prompts() {
         assert_eq!(
             SetupInputKind::Name.prompt_label(None),
