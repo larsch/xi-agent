@@ -79,6 +79,8 @@ use app_event::AppEvent;
 use config::XiConfig;
 use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
 use provider::{ThinkingSupport, build_provider_for_instance, thinking_support_for_instance};
+use provider_instance::AuthMode;
+use provider_instance::BackendPreset;
 use provider_instance::ProviderInstance;
 use provider_manager::PendingProviderSetup;
 use provider_manager::format_provider_error_for_display;
@@ -166,6 +168,39 @@ async fn main() -> io::Result<()> {
             crate::theme::Theme::default()
         }
     };
+
+    // Synthesise built-in hosted provider instances if they are not yet
+    // present in config.  These are unconditional singletons — the user never
+    // creates, names, or deletes them.
+    {
+        let mut added = false;
+        for preset in BackendPreset::built_in_hosted() {
+            let id = preset.id().to_string();
+            if !config.providers.iter().any(|p| p.id == id) {
+                config
+                    .providers
+                    .push(ProviderInstance::new(id, preset.clone()));
+                added = true;
+            }
+        }
+        // Sort so built-ins come before user-created instances.
+        config.providers.sort_by(|a, b| {
+            let a_builtin = BackendPreset::built_in_hosted()
+                .iter()
+                .any(|p| p.id() == a.id);
+            let b_builtin = BackendPreset::built_in_hosted()
+                .iter()
+                .any(|p| p.id() == b.id);
+            match (a_builtin, b_builtin) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.id.cmp(&b.id),
+            }
+        });
+        if added && let Err(e) = config.save() {
+            log::debug!("failed to persist synthesised built-in instances: {e}");
+        }
+    }
 
     // ── Non-interactive (--print / -p) mode ───────────────────────────────────
     if let Some(words) = cli.print {
@@ -262,27 +297,41 @@ async fn main() -> io::Result<()> {
     app.agent_config.system_prompt = Some(system_prompt);
     app.loaded_skills = (*loaded_skills).clone();
     app.provider.instances = config.providers.clone();
+    // Mark provider as explicitly selected when a provider was configured
+    // (from config.toml or --provider flag), as opposed to the fallback.
+    if config.provider.is_some() || cli.provider.is_some() {
+        app.provider.provider_selected = true;
+    }
     maybe_warn_thinking_unsupported(&mut app);
 
     loop {
         // Build (or re-build) the provider for the current instance.
-        let provider = match build_provider_for_instance(
-            &app.provider.current_instance,
-            app.provider.current_thinking,
-            &config,
-            app.session.current_session_id.as_deref(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                let msg = format!("[provider unavailable: {e}]");
-                log::debug!(
-                    "provider build failed: provider={} model={} err={}",
-                    app.provider.current_instance.id,
-                    app.provider.current_model,
-                    e
-                );
-                app.push_notice(llm::Message::assistant(msg.clone()));
-                Arc::new(UnavailableProvider { message: msg }) as Arc<dyn LlmProvider + Send + Sync>
+        // When no provider has been explicitly selected, skip the build
+        // to avoid spurious "not authenticated" notices on fresh install.
+        let provider = if !app.provider.provider_selected {
+            Arc::new(UnavailableProvider {
+                message: String::new(),
+            }) as Arc<dyn LlmProvider + Send + Sync>
+        } else {
+            match build_provider_for_instance(
+                &app.provider.current_instance,
+                app.provider.current_thinking,
+                &config,
+                app.session.current_session_id.as_deref(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = format!("[provider unavailable: {e}]");
+                    log::debug!(
+                        "provider build failed: provider={} model={} err={}",
+                        app.provider.current_instance.id,
+                        app.provider.current_model,
+                        e
+                    );
+                    app.push_notice(llm::Message::assistant(msg.clone()));
+                    Arc::new(UnavailableProvider { message: msg })
+                        as Arc<dyn LlmProvider + Send + Sync>
+                }
             }
         };
 
@@ -360,12 +409,47 @@ async fn main() -> io::Result<()> {
 
             Ok(RunResult::ChangeProvider(id)) => {
                 if let Some(inst) = config.find_provider(&id).cloned() {
+                    // Mark provider as explicitly selected.
+                    app.provider.provider_selected = true;
+
                     let requires_api_key = provider_setup_requires_api_key(&inst);
                     if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
                         app.provider.pending_setup =
                             Some(PendingProviderSetup::from_instance(&inst));
                         app.enter_provider_api_key_input_mode();
                         continue;
+                    }
+
+                    // For OAuth providers, start login if no credentials exist.
+                    if inst.backend_preset.def().auth_mode == AuthMode::OAuthLogin {
+                        let has_creds = match inst.backend_preset {
+                            BackendPreset::Copilot => auth::AuthStore::load_default()
+                                .ok()
+                                .and_then(|s| s.get_copilot())
+                                .is_some(),
+                            BackendPreset::Codex => auth::AuthStore::load_default()
+                                .ok()
+                                .and_then(|s| s.get_codex())
+                                .is_some(),
+                            BackendPreset::Gemini => auth::AuthStore::load_default()
+                                .ok()
+                                .and_then(|s| s.get_gemini())
+                                .is_some(),
+                            _ => false,
+                        };
+                        if !has_creds {
+                            // Switch to this provider first so the rebuild after
+                            // login picks it up.
+                            app.provider.current_instance = inst;
+                            app.provider.current_model =
+                                resolve_model_for_instance(None, &app.provider.current_instance);
+                            app.provider.current_thinking = resolve_thinking_level_for_model(
+                                &config,
+                                &app.provider.current_model,
+                            );
+                            app.start_login(&id);
+                            continue;
+                        }
                     }
 
                     app.provider.current_instance = inst;
@@ -392,6 +476,7 @@ async fn main() -> io::Result<()> {
                 let current_model_for_instance = resolve_model_for_instance(None, &instance);
                 config.upsert_provider(instance.clone());
                 config.provider = Some(instance_id);
+                app.provider.provider_selected = true;
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist new provider config: {e}");
                     app.push_notice(Message::assistant(format!(
@@ -423,6 +508,7 @@ async fn main() -> io::Result<()> {
             }) => {
                 app.clear_pending_provider_setup();
                 let instance_id = instance.id.clone();
+                app.provider.provider_selected = true;
                 let current_model_for_instance = resolve_model_for_instance(None, &instance);
                 if let Some(original_id) = original_id.as_deref()
                     && original_id != instance.id
@@ -510,6 +596,7 @@ async fn main() -> io::Result<()> {
                 }
                 config.upsert_provider(inst.clone());
                 config.provider = Some(inst.id.clone());
+                app.provider.provider_selected = true;
                 if let Err(e) = config.save() {
                     log::debug!("failed to persist provider config: {e}");
                     app.push_notice(Message::assistant(format!(
@@ -752,6 +839,7 @@ fn persist_provider_model_selection_v2(config: &mut XiConfig, app: &mut App) {
     if instance.backend_preset == provider_instance::BackendPreset::Test {
         return;
     }
+    app.provider.provider_selected = true;
     config.provider = Some(instance.id.clone());
     config.thinking = Some(thinking.as_str().to_string());
     config

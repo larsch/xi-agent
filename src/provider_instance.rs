@@ -240,7 +240,7 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
         default_api: ApiType::OllamaChatApi,
         user_selects_api: false,
         endpoint_behavior: EndpointBehavior::Predetermined,
-        auth_mode: AuthMode::None,
+        auth_mode: AuthMode::ApiKey,
         url_normalization: None,
     },
     BackendPresetDef {
@@ -320,6 +320,21 @@ impl BackendPreset {
     /// All backend presets visible in the "add provider" menu.
     pub fn user_visible() -> &'static [BackendPreset] {
         &[Self::Ollama, Self::OpenWebUi, Self::OpenAiCompatible]
+    }
+
+    /// Built-in hosted providers that always appear in the provider picker.
+    ///
+    /// These are unconditional singletons — the user never creates, names, or
+    /// deletes them.  Credentials are collected on first selection.
+    pub fn built_in_hosted() -> &'static [BackendPreset] {
+        &[
+            Self::Copilot,
+            Self::Codex,
+            Self::Gemini,
+            Self::OpenAi,
+            Self::OpenRouter,
+            Self::OllamaCom,
+        ]
     }
 
     pub fn from_id(s: &str) -> Option<Self> {
@@ -474,6 +489,31 @@ mod tests {
     }
 
     #[test]
+    fn built_in_hosted_includes_all_hosted_services() {
+        let built_ins = BackendPreset::built_in_hosted();
+        assert_eq!(
+            built_ins,
+            &[
+                BackendPreset::Copilot,
+                BackendPreset::Codex,
+                BackendPreset::Gemini,
+                BackendPreset::OpenAi,
+                BackendPreset::OpenRouter,
+                BackendPreset::OllamaCom,
+            ]
+        );
+        // Built-in hosted and user-visible sets should be disjoint.
+        let user_visible = BackendPreset::user_visible();
+        for bi in built_ins {
+            assert!(
+                !user_visible.contains(bi),
+                "{:?} should not be in user_visible()",
+                bi
+            );
+        }
+    }
+
+    #[test]
     fn provider_preset_metadata_matches_spec_semantics() {
         let openrouter = BackendPreset::OpenRouter.def();
         assert_eq!(openrouter.backend_class, BackendClass::BuiltInHosted);
@@ -496,6 +536,11 @@ mod tests {
         assert_eq!(webui.backend_class, BackendClass::UserSuppliedService);
         assert_eq!(webui.auth_mode, AuthMode::ApiKey);
         assert_eq!(webui.endpoint_behavior, EndpointBehavior::UserSupplied);
+
+        let ollamacom = BackendPreset::OllamaCom.def();
+        assert_eq!(ollamacom.backend_class, BackendClass::BuiltInHosted);
+        assert_eq!(ollamacom.auth_mode, AuthMode::ApiKey);
+        assert_eq!(ollamacom.endpoint_behavior, EndpointBehavior::Predetermined);
     }
 
     #[test]

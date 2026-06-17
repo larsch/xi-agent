@@ -715,6 +715,10 @@ fn handle_chat_submit(
 
     if app.streaming() {
         app.enqueue_steering_from_input();
+    } else if !app.provider.provider_selected {
+        app.push_notice(Message::assistant(
+            "[no provider selected — type /provider to pick one]",
+        ));
     } else {
         app.submit(provider);
     }

@@ -87,6 +87,10 @@ pub(crate) struct ProviderManager {
     /// Whether the current provider+model combination supports thinking.
     pub thinking_supported: bool,
 
+    /// Whether the user has explicitly selected a provider (via `/provider` or
+    /// CLI flag).  False on fresh install until the user picks one.
+    pub provider_selected: bool,
+
     /// Which step of the provider setup input flow is currently active.
     pub setup_step: ProviderSetupStep,
 
@@ -109,6 +113,7 @@ impl ProviderManager {
             current_model: initial_model,
             current_thinking: initial_thinking,
             thinking_supported: false,
+            provider_selected: false,
             setup_step: ProviderSetupStep::Idle,
             pending_setup: None,
             pending_removal: None,

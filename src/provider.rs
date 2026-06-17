@@ -261,7 +261,10 @@ pub fn build_provider_for_instance(
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://ollama.com".to_string());
-            Ok(Arc::new(OllamaProvider::new(base, model.to_string())))
+            let api_key = instance.api_key.clone();
+            let mut p = OllamaProvider::new(base, model.to_string());
+            p.api_key = api_key;
+            Ok(Arc::new(p))
         }
 
         // ── Open WebUI ────────────────────────────────────────────────────
