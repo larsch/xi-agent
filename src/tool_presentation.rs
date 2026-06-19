@@ -132,7 +132,11 @@ pub fn tool_invocation_label(
 
     // read_skill: just the skill name.
     if name == "read_skill" {
-        let skill_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let skill_name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if skill_name.is_empty() {
             return (tool_pending_label(name), true);
         }
@@ -141,8 +145,8 @@ pub fn tool_invocation_label(
 
     // find_files: pattern and/or path.
     if matches!(name, "find" | "find_files") {
-        let pattern = args.get("pattern").and_then(|v| v.as_str());
-        let path = args.get("path").and_then(|v| v.as_str());
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).map(str::trim);
+        let path = args.get("path").and_then(|v| v.as_str()).map(str::trim);
         let detail = match (pattern, path) {
             (Some(p), Some(d)) if !p.is_empty() && !d.is_empty() => {
                 format!("{} in {}", compact(p, display), d)
@@ -208,19 +212,30 @@ fn compact(input: &str, display: &DisplayConfig) -> String {
 
 fn multiline_head_truncated(input: &str, display: &DisplayConfig) -> String {
     let max_lines = max_shell_command_lines(display);
-    let lines: Vec<&str> = input.lines().collect();
+    let mut lines: Vec<&str> = input.lines().collect();
+
+    // Universal rule: all rendered output is trimmed.
+    // Strip leading and trailing empty lines so the emoji never sits alone.
+    while lines.first() == Some(&"") {
+        lines.remove(0);
+    }
+    while lines.last() == Some(&"") {
+        lines.pop();
+    }
+
     if lines.is_empty() {
         return String::new();
     }
 
+    let total = lines.len();
     let mut shown: Vec<String> = lines
         .iter()
         .take(max_lines)
         .map(|line| (*line).to_string())
         .collect();
 
-    if lines.len() > max_lines {
-        shown.push(format!("… {} total lines", lines.len()));
+    if total > max_lines {
+        shown.push(format!("… {total} total lines"));
     }
 
     shown.join("\n")
@@ -389,6 +404,23 @@ mod tests {
     }
 
     #[test]
+    fn find_files_trims_path() {
+        let (lbl, ph) = label("find_files", &json!({"path": "\n src\n"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🔍 in src");
+    }
+
+    #[test]
+    fn find_files_trims_pattern_and_path() {
+        let (lbl, ph) = label(
+            "find_files",
+            &json!({"pattern": "\n *.rs \n", "path": "\n src \n"}),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "🔍 *.rs in src");
+    }
+
+    #[test]
     fn find_files_placeholder_when_both_empty() {
         let (lbl, ph) = label("find_files", &json!({"pattern": "", "path": ""}));
         assert!(ph);
@@ -400,6 +432,13 @@ mod tests {
     #[test]
     fn read_skill_shows_name() {
         let (lbl, ph) = label("read_skill", &json!({"name": "workflow"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🎓 workflow");
+    }
+
+    #[test]
+    fn read_skill_trims_name() {
+        let (lbl, ph) = label("read_skill", &json!({"name": "\n workflow\n"}));
         assert!(!ph);
         assert_eq!(lbl, "🎓 workflow");
     }
@@ -496,6 +535,31 @@ mod tests {
         let (lbl, ph) = label("python", &json!({}));
         assert!(ph);
         assert_eq!(lbl, "🐍 running…");
+    }
+
+    #[test]
+    fn python_trims_leading_newlines() {
+        // Regression: scripts that start with \n would put the emoji alone
+        // on the first line. Leading empty lines must be trimmed.
+        let (lbl, ph) = label("python", &json!({"script": "\nimport time\nprint('ok')"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🐍 import time\nprint('ok')");
+    }
+
+    #[test]
+    fn python_trims_trailing_newlines() {
+        // Trailing empty lines should also be stripped so no dangling empty
+        // line appears after the last visible content.
+        let (lbl, ph) = label("python", &json!({"script": "print('ok')\nimport time\n\n"}));
+        assert!(!ph);
+        assert_eq!(lbl, "🐍 print('ok')\nimport time");
+    }
+
+    #[test]
+    fn shell_trims_leading_newlines() {
+        let (lbl, ph) = label("bash", &json!({"command": "\n\necho hello"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 echo hello");
     }
 
     // ── Custom / no streaming_field ───────────────────────────────────────────

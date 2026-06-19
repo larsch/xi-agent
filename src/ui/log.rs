@@ -930,20 +930,24 @@ fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: us
     } else {
         content.split('\n').collect()
     };
+    // Universal rule: all rendered output is trimmed.
+    // Keep interior empty lines (separating blocks) but strip leading and
+    // trailing empty segments.
     let visible: Vec<usize> = if content.is_empty() {
         vec![0]
     } else {
         segments
             .iter()
             .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
+            .filter(|(idx, seg)| {
+                if !seg.is_empty() {
+                    return true;
                 }
+                let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
+                let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
+                has_nonempty_before && has_nonempty_after
             })
+            .map(|(idx, _)| idx)
             .collect()
     };
 
@@ -972,20 +976,23 @@ fn append_message_colored_dim(
     } else {
         content.split('\n').collect()
     };
+    // Universal rule: all rendered output is trimmed.
+    // Keep interior empty lines but strip leading and trailing empty segments.
     let visible: Vec<usize> = if content.is_empty() {
         vec![0]
     } else {
         segments
             .iter()
             .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
+            .filter(|(idx, seg)| {
+                if !seg.is_empty() {
+                    return true;
                 }
+                let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
+                let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
+                has_nonempty_before && has_nonempty_after
             })
+            .map(|(idx, _)| idx)
             .collect()
     };
 
@@ -1050,17 +1057,19 @@ pub(super) fn append_tool_result_block(
 
     let content_width = width.saturating_sub(1).max(1);
     let segments: Vec<&str> = content.split('\n').collect();
+    // Universal rule: all rendered output is trimmed.
     let visible: Vec<usize> = segments
         .iter()
         .enumerate()
-        .filter_map(|(idx, seg)| {
-            let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-            if seg.is_empty() && !has_nonempty_after {
-                None
-            } else {
-                Some(idx)
+        .filter(|(idx, seg)| {
+            if !seg.is_empty() {
+                return true;
             }
+            let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
+            let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
+            has_nonempty_before && has_nonempty_after
         })
+        .map(|(idx, _)| idx)
         .collect();
 
     for seg_idx in visible {
@@ -1088,20 +1097,22 @@ fn append_message_dim(
     } else {
         content.split('\n').collect()
     };
+    // Universal rule: all rendered output is trimmed.
     let visible: Vec<usize> = if content.is_empty() {
         vec![0]
     } else {
         segments
             .iter()
             .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
+            .filter(|(idx, seg)| {
+                if !seg.is_empty() {
+                    return true;
                 }
+                let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
+                let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
+                has_nonempty_before && has_nonempty_after
             })
+            .map(|(idx, _)| idx)
             .collect()
     };
     let last_visible = visible.last().copied();
