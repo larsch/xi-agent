@@ -338,10 +338,18 @@ fn handle_shell_mode_key(
 fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) -> KeyDispatch {
     match key.code {
         KeyCode::Up => {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                app.step_back();
+                return KeyDispatch::Continue;
+            }
             app.selection_select_prev();
             cancel_ask_freeform_if_off_sentinel(app);
         }
         KeyCode::Down => {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                app.step_forward();
+                return KeyDispatch::Continue;
+            }
             app.selection_select_next();
             cancel_ask_freeform_if_off_sentinel(app);
         }
