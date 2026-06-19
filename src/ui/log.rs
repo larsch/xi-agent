@@ -25,6 +25,9 @@ use super::input::{normalize_terminal_segment, wrap_str};
 pub struct ToolBodyConfig {
     /// Show untruncated output for all tools.
     pub full_output: bool,
+    /// When `true`, suppress the ask_user question body in the log so it
+    /// only appears in the interactive selection header.
+    pub hide_ask_question: bool,
     /// Max lines shown for head-truncated bodies (read_file, write_file, find_files).
     pub head_lines: usize,
     /// Max lines shown for tail-truncated bodies (bash, exec, custom).
@@ -37,6 +40,7 @@ impl Default for ToolBodyConfig {
     fn default() -> Self {
         Self {
             full_output: false,
+            hide_ask_question: false,
             head_lines: 8,
             tail_lines: 8,
             diff_lines: 4,
@@ -240,19 +244,22 @@ fn render_tool_call(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Context: ask_user bg, dimmed text, no icon.
+        // Context: green background, readable text, clipboard emoji.
         if let Some(ctx) = context {
-            append_ask_user_block_dim(
+            append_ask_user_context_block(
                 out,
                 ctx,
                 width,
                 theme.log.ask_user.bg.unwrap_or(Color::Rgb(27, 71, 31)),
                 theme,
+                "📋 ",
             );
         }
 
-        // Question: no background (same as normal agent responses).
-        if !question.is_empty() {
+        // The question also appears in the selection header during
+        // interactive ask_user.  When a pending ask is active we hide it
+        // from the log to avoid duplication; committed turns always show it.
+        if !question.is_empty() && !cfg.hide_ask_question {
             let md_lines =
                 crate::markdown::render_with_theme(question, width, "❓ ", &theme.markdown);
             append_markdown_answer(out, md_lines, false);
@@ -802,27 +809,29 @@ fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'stati
 
 // ── ask_user block helpers ────────────────────────────────────────────────────
 
-/// Context block: green background, dimmed text, no icon.
-fn append_ask_user_block_dim(
+/// Context block: green background, readable text, with an emoji prefix
+/// (e.g. "📋 ").  No DIM — the green background alone distinguishes it from
+/// surrounding content.
+fn append_ask_user_context_block(
     out: &mut Vec<Line<'static>>,
     content: &str,
     width: usize,
     bg: Color,
     theme: &Theme,
+    emoji: &str,
 ) {
-    let dim_bg_style = Style::default().bg(bg).add_modifier(Modifier::DIM);
+    let bg_style = Style::default().bg(bg);
     let padding_style = Style::default().bg(bg);
-    let md_lines = crate::markdown::render_with_theme(content, width, "", &theme.markdown);
+    let md_lines = crate::markdown::render_with_theme(content, width, emoji, &theme.markdown);
     for line in md_lines {
-        // Re-render with bg color and dim applied to each span.
-        let dimmed: Vec<Span<'static>> = line
+        let styled: Vec<Span<'static>> = line
             .spans
             .into_iter()
-            .map(|s| Span::styled(s.content, dim_bg_style.patch(s.style)))
+            .map(|s| Span::styled(s.content, bg_style.patch(s.style)))
             .collect();
-        let text_width: usize = dimmed.iter().map(|s| s.content.width()).sum();
+        let text_width: usize = styled.iter().map(|s| s.content.width()).sum();
         let padding = width.saturating_sub(text_width);
-        let mut spans = dimmed;
+        let mut spans = styled;
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), padding_style));
         }
@@ -1725,12 +1734,14 @@ mod tests {
             "ask_user",
             serde_json::json!({"question": "What do you want?"}),
         );
-        // No following ToolResult.
+        // Simulate interactive mode: hide the question (it's in the header).
+        let mut cfg = cfg();
+        cfg.hide_ask_question = true;
         let lines = build_log_lines(
             &[call],
             false,
             120,
-            &cfg(),
+            &cfg,
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
         );
@@ -1744,8 +1755,8 @@ mod tests {
             })
             .collect();
         assert!(
-            text.iter().any(|t| t.contains("What do you want?")),
-            "pending question not rendered"
+            !text.iter().any(|t| t.contains("What do you want?")),
+            "question should be hidden during interactive ask"
         );
     }
 
@@ -1757,6 +1768,7 @@ mod tests {
             serde_json::json!({"question": "What do you want?"}),
         );
         let result = Message::tool_result("c1", "Option A", false);
+        // Committed turn: question should appear in the log.
         let lines = build_log_lines(
             &[call, result],
             false,
@@ -1776,7 +1788,7 @@ mod tests {
             .collect();
         assert!(
             text.iter().any(|t| t.contains("What do you want?")),
-            "question not rendered"
+            "question should appear in committed log"
         );
         assert!(
             text.iter().any(|t| t.contains("Option A")),

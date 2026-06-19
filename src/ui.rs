@@ -19,12 +19,12 @@ use crate::{
     app::{App, InputMode},
     config::DisplayConfig,
     context_window::context_window_for_model,
-    selection_state::MAX_SELECTION_VISIBLE,
+    selection_state::{MAX_SELECTION_VISIBLE, SelectionKind},
 };
 
 use self::{
     info::build_info_line,
-    input::{render_input_panel, split_scrollbar_column, style_textarea},
+    input::{render_input_panel, split_scrollbar_column, style_textarea, wrap_str},
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
     log::{ToolBodyConfig, build_log_lines, dim_lines},
     login::build_login_content_lines,
@@ -53,6 +53,7 @@ fn build_log_lines_cached<'a>(
     {
         let cfg = ToolBodyConfig {
             full_output: app.log_view.full_output,
+            hide_ask_question: app.ask_user.has_pending(),
             ..ToolBodyConfig::default()
         };
         let lines = if let Some((kept, discarded)) = app.display_messages_split() {
@@ -86,6 +87,26 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let input_line_count = input_visual_line_count(active_lines, width);
 
+    let ask_user_header_lines =
+        if app.selection.active && app.selection.kind == Some(SelectionKind::AskUser) {
+            let question = app
+                .ask_user
+                .pending
+                .as_ref()
+                .map(|p| p.question.as_str())
+                .unwrap_or("");
+            if question.is_empty() {
+                1
+            } else {
+                // Wrapped question lines + 1 for the hints bar.
+                let prefix_width = "❓ ".len();
+                let wrap_width = width.saturating_sub(prefix_width).max(1);
+                wrap_str(question, wrap_width).len() + 1
+            }
+        } else {
+            0
+        };
+
     let layout = compute_panel_heights(PanelInputs {
         terminal_height,
         width,
@@ -97,6 +118,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         completions_len: app.completion.completions.len(),
         resume_hint_visible,
         ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
+        ask_user_header_lines,
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
         has_activity: app.throbber_visible() || app.log_view.full_output,
@@ -227,27 +249,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     if app.selection.active {
-        let hints = if app.in_provider_selection_mode() {
-            if app.selection_filter_enabled() {
-                "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   type filter   Esc cancel  "
-            } else {
-                "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   Esc cancel  "
-            }
-        } else if app.in_provider_removal_confirmation_mode() {
-            "↑↓ navigate   Enter select   Esc cancel  "
-        } else if app.selection_filter_enabled() {
-            "↑↓ navigate   type filter   Enter select   Esc cancel  "
-        } else {
-            "↑↓ navigate   Enter select   Esc cancel  "
-        };
-        let title = app.selection.title;
-        let query = if app.selection.query.is_empty() {
-            "".to_string()
-        } else {
-            format!("filter: {}", app.selection.query)
-        };
-        let query_width = query.width();
-        let gap = width.saturating_sub(title.width() + query_width + hints.width());
         let header_bg = app
             .theme
             .menu
@@ -255,24 +256,118 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             .header
             .bg
             .unwrap_or(Color::Rgb(20, 45, 20));
-        let header_line = Line::from(vec![
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::White)
-                    .bg(header_bg)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            Span::styled(" ".repeat(gap), Style::default().bg(header_bg)),
-            Span::styled(query, Style::default().fg(Color::Yellow).bg(header_bg)),
-            Span::styled(
-                hints.to_string(),
-                Style::default()
-                    .bg(header_bg)
-                    .add_modifier(ratatui::style::Modifier::DIM),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(vec![header_line]), sel_header_area);
+
+        let header_lines: Vec<Line<'static>> = if app.selection.kind == Some(SelectionKind::AskUser)
+        {
+            // Multiline ask_user header: wrapped question with ❓ prefix,
+            // followed by a hints bar.
+            let question = app
+                .ask_user
+                .pending
+                .as_ref()
+                .map(|p| p.question.as_str())
+                .unwrap_or("");
+            let prefix = "❓ ";
+            let prefix_w = prefix.len();
+            let wrap_width = width.saturating_sub(prefix_w).max(1);
+            let wrapped = wrap_str(question, wrap_width);
+            let question_fg = app
+                .theme
+                .tools
+                .get("ask_user")
+                .headline_color()
+                .unwrap_or(Color::Rgb(255, 220, 80));
+
+            let mut lines: Vec<Line<'static>> = Vec::with_capacity(wrapped.len() + 1);
+
+            for (i, chunk) in wrapped.iter().enumerate() {
+                let full = if i == 0 {
+                    format!("{}{}", prefix, chunk)
+                } else {
+                    format!("{}{}", " ".repeat(prefix_w), chunk)
+                };
+                let text_width = full.width();
+                let pad = width.saturating_sub(text_width);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        full,
+                        Style::default()
+                            .fg(question_fg)
+                            .bg(header_bg)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    ),
+                    Span::styled(" ".repeat(pad), Style::default().bg(header_bg)),
+                ]));
+            }
+
+            // Hints bar (last header line).
+            let hints = if app.ask_user_selection_no_freeform() {
+                "↑↓ navigate   Enter select  "
+            } else {
+                "↑↓ navigate   Enter select   Esc cancel  "
+            };
+            let query = if app.selection.query.is_empty() {
+                String::new()
+            } else {
+                format!("filter: {}  ", app.selection.query)
+            };
+            let hint_text = format!("{}{}", query, hints);
+            let hint_width = hint_text.width();
+            let pad = width.saturating_sub(hint_width);
+            lines.push(Line::from(vec![
+                Span::styled(" ".repeat(pad), Style::default().bg(header_bg)),
+                Span::styled(
+                    hint_text,
+                    Style::default()
+                        .bg(header_bg)
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                ),
+            ]));
+
+            lines
+        } else {
+            // Standard single-line header for non-ask_user selections.
+            let hints = if app.in_provider_selection_mode() {
+                if app.selection_filter_enabled() {
+                    "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   type filter   Esc cancel  "
+                } else {
+                    "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   Esc cancel  "
+                }
+            } else if app.in_provider_removal_confirmation_mode() {
+                "↑↓ navigate   Enter select   Esc cancel  "
+            } else if app.selection_filter_enabled() {
+                "↑↓ navigate   type filter   Enter select   Esc cancel  "
+            } else {
+                "↑↓ navigate   Enter select   Esc cancel  "
+            };
+            let title = app.selection.title;
+            let query = if app.selection.query.is_empty() {
+                "".to_string()
+            } else {
+                format!("filter: {}", app.selection.query)
+            };
+            let gap = width.saturating_sub(title.width() + query.width() + hints.width());
+            let header_line = Line::from(vec![
+                Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(header_bg)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::styled(" ".repeat(gap), Style::default().bg(header_bg)),
+                Span::styled(query, Style::default().fg(Color::Yellow).bg(header_bg)),
+                Span::styled(
+                    hints.to_string(),
+                    Style::default()
+                        .bg(header_bg)
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                ),
+            ]);
+            vec![header_line]
+        };
+
+        f.render_widget(Paragraph::new(header_lines), sel_header_area);
 
         let selection_total = app.selection.items.len();
         let selection_scrollbar_needed = selection_total > MAX_SELECTION_VISIBLE;
@@ -536,6 +631,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -559,6 +655,7 @@ mod tests {
             completions_len: 3,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -585,6 +682,7 @@ mod tests {
             completions_len: 5,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -602,6 +700,7 @@ mod tests {
             completions_len: 5,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -626,6 +725,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: true,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -648,6 +748,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -675,6 +776,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -698,6 +800,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -715,6 +818,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -739,6 +843,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: true,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
             has_activity: false,
@@ -1714,17 +1819,20 @@ mod tests {
         });
 
         // Before typing: input should have ask_user bg (Rgb(50, 30, 15)).
-        let buf_before = render_to_buffer(&mut app, 40, 8);
+        let buf_before = render_to_buffer(&mut app, 40, 12);
         // After typing: input should have ask_user bg.
         app.begin_ask_freeform_typing();
         app.textarea.insert_char('x');
-        let buf_after = render_to_buffer(&mut app, 40, 8);
+        let buf_after = render_to_buffer(&mut app, 40, 12);
 
-        // Find the input row (row with 'x' in it).
-        let input_row = (0..8u16)
+        // Find the input row — the row where 'x' appears with the ask_user
+        // input background (not in the header where "next" contains 'x').
+        let ask_user_bg = ratatui::style::Color::Rgb(50, 30, 15);
+        let input_row = (0..12u16)
             .find(|&y| {
-                buf_after[(0, y)].symbol() == "x"
-                    || (1..40u16).any(|x| buf_after[(x, y)].symbol() == "x")
+                (0..40u16).any(|x| {
+                    buf_after[(x, y)].symbol() == "x" && buf_after[(x, y)].bg == ask_user_bg
+                })
             })
             .expect("should find input row");
 
@@ -1732,8 +1840,7 @@ mod tests {
         let bg_after = buf_after[(0, input_row)].bg;
         let bg_before = buf_before[(0, input_row)].bg;
         assert_eq!(
-            bg_after,
-            ratatui::style::Color::Rgb(50, 30, 15),
+            bg_after, ask_user_bg,
             "input bg after typing should be ask_user bg (Rgb(50, 30, 15)), got {bg_after:?}"
         );
         assert_ne!(

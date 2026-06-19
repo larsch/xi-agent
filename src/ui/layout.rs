@@ -31,6 +31,10 @@ pub(super) struct PanelInputs<'a> {
     pub(super) completions_len: usize,
     pub(super) resume_hint_visible: bool,
     pub(super) ask_user_selection_no_freeform: bool,
+    /// Number of visible lines for the ask_user question in the selection
+    /// header (0 when not in ask_user selection mode).  Includes the hints
+    /// bar, so the total header rows are `max(1, ask_user_header_lines)`.
+    pub(super) ask_user_header_lines: usize,
     pub(super) login_url: Option<&'a str>,
     pub(super) has_login_code: bool,
     pub(super) has_activity: bool,
@@ -88,7 +92,11 @@ pub(super) fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
         0
     };
 
-    let selection_header_height: u16 = if input.selection_mode { 1 } else { 0 };
+    let selection_header_height: u16 = if input.selection_mode {
+        input.ask_user_header_lines.max(1) as u16
+    } else {
+        0
+    };
     let selection_items_height: u16 = if input.selection_mode {
         input.selection_items_len.clamp(1, MAX_SELECTION_VISIBLE) as u16
     } else {
@@ -159,6 +167,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -182,6 +191,7 @@ mod tests {
             completions_len: 3,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -208,6 +218,7 @@ mod tests {
             completions_len: 5,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -225,6 +236,7 @@ mod tests {
             completions_len: 5,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -249,6 +261,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: true,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -271,6 +284,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -298,6 +312,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: true,
@@ -323,6 +338,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: true,
@@ -348,6 +364,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -371,6 +388,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -388,6 +406,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: false,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: None,
             has_login_code: false,
             has_activity: false,
@@ -412,6 +431,7 @@ mod tests {
             completions_len: 0,
             resume_hint_visible: true,
             ask_user_selection_no_freeform: false,
+            ask_user_header_lines: 0,
             login_url: Some("https://example.com/very/long/url"),
             has_login_code: true,
             has_activity: false,
