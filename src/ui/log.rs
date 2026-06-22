@@ -295,7 +295,20 @@ fn render_tool_call(
         };
         (lbl, false)
     } else if let Some(partial) = msg.tool_partial_args.as_deref() {
-        tool_presentation::tool_invocation_label_from_partial(name, partial, sf, display)
+        let (lbl, placeholder) =
+            tool_presentation::tool_invocation_label_from_partial(name, partial, sf, display);
+        if placeholder {
+            if let Some(snapshot) = msg.tool_partial_snapshot.as_ref() {
+                // The latest partial JSON chunk couldn't be completed, but we
+                // still have a valid snapshot from a previous frame.  Use it
+                // so the headline doesn't blink back to a placeholder.
+                tool_presentation::tool_invocation_label(name, snapshot, sf, display)
+            } else {
+                (lbl, placeholder)
+            }
+        } else {
+            (lbl, placeholder)
+        }
     } else {
         match msg.tool_args.as_ref() {
             Some(args) => tool_presentation::tool_invocation_label(name, args, sf, display),

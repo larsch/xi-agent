@@ -11,6 +11,18 @@ pub struct LogCache {
     pub(crate) cached_lines: Option<(u64, usize, Option<usize>, Vec<Line<'static>>)>,
 }
 
+/// Tracks the maximum rendered line count observed during the current streaming
+/// turn. When the total shrinks (e.g. an edit_file diff recalculates with fewer
+/// lines), this lets us pad the visible output with blank lines so the viewport
+/// doesn't pull old content down.
+///
+/// Cleared on user scroll, resize, and streaming end.
+#[derive(Clone, Copy)]
+pub(crate) struct PaddingState {
+    /// Maximum total rendered line count observed.
+    pub(crate) max_total_lines: usize,
+}
+
 impl LogCache {
     pub fn new() -> Self {
         Self {
@@ -42,8 +54,13 @@ pub struct LogViewState {
     pub(crate) auto_scroll: bool,
     /// Height of the log pane from the last draw — used as page-size scrolling.
     pub(crate) last_log_height: usize,
+    /// Width of the log pane from the last draw — used to detect resize.
+    pub(crate) last_log_width: usize,
     /// When true, tool bodies are rendered without truncation.
     pub(crate) full_output: bool,
+    /// Padding state for the last message block during streaming.
+    /// Cleared on user scroll, invalidated on resize (via [`LogViewState::invalidate`]).
+    pub(crate) last_block_padding: Option<PaddingState>,
 }
 
 impl LogViewState {
@@ -53,7 +70,9 @@ impl LogViewState {
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
+            last_log_width: 0,
             full_output: false,
+            last_block_padding: None,
         }
     }
 
@@ -61,7 +80,13 @@ impl LogViewState {
         self.log_cache.invalidate();
     }
 
+    /// Clear the block-padding state (on resize, scroll, or streaming end).
+    pub fn clear_padding(&mut self) {
+        self.last_block_padding = None;
+    }
+
     pub fn scroll_up(&mut self) {
+        self.clear_padding();
         self.scroll_up_lines(self.last_log_height.max(1));
     }
 
@@ -75,6 +100,7 @@ impl LogViewState {
     }
 
     pub fn scroll_down(&mut self) {
+        self.clear_padding();
         self.auto_scroll = false;
         self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
     }
@@ -83,6 +109,7 @@ impl LogViewState {
     pub fn toggle_full_output(&mut self) {
         self.full_output = !self.full_output;
         self.log_cache.invalidate();
+        self.clear_padding();
     }
 }
 

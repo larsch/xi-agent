@@ -19,6 +19,7 @@ use crate::{
     app::{App, InputMode},
     config::DisplayConfig,
     context_window::context_window_for_model,
+    log_view_state::PaddingState,
     selection_state::{MAX_SELECTION_VISIBLE, SelectionKind},
 };
 
@@ -48,6 +49,7 @@ fn build_log_lines_cached<'a>(
         app.log_view.invalidate();
     }
     let step_cursor = app.step_back.cursor;
+    let streaming = app.streaming();
     if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, sc, _))
         if *rev == app.log_view.log_cache.revision && *w == width && *sc == step_cursor)
     {
@@ -64,7 +66,26 @@ fn build_log_lines_cached<'a>(
             lines
         } else {
             let combined = app.display_messages_combined();
-            build_log_lines(&combined, app.streaming(), width, &cfg, &app.theme, display)
+            let lines = build_log_lines(&combined, streaming, width, &cfg, &app.theme, display);
+
+            // Track the maximum total line count for padding during streaming.
+            if streaming {
+                let total = lines.len();
+                match &mut app.log_view.last_block_padding {
+                    Some(ps) => {
+                        if total > ps.max_total_lines {
+                            ps.max_total_lines = total;
+                        }
+                    }
+                    None => {
+                        app.log_view.last_block_padding = Some(PaddingState {
+                            max_total_lines: total,
+                        });
+                    }
+                }
+            }
+
+            lines
         };
         let rev = app.log_view.log_cache.revision;
         app.log_view.log_cache.cached_lines = Some((rev, width, step_cursor, lines));
@@ -163,6 +184,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
     let log_width = log_content_area.width as usize;
     app.log_view.last_log_height = inner_height;
+
+    // Reset block padding on terminal resize.
+    if app.log_view.last_log_width != 0 && app.log_view.last_log_width != log_width {
+        app.log_view.clear_padding();
+    }
+    app.log_view.last_log_width = log_width;
+
     let display = app.display.clone();
 
     let total_lines = build_log_lines_cached(app, log_width, &display).len();
@@ -193,9 +221,43 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let has_scrollbar = total_lines > inner_height && !app.log_view.auto_scroll;
     let log_scroll = app.log_view.log_scroll;
+
+    // Clear block padding when streaming is no longer active.
+    if !app.streaming() {
+        app.log_view.clear_padding();
+    }
+
+    let max_total = app
+        .log_view
+        .last_block_padding
+        .as_ref()
+        .map(|ps| ps.max_total_lines)
+        .unwrap_or(0);
+
+    let block_padding = if app.log_view.auto_scroll {
+        max_total.saturating_sub(total_lines)
+    } else {
+        0
+    };
+
     let visible_lines: Vec<Line<'static>> = {
         let all = build_log_lines_cached(app, log_width, &display);
-        if total_lines <= inner_height {
+        if block_padding > 0 {
+            // Anchor the viewport top at the content position it had before
+            // the block shrank (max_total_lines - inner_height).  Show all
+            // remaining content from there, then pad with blank lines below.
+            let anchor_top = max_total.saturating_sub(inner_height);
+            let raw_start = anchor_top.min(total_lines);
+            let raw_end = total_lines;
+            let raw_lines = raw_end.saturating_sub(raw_start);
+            let bottom_padding = block_padding;
+            let top_padding = inner_height.saturating_sub(raw_lines + bottom_padding);
+
+            let mut v: Vec<Line<'static>> = vec![Line::default(); top_padding];
+            v.extend(all[raw_start..raw_end].iter().cloned());
+            v.extend(std::iter::repeat_n(Line::default(), bottom_padding));
+            v
+        } else if total_lines <= inner_height {
             let padding = inner_height - total_lines;
             let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
             v.extend(all.iter().cloned());
