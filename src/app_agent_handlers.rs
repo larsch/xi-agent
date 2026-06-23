@@ -346,6 +346,7 @@ impl App {
 
     fn on_agent_done(&mut self) {
         self.agent_turn.end();
+        self.log_view.clear_padding();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;

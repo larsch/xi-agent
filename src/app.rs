@@ -1697,7 +1697,8 @@ mod tests {
     // ── receive_ask_request ───────────────────────────────────────────────────
 
     /// When ask_user has no options, receive_ask_request must go directly into
-    /// freeform mode (not selection mode).
+    /// freeform mode (not selection mode).  The question is visible in the log
+    /// tool call, so no selection header is needed.
     #[test]
     fn receive_ask_request_no_options_enters_freeform_mode() {
         let mut app = make_app();

@@ -717,7 +717,7 @@ impl App {
         }
 
         self.selection
-            .activate(SelectionKind::AskUser, "  Ask user  ", items);
+            .activate(SelectionKind::AskUser, "Options:", items);
     }
 
     /// Returns true when the current pending ask allows a free-form typed answer.
@@ -758,7 +758,7 @@ impl App {
 
         if options.is_empty() {
             // No options: go straight to freeform input so the user can type
-            // their answer without an intermediate selection-menu step.
+            // their answer.  The question is visible in the log tool call.
             self.ask_user.freeform_mode = true;
             self.exit_selection_mode();
             self.reset_textarea();
@@ -778,7 +778,6 @@ impl App {
             })
             .collect();
 
-        // Include freeform sentinel when options are present but allow_freeform is true.
         if allow_freeform {
             items.push(CompletionItem {
                 label: "Type your response…".to_string(),
@@ -791,7 +790,7 @@ impl App {
         }
 
         self.selection
-            .activate(SelectionKind::AskUser, "  Ask user  ", items);
+            .activate(SelectionKind::AskUser, "Options:", items);
     }
 
     pub fn enter_ask_freeform_mode(&mut self) {

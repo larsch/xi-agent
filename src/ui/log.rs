@@ -25,9 +25,6 @@ use super::input::{normalize_terminal_segment, wrap_str};
 pub struct ToolBodyConfig {
     /// Show untruncated output for all tools.
     pub full_output: bool,
-    /// When `true`, suppress the ask_user question body in the log so it
-    /// only appears in the interactive selection header.
-    pub hide_ask_question: bool,
     /// Max lines shown for head-truncated bodies (read_file, write_file, find_files).
     pub head_lines: usize,
     /// Max lines shown for tail-truncated bodies (bash, exec, custom).
@@ -40,7 +37,6 @@ impl Default for ToolBodyConfig {
     fn default() -> Self {
         Self {
             full_output: false,
-            hide_ask_question: false,
             head_lines: 8,
             tail_lines: 8,
             diff_lines: 4,
@@ -244,7 +240,8 @@ fn render_tool_call(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Context: green background, readable text, clipboard emoji.
+        // Context always renders in the log — the selection header only
+        // shows the question, so there is no duplication risk.
         if let Some(ctx) = context {
             append_ask_user_context_block(
                 out,
@@ -256,10 +253,8 @@ fn render_tool_call(
             );
         }
 
-        // The question also appears in the selection header during
-        // interactive ask_user.  When a pending ask is active we hide it
-        // from the log to avoid duplication; committed turns always show it.
-        if !question.is_empty() && !cfg.hide_ask_question {
+        // The question always renders in the log body.
+        if !question.is_empty() {
             let md_lines =
                 crate::markdown::render_with_theme(question, width, "❓ ", &theme.markdown);
             append_markdown_answer(out, md_lines, false);
@@ -1758,14 +1753,12 @@ mod tests {
             "ask_user",
             serde_json::json!({"question": "What do you want?"}),
         );
-        // Simulate interactive mode: hide the question (it's in the header).
-        let mut cfg = cfg();
-        cfg.hide_ask_question = true;
+        // Question always renders in the log body.
         let lines = build_log_lines(
             &[call],
             false,
             120,
-            &cfg,
+            &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
         );
@@ -1779,8 +1772,8 @@ mod tests {
             })
             .collect();
         assert!(
-            !text.iter().any(|t| t.contains("What do you want?")),
-            "question should be hidden during interactive ask"
+            text.iter().any(|t| t.contains("What do you want?")),
+            "question should be visible in the log"
         );
     }
 
