@@ -189,9 +189,14 @@ impl AnthropicProvider {
                 body["tools"] = serde_json::json!(convert_tools(&tools));
             }
 
-            log::debug!(
-                "[TAU_DEBUG] → anthropic request:\n{}",
-                serde_json::to_string_pretty(&body).unwrap_or_default()
+            crate::debug_log::log_structured(
+                log::Level::Debug,
+                "xi::llm::anthropic",
+                serde_json::json!({
+                    "event": "llm_request",
+                    "provider": "anthropic",
+                    "payload": &body,
+                }),
             );
 
             let mut req = client.post(&url).json(&body);

@@ -328,7 +328,18 @@ where
             sse.push_bytes(&bytes);
 
             while let Some(line) = sse.next_data_line() {
-                log::debug!("[TAU_DEBUG] ← {provider_name} chunk {line_num}: {line}");
+                let payload: serde_json::Value = serde_json::from_str(&line)
+                    .unwrap_or(serde_json::Value::String(line.to_owned()));
+                crate::debug_log::log_structured(
+                    log::Level::Debug,
+                    "xi::llm::common",
+                    serde_json::json!({
+                        "event": "llm_chunk",
+                        "provider": provider_name,
+                        "chunk_index": line_num,
+                        "payload": payload,
+                    }),
+                );
                 line_num += 1;
 
                 let mut events = Vec::new();
@@ -382,7 +393,18 @@ where
                     continue;
                 }
 
-                log::debug!("[TAU_DEBUG] ← {provider_name} chunk {line_num}: {line}");
+                let payload: serde_json::Value = serde_json::from_str(&line)
+                    .unwrap_or(serde_json::Value::String(line.clone()));
+                crate::debug_log::log_structured(
+                    log::Level::Debug,
+                    "xi::llm::common",
+                    serde_json::json!({
+                        "event": "llm_chunk",
+                        "provider": provider_name,
+                        "chunk_index": line_num,
+                        "payload": payload,
+                    }),
+                );
                 line_num += 1;
 
                 let mut events = Vec::new();

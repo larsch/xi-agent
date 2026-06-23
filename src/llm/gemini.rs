@@ -279,9 +279,14 @@ impl GeminiProvider {
         Box::pin(async_stream::stream! {
             let body = build_request(&messages, &tools, &project_id, &model, thinking_level);
 
-            log::debug!(
-                "[TAU_DEBUG] → gemini request:\n{}",
-                serde_json::to_string_pretty(&body).unwrap_or_default()
+            crate::debug_log::log_structured(
+                log::Level::Debug,
+                "xi::llm::gemini",
+                serde_json::json!({
+                    "event": "llm_request",
+                    "provider": "gemini",
+                    "payload": &body,
+                }),
             );
 
             // Retry loop: honours server-provided delay on 429, exponential

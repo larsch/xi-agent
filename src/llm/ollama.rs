@@ -277,8 +277,16 @@ impl LlmProvider for OllamaProvider {
                 stream: true,
             };
 
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                log::debug!("[TAU_DEBUG] → ollama request:\n{json}");
+            if let Ok(payload) = serde_json::to_value(&body) {
+                crate::debug_log::log_structured(
+                    log::Level::Debug,
+                    "xi::llm::ollama",
+                    serde_json::json!({
+                        "event": "llm_request",
+                        "provider": "ollama",
+                        "payload": payload,
+                    }),
+                );
             }
 
             let mut req = client.post(&url).json(&body);
@@ -337,8 +345,16 @@ impl LlmProvider for OllamaProvider {
                 stream: true,
             };
 
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                log::debug!("[TAU_DEBUG] → ollama request:\n{json}");
+            if let Ok(payload) = serde_json::to_value(&body) {
+                crate::debug_log::log_structured(
+                    log::Level::Debug,
+                    "xi::llm::ollama",
+                    serde_json::json!({
+                        "event": "llm_request",
+                        "provider": "ollama",
+                        "payload": payload,
+                    }),
+                );
             }
 
             let mut req = client.post(&url).json(&body);

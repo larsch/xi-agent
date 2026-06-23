@@ -106,8 +106,16 @@ impl OpenAiProvider {
                 reasoning_effort,
             };
 
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                log::debug!("[TAU_DEBUG] → request:\n{json}");
+            if let Ok(payload) = serde_json::to_value(&body) {
+                crate::debug_log::log_structured(
+                    log::Level::Debug,
+                    "xi::llm::openai",
+                    serde_json::json!({
+                        "event": "llm_request",
+                        "provider": "openai",
+                        "payload": payload,
+                    }),
+                );
             }
 
             let mut req = client
