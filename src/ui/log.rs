@@ -841,6 +841,27 @@ fn render_diff_body(
 
     let content_width = width.saturating_sub(3).max(1);
 
+    // Helper: push a combined "total + common" filler when both apply.
+    let push_total_common =
+        |out: &mut Vec<Line<'static>>, total: usize, common: usize, color: Color| {
+            if total > 0 && common > 0 {
+                out.push(placeholder_result_line(
+                    format!("… {total} total lines + {common} common lines"),
+                    color,
+                ));
+            } else if total > 0 {
+                out.push(placeholder_result_line(
+                    format!("… {total} total lines"),
+                    color,
+                ));
+            } else if common > 0 {
+                out.push(placeholder_result_line(
+                    format!("… {common} common lines"),
+                    color,
+                ));
+            }
+        };
+
     // Removed block (omit common-line placeholders when it's a pure addition).
     if old_total > 0 {
         if common_head > 0 && !is_pure_removal {
@@ -856,18 +877,14 @@ fn render_diff_body(
                 out.push(tool_result_line('│', chunk, removed_color));
             }
         }
-        if !full_output && old_total > max_lines_per_side {
-            out.push(placeholder_result_line(
-                format!("… {old_total} total lines"),
-                removed_color,
-            ));
-        }
-        if common_tail > 0 && !is_pure_removal {
-            out.push(placeholder_result_line(
-                format!("… {common_tail} common lines"),
-                removed_color,
-            ));
-        }
+        let truncated = !full_output && old_total > max_lines_per_side;
+        let total_filler = if truncated { old_total } else { 0 };
+        let common_filler = if common_tail > 0 && !is_pure_removal {
+            common_tail
+        } else {
+            0
+        };
+        push_total_common(out, total_filler, common_filler, removed_color);
     }
 
     // Added block (omit common-line placeholders when it's a pure removal).
@@ -885,18 +902,14 @@ fn render_diff_body(
                 out.push(tool_result_line('│', chunk, added_color));
             }
         }
-        if !full_output && new_total > max_lines_per_side {
-            out.push(placeholder_result_line(
-                format!("… {new_total} total lines"),
-                added_color,
-            ));
-        }
-        if common_tail > 0 && !is_pure_addition {
-            out.push(placeholder_result_line(
-                format!("… {common_tail} common lines"),
-                added_color,
-            ));
-        }
+        let truncated = !full_output && new_total > max_lines_per_side;
+        let total_filler = if truncated { new_total } else { 0 };
+        let common_filler = if common_tail > 0 && !is_pure_addition {
+            common_tail
+        } else {
+            0
+        };
+        push_total_common(out, total_filler, common_filler, added_color);
     }
 }
 
