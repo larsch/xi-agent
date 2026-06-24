@@ -142,9 +142,6 @@ pub(super) fn build_log_lines(
                         format!("🧠 {}", wrapped[skip..].join("\n"))
                     };
                     append_message_dim(&mut lines, &thinking_display, "", width);
-                    if has_answer {
-                        lines.push(Line::default());
-                    }
                 }
 
                 let effective_phase = match msg.assistant_phase {

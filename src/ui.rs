@@ -1339,7 +1339,7 @@ mod tests {
             &crate::config::DisplayConfig::default(),
         );
         assert_eq!(line_text(&lines[0]), "🧠 planning");
-        assert_eq!(line_text(&lines[2]), "💬 answer");
+        assert_eq!(line_text(&lines[1]), "💬 answer");
     }
 
     #[test]
