@@ -1207,7 +1207,7 @@ mod tests {
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(!rendered.contains("[lines 10-20 of 300]"));
-        assert!(rendered.contains("│alpha"));
+        assert!(rendered.contains("╭ alpha"));
     }
 
     #[test]
@@ -1252,7 +1252,7 @@ mod tests {
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            rendered.contains("💻 echo one\necho two\necho three"),
+            rendered.contains("💻 echo one\n   echo two\n   echo three"),
             "{rendered}"
         );
     }
@@ -1275,7 +1275,7 @@ mod tests {
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            rendered.contains("💻 l1\nl2\nl3\nl4\nl5\n… 6 total lines"),
+            rendered.contains("💻 l1\n   l2\n   l3\n   l4\n   l5\n   … 6 total lines"),
             "{rendered}"
         );
         assert!(!rendered.contains("l6"), "{rendered}");
@@ -1392,8 +1392,8 @@ mod tests {
         let mut out = Vec::new();
         append_tool_result_block(&mut out, "line one\nline two", 80, Color::Green);
         assert_eq!(out.len(), 2);
-        assert_eq!(line_text(&out[0]), "│line one");
-        assert_eq!(line_text(&out[1]), "│line two");
+        assert_eq!(line_text(&out[0]), " │ line one");
+        assert_eq!(line_text(&out[1]), " │ line two");
     }
 
     #[test]
@@ -1401,7 +1401,7 @@ mod tests {
         let mut out = Vec::new();
         append_tool_result_block(&mut out, "uptime output\n", 80, Color::Green);
         assert_eq!(out.len(), 1);
-        assert_eq!(line_text(&out[0]), "│uptime output");
+        assert_eq!(line_text(&out[0]), " │ uptime output");
     }
 
     #[test]
@@ -1411,7 +1411,7 @@ mod tests {
         assert!(out.len() >= 2);
         for line in out {
             let text = line_text(&line);
-            assert!(text.starts_with('│'));
+            assert!(text.starts_with(" │ "));
             assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 4);
         }
     }
@@ -1420,7 +1420,7 @@ mod tests {
     fn tool_result_block_expands_leading_tabs_after_prefix() {
         let mut out = Vec::new();
         append_tool_result_block(&mut out, "\talpha", 20, Color::Green);
-        assert_eq!(line_text(&out[0]), "│   alpha");
+        assert_eq!(line_text(&out[0]), " │  alpha");
     }
 
     #[test]
@@ -1453,7 +1453,7 @@ mod tests {
             .expect("second draw succeeds");
 
         let joined = buffer_to_plain_lines(terminal.backend().buffer(), 40, 10).join("\n");
-        assert!(joined.contains("│short"), "{joined}");
+        assert!(joined.contains("╰ short"), "{joined}");
         assert!(!joined.contains("much longer"), "{joined}");
     }
 
@@ -1723,7 +1723,12 @@ mod tests {
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
-            .filter(|l| l.starts_with('│'))
+            .filter(|l| {
+                l.starts_with(" ╭ ")
+                    || l.starts_with(" │ ")
+                    || l.starts_with(" ╰ ")
+                    || l.starts_with(" ┆ ")
+            })
             .collect();
         assert_eq!(result_lines.len(), 1, "should be exactly one result line");
         assert!(
@@ -1751,7 +1756,12 @@ mod tests {
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
-            .filter(|l| l.starts_with('│'))
+            .filter(|l| {
+                l.starts_with(" ╭ ")
+                    || l.starts_with(" │ ")
+                    || l.starts_with(" ╰ ")
+                    || l.starts_with(" ┆ ")
+            })
             .collect();
         assert!(!result_lines.is_empty());
         assert!(
@@ -1777,9 +1787,9 @@ mod tests {
             &crate::config::DisplayConfig::default(),
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("│load: 1.0"), "{rendered}");
+        assert!(rendered.contains("╰ load: 1.0"), "{rendered}");
         // No extra blank line after the content.
-        assert!(!rendered.contains("│load: 1.0\n│"), "{rendered}");
+        assert!(!rendered.contains("╰ load: 1.0\n│"), "{rendered}");
     }
 
     #[test]

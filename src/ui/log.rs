@@ -127,9 +127,7 @@ pub(super) fn build_log_lines(
                         let all_lines: Vec<&str> = sanitized.lines().collect();
                         // Wrap each logical line to terminal width, then take only the
                         // last 5 *displayed* lines for visual stability as the model streams.
-                        // Without this, a long logical line that wraps to multiple display
-                        // lines causes the output height to jump as new characters arrive.
-                        let wrap_width = width.saturating_sub(2).max(1); // account for "🧠 " prefix
+                        let wrap_width = width.saturating_sub(3).max(1);
                         let mut wrapped: Vec<String> = Vec::new();
                         for logical in all_lines {
                             if logical.is_empty() {
@@ -139,9 +137,9 @@ pub(super) fn build_log_lines(
                             }
                         }
                         let skip = wrapped.len().saturating_sub(5);
-                        format!("🧠 {}", wrapped[skip..].join("\n"))
+                        wrapped[skip..].join("\n")
                     };
-                    append_message_dim(&mut lines, &thinking_display, "", width);
+                    append_message_dim(&mut lines, "🧠", &thinking_display, "", width);
                 }
 
                 let effective_phase = match msg.assistant_phase {
@@ -189,14 +187,10 @@ pub(super) fn build_log_lines(
                 };
 
                 if has_answer {
-                    let prefix = format!("{answer_icon} ");
-                    let md_lines = crate::markdown::render_with_theme(
-                        &content,
-                        width,
-                        &prefix,
-                        &theme.markdown,
-                    );
-                    append_markdown_answer(&mut lines, md_lines, is_streaming_last);
+                    let md_width = width.saturating_sub(3).max(1);
+                    let md_lines =
+                        crate::markdown::render_with_theme(&content, md_width, "", &theme.markdown);
+                    append_markdown_answer(&mut lines, answer_icon, md_lines, is_streaming_last);
                 }
             }
             Role::ToolCall => {
@@ -252,9 +246,10 @@ fn render_tool_call(
 
         // The question always renders in the log body.
         if !question.is_empty() {
+            let md_width = width.saturating_sub(3).max(1);
             let md_lines =
-                crate::markdown::render_with_theme(question, width, "❓ ", &theme.markdown);
-            append_markdown_answer(out, md_lines, false);
+                crate::markdown::render_with_theme(question, md_width, "", &theme.markdown);
+            append_markdown_answer(out, "❓", md_lines, false);
         }
 
         // Response is rendered in render_tool_result; nothing more here.
@@ -397,6 +392,7 @@ fn render_tool_call(
                 cfg.full_output,
                 body_color,
                 width,
+                true, // streaming — intent body, result not yet available
             );
         }
     }
@@ -456,6 +452,7 @@ fn render_tool_call(
             cfg.full_output,
             body_color,
             width,
+            true, // streaming — subprocess still running
         );
     }
 }
@@ -498,7 +495,15 @@ fn render_tool_result(
             Color::LightBlue
         };
         let content = sanitize_for_display(&msg.content);
-        render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+        render_tail_truncated_body(
+            out,
+            &content,
+            cfg.tail_lines,
+            cfg.full_output,
+            color,
+            width,
+            false,
+        );
         return;
     }
 
@@ -536,7 +541,15 @@ fn render_tool_result(
             theme.log.diff.added.fg.unwrap_or(Color::Green)
         };
         let content = sanitize_for_display(&msg.content);
-        render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+        render_tail_truncated_body(
+            out,
+            &content,
+            cfg.tail_lines,
+            cfg.full_output,
+            color,
+            width,
+            false,
+        );
         return;
     }
 
@@ -552,7 +565,15 @@ fn render_tool_result(
             .get(prev_name)
             .body_color()
             .unwrap_or(Color::Green);
-        render_head_truncated_body(out, content, cfg.head_lines, cfg.full_output, color, width);
+        render_head_truncated_body(
+            out,
+            content,
+            cfg.head_lines,
+            cfg.full_output,
+            color,
+            width,
+            false,
+        );
         return;
     }
 
@@ -568,7 +589,15 @@ fn render_tool_result(
                 .unwrap_or(Color::Green)
         };
         let content = sanitize_for_display(&msg.content);
-        render_head_truncated_body(out, &content, cfg.head_lines, cfg.full_output, color, width);
+        render_head_truncated_body(
+            out,
+            &content,
+            cfg.head_lines,
+            cfg.full_output,
+            color,
+            width,
+            false,
+        );
         return;
     }
 
@@ -589,7 +618,15 @@ fn render_tool_result(
                 .unwrap_or(Color::LightBlue)
         };
         let content = sanitize_for_display(&msg.content);
-        render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+        render_tail_truncated_body(
+            out,
+            &content,
+            cfg.tail_lines,
+            cfg.full_output,
+            color,
+            width,
+            false,
+        );
         return;
     }
 
@@ -604,12 +641,25 @@ fn render_tool_result(
             .unwrap_or(Color::Green)
     };
     let content = sanitize_for_display(&msg.content);
-    render_tail_truncated_body(out, &content, cfg.tail_lines, cfg.full_output, color, width);
+    render_tail_truncated_body(
+        out,
+        &content,
+        cfg.tail_lines,
+        cfg.full_output,
+        color,
+        width,
+        false,
+    );
 }
 
 // ── Body rendering helpers ────────────────────────────────────────────────────
 
-/// Render head-truncated body: show first `max_lines` lines, then marker.
+/// Render head-truncated body: show first `max_lines` lines, then truncation marker.
+///
+/// The first visible content line always uses `╭` (the true start is shown).
+/// The last content line uses `╰` (confirmed) or `┆` (streaming) when the body
+/// is not truncated; truncated bodies end with the `┆` truncation marker instead.
+/// Wrapped chunks of the same logical line continue with `│`.
 fn render_head_truncated_body(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -617,22 +667,46 @@ fn render_head_truncated_body(
     full_output: bool,
     color: Color,
     width: usize,
+    is_streaming: bool,
 ) {
     if content.trim().is_empty() {
         return;
     }
+    let content_width = width.saturating_sub(3).max(1);
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let limit = if full_output { total } else { max_lines };
-    let shown = lines.iter().take(limit);
-    for line in shown {
-        let normalized = normalize_terminal_segment(line, 1);
-        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
-        for chunk in chunks {
-            out.push(tool_result_line(chunk, color));
+    let truncated = !full_output && total > max_lines;
+    let shown: Vec<&&str> = lines.iter().take(limit).collect();
+    let shown_count = shown.len();
+
+    for (i, line) in shown.iter().enumerate() {
+        let is_first_logical = i == 0;
+        let is_last_logical = i == shown_count - 1 && !truncated;
+
+        let normalized = normalize_terminal_segment(line, 3);
+        let chunks = wrap_str(&normalized, content_width);
+        let chunk_count = chunks.len();
+
+        for (ci, chunk) in chunks.into_iter().enumerate() {
+            let is_first_chunk = ci == 0;
+            let is_last_chunk = ci == chunk_count - 1;
+
+            let marker = if is_last_logical && is_last_chunk && is_streaming {
+                '┆'
+            } else if is_last_logical && is_last_chunk {
+                '╰'
+            } else if is_first_logical && is_first_chunk {
+                '╭'
+            } else {
+                '│'
+            };
+
+            out.push(tool_result_line(marker, chunk, color));
         }
     }
-    if !full_output && total > max_lines {
+
+    if truncated {
         out.push(placeholder_result_line(
             format!("… {total} total lines"),
             color,
@@ -640,7 +714,12 @@ fn render_head_truncated_body(
     }
 }
 
-/// Render tail-truncated body: show marker then last `max_lines` lines.
+/// Render tail-truncated body: show truncation marker then last `max_lines` lines.
+///
+/// When a truncation marker precedes, the first visible content line uses `│`
+/// (the true start is hidden).  Otherwise it uses `╭`.  The last content line
+/// always uses `╰` (confirmed) or `┆` (streaming) — the end is always visible.
+/// Wrapped chunks of the same logical line continue with `│`.
 fn render_tail_truncated_body(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -648,14 +727,17 @@ fn render_tail_truncated_body(
     full_output: bool,
     color: Color,
     width: usize,
+    is_streaming: bool,
 ) {
     if content.trim().is_empty() {
         return;
     }
+    let content_width = width.saturating_sub(3).max(1);
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
-    let limit = if full_output { total } else { max_lines };
-    if !full_output && total > max_lines {
+    let _unused_limit = if full_output { total } else { max_lines };
+    let truncated = !full_output && total > max_lines;
+    if truncated {
         out.push(placeholder_result_line(
             format!("… {total} total lines"),
             color,
@@ -666,14 +748,34 @@ fn render_tail_truncated_body(
     } else {
         total - max_lines
     };
-    for line in &lines[start..] {
-        let normalized = normalize_terminal_segment(line, 1);
-        let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
-        for chunk in chunks {
-            out.push(tool_result_line(chunk, color));
+    let shown = &lines[start..];
+    let shown_count = shown.len();
+
+    for (i, line) in shown.iter().enumerate() {
+        let is_first_logical = i == 0 && !truncated;
+        let is_last_logical = i == shown_count - 1;
+
+        let normalized = normalize_terminal_segment(line, 3);
+        let chunks = wrap_str(&normalized, content_width);
+        let chunk_count = chunks.len();
+
+        for (ci, chunk) in chunks.into_iter().enumerate() {
+            let is_first_chunk = ci == 0;
+            let is_last_chunk = ci == chunk_count - 1;
+
+            let marker = if is_last_logical && is_last_chunk && is_streaming {
+                '┆'
+            } else if is_last_logical && is_last_chunk {
+                '╰'
+            } else if is_first_logical && is_first_chunk {
+                '╭'
+            } else {
+                '│'
+            };
+
+            out.push(tool_result_line(marker, chunk, color));
         }
     }
-    let _ = limit;
 }
 
 /// Render a compact diff body for edit_file.
@@ -731,6 +833,8 @@ fn render_diff_body(
     let is_pure_addition = old_total == 0;
     let is_pure_removal = new_total == 0;
 
+    let content_width = width.saturating_sub(3).max(1);
+
     // Removed block (omit common-line placeholders when it's a pure addition).
     if old_total > 0 {
         if common_head > 0 && !is_pure_removal {
@@ -740,10 +844,10 @@ fn render_diff_body(
             ));
         }
         for line in old_diff.iter().take(old_limit) {
-            let normalized = normalize_terminal_segment(line, 0);
-            let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
+            let normalized = normalize_terminal_segment(line, 3);
+            let chunks = wrap_str(&normalized, content_width);
             for chunk in chunks {
-                out.push(tool_result_line(chunk, removed_color));
+                out.push(tool_result_line('│', chunk, removed_color));
             }
         }
         if !full_output && old_total > max_lines_per_side {
@@ -769,10 +873,10 @@ fn render_diff_body(
             ));
         }
         for line in new_diff.iter().take(new_limit) {
-            let normalized = normalize_terminal_segment(line, 0);
-            let chunks = wrap_str(&normalized, width.saturating_sub(1).max(1));
+            let normalized = normalize_terminal_segment(line, 3);
+            let chunks = wrap_str(&normalized, content_width);
             for chunk in chunks {
-                out.push(tool_result_line(chunk, added_color));
+                out.push(tool_result_line('│', chunk, added_color));
             }
         }
         if !full_output && new_total > max_lines_per_side {
@@ -790,24 +894,28 @@ fn render_diff_body(
     }
 }
 
-/// Build a regular content line with a `│` margin marker, both in `color`.
-fn tool_result_line(content: impl Into<String>, color: Color) -> Line<'static> {
+/// Build a body content line with a block-drawing margin marker at column 1.
+///
+/// Layout: `·` at column 0, marker at column 1, `·` at column 2, content from
+/// column 3 onward.  Both the marker prefix and the content share `color`.
+fn tool_result_line(marker: char, content: impl Into<String>, color: Color) -> Line<'static> {
     let style = Style::default().fg(color);
     Line::from(vec![
-        Span::styled("│", style),
+        Span::styled(format!(" {} ", marker), style),
         Span::styled(content.into(), style),
     ])
 }
 
-/// Build a truncation/context placeholder line with a `┆` margin marker.
-/// The `┆` is rendered in `color`; the text is rendered in `color` + dim + italic.
+/// Build a truncation/context placeholder line with a `┆` margin marker at
+/// column 1.  The marker is rendered in `color`; the text is rendered in
+/// `color` + dim + italic.
 fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'static> {
     let marker_style = Style::default().fg(color);
     let text_style = Style::default()
         .fg(color)
         .add_modifier(Modifier::ITALIC | Modifier::DIM);
     Line::from(vec![
-        Span::styled("┆", marker_style),
+        Span::styled(" ┆ ", marker_style),
         Span::styled(text.into(), text_style),
     ])
 }
@@ -931,11 +1039,40 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: usize, color: Color) {
     let style = Style::default().fg(color);
     let segments: Vec<&str> = content.split('\n').collect();
-    for seg_idx in visible_segments(&segments) {
+    let visible = visible_segments(&segments);
+    let content_width = width.saturating_sub(3).max(1);
+
+    for (vi, &seg_idx) in visible.iter().enumerate() {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
-        let chunks = wrap_str(&normalized, width);
-        for chunk in chunks {
-            out.push(Line::from(vec![Span::styled(chunk, style)]));
+
+        if vi == 0 {
+            // First line: icon at cols 0-1, space at col 2, text at col 3+.
+            let (icon, text) = tool_presentation::split_icon_from_label(&normalized);
+            let prefix = format!("{icon} ");
+            let chunks = wrap_str(text, content_width);
+            for (ci, chunk) in chunks.iter().enumerate() {
+                if ci == 0 {
+                    out.push(Line::from(vec![
+                        Span::styled(prefix.clone(), style),
+                        Span::styled(chunk.clone(), style),
+                    ]));
+                } else {
+                    // Wrapped continuation of the first line: indent 3 spaces.
+                    out.push(Line::from(vec![
+                        Span::styled("   ", style),
+                        Span::styled(chunk.clone(), style),
+                    ]));
+                }
+            }
+        } else {
+            // Subsequent logical lines (multiline labels): indent 3 spaces.
+            let chunks = wrap_str(&normalized, content_width);
+            for chunk in chunks {
+                out.push(Line::from(vec![
+                    Span::styled("   ", style),
+                    Span::styled(chunk, style),
+                ]));
+            }
         }
     }
 }
@@ -952,18 +1089,44 @@ fn append_message_colored_dim(
         .fg(color)
         .add_modifier(Modifier::ITALIC | Modifier::DIM);
     let segments: Vec<&str> = content.split('\n').collect();
-    for seg_idx in visible_segments(&segments) {
+    let visible = visible_segments(&segments);
+    let content_width = width.saturating_sub(3).max(1);
+
+    for (vi, &seg_idx) in visible.iter().enumerate() {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
-        let chunks = wrap_str(&normalized, width);
-        for chunk in chunks {
-            out.push(Line::from(vec![Span::styled(chunk, style)]));
+
+        if vi == 0 {
+            let (icon, text) = tool_presentation::split_icon_from_label(&normalized);
+            let prefix = format!("{icon} ");
+            let chunks = wrap_str(text, content_width);
+            for (ci, chunk) in chunks.iter().enumerate() {
+                if ci == 0 {
+                    out.push(Line::from(vec![
+                        Span::styled(prefix.clone(), style),
+                        Span::styled(chunk.clone(), style),
+                    ]));
+                } else {
+                    out.push(Line::from(vec![
+                        Span::styled("   ", style),
+                        Span::styled(chunk.clone(), style),
+                    ]));
+                }
+            }
+        } else {
+            let chunks = wrap_str(&normalized, content_width);
+            for chunk in chunks {
+                out.push(Line::from(vec![
+                    Span::styled("   ", style),
+                    Span::styled(chunk, style),
+                ]));
+            }
         }
     }
 }
 
 /// Like `append_message_colored_dim` but renders an icon prefix without
 /// italic/dim so the emoji stays visually clean while the placeholder text
-/// is still marked as provisional.
+/// is still marked as provisional.  Content aligned to column 3.
 fn append_message_colored_dim_with_icon(
     out: &mut Vec<Line<'static>>,
     icon: &str,
@@ -971,15 +1134,16 @@ fn append_message_colored_dim_with_icon(
     width: usize,
     color: Color,
 ) {
-    let _ = width;
     let icon_style = Style::default().fg(color);
     let text_style = Style::default()
         .fg(color)
         .add_modifier(Modifier::ITALIC | Modifier::DIM);
+    let prefix = format!("{icon} ");
     out.push(Line::from(vec![
-        Span::styled(icon.to_string(), icon_style),
-        Span::styled(format!(" {text}"), text_style),
+        Span::styled(prefix, icon_style),
+        Span::styled(text.to_string(), text_style),
     ]));
+    let _ = width;
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -997,7 +1161,7 @@ pub(super) fn append_tool_result_block(
             .fg(Color::Rgb(100, 100, 120))
             .add_modifier(Modifier::ITALIC);
         out.push(Line::from(vec![
-            Span::styled("│", marker_style),
+            Span::styled(" │ ", marker_style),
             Span::styled("(no output)", no_output_style),
         ]));
         return;
@@ -1005,21 +1169,21 @@ pub(super) fn append_tool_result_block(
 
     if width == 0 {
         out.push(Line::from(vec![Span::styled(
-            "│".to_string(),
+            " │ ".to_string(),
             marker_style,
         )]));
         return;
     }
 
-    let content_width = width.saturating_sub(1).max(1);
+    let content_width = width.saturating_sub(3).max(1);
     let segments: Vec<&str> = content.split('\n').collect();
     for seg_idx in visible_segments(&segments) {
         let segment = segments[seg_idx];
-        let normalized = normalize_terminal_segment(segment, 1);
+        let normalized = normalize_terminal_segment(segment, 3);
         let chunks = wrap_str(&normalized, content_width);
         for chunk in chunks {
             out.push(Line::from(vec![
-                Span::styled("│", marker_style),
+                Span::styled(" │ ", marker_style),
                 Span::styled(chunk, text_style),
             ]));
         }
@@ -1028,26 +1192,38 @@ pub(super) fn append_tool_result_block(
 
 fn append_message_dim(
     out: &mut Vec<Line<'static>>,
-    content: &str,
+    icon: &str,
+    text: &str,
     suffix: &'static str,
     width: usize,
 ) {
     let dim_style = Style::default().fg(Color::DarkGray);
-    let segments: Vec<&str> = content.split('\n').collect();
+    let segments: Vec<&str> = text.split('\n').collect();
     let visible = visible_segments(&segments);
     let last_visible = visible.last().copied();
 
-    for seg_idx in visible {
+    for (vi, &seg_idx) in visible.iter().enumerate() {
         let segment = segments[seg_idx];
+        let is_first_visible = vi == 0;
         let is_last_visible_seg = Some(seg_idx) == last_visible;
         let normalized = normalize_terminal_segment(segment, 0);
-        let chunks = wrap_str(&normalized, width);
+        let content_width = width.saturating_sub(3).max(1);
+        let chunks = wrap_str(&normalized, content_width);
         let last_chunk = chunks.len() - 1;
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let is_last_chunk = chunk_idx == last_chunk;
             let show_suffix = !suffix.is_empty() && is_last_visible_seg && is_last_chunk;
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(chunk.clone(), dim_style)];
+
+            let mut spans: Vec<Span<'static>> = if is_first_visible && chunk_idx == 0 {
+                vec![Span::styled(format!("{icon} {chunk}"), dim_style)]
+            } else {
+                vec![
+                    Span::styled(" │ ", dim_style), // margin marker for continuation
+                    Span::styled(chunk.clone(), dim_style),
+                ]
+            };
+
             if show_suffix {
                 spans.push(Span::styled(suffix, dim_style));
             }
@@ -1058,7 +1234,8 @@ fn append_message_dim(
 
 fn append_markdown_answer(
     out: &mut Vec<Line<'static>>,
-    mut md_lines: Vec<Line<'static>>,
+    icon: &str,
+    md_lines: Vec<Line<'static>>,
     streaming: bool,
 ) {
     if md_lines.is_empty() {
@@ -1071,13 +1248,32 @@ fn append_markdown_answer(
         return;
     }
 
-    if streaming {
-        let last = md_lines.last_mut().unwrap();
-        last.spans
-            .push(Span::styled("▋", Style::default().fg(Color::Yellow)));
-    }
+    let prefix = format!("{icon} ");
+    let last_idx = md_lines.len() - 1;
 
-    out.extend(md_lines);
+    for (i, mut line) in md_lines.into_iter().enumerate() {
+        if i == 0 {
+            // First line: prepend emoji icon prefix.
+            line.spans.insert(0, Span::raw(prefix.clone()));
+        } else {
+            // Continuation line: prepend margin marker.
+            let marker = if i == last_idx && streaming {
+                " ┆ "
+            } else if i == last_idx {
+                " ╰ "
+            } else {
+                " │ "
+            };
+            line.spans.insert(0, Span::raw(marker));
+        }
+
+        if streaming && i == last_idx {
+            line.spans
+                .push(Span::styled("▋", Style::default().fg(Color::Yellow)));
+        }
+
+        out.push(line);
+    }
 }
 
 fn append_message_markdown(
