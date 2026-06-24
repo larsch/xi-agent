@@ -662,7 +662,10 @@ pub fn render_with_theme(
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                out.push(Line::default());
+                // No explicit blank here: pulldown-cmark includes the trailing
+                // '\n' in the code-block Text event, and the split loop
+                // preserves it as an empty line.  Adding another blank would
+                // create a double gap.
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
@@ -670,7 +673,8 @@ pub fn render_with_theme(
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 in_blockquote = false;
-                out.push(Line::default());
+                // No explicit blank here: the last inner paragraph already
+                // pushes a blank, so an extra one would double the gap.
             }
 
             Event::Start(Tag::List(start)) => {
@@ -805,7 +809,9 @@ pub fn render_with_theme(
                     for line in text.split('\n') {
                         if line.is_empty() {
                             // Preserve blank lines inside code blocks.
-                            out.push(Line::from(Span::raw("")));
+                            // Use Line::default() so the dedup/trailing-blank
+                            // cleanup recognises these as empty lines.
+                            out.push(Line::default());
                             continue;
                         }
                         // Hard-wrap the line if it exceeds the available width.
@@ -918,12 +924,23 @@ pub fn render_with_theme(
         out.extend(wrapped);
     }
 
-    // Remove a trailing blank line if present — keeps output compact.
-    if out.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
-        out.pop();
+    // Collapse consecutive empty lines into a single one, then strip any
+    // trailing blank.  This avoids double-blank artefacts from block-level
+    // separators combining with trailing newlines preserved from code-block
+    // or blockquote text.
+    let mut deduped: Vec<Line<'static>> = Vec::with_capacity(out.len());
+    for line in out {
+        let empty = line.spans.is_empty();
+        if empty && deduped.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
+            continue; // skip consecutive blank
+        }
+        deduped.push(line);
+    }
+    if deduped.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
+        deduped.pop();
     }
 
-    out
+    deduped
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────────
@@ -1345,5 +1362,79 @@ mod tests {
         let text = lines.iter().map(line_text).collect::<Vec<_>>().join("");
         assert!(text.contains("bold"));
         assert!(text.contains("<i>italic</i>"));
+    }
+
+    // ── Inter-block spacing ────────────────────────────────────────────────────
+
+    /// Assert that `md` renders to exactly the lines in `expected`.
+    fn assert_renders_to(md: &str, width: usize, expected: &[&str]) {
+        let lines = render(md, width, "");
+        let got: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(got, expected, "for input:\n{md}");
+    }
+
+    #[test]
+    fn paragraph_then_code_block_one_blank_between() {
+        assert_renders_to(
+            "Para before\n\n```\ncode\n```",
+            80,
+            &["Para before", "", "  code"],
+        );
+    }
+
+    #[test]
+    fn code_block_then_paragraph_one_blank_between() {
+        assert_renders_to(
+            "```\ncode\n```\n\nPara after",
+            80,
+            &["  code", "", "Para after"],
+        );
+    }
+
+    #[test]
+    fn two_code_blocks_one_blank_between() {
+        assert_renders_to(
+            "```\nfirst\n```\n```\nsecond\n```",
+            80,
+            &["  first", "", "  second"],
+        );
+    }
+
+    #[test]
+    fn paragraph_then_blockquote_one_blank_between() {
+        assert_renders_to(
+            "Para before\n\n> quote",
+            80,
+            &["Para before", "", "│ quote"],
+        );
+    }
+
+    #[test]
+    fn blockquote_then_paragraph_one_blank_between() {
+        assert_renders_to("> quote\n\nPara after", 80, &["│ quote", "", "Para after"]);
+    }
+
+    #[test]
+    fn code_block_then_blockquote_one_blank_between() {
+        assert_renders_to("```\ncode\n```\n\n> quote", 80, &["  code", "", "│ quote"]);
+    }
+
+    #[test]
+    fn looose_list_followed_by_paragraph_one_blank_only() {
+        // Loose list: blank lines between items means each item is a paragraph.
+        assert_renders_to(
+            "- Item 1\n\n- Item 2\n\nPara after",
+            80,
+            &["• Item 1", "• Item 2", "", "Para after"],
+        );
+    }
+
+    #[test]
+    fn heading_then_code_block_one_blank_between() {
+        assert_renders_to(
+            "# Title\n\n```\ncode\n```\n\nMore",
+            80,
+            &["# Title", "", "  code", "", "More"],
+        );
     }
 }
