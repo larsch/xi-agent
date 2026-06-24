@@ -848,27 +848,8 @@ fn append_ask_user_context_block(
 fn append_ask_user_response(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
     let bg_style = Style::default().bg(bg);
     let sanitized = sanitize_for_display(content);
-    let segments: Vec<&str> = if sanitized.is_empty() {
-        vec![""]
-    } else {
-        sanitized.split('\n').collect()
-    };
-    let visible: Vec<usize> = if sanitized.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, seg)| {
-                let has_nonempty_after = segments.iter().skip(idx + 1).any(|s| !s.is_empty());
-                if seg.is_empty() && !has_nonempty_after {
-                    None
-                } else {
-                    Some(idx)
-                }
-            })
-            .collect()
-    };
+    let segments: Vec<&str> = sanitized.split('\n').collect();
+    let visible = visible_segments(&segments);
 
     out.push(halfblock_line(width, '▄', bg));
 
@@ -888,6 +869,25 @@ fn append_ask_user_response(out: &mut Vec<Line<'static>>, content: &str, width: 
 }
 
 // ── Shared rendering primitives ───────────────────────────────────────────────
+
+/// Return the indices of segments to keep: strip leading/trailing empty
+/// lines while preserving interior empty lines. An empty input returns an
+/// empty vector so that callers can iterate directly without a sentinel.
+fn visible_segments(segments: &[&str]) -> Vec<usize> {
+    segments
+        .iter()
+        .enumerate()
+        .filter(|(idx, seg)| {
+            if !seg.is_empty() {
+                return true;
+            }
+            let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
+            let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
+            has_nonempty_before && has_nonempty_after
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
 
 fn trim_assistant_block_edges(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
@@ -930,33 +930,8 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 
 fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: usize, color: Color) {
     let style = Style::default().fg(color);
-    let segments: Vec<&str> = if content.is_empty() {
-        vec![""]
-    } else {
-        content.split('\n').collect()
-    };
-    // Universal rule: all rendered output is trimmed.
-    // Keep interior empty lines (separating blocks) but strip leading and
-    // trailing empty segments.
-    let visible: Vec<usize> = if content.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter(|(idx, seg)| {
-                if !seg.is_empty() {
-                    return true;
-                }
-                let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
-                let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
-                has_nonempty_before && has_nonempty_after
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    };
-
-    for seg_idx in visible {
+    let segments: Vec<&str> = content.split('\n').collect();
+    for seg_idx in visible_segments(&segments) {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
         let chunks = wrap_str(&normalized, width);
         for chunk in chunks {
@@ -976,32 +951,8 @@ fn append_message_colored_dim(
     let style = Style::default()
         .fg(color)
         .add_modifier(Modifier::ITALIC | Modifier::DIM);
-    let segments: Vec<&str> = if content.is_empty() {
-        vec![""]
-    } else {
-        content.split('\n').collect()
-    };
-    // Universal rule: all rendered output is trimmed.
-    // Keep interior empty lines but strip leading and trailing empty segments.
-    let visible: Vec<usize> = if content.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter(|(idx, seg)| {
-                if !seg.is_empty() {
-                    return true;
-                }
-                let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
-                let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
-                has_nonempty_before && has_nonempty_after
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    };
-
-    for seg_idx in visible {
+    let segments: Vec<&str> = content.split('\n').collect();
+    for seg_idx in visible_segments(&segments) {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
         let chunks = wrap_str(&normalized, width);
         for chunk in chunks {
@@ -1062,22 +1013,7 @@ pub(super) fn append_tool_result_block(
 
     let content_width = width.saturating_sub(1).max(1);
     let segments: Vec<&str> = content.split('\n').collect();
-    // Universal rule: all rendered output is trimmed.
-    let visible: Vec<usize> = segments
-        .iter()
-        .enumerate()
-        .filter(|(idx, seg)| {
-            if !seg.is_empty() {
-                return true;
-            }
-            let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
-            let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
-            has_nonempty_before && has_nonempty_after
-        })
-        .map(|(idx, _)| idx)
-        .collect();
-
-    for seg_idx in visible {
+    for seg_idx in visible_segments(&segments) {
         let segment = segments[seg_idx];
         let normalized = normalize_terminal_segment(segment, 1);
         let chunks = wrap_str(&normalized, content_width);
@@ -1097,29 +1033,8 @@ fn append_message_dim(
     width: usize,
 ) {
     let dim_style = Style::default().fg(Color::DarkGray);
-    let segments: Vec<&str> = if content.is_empty() {
-        vec![""]
-    } else {
-        content.split('\n').collect()
-    };
-    // Universal rule: all rendered output is trimmed.
-    let visible: Vec<usize> = if content.is_empty() {
-        vec![0]
-    } else {
-        segments
-            .iter()
-            .enumerate()
-            .filter(|(idx, seg)| {
-                if !seg.is_empty() {
-                    return true;
-                }
-                let has_nonempty_before = segments[..*idx].iter().any(|s| !s.is_empty());
-                let has_nonempty_after = segments[idx + 1..].iter().any(|s| !s.is_empty());
-                has_nonempty_before && has_nonempty_after
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    };
+    let segments: Vec<&str> = content.split('\n').collect();
+    let visible = visible_segments(&segments);
     let last_visible = visible.last().copied();
 
     for seg_idx in visible {
