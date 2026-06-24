@@ -1084,10 +1084,17 @@ impl App {
             return None;
         }
 
-        let events: Vec<SessionEvent> = {
+        let mut events: Vec<SessionEvent> = {
             let ss = self.session.session_state.as_ref()?;
             ss.events()[..idx].to_vec()
         };
+
+        // Strip trailing incomplete turn: when stepping back to an ask_user
+        // ToolResult boundary, the slice `[..idx]` includes the preceding
+        // ToolCall but not its result — leaving an unpaired ToolCall that
+        // violates the API invariant "every assistant message with tool_calls
+        // must be followed by tool result messages".
+        trim_incomplete_turn(&mut events);
 
         let cwd = self.session.current_cwd.clone();
         let new_session_id = self
@@ -1142,6 +1149,57 @@ impl App {
 
         if let Ok(mut cb) = arboard::Clipboard::new() {
             let _ = cb.set_text(text);
+        }
+    }
+}
+
+/// Strip trailing unpaired [`ToolCall`](SessionEvent::ToolCall) events and the
+/// [`AssistantMessage`](SessionEvent::AssistantMessage) that started their
+/// turn from a step-back branch event slice.
+///
+/// When `commit_step_branch` slices events at a step boundary that points to
+/// an `ask_user` [`ToolResult`](SessionEvent::ToolResult), the preceding
+/// `ToolCall` is included but its result is excluded.  This leaves an
+/// unpaired `ToolCall` that violates the API invariant "every assistant
+/// message with `tool_calls` must be followed by tool result messages".
+///
+/// This function walks backwards from the end of `events`, finds any trailing
+/// `ToolCall` events that have no matching `ToolResult` in the slice, and
+/// removes them together with the `AssistantMessage` that started their turn
+/// (if all tool calls belonging to that turn are unpaired).
+fn trim_incomplete_turn(events: &mut Vec<SessionEvent>) {
+    // Walk backwards collecting unpaired ToolCall IDs.
+    let mut unpaired: Vec<String> = Vec::new();
+    for i in (0..events.len()).rev() {
+        match &events[i] {
+            SessionEvent::ToolCall { id, .. } => {
+                // Check whether a matching ToolResult exists anywhere
+                // in the slice (results always follow their calls).
+                let has_result = events
+                    .iter()
+                    .any(|e| matches!(e, SessionEvent::ToolResult { id: rid, .. } if rid == id));
+                if has_result {
+                    // This ToolCall is paired — stop; everything before it is
+                    // part of completed turns.
+                    break;
+                }
+                unpaired.push(id.clone());
+            }
+            SessionEvent::AssistantMessage { .. } => {
+                // If every ToolCall after this AssistantMessage is in
+                // `unpaired`, this AssistantMessage starts the incomplete
+                // turn.  Truncate here — the incomplete turn is stripped.
+                let all_after_unpaired = events[i + 1..].iter().all(|e| match e {
+                    SessionEvent::ToolCall { id, .. } => unpaired.contains(id),
+                    _ => false,
+                });
+                if all_after_unpaired && !events[i + 1..].is_empty() {
+                    events.truncate(i);
+                }
+                // Stop regardless — we only strip one trailing incomplete turn.
+                break;
+            }
+            _ => {}
         }
     }
 }
@@ -2948,5 +3006,191 @@ mod tests {
 
         app.step_back();
         assert!(app.step_back.cursor.is_none());
+    }
+
+    // ── trim_incomplete_turn / commit_step_branch ask_user fix ─────────────
+
+    #[test]
+    fn trim_incomplete_turn_removes_trailing_unpaired_tool_call_and_assistant() {
+        let mut events = vec![
+            user_ev("hello"),
+            assistant_ev("hi"),
+            // Incomplete turn: AssistantMessage + unpaired ToolCall.
+            assistant_ev("which one?"),
+            ask_user_call_ev("pick"),
+        ];
+        super::trim_incomplete_turn(&mut events);
+        // The incomplete turn (asst + unpaired tool call) must be stripped.
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            crate::session_event::SessionEvent::UserMessage { .. }
+        ));
+        assert!(matches!(
+            events[1],
+            crate::session_event::SessionEvent::AssistantMessage { .. }
+        ));
+    }
+
+    #[test]
+    fn trim_incomplete_turn_preserves_paired_tool_calls() {
+        let mut events = vec![
+            user_ev("run"),
+            assistant_ev(""),
+            crate::session_event::SessionEvent::ToolCall {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                args: serde_json::json!({"command": "ls"}),
+                timestamp: ts(),
+            },
+            crate::session_event::SessionEvent::ToolResult {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                display_range: None,
+                timestamp: ts(),
+            },
+        ];
+        let expected_len = events.len();
+        super::trim_incomplete_turn(&mut events);
+        // All tool calls have results — nothing should be removed.
+        assert_eq!(events.len(), expected_len);
+        assert!(events.iter().any(|e| {
+            matches!(e, crate::session_event::SessionEvent::ToolCall { id, name, .. } if id == "t1" && name == "bash")
+        }));
+        assert!(events.iter().any(|e| {
+            matches!(e, crate::session_event::SessionEvent::ToolResult { id, name, .. } if id == "t1" && name == "bash")
+        }));
+    }
+
+    #[test]
+    fn trim_incomplete_turn_noop_when_clean() {
+        let mut events = vec![
+            user_ev("a"),
+            assistant_ev("b"),
+            user_ev("c"),
+            assistant_ev("d"),
+        ];
+        let expected_len = events.len();
+        super::trim_incomplete_turn(&mut events);
+        assert_eq!(events.len(), expected_len);
+    }
+
+    #[test]
+    fn trim_incomplete_turn_empty_slice() {
+        let mut events: Vec<crate::session_event::SessionEvent> = vec![];
+        super::trim_incomplete_turn(&mut events);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn commit_step_branch_strips_incomplete_ask_user_turn() {
+        // Simulate stepping back to an ask_user ToolResult and committing a
+        // branch.  The resulting session must not contain unpaired ToolCalls.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let store = crate::session::SessionStore::open_at(sessions_dir).expect("open store");
+
+        let mut app = make_app_with_events(vec![
+            user_ev("start"),
+            assistant_ev("thinking…"),
+            // Completed tool call from the same turn (not ask_user).
+            crate::session_event::SessionEvent::ToolCall {
+                id: "bash1".to_string(),
+                name: "bash".to_string(),
+                args: serde_json::json!({"command": "ls"}),
+                timestamp: ts(),
+            },
+            crate::session_event::SessionEvent::ToolResult {
+                id: "bash1".to_string(),
+                name: "bash".to_string(),
+                content: "output".to_string(),
+                is_error: false,
+                display_range: None,
+                timestamp: ts(),
+            },
+            // The ask_user turn:
+            assistant_ev("which option?"),
+            ask_user_call_ev("pick one"),
+            ask_user_result_ev("ask_1", "old answer"),
+            // More events after (should not be in branch):
+            assistant_ev("thanks"),
+            user_ev("next"),
+        ]);
+        app.session.session_store = Some(store);
+        app.session.current_cwd = tmp.path().to_string_lossy().to_string();
+
+        // Step back to the ask_user ToolResult boundary (index 6).
+        // Boundaries: UserMsg(0), ask_user ToolResult(6), UserMsg(8)
+        app.step_back(); // -> last UserMessage (8)
+        app.step_back(); // -> ask_user ToolResult (6)
+        assert_eq!(app.step_back.cursor, Some(6));
+
+        // Set a new answer and commit the branch.
+        app.textarea = ratatui_textarea::TextArea::new(vec!["new answer".to_string()]);
+        let committed = app.commit_step_branch();
+        assert!(committed.is_some());
+
+        // commit_step_branch creates a new session from trimmed events.
+        // append_user_message is called separately by finish_pending_ask.
+        let ss = app.session.session_state.as_ref().unwrap();
+        // After trimming: user(0), asst(1), bash_call(2), bash_result(3) = 4 events.
+        assert_eq!(ss.events().len(), 4);
+
+        // Verify no unpaired ToolCalls remain.
+        for (i, ev) in ss.events().iter().enumerate() {
+            if let crate::session_event::SessionEvent::ToolCall { id, .. } = ev {
+                let has_result = ss.events()[i + 1..].iter().any(|e| {
+                    matches!(e, crate::session_event::SessionEvent::ToolResult { id: rid, .. } if rid == id)
+                });
+                assert!(
+                    has_result,
+                    "ToolCall at index {i} has no matching ToolResult"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn trim_incomplete_turn_only_strips_last_incomplete_turn() {
+        // A preceding incomplete turn should be left alone if it's not at the tail.
+        let mut events = vec![
+            user_ev("first"),
+            assistant_ev("which?"),
+            ask_user_call_ev("first q"),
+            ask_user_result_ev("ask_1", "answer"), // paired — complete
+            // Second ask_user turn — incomplete at tail (different call id).
+            assistant_ev("another?"),
+            crate::session_event::SessionEvent::ToolCall {
+                id: "ask_2".to_string(),
+                name: "ask_user".to_string(),
+                args: serde_json::json!({"question": "second q"}),
+                timestamp: ts(),
+            },
+        ];
+        super::trim_incomplete_turn(&mut events);
+        // Only the second (trailing) incomplete turn is removed (asst at 4 + call at 5).
+        assert_eq!(events.len(), 4);
+        // Verify the first ask_user turn is intact.
+        let has_ask_1_call = events.iter().any(|e| {
+            matches!(e, crate::session_event::SessionEvent::ToolCall { id, name, .. } if id == "ask_1" && name == "ask_user")
+        });
+        assert!(has_ask_1_call, "first ask_user turn should be preserved");
+        let has_ask_1_result = events.iter().any(|e| {
+            matches!(e, crate::session_event::SessionEvent::ToolResult { id, name, .. } if id == "ask_1" && name == "ask_user")
+        });
+        assert!(
+            has_ask_1_result,
+            "first ask_user result should be preserved"
+        );
+        // The second incomplete turn must not be present.
+        let has_second = events.iter().any(|e| {
+            matches!(e, crate::session_event::SessionEvent::ToolCall { id, .. } if id == "ask_2")
+        });
+        assert!(
+            !has_second,
+            "second incomplete ask_user turn must be stripped"
+        );
     }
 }
