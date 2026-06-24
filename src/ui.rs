@@ -1453,7 +1453,7 @@ mod tests {
             .expect("second draw succeeds");
 
         let joined = buffer_to_plain_lines(terminal.backend().buffer(), 40, 10).join("\n");
-        assert!(joined.contains("╰ short"), "{joined}");
+        assert!(joined.contains("· short"), "{joined}");
         assert!(!joined.contains("much longer"), "{joined}");
     }
 
@@ -1727,6 +1727,7 @@ mod tests {
                 l.starts_with(" ╭ ")
                     || l.starts_with(" │ ")
                     || l.starts_with(" ╰ ")
+                    || l.starts_with(" · ")
                     || l.starts_with(" ┆ ")
             })
             .collect();
@@ -1760,6 +1761,7 @@ mod tests {
                 l.starts_with(" ╭ ")
                     || l.starts_with(" │ ")
                     || l.starts_with(" ╰ ")
+                    || l.starts_with(" · ")
                     || l.starts_with(" ┆ ")
             })
             .collect();
@@ -1787,9 +1789,9 @@ mod tests {
             &crate::config::DisplayConfig::default(),
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("╰ load: 1.0"), "{rendered}");
+        assert!(rendered.contains("· load: 1.0"), "{rendered}");
         // No extra blank line after the content.
-        assert!(!rendered.contains("╰ load: 1.0\n│"), "{rendered}");
+        assert!(!rendered.contains("· load: 1.0\n│"), "{rendered}");
     }
 
     #[test]

@@ -656,9 +656,10 @@ fn render_tool_result(
 
 /// Render head-truncated body: show first `max_lines` lines, then truncation marker.
 ///
-/// The first visible content line always uses `╭` (the true start is shown).
+/// The first visible content line uses `╭` (the true start is shown).
 /// The last content line uses `╰` (confirmed) or `┆` (streaming) when the body
 /// is not truncated; truncated bodies end with the `┆` truncation marker instead.
+/// A single-line body uses `·` (self-contained, no continuation implied).
 /// Wrapped chunks of the same logical line continue with `│`.
 fn render_head_truncated_body(
     out: &mut Vec<Line<'static>>,
@@ -694,6 +695,8 @@ fn render_head_truncated_body(
 
             let marker = if is_last_logical && is_last_chunk && is_streaming {
                 '┆'
+            } else if is_first_logical && is_last_logical {
+                '·'
             } else if is_last_logical && is_last_chunk {
                 '╰'
             } else if is_first_logical && is_first_chunk {
@@ -719,6 +722,7 @@ fn render_head_truncated_body(
 /// When a truncation marker precedes, the first visible content line uses `│`
 /// (the true start is hidden).  Otherwise it uses `╭`.  The last content line
 /// always uses `╰` (confirmed) or `┆` (streaming) — the end is always visible.
+/// A single-line body uses `·` (self-contained, no continuation implied).
 /// Wrapped chunks of the same logical line continue with `│`.
 fn render_tail_truncated_body(
     out: &mut Vec<Line<'static>>,
@@ -765,6 +769,8 @@ fn render_tail_truncated_body(
 
             let marker = if is_last_logical && is_last_chunk && is_streaming {
                 '┆'
+            } else if is_first_logical && is_last_logical {
+                '·'
             } else if is_last_logical && is_last_chunk {
                 '╰'
             } else if is_first_logical && is_first_chunk {
