@@ -1041,6 +1041,7 @@ fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: us
     let segments: Vec<&str> = content.split('\n').collect();
     let visible = visible_segments(&segments);
     let content_width = width.saturating_sub(3).max(1);
+    let last_visible_idx = visible.len() - 1;
 
     for (vi, &seg_idx) in visible.iter().enumerate() {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
@@ -1050,6 +1051,7 @@ fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: us
             let (icon, text) = tool_presentation::split_icon_from_label(&normalized);
             let prefix = format!("{icon} ");
             let chunks = wrap_str(text, content_width);
+            let last_chunk = chunks.len() - 1;
             for (ci, chunk) in chunks.iter().enumerate() {
                 if ci == 0 {
                     out.push(Line::from(vec![
@@ -1057,20 +1059,30 @@ fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: us
                         Span::styled(chunk.clone(), style),
                     ]));
                 } else {
-                    // Wrapped continuation of the first line: indent 3 spaces.
+                    let marker = if ci == last_chunk && vi == last_visible_idx {
+                        " ╰ "
+                    } else {
+                        " │ "
+                    };
                     out.push(Line::from(vec![
-                        Span::styled("   ", style),
+                        Span::styled(marker, style),
                         Span::styled(chunk.clone(), style),
                     ]));
                 }
             }
         } else {
-            // Subsequent logical lines (multiline labels): indent 3 spaces.
+            // Subsequent logical lines (multiline labels).
             let chunks = wrap_str(&normalized, content_width);
-            for chunk in chunks {
+            let last_chunk = chunks.len() - 1;
+            for (ci, chunk) in chunks.iter().enumerate() {
+                let marker = if ci == last_chunk && vi == last_visible_idx {
+                    " ╰ "
+                } else {
+                    " │ "
+                };
                 out.push(Line::from(vec![
-                    Span::styled("   ", style),
-                    Span::styled(chunk, style),
+                    Span::styled(marker, style),
+                    Span::styled(chunk.clone(), style),
                 ]));
             }
         }
@@ -1091,6 +1103,7 @@ fn append_message_colored_dim(
     let segments: Vec<&str> = content.split('\n').collect();
     let visible = visible_segments(&segments);
     let content_width = width.saturating_sub(3).max(1);
+    let last_visible_idx = visible.len() - 1;
 
     for (vi, &seg_idx) in visible.iter().enumerate() {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
@@ -1099,6 +1112,7 @@ fn append_message_colored_dim(
             let (icon, text) = tool_presentation::split_icon_from_label(&normalized);
             let prefix = format!("{icon} ");
             let chunks = wrap_str(text, content_width);
+            let last_chunk = chunks.len() - 1;
             for (ci, chunk) in chunks.iter().enumerate() {
                 if ci == 0 {
                     out.push(Line::from(vec![
@@ -1106,18 +1120,29 @@ fn append_message_colored_dim(
                         Span::styled(chunk.clone(), style),
                     ]));
                 } else {
+                    let marker = if ci == last_chunk && vi == last_visible_idx {
+                        " ╰ "
+                    } else {
+                        " │ "
+                    };
                     out.push(Line::from(vec![
-                        Span::styled("   ", style),
+                        Span::styled(marker, style),
                         Span::styled(chunk.clone(), style),
                     ]));
                 }
             }
         } else {
             let chunks = wrap_str(&normalized, content_width);
-            for chunk in chunks {
+            let last_chunk = chunks.len() - 1;
+            for (ci, chunk) in chunks.iter().enumerate() {
+                let marker = if ci == last_chunk && vi == last_visible_idx {
+                    " ╰ "
+                } else {
+                    " │ "
+                };
                 out.push(Line::from(vec![
-                    Span::styled("   ", style),
-                    Span::styled(chunk, style),
+                    Span::styled(marker, style),
+                    Span::styled(chunk.clone(), style),
                 ]));
             }
         }

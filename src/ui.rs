@@ -1252,7 +1252,7 @@ mod tests {
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            rendered.contains("💻 echo one\n   echo two\n   echo three"),
+            rendered.contains("💻 echo one\n │ echo two\n ╰ echo three"),
             "{rendered}"
         );
     }
@@ -1275,7 +1275,7 @@ mod tests {
         );
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            rendered.contains("💻 l1\n   l2\n   l3\n   l4\n   l5\n   … 6 total lines"),
+            rendered.contains("💻 l1\n │ l2\n │ l3\n │ l4\n │ l5\n ╰ … 6 total lines"),
             "{rendered}"
         );
         assert!(!rendered.contains("l6"), "{rendered}");
