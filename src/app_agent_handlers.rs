@@ -152,6 +152,7 @@ impl App {
     }
 
     fn on_tool_call_intent(&mut self, id: String, name: String, streaming_field: Option<String>) {
+        self.agent_turn.record_output("tool_call_intent");
         self.session.live_turn.assistant_phase = AssistantPhase::Provisional;
         // Create a live entry with no args yet — partial args will stream in.
         self.session.live_turn.tool_entries.push(LiveToolEntry {
@@ -167,6 +168,9 @@ impl App {
     }
 
     fn on_tool_call_args_delta(&mut self, id: String, partial_json: String) {
+        if !partial_json.trim().is_empty() {
+            self.agent_turn.record_output("tool_call_args_delta");
+        }
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.partial_args.push_str(&partial_json);
             if let Ok(completed) = jawohl::complete_json(&entry.partial_args)
@@ -275,6 +279,9 @@ impl App {
     }
 
     fn on_tool_output_chunk(&mut self, id: String, chunk: String) {
+        if !chunk.trim().is_empty() {
+            self.agent_turn.record_output("tool_output_chunk");
+        }
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.running_output.push_str(&chunk);
         }
