@@ -139,7 +139,13 @@ pub(super) fn build_log_lines(
                         let skip = wrapped.len().saturating_sub(5);
                         wrapped[skip..].join("\n")
                     };
-                    append_message_dim(&mut lines, "🧠", &thinking_display, "", width);
+                    append_message_colored(
+                        &mut lines,
+                        &format!("🧠 {}", thinking_display),
+                        width,
+                        Color::DarkGray,
+                        false,
+                    );
                 }
 
                 let effective_phase = match msg.assistant_phase {
@@ -350,10 +356,10 @@ fn render_tool_call(
         if !text.is_empty() {
             append_message_colored_dim_with_icon(out, icon, text, width, color);
         } else {
-            append_message_colored_dim(out, &intent_label, width, color);
+            append_message_colored(out, &intent_label, width, color, true);
         }
     } else {
-        append_message_colored(out, &intent_label, width, color);
+        append_message_colored(out, &intent_label, width, color, false);
     }
 
     // Show streaming write_file intent body.
@@ -1055,8 +1061,17 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
-fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: usize, color: Color) {
-    let style = Style::default().fg(color);
+fn append_message_colored(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    color: Color,
+    dim: bool,
+) {
+    let mut style = Style::default().fg(color);
+    if dim {
+        style = style.add_modifier(Modifier::ITALIC | Modifier::DIM);
+    }
     let segments: Vec<&str> = content.split('\n').collect();
     let visible = visible_segments(&segments);
     let content_width = width.saturating_sub(3).max(1);
@@ -1108,67 +1123,7 @@ fn append_message_colored(out: &mut Vec<Line<'static>>, content: &str, width: us
     }
 }
 
-/// Like `append_message_colored` but adds italic + dim modifiers to indicate
-/// a placeholder (the tool's target argument has not yet streamed in).
-fn append_message_colored_dim(
-    out: &mut Vec<Line<'static>>,
-    content: &str,
-    width: usize,
-    color: Color,
-) {
-    let style = Style::default()
-        .fg(color)
-        .add_modifier(Modifier::ITALIC | Modifier::DIM);
-    let segments: Vec<&str> = content.split('\n').collect();
-    let visible = visible_segments(&segments);
-    let content_width = width.saturating_sub(3).max(1);
-    let last_visible_idx = visible.len() - 1;
-
-    for (vi, &seg_idx) in visible.iter().enumerate() {
-        let normalized = normalize_terminal_segment(segments[seg_idx], 0);
-
-        if vi == 0 {
-            let (icon, text) = tool_presentation::split_icon_from_label(&normalized);
-            let prefix = format!("{icon} ");
-            let chunks = wrap_str(text, content_width);
-            let last_chunk = chunks.len() - 1;
-            for (ci, chunk) in chunks.iter().enumerate() {
-                if ci == 0 {
-                    out.push(Line::from(vec![
-                        Span::styled(prefix.clone(), style),
-                        Span::styled(chunk.clone(), style),
-                    ]));
-                } else {
-                    let marker = if ci == last_chunk && vi == last_visible_idx {
-                        " ╰ "
-                    } else {
-                        " │ "
-                    };
-                    out.push(Line::from(vec![
-                        Span::styled(marker, style),
-                        Span::styled(chunk.clone(), style),
-                    ]));
-                }
-            }
-        } else {
-            let chunks = wrap_str(&normalized, content_width);
-            let last_chunk = chunks.len() - 1;
-            for (ci, chunk) in chunks.iter().enumerate() {
-                let marker = if ci == last_chunk && vi == last_visible_idx {
-                    " ╰ "
-                } else {
-                    " │ "
-                };
-                out.push(Line::from(vec![
-                    Span::styled(marker, style),
-                    Span::styled(chunk.clone(), style),
-                ]));
-            }
-        }
-    }
-}
-
-/// Like `append_message_colored_dim` but renders an icon prefix without
+/// Like `append_message_colored` with dim=true but renders an icon prefix without
 /// italic/dim so the emoji stays visually clean while the placeholder text
 /// is still marked as provisional.  Content aligned to column 3.
 fn append_message_colored_dim_with_icon(
@@ -1230,48 +1185,6 @@ pub(super) fn append_tool_result_block(
                 Span::styled(" │ ", marker_style),
                 Span::styled(chunk, text_style),
             ]));
-        }
-    }
-}
-
-fn append_message_dim(
-    out: &mut Vec<Line<'static>>,
-    icon: &str,
-    text: &str,
-    suffix: &'static str,
-    width: usize,
-) {
-    let dim_style = Style::default().fg(Color::DarkGray);
-    let segments: Vec<&str> = text.split('\n').collect();
-    let visible = visible_segments(&segments);
-    let last_visible = visible.last().copied();
-
-    for (vi, &seg_idx) in visible.iter().enumerate() {
-        let segment = segments[seg_idx];
-        let is_first_visible = vi == 0;
-        let is_last_visible_seg = Some(seg_idx) == last_visible;
-        let normalized = normalize_terminal_segment(segment, 0);
-        let content_width = width.saturating_sub(3).max(1);
-        let chunks = wrap_str(&normalized, content_width);
-        let last_chunk = chunks.len() - 1;
-
-        for (chunk_idx, chunk) in chunks.iter().enumerate() {
-            let is_last_chunk = chunk_idx == last_chunk;
-            let show_suffix = !suffix.is_empty() && is_last_visible_seg && is_last_chunk;
-
-            let mut spans: Vec<Span<'static>> = if is_first_visible && chunk_idx == 0 {
-                vec![Span::styled(format!("{icon} {chunk}"), dim_style)]
-            } else {
-                vec![
-                    Span::styled(" │ ", dim_style), // margin marker for continuation
-                    Span::styled(chunk.clone(), dim_style),
-                ]
-            };
-
-            if show_suffix {
-                spans.push(Span::styled(suffix, dim_style));
-            }
-            out.push(Line::from(spans));
         }
     }
 }
