@@ -196,7 +196,11 @@ impl App {
 
     /// Advance the throbber animation frame.  Called on every UI tick.
     pub fn tick(&mut self) {
-        self.agent_turn.advance_tick();
+        if self.login.refresh_in_progress {
+            self.agent_turn.tick = self.agent_turn.tick.wrapping_add(1);
+        } else {
+            self.agent_turn.advance_tick();
+        }
     }
 
     /// Record a model/provider change in the event log.
@@ -230,9 +234,13 @@ impl App {
     ///   throbber hidden — something is actively appearing on screen.
     /// - Machine working **silently** (streaming, no visible output for a short interval):
     ///   throbber visible — signals that work is in progress.
+    /// - Token refresh in progress: throbber visible regardless of turn state,
+    ///   so the user sees activity during the ~500ms refresh window.
     pub fn throbber_visible(&self) -> bool {
-        self.agent_turn
-            .throbber_visible(self.has_pending_ask() || self.ask_user_freeform_mode())
+        self.login.refresh_in_progress
+            || self
+                .agent_turn
+                .throbber_visible(self.has_pending_ask() || self.ask_user_freeform_mode())
     }
 
     /// Returns true when provider/system status text should be visible.

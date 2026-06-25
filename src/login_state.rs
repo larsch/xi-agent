@@ -319,6 +319,10 @@ impl LoginState {
                     self.needs_rebuild = true;
                 } else {
                     self.retry_after_refresh = false;
+                    // Still signal a rebuild so the event loop exits and the
+                    // error notice becomes visible — without this, the UI
+                    // would be stuck if the refresh happened during a turn.
+                    self.needs_rebuild = true;
                     session.live_turn.notices.push(Message::assistant(format!(
                         "[token refresh failed for {provider}: {message}. Run /login {provider}]"
                     )));

@@ -364,6 +364,7 @@ impl App {
     }
 
     fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
+        self.agent_turn.end();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;
@@ -381,19 +382,17 @@ impl App {
                 self.login.auth_retry_budget
             );
             self.login.auth_retry_budget -= 1;
-            // Keep the turn in Waiting state — the throbber should stay visible
-            // while the token refresh is in progress and the turn is about to retry.
-            // Discard pending events and in-flight turn state — the turn will be retried.
+            // Discard pending events and in-flight turn state — the turn will be
+            // retried after the token refresh completes. The throbber stays
+            // visible via login.refresh_in_progress while the refresh is in flight.
             self.session.pending_turn_events.clear();
             self.session.live_turn.clear_turn();
         } else {
-            self.agent_turn.end();
             let provider_label = active_provider_display_name(
                 &self.provider.current_instance.id,
                 &self.provider.instances,
             );
             let rendered = format_provider_error_for_display(&provider_label, &e);
-            self.agent_turn.set_status(None);
             // Discard any partially accumulated assistant/tool events
             // and append a TurnError instead. Provider errors are already
             // shown in the output area via the committed TurnError, so do not

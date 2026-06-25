@@ -729,9 +729,9 @@ async fn run(
             // ── Throbber animation tick ───────────────────────────────────────
             _ = tick_interval.tick() => {
                 app.tick();
-                // Only mark dirty when the throbber is actually animating;
-                // when idle the tick fires but nothing visible changes.
-                if app.streaming() {
+                // Redraw when the turn is active or when a token refresh is in
+                // flight — the throbber should animate in both cases.
+                if app.streaming() || app.login.refresh_in_progress {
                     needs_redraw = true;
                 }
             }
