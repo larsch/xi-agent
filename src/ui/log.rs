@@ -137,7 +137,19 @@ pub(super) fn build_log_lines(
                             }
                         }
                         let skip = wrapped.len().saturating_sub(5);
-                        wrapped[skip..].join("\n")
+                        let shown = &wrapped[skip..];
+                        // Trim leading and trailing empty wrapped lines so the
+                        // first and last visible thinking lines are never blank.
+                        let trim_start = shown
+                            .iter()
+                            .position(|s| !s.is_empty())
+                            .unwrap_or(shown.len());
+                        let trim_end = shown
+                            .iter()
+                            .rposition(|s| !s.is_empty())
+                            .map(|i| i + 1)
+                            .unwrap_or(trim_start);
+                        shown[trim_start..trim_end].join("\n")
                     };
                     // Thinking is always a complete, contiguous block that
                     // finishes before the response starts — across all providers.
@@ -727,7 +739,21 @@ fn render_head_truncated_body(
         max_lines
     };
     let truncated = !full_output && total_wrapped > max_lines;
-    let shown = &wrapped[..limit.min(total_wrapped)];
+    let mut shown = &wrapped[..limit.min(total_wrapped)];
+
+    // Trim leading and trailing empty wrapped lines so the first and last
+    // visible body lines are never blank.  Empty lines between content are
+    // preserved (they represent actual blank lines in the output).
+    let trim_start = shown
+        .iter()
+        .position(|wl| !wl.text.is_empty())
+        .unwrap_or(shown.len());
+    let trim_end = shown
+        .iter()
+        .rposition(|wl| !wl.text.is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(trim_start);
+    shown = &shown[trim_start..trim_end];
 
     for wl in shown {
         let is_first_logical = wl.logical_idx == 0 && wl.is_first_chunk;
@@ -797,7 +823,21 @@ fn render_tail_truncated_body(
     } else {
         total_wrapped - max_lines
     };
-    let shown = &wrapped[start..];
+    let mut shown = &wrapped[start..];
+
+    // Trim leading and trailing empty wrapped lines so the first and last
+    // visible body lines are never blank.  Empty lines between content are
+    // preserved (they represent actual blank lines in the output).
+    let trim_start = shown
+        .iter()
+        .position(|wl| !wl.text.is_empty())
+        .unwrap_or(shown.len());
+    let trim_end = shown
+        .iter()
+        .rposition(|wl| !wl.text.is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(trim_start);
+    shown = &shown[trim_start..trim_end];
 
     for wl in shown {
         // `is_first_logical` is true only when the first wrapped chunk of the

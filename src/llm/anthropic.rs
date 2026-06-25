@@ -141,6 +141,7 @@ impl AnthropicProvider {
         }
     }
 
+    #[allow(unused_assignments)] // _cache_creation_tokens captured for future cost-reporting
     fn stream_inner(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>) -> LlmStream {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let model = self.model.clone();
