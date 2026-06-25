@@ -1,6 +1,9 @@
 # Build output
 /target/
 
+# User-specific Cargo config
+.cargo/
+
 # Cargo lock file (keep for binaries, remove for libraries)
 # Cargo.lock
 
