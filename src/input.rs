@@ -60,22 +60,6 @@ pub(crate) enum KeyDispatch {
 #[cfg(windows)]
 const PASTE_ENTER_THRESHOLD_MS: Option<u128> = Some(10);
 
-// ── Clipboard (Windows only) ─────────────────────────────────────────────────
-
-/// Read text from the system clipboard, or return `None` on error.
-///
-/// On Windows, terminals that do not support bracketed paste (e.g. conhost)
-/// deliver paste events as individual key records — including `VK_RETURN` for
-/// every newline — so `Event::Paste` is never emitted and newlines in pasted
-/// text inadvertently submit the input.  Reading the clipboard directly and
-/// calling `insert_str` sidesteps the Win32 console input path entirely.
-#[cfg(windows)]
-fn read_clipboard_text() -> Option<String> {
-    arboard::Clipboard::new()
-        .ok()
-        .and_then(|mut cb| cb.get_text().ok())
-}
-
 // ── Helper functions ──────────────────────────────────────────────────────────
 
 pub(crate) fn normalize_paste_text(text: &str) -> String {
@@ -287,17 +271,6 @@ fn handle_global_key_shortcuts(
         && !app.selection.active
     {
         app.resume_latest_for_current_cwd();
-        return KeyDispatch::Continue;
-    }
-
-    #[cfg(windows)]
-    if key.code == KeyCode::Char('v')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !app.login.active
-    {
-        if let Some(text) = read_clipboard_text() {
-            apply_paste(app, _provider, &text);
-        }
         return KeyDispatch::Continue;
     }
 

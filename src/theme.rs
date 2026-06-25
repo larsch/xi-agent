@@ -859,7 +859,6 @@ impl Default for StatusTheme {
             },
             idle: StyleSpec {
                 fg: Some(Color::Rgb(160, 160, 180)),
-                italic: Some(true),
                 ..Default::default()
             },
         }

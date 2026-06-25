@@ -31,6 +31,7 @@ mod app_interaction;
 mod app_submission;
 mod ask_user_state;
 mod auth;
+mod clipboard;
 mod commands;
 mod completion;
 mod completion_state;

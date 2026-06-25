@@ -1155,8 +1155,17 @@ impl App {
             return;
         }
 
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            let _ = cb.set_text(text);
+        match crate::clipboard::set_clipboard(&text) {
+            Ok(()) => {
+                log::debug!("copied {} bytes to clipboard via OSC 52", text.len());
+                self.agent_turn
+                    .set_status(Some(StreamingStatus::CompletedMessage(
+                        "📋 Copied to clipboard.".to_string(),
+                    )));
+            }
+            Err(e) => {
+                log::debug!("clipboard copy failed: {e}");
+            }
         }
     }
 }

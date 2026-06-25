@@ -18,7 +18,7 @@ path = "src/main.rs"
 anyhow = "1.0.102"
 clap = { version = "4", features = ["derive"] }
 async-stream = "0.3"
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream", "osc52"] }
 futures-util = "0.3.32"
 ratatui = "0.30"
 reqwest = { version = "0.13.2", features = ["json", "stream"] }
@@ -39,7 +39,6 @@ getrandom = "0.2"
 urlencoding = "2.1"
 log = { version = "0.4", features = ["std"] }
 toml = { version = "0.8", features = ["parse"] }
-arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 pulldown-cmark = "0.13"
 ammonia = "4.1"
 serde_path_to_error = "0.1.20"

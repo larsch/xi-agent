@@ -46,14 +46,6 @@ pub struct LoginState {
     pub(crate) retry_model_fetch_after_refresh: bool,
     pub(crate) auth_retry_budget: u8,
     pub(crate) cancel: Option<Arc<AtomicBool>>,
-    /// Persistent clipboard instance used during the login flow.
-    ///
-    /// On Linux the clipboard is owned by the process: dropping the
-    /// `arboard::Clipboard` instance releases ownership and the text
-    /// disappears from other applications.  We therefore keep it alive for
-    /// the entire duration of the login panel and only drop it once login
-    /// finishes.
-    pub(crate) clipboard: Option<arboard::Clipboard>,
 }
 
 impl LoginState {
@@ -71,7 +63,6 @@ impl LoginState {
             retry_model_fetch_after_refresh: false,
             auth_retry_budget: 0,
             cancel: None,
-            clipboard: None,
         }
     }
 
@@ -89,24 +80,9 @@ impl LoginState {
         }
     }
 
-    /// Copy `text` to the clipboard using the persistent `self.clipboard`
-    /// instance. Lazily initialises it on first call. Returns an error
-    /// string on failure.
+    /// Copy `text` to the system clipboard via OSC 52.
     pub fn clipboard_set(&mut self, text: String) -> Result<(), String> {
-        // Lazily open the clipboard and keep it alive for the whole login
-        // session. On Linux the clipboard is owner-based: dropping the
-        // Clipboard instance clears the content for other applications.
-        if self.clipboard.is_none() {
-            match arboard::Clipboard::new() {
-                Ok(cb) => self.clipboard = Some(cb),
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-        self.clipboard
-            .as_mut()
-            .unwrap()
-            .set_text(text)
-            .map_err(|e| e.to_string())
+        crate::clipboard::set_clipboard(&text)
     }
 
     // ── Login flow actions ────────────────────────────────────────────────────
@@ -337,9 +313,6 @@ impl LoginState {
                 self.cancel = None;
                 self.auth_flow = None;
                 selection.reset();
-                // Drop the clipboard instance; on Linux this releases clipboard
-                // ownership so the content is no longer served by this process.
-                self.clipboard = None;
             }
         }
     }
@@ -370,7 +343,6 @@ mod tests {
         assert!(!s.retry_model_fetch_after_refresh);
         assert_eq!(s.auth_retry_budget, 0);
         assert!(s.cancel.is_none());
-        assert!(s.clipboard.is_none());
     }
 
     #[test]
