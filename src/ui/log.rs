@@ -139,12 +139,15 @@ pub(super) fn build_log_lines(
                         let skip = wrapped.len().saturating_sub(5);
                         wrapped[skip..].join("\n")
                     };
+                    // Thinking is always a complete, contiguous block that
+                    // finishes before the response starts — across all providers.
                     append_message_colored(
                         &mut lines,
                         &format!("🧠 {}", thinking_display),
                         width,
                         Color::DarkGray,
                         false,
+                        is_streaming_last && !has_answer,
                     );
                 }
 
@@ -356,10 +359,10 @@ fn render_tool_call(
         if !text.is_empty() {
             append_message_colored_dim_with_icon(out, icon, text, width, color);
         } else {
-            append_message_colored(out, &intent_label, width, color, true);
+            append_message_colored(out, &intent_label, width, color, true, false);
         }
     } else {
-        append_message_colored(out, &intent_label, width, color, false);
+        append_message_colored(out, &intent_label, width, color, false, false);
     }
 
     // Show streaming write_file intent body.
@@ -1067,6 +1070,7 @@ fn append_message_colored(
     width: usize,
     color: Color,
     dim: bool,
+    streaming: bool,
 ) {
     let mut style = Style::default().fg(color);
     if dim {
@@ -1076,6 +1080,7 @@ fn append_message_colored(
     let visible = visible_segments(&segments);
     let content_width = width.saturating_sub(3).max(1);
     let last_visible_idx = visible.len() - 1;
+    let ending = if streaming { " ┆ " } else { " ╰ " };
 
     for (vi, &seg_idx) in visible.iter().enumerate() {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);
@@ -1094,7 +1099,7 @@ fn append_message_colored(
                     ]));
                 } else {
                     let marker = if ci == last_chunk && vi == last_visible_idx {
-                        " ╰ "
+                        ending
                     } else {
                         " │ "
                     };
@@ -1110,7 +1115,7 @@ fn append_message_colored(
             let last_chunk = chunks.len() - 1;
             for (ci, chunk) in chunks.iter().enumerate() {
                 let marker = if ci == last_chunk && vi == last_visible_idx {
-                    " ╰ "
+                    ending
                 } else {
                     " │ "
                 };
