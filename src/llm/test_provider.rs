@@ -22,6 +22,11 @@ pub struct TestProvider {
     write_edit_step: Arc<AtomicU8>,
     /// Temp file path used by the write-edit sequence.
     write_edit_path: Arc<std::sync::Mutex<String>>,
+    /// Tracks the current step for the long-lines sequence.
+    /// 0 = idle, 1 = waiting for write result, 2 = waiting for grep result, 3 = done.
+    long_lines_step: Arc<AtomicU8>,
+    /// Temp file path used by the long-lines sequence.
+    long_lines_path: Arc<std::sync::Mutex<String>>,
 }
 
 impl TestProvider {
@@ -31,6 +36,8 @@ impl TestProvider {
             sequence_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             write_edit_step: Arc::new(AtomicU8::new(0)),
             write_edit_path: Arc::new(std::sync::Mutex::new(String::new())),
+            long_lines_step: Arc::new(AtomicU8::new(0)),
+            long_lines_path: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 }
@@ -234,6 +241,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 |---------|-------------|
 | `write` | Issue a `write_file` tool call to the system temp directory |
 | `write-edit` | Stream `write_file` then `edit_file` (~4–8 chars/chunk at 20 chunks/sec); edit uses 6 lines of context each side |
+| `long-lines` | 3-step sequence: write 10 very long lines (~200 chars each), grep all, read back (exercises wrapped-line limit in shell and read_file output) |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
 | `read-skill [name]` | Issue a `read_skill` tool call (defaults to `edit_skill` if no name given) |
@@ -335,6 +343,21 @@ fn test_temp_path() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// Fixture with 10 very long lines for the `long-lines` command.
+/// Each line is ~400+ characters (wraps to 6+ visual lines at 80 cols).
+const LONG_LINES_FIXTURE: &str = "\
+line 01: The quick brown fox jumps over the lazy dog repeatedly without stopping for a break while the sun sets slowly over the horizon and the birds return to their nests for the evening chorus while the crickets begin their nightly symphony beneath the ancient oak tree that has stood watch over the meadow for more than three hundred years\n\
+line 02: Pack my box with five dozen liquor jugs and then carefully arrange them in alphabetical order by brand name while simultaneously balancing a tray of champagne flutes on my head and reciting the complete works of Shakespeare from memory without missing a single syllable or forgetting where I left my car keys in the parking lot behind the theatre\n\
+line 03: How vexingly quick daft zebras jump over fences made of bamboo and discarded typewriters that were once used by famous authors who wrote about the human condition in novels so long and complex that scholars still debate their true meaning decades after publication\n\
+line 04: The five boxing wizards jump quickly through hoops of fire while reciting Shakespearean sonnets backwards in a language that has not been spoken for centuries except by the ancient order of librarians who guard the secrets of the universe in an underground archive protected by puzzles and riddles\n\
+line 05: Sphinx of black quartz judge my vow and render a verdict based on the ancient laws of the desert kingdom where camels roam freely among the pyramids and oases while merchants trade spices and silk under the watchful eye of the pharaoh who demands tribute from every traveler\n\
+line 06: Waltz nymph for quick jigs vex bud and then tango with the penguins who have been training for this dance competition since the last ice age ended and the glaciers retreated to reveal the hidden ballroom carved from crystal deep within the frozen mountains\n\
+line 07: Blowzy red-haired vixens blow kisses to the crowd while juggling chainsaws and reciting the digits of pi to a thousand decimal places without error even as the marching band parades through the center ring playing a medley of sea shanties arranged for brass instruments\n\
+line 08: Jumpy halfback vows to fix the broken scoreboard using only a roll of duct tape and a paperclip while the stadium erupts in chaos around the final play of the championship game with millions watching from home and the commentators losing their minds\n\
+line 09: Plucky quarterback who zaps defenders with lightning bolts conjured from ancient runes found in a cave beneath the fifty-yard line during halftime when the marching band was performing and nobody noticed the strange glowing symbols on the turf\n\
+line 10: quickly foxing the dizzy dog around the mulberry bush while the monkey chases the weasel through a labyrinth of mirrors and existential questions that would make even the most confident philosopher stop and reconsider everything they thought they knew about reality\n\
+";
 
 /// Short fixture content (≤8 lines) for `read` command.
 const READ_SHORT_FIXTURE: &str = "\
@@ -553,6 +576,41 @@ context line 12: jigs vex bud\n\
     )
 }
 
+/// Build a write_file tool call for the long-lines sequence's write step.
+fn long_lines_write_stream(path: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "write_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "write_file".to_string(),
+            args: serde_json::json!({
+                "path": path,
+                "content": LONG_LINES_FIXTURE,
+            }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Build a read_file tool call for the long-lines sequence's read step.
+fn long_lines_read_stream(path: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({ "path": path }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
 /// Build a tool call stream for a shell tool (bash / powershell / cmd).
 fn shell_tool_stream(tool_name: String, command: String) -> LlmStream {
     Box::pin(stream! {
@@ -690,6 +748,44 @@ impl TestProvider {
             }
         }
     }
+
+    /// Drive the long-lines scripted sequence.
+    ///
+    /// Steps:
+    ///   1 → write_file with 10 very long lines (~200 chars each)
+    ///   2 → bash: grep for a pattern matching all lines
+    ///   3 → read_file the temp file
+    ///   4 → emit summary, reset to idle
+    fn advance_long_lines(&self, step: u8, _tool_result: &str) -> LlmStream {
+        let seq = Arc::clone(&self.long_lines_step);
+        let path_guard = Arc::clone(&self.long_lines_path);
+        match step {
+            1 => {
+                seq.store(2, Ordering::SeqCst);
+                let path = path_guard.lock().unwrap().clone();
+                long_lines_write_stream(path)
+            }
+            2 => {
+                seq.store(3, Ordering::SeqCst);
+                let path = path_guard.lock().unwrap().clone();
+                // grep for a pattern that matches every line (they all contain "the").
+                shell_tool_stream("bash".to_string(), format!("grep -n 'the' '{path}'"))
+            }
+            3 => {
+                seq.store(4, Ordering::SeqCst);
+                let path = path_guard.lock().unwrap().clone();
+                long_lines_read_stream(path)
+            }
+            _ => {
+                seq.store(0, Ordering::SeqCst);
+                stream_owned(
+                    "Long-lines sequence complete: wrote 10 very long lines, grepped them all, and read the file back.\n\
+                     Scroll up to verify the wrapped-line limit is enforced in both shell output (grep) and read_file output.\n"
+                        .to_string(),
+                )
+            }
+        }
+    }
 }
 
 impl super::LlmProvider for TestProvider {
@@ -720,6 +816,12 @@ impl super::LlmProvider for TestProvider {
                     "write-edit sequence complete: wrote the file and edited it with 6 lines of context on each side.\n"
                         .to_string(),
                 );
+            }
+
+            // Check long-lines sequence.
+            let ll_step = self.long_lines_step.load(Ordering::SeqCst);
+            if ll_step > 0 {
+                return self.advance_long_lines(ll_step, &last.content.clone());
             }
 
             let step = self.sequence_step.load(Ordering::SeqCst);
@@ -933,6 +1035,24 @@ impl super::LlmProvider for TestProvider {
                 *self.write_edit_path.lock().unwrap() = path.clone();
                 self.write_edit_step.store(1, Ordering::SeqCst);
                 write_edit_write_stream(path)
+            }
+
+            "long-lines" => {
+                // 3-step sequence: write 10 very long lines, grep all, read back.
+                let fname = format!(
+                    "xi-test-long-lines-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0)
+                );
+                let path = std::env::temp_dir()
+                    .join(fname)
+                    .to_string_lossy()
+                    .into_owned();
+                *self.long_lines_path.lock().unwrap() = path.clone();
+                self.long_lines_step.store(1, Ordering::SeqCst);
+                self.advance_long_lines(1, "")
             }
 
             "read" => read_file_stream(READ_SHORT_FIXTURE),

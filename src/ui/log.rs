@@ -663,11 +663,45 @@ fn render_tool_result(
 
 // ── Body rendering helpers ────────────────────────────────────────────────────
 
-/// Render head-truncated body: show first `max_lines` lines, then truncation marker.
+/// A single wrapped (visual) line produced from a logical line of content.
+struct WrappedLine {
+    text: String,
+    /// Which logical line this chunk belongs to (0-indexed).
+    logical_idx: usize,
+    /// First wrapped chunk of its logical line.
+    is_first_chunk: bool,
+    /// Last wrapped chunk of its logical line.
+    is_last_chunk: bool,
+}
+
+/// Wrap every logical line in `content` to `width` columns, returning a flat
+/// list of `WrappedLine` entries with logical-line metadata.
+fn wrap_content(content: &str, width: usize) -> Vec<WrappedLine> {
+    let mut out: Vec<WrappedLine> = Vec::new();
+    for (li, line) in content.lines().enumerate() {
+        let normalized = normalize_terminal_segment(line, 3);
+        let chunks = wrap_str(&normalized, width);
+        let chunk_count = chunks.len();
+        for (ci, chunk) in chunks.into_iter().enumerate() {
+            out.push(WrappedLine {
+                text: chunk,
+                logical_idx: li,
+                is_first_chunk: ci == 0,
+                is_last_chunk: ci == chunk_count - 1,
+            });
+        }
+    }
+    out
+}
+
+/// Render head-truncated body: show first `max_lines` wrapped lines, then truncation marker.
+///
+/// The limit is enforced on wrapped (visual) lines, not logical lines, so very
+/// long logical lines that wrap to many visual lines are still bounded.
 ///
 /// The first visible content line uses `╭` (the true start is shown).
 /// The last content line uses `╰` (confirmed) or `┆` (streaming) when the body
-/// is not truncated; truncated bodies end with the `┆` truncation marker instead.
+/// is not truncated; truncated bodies end with a truncation marker.
 /// A single-line body uses `·` (self-contained, no continuation implied).
 /// Wrapped chunks of the same logical line continue with `│`.
 fn render_head_truncated_body(
@@ -683,50 +717,51 @@ fn render_head_truncated_body(
         return;
     }
     let content_width = width.saturating_sub(3).max(1);
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-    let limit = if full_output { total } else { max_lines };
-    let truncated = !full_output && total > max_lines;
-    let shown: Vec<&&str> = lines.iter().take(limit).collect();
-    let shown_count = shown.len();
+    let total_logical = content.lines().count();
+    let wrapped = wrap_content(content, content_width);
+    let total_wrapped = wrapped.len();
 
-    for (i, line) in shown.iter().enumerate() {
-        let is_first_logical = i == 0;
-        let is_last_logical = i == shown_count - 1 && !truncated;
+    let limit = if full_output {
+        total_wrapped
+    } else {
+        max_lines
+    };
+    let truncated = !full_output && total_wrapped > max_lines;
+    let shown = &wrapped[..limit.min(total_wrapped)];
 
-        let normalized = normalize_terminal_segment(line, 3);
-        let chunks = wrap_str(&normalized, content_width);
-        let chunk_count = chunks.len();
+    for wl in shown {
+        let is_first_logical = wl.logical_idx == 0 && wl.is_first_chunk;
+        // We say the last logical line is visible only when all wrapped chunks
+        // through the very end are displayed (no truncation).
+        let is_last_logical = !truncated && wl.logical_idx + 1 == total_logical && wl.is_last_chunk;
 
-        for (ci, chunk) in chunks.into_iter().enumerate() {
-            let is_first_chunk = ci == 0;
-            let is_last_chunk = ci == chunk_count - 1;
+        let marker = if is_last_logical && is_streaming {
+            '┆'
+        } else if is_first_logical && is_last_logical {
+            '·'
+        } else if is_last_logical {
+            '╰'
+        } else if is_first_logical && wl.is_first_chunk {
+            '╭'
+        } else {
+            '│'
+        };
 
-            let marker = if is_last_logical && is_last_chunk && is_streaming {
-                '┆'
-            } else if is_first_logical && is_last_logical {
-                '·'
-            } else if is_last_logical && is_last_chunk {
-                '╰'
-            } else if is_first_logical && is_first_chunk {
-                '╭'
-            } else {
-                '│'
-            };
-
-            out.push(tool_result_line(marker, chunk, color));
-        }
+        out.push(tool_result_line(marker, &wl.text, color));
     }
 
     if truncated {
         out.push(placeholder_result_line(
-            format!("… {total} total lines"),
+            format!("… {total_logical} total lines"),
             color,
         ));
     }
 }
 
-/// Render tail-truncated body: show truncation marker then last `max_lines` lines.
+/// Render tail-truncated body: show truncation marker then last `max_lines` wrapped lines.
+///
+/// The limit is enforced on wrapped (visual) lines, not logical lines, so very
+/// long logical lines that wrap to many visual lines are still bounded.
 ///
 /// When a truncation marker precedes, the first visible content line uses `│`
 /// (the true start is hidden).  Otherwise it uses `╭`.  The last content line
@@ -746,54 +781,54 @@ fn render_tail_truncated_body(
         return;
     }
     let content_width = width.saturating_sub(3).max(1);
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-    let _unused_limit = if full_output { total } else { max_lines };
-    let truncated = !full_output && total > max_lines;
+    let total_logical = content.lines().count();
+    let wrapped = wrap_content(content, content_width);
+    let total_wrapped = wrapped.len();
+
+    let truncated = !full_output && total_wrapped > max_lines;
     if truncated {
         out.push(placeholder_result_line(
-            format!("… {total} total lines"),
+            format!("… {total_logical} total lines"),
             color,
         ));
     }
-    let start = if full_output || total <= max_lines {
+    let start = if full_output || total_wrapped <= max_lines {
         0
     } else {
-        total - max_lines
+        total_wrapped - max_lines
     };
-    let shown = &lines[start..];
-    let shown_count = shown.len();
+    let shown = &wrapped[start..];
 
-    for (i, line) in shown.iter().enumerate() {
-        let is_first_logical = i == 0 && !truncated;
-        let is_last_logical = i == shown_count - 1;
+    for wl in shown {
+        // `is_first_logical` is true only when the first wrapped chunk of the
+        // very first logical line is visible AND no truncation hides any
+        // earlier content.
+        let is_first_logical = !truncated && wl.logical_idx == 0 && wl.is_first_chunk;
+        // Tail-truncated always shows through the end, so the last logical
+        // line's last chunk marks the true end.
+        let is_last_logical = wl.logical_idx + 1 == total_logical && wl.is_last_chunk;
 
-        let normalized = normalize_terminal_segment(line, 3);
-        let chunks = wrap_str(&normalized, content_width);
-        let chunk_count = chunks.len();
+        let marker = if is_last_logical && is_streaming {
+            '┆'
+        } else if is_first_logical && is_last_logical {
+            '·'
+        } else if is_last_logical {
+            '╰'
+        } else if is_first_logical && wl.is_first_chunk {
+            '╭'
+        } else {
+            '│'
+        };
 
-        for (ci, chunk) in chunks.into_iter().enumerate() {
-            let is_first_chunk = ci == 0;
-            let is_last_chunk = ci == chunk_count - 1;
-
-            let marker = if is_last_logical && is_last_chunk && is_streaming {
-                '┆'
-            } else if is_first_logical && is_last_logical {
-                '·'
-            } else if is_last_logical && is_last_chunk {
-                '╰'
-            } else if is_first_logical && is_first_chunk {
-                '╭'
-            } else {
-                '│'
-            };
-
-            out.push(tool_result_line(marker, chunk, color));
-        }
+        out.push(tool_result_line(marker, &wl.text, color));
     }
 }
 
 /// Render a compact diff body for edit_file.
+///
+/// The per-side line limit is enforced on wrapped (visual) lines, not logical
+/// lines, so very long logical lines that wrap to many visual lines are still
+/// bounded.
 fn render_diff_body(
     out: &mut Vec<Line<'static>>,
     old_text: &str,
@@ -834,16 +869,6 @@ fn render_diff_body(
 
     let old_total = old_diff.len();
     let new_total = new_diff.len();
-    let old_limit = if full_output {
-        old_total
-    } else {
-        max_lines_per_side
-    };
-    let new_limit = if full_output {
-        new_total
-    } else {
-        max_lines_per_side
-    };
 
     let is_pure_addition = old_total == 0;
     let is_pure_removal = new_total == 0;
@@ -871,6 +896,39 @@ fn render_diff_body(
             }
         };
 
+    // Helper: render a slice of logical lines as wrapped lines, limiting at
+    // the wrapped level. Pushes rendered lines to `out`.
+    let render_diff_block = |out: &mut Vec<Line<'static>>, diff_lines: &[&str], color: Color| {
+        for line in diff_lines {
+            let normalized = normalize_terminal_segment(line, 3);
+            let chunks = wrap_str(&normalized, content_width);
+            for chunk in chunks {
+                out.push(tool_result_line('│', chunk, color));
+            }
+        }
+    };
+
+    // Helper: render a slice of logical lines with a wrapped-line limit.
+    // Stops once `max_wrapped` wrapped lines have been emitted.
+    let render_diff_block_limited =
+        |out: &mut Vec<Line<'static>>, diff_lines: &[&str], max_wrapped: usize, color: Color| {
+            let mut emitted = 0usize;
+            for line in diff_lines {
+                if emitted >= max_wrapped {
+                    break;
+                }
+                let normalized = normalize_terminal_segment(line, 3);
+                let chunks = wrap_str(&normalized, content_width);
+                for chunk in chunks {
+                    if emitted >= max_wrapped {
+                        break;
+                    }
+                    out.push(tool_result_line('│', chunk, color));
+                    emitted += 1;
+                }
+            }
+        };
+
     // Removed block (omit common-line placeholders when it's a pure addition).
     if old_total > 0 {
         if common_head > 0 && !is_pure_removal {
@@ -879,12 +937,10 @@ fn render_diff_body(
                 removed_color,
             ));
         }
-        for line in old_diff.iter().take(old_limit) {
-            let normalized = normalize_terminal_segment(line, 3);
-            let chunks = wrap_str(&normalized, content_width);
-            for chunk in chunks {
-                out.push(tool_result_line('│', chunk, removed_color));
-            }
+        if full_output {
+            render_diff_block(out, old_diff, removed_color);
+        } else {
+            render_diff_block_limited(out, old_diff, max_lines_per_side, removed_color);
         }
         let truncated = !full_output && old_total > max_lines_per_side;
         let total_filler = if truncated { old_total } else { 0 };
@@ -904,12 +960,10 @@ fn render_diff_body(
                 added_color,
             ));
         }
-        for line in new_diff.iter().take(new_limit) {
-            let normalized = normalize_terminal_segment(line, 3);
-            let chunks = wrap_str(&normalized, content_width);
-            for chunk in chunks {
-                out.push(tool_result_line('│', chunk, added_color));
-            }
+        if full_output {
+            render_diff_block(out, new_diff, added_color);
+        } else {
+            render_diff_block_limited(out, new_diff, max_lines_per_side, added_color);
         }
         let truncated = !full_output && new_total > max_lines_per_side;
         let total_filler = if truncated { new_total } else { 0 };
@@ -1913,6 +1967,246 @@ mod tests {
         assert!(
             !headline.contains("writing…"),
             "finalized headline must not be a placeholder, got: {headline}"
+        );
+    }
+
+    // ── Wrapped-line truncation (regression: very long logical lines) ────────
+
+    /// Helper: collect all text from rendered lines as a single string for inspection.
+    fn lines_text_joined(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn head_truncation_limits_wrapped_lines_not_logical() {
+        // Two logical lines, each wrapping to ~five visual lines at width 20.
+        // max_lines = 8 visual lines → only 8 wrapped lines shown, truncation
+        // marker present.
+        let long_line = "x".repeat(100); // ~5 wrapped lines at width 20
+        let content = format!("{}\n{}", long_line, long_line);
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            20, // narrow terminal → forces wrapping
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        // Lines: 1 headline + up to 8 body lines + 1 truncation marker = max 10
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            body_text.contains("2 total lines"),
+            "expected truncation marker, got:\n{body_text}"
+        );
+        // Count body lines (exclude headline — first line contains the tool icon).
+        let body_start = 1; // skip headline
+        let body_end = lines.len();
+        let body_count = body_end - body_start;
+        assert!(
+            body_count <= 9, // 8 wrapped lines + 1 marker
+            "too many body lines ({body_count}), expected ≤ 9:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn tail_truncation_limits_wrapped_lines_not_logical() {
+        // Two logical lines, each wrapping to ~five visual lines at width 20.
+        let long_line = "x".repeat(100);
+        let content = format!("{}\n{}", long_line, long_line);
+        let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "echo"}));
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            20,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            body_text.contains("2 total lines"),
+            "expected truncation marker, got:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn head_truncation_no_marker_when_wrapped_lines_fit() {
+        // Short content: all wrapped lines fit within the limit.
+        let content = "short line";
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
+        let result = Message::tool_result("c1", content, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            !body_text.contains("total lines"),
+            "unexpected truncation marker for short content:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn tail_truncation_no_marker_when_wrapped_lines_fit() {
+        let content = "short output";
+        let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "echo"}));
+        let result = Message::tool_result("c1", content, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            !body_text.contains("total lines"),
+            "unexpected truncation marker:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn head_truncation_single_long_logical_line_is_bounded() {
+        // One very long logical line → should be capped at max_lines wrapped chunks.
+        let long_line = "x".repeat(500); // ~seven wrapped lines at width 80
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
+        let result = Message::tool_result("c1", long_line, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            80,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        // Should have truncation marker since head_lines=8 but the line wraps
+        // to ~7 chunks (< 8 at width 80), so actually no truncation for 500
+        // chars at width 80.  Let's verify: at width=80, content_width=77,
+        // 500/77 ≈ 7 chunks → fits within 8.
+        // Use narrower width to force truncation.
+        assert!(
+            !body_text.contains("total lines"),
+            "500 chars at width 80 should fit in 8 wrapped lines:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn head_truncation_single_very_long_line_is_truncated() {
+        // One very long logical line at narrow width → many wrapped chunks → must truncate.
+        let long_line = "x".repeat(500);
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
+        let result = Message::tool_result("c1", long_line, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            20, // narrow → ~26 wrapped chunks (500/17 ≈ 30)
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            body_text.contains("1 total lines"),
+            "expected truncation marker for single long line at narrow width:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn tail_truncation_single_long_line_is_bounded() {
+        let long_line = "x".repeat(500);
+        let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "echo"}));
+        let result = Message::tool_result("c1", long_line, false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            20,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            body_text.contains("1 total lines"),
+            "expected truncation marker for long line in tail mode:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn diff_body_removed_block_limited_by_wrapped_lines() {
+        // old_text has one very long line that wraps many times at width 20.
+        // diff_lines default = 4; should limit to 4 wrapped visual lines.
+        // There's only 1 logical line, so no logical truncation marker is
+        // expected — but the visual display is still bounded.
+        let old_long = "r".repeat(200);
+        let new = "a";
+        let call = Message::tool_call(
+            "c1",
+            "edit_file",
+            serde_json::json!({"path": "f", "old_text": old_long, "new_text": new}),
+        );
+        let result = Message::tool_result("c1", "ok", false);
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            20,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        // Count how many body lines contain the removed marker pattern " │ r".
+        // Should be exactly 4 (diff_lines limit), not ~12 (the full wrapped count).
+        let removed_line_count = body_text.lines().filter(|l| l.contains("│ rrr")).count();
+        assert_eq!(
+            removed_line_count, 4,
+            "expected exactly 4 wrapped lines of 'r's (diff_lines limit), got {removed_line_count}:\n{body_text}"
+        );
+        // The new_text 'a' should also appear.
+        assert!(
+            body_text.contains("│ a"),
+            "expected new_text 'a' in diff output:\n{body_text}"
+        );
+    }
+
+    #[test]
+    fn full_output_disables_wrapped_truncation() {
+        let long_line = "x".repeat(500);
+        let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
+        let result = Message::tool_result("c1", long_line, false);
+        let cfg_full = ToolBodyConfig {
+            full_output: true,
+            ..ToolBodyConfig::default()
+        };
+        let lines = build_log_lines(
+            &[call, result],
+            false,
+            20,
+            &cfg_full,
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        let body_text = lines_text_joined(&lines);
+        assert!(
+            !body_text.contains("total lines"),
+            "full_output must not truncate:\n{body_text}"
         );
     }
 }
