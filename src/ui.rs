@@ -308,6 +308,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 } else {
                     "↑↓ navigate   Enter select   Esc cancel  "
                 }
+            } else if app.selection.kind == Some(SelectionKind::KeybindingHelp) {
+                "↑↓ navigate   PageUp/PageDown scroll   type filter   Esc close  "
             } else if app.in_provider_selection_mode() {
                 if app.selection_filter_enabled() {
                     "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   type filter   Esc cancel  "

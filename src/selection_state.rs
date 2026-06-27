@@ -81,6 +81,7 @@ pub(crate) enum SelectionKind {
     AskUser,
     LoginAction,
     ConfirmProviderRemoval,
+    KeybindingHelp,
 }
 
 /// All state for the selection menu panel.

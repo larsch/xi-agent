@@ -63,14 +63,17 @@ cargo install --path .
 
 | Key             | Action                          |
 |-----------------|-------------------------------|
+| `F1`            | Show keyboard shortcuts         |
 | `Enter`         | Submit message (or queue steering message if agent loop is running) |
 | `Shift+Enter`   | Insert newline in input         |
 | `Page Up`       | Scroll chat up one page         |
 | `Page Down`     | Scroll chat to bottom           |
 | `Scroll wheel`  | Scroll chat (3 lines/tick)      |
 | `Ctrl+I`        | Toggle provider/model info bar  |
+| `Ctrl+F`        | Toggle full tool output         |
 | `Ctrl+R`        | Resume latest session for current folder |
-| `Ctrl+C`        | Quit                            |
+| `!`             | Enter shell mode when input is empty |
+| `Ctrl+C`        | Quit (or leave shell mode)      |
 | `Esc`           | Abort current agent loop; also cancel login/slash/selection contexts |
 
 ## Slash commands

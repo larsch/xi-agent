@@ -158,14 +158,23 @@ pub(super) fn build_selection_lines(
             if item.loading {
                 let fill =
                     " ".repeat(terminal_width.saturating_sub(INDENT.len() + item.label.width()));
-                let fg = if item.error { Color::Red } else { Color::Reset };
+                let fg = if item.error {
+                    Color::Red
+                } else if item.complete_to.is_empty() && item.detail.is_empty() {
+                    Color::Yellow
+                } else {
+                    Color::Reset
+                };
+                let modifier = if item.complete_to.is_empty() && item.detail.is_empty() {
+                    ratatui::style::Modifier::BOLD
+                } else {
+                    ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM
+                };
                 return Line::from(vec![
                     Span::styled(INDENT, Style::default().bg(bg)),
                     Span::styled(
                         item.label.clone(),
-                        Style::default().fg(fg).bg(bg).add_modifier(
-                            ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
-                        ),
+                        Style::default().fg(fg).bg(bg).add_modifier(modifier),
                     ),
                     Span::styled(fill, Style::default().bg(bg)),
                 ]);

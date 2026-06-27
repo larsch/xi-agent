@@ -39,6 +39,7 @@ impl App {
             | Some(SelectionKind::ConfirmProviderRemoval)
             | Some(SelectionKind::ProviderBackendPreset)
             | Some(SelectionKind::ProviderApiType)
+            | Some(SelectionKind::KeybindingHelp)
             | None => None,
         };
 
@@ -480,35 +481,67 @@ impl App {
     /// Navigate the selection menu down (wraps around).
     pub fn selection_select_next(&mut self) {
         let len = self.selection.items.len();
-        if len > 0 {
+        if len == 0 {
+            return;
+        }
+
+        let start = self.selection.selected;
+        loop {
             self.selection.selected = (self.selection.selected + 1) % len;
-            if self.selection.selected == 0 {
-                self.selection.scroll = 0;
-            } else {
-                self.ensure_selection_visible();
+            let item = &self.selection.items[self.selection.selected];
+            if !item.loading || self.selection.selected == start {
+                break;
             }
+        }
+
+        if self.selection.selected == 0 {
+            self.selection.scroll = 0;
+        } else {
+            self.ensure_selection_visible();
         }
     }
 
     /// Navigate the selection menu up (wraps around).
     pub fn selection_select_prev(&mut self) {
         let len = self.selection.items.len();
-        if len > 0 {
+        if len == 0 {
+            return;
+        }
+
+        let start = self.selection.selected;
+        loop {
             self.selection.selected = (self.selection.selected + len - 1) % len;
-            if self.selection.selected == len - 1 {
-                self.selection.scroll = len.saturating_sub(MAX_SELECTION_VISIBLE);
-            } else {
-                self.ensure_selection_visible();
+            let item = &self.selection.items[self.selection.selected];
+            if !item.loading || self.selection.selected == start {
+                break;
             }
+        }
+
+        if self.selection.selected == len - 1 {
+            self.selection.scroll = len.saturating_sub(MAX_SELECTION_VISIBLE);
+        } else {
+            self.ensure_selection_visible();
         }
     }
 
     /// Jump forward one page (MAX_SELECTION_VISIBLE items) in the selection menu.
     pub fn selection_page_down(&mut self) {
         let len = self.selection.items.len();
-        if len > 0 {
-            let new = (self.selection.selected + MAX_SELECTION_VISIBLE).min(len - 1);
-            self.selection.selected = new;
+        if len == 0 {
+            return;
+        }
+
+        let start = self.selection.selected;
+        self.selection.selected = (self.selection.selected + MAX_SELECTION_VISIBLE).min(len - 1);
+        while self.selection.items[self.selection.selected].loading
+            && self.selection.selected < len - 1
+        {
+            self.selection.selected += 1;
+        }
+        while self.selection.items[self.selection.selected].loading && self.selection.selected > 0 {
+            self.selection.selected -= 1;
+        }
+        if self.selection.selected != start {
             self.ensure_selection_visible();
         }
     }
@@ -516,11 +549,24 @@ impl App {
     /// Jump backward one page (MAX_SELECTION_VISIBLE items) in the selection menu.
     pub fn selection_page_up(&mut self) {
         let len = self.selection.items.len();
-        if len > 0 {
-            self.selection.selected = self
-                .selection
-                .selected
-                .saturating_sub(MAX_SELECTION_VISIBLE);
+        if len == 0 {
+            return;
+        }
+
+        let start = self.selection.selected;
+        self.selection.selected = self
+            .selection
+            .selected
+            .saturating_sub(MAX_SELECTION_VISIBLE);
+        while self.selection.items[self.selection.selected].loading && self.selection.selected > 0 {
+            self.selection.selected -= 1;
+        }
+        while self.selection.items[self.selection.selected].loading
+            && self.selection.selected < len - 1
+        {
+            self.selection.selected += 1;
+        }
+        if self.selection.selected != start {
             self.ensure_selection_visible();
         }
     }
@@ -610,6 +656,7 @@ impl App {
                 }
                 _ => None,
             },
+            Some(SelectionKind::KeybindingHelp) => None,
             None => None,
         }?;
 

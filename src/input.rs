@@ -6,6 +6,7 @@ use crate::{
     app::{App, InputMode, SelectionResult},
     commands::CommandAction,
     config::XiConfig,
+    keybindings::{self, KeyBindingId},
     llm::{LlmProvider, Message},
     provider::{ThinkingSupport, thinking_support_for_instance},
     provider_instance::{AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
@@ -219,7 +220,12 @@ fn handle_global_key_shortcuts(
     key: KeyEvent,
     #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
 ) -> KeyDispatch {
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if keybindings::matches(KeyBindingId::ShowHelp, key) {
+        app.enter_keybinding_help_mode();
+        return KeyDispatch::Continue;
+    }
+
+    if keybindings::matches(KeyBindingId::Quit, key) {
         if app.input_mode == InputMode::Shell {
             app.exit_shell_mode();
             return KeyDispatch::Continue;
@@ -227,7 +233,7 @@ fn handle_global_key_shortcuts(
         return KeyDispatch::Return(RunResult::Quit);
     }
 
-    if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if keybindings::matches(KeyBindingId::QuitIfInputEmpty, key) {
         if app.input_mode == InputMode::Shell {
             if app.shell_input_is_empty() {
                 app.exit_shell_mode();
@@ -246,30 +252,24 @@ fn handle_global_key_shortcuts(
         return KeyDispatch::Continue;
     }
 
-    if key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if keybindings::matches(KeyBindingId::ToggleInfo, key)
+        || keybindings::matches(KeyBindingId::ToggleInfoAlt, key)
+    {
         app.toggle_info();
         return KeyDispatch::Continue;
     }
 
-    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::ALT) {
-        app.toggle_info();
-        return KeyDispatch::Continue;
-    }
-
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
+    if keybindings::matches(KeyBindingId::CopyLastAssistantResponse, key) {
         app.copy_last_assistant_response();
         return KeyDispatch::Continue;
     }
 
-    if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if keybindings::matches(KeyBindingId::ToggleFullOutput, key) {
         app.log_view.toggle_full_output();
         return KeyDispatch::Continue;
     }
 
-    if key.code == KeyCode::Char('r')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !app.selection.active
-    {
+    if keybindings::matches(KeyBindingId::ResumeLatestSession, key) && !app.selection.active {
         app.resume_latest_for_current_cwd();
         return KeyDispatch::Continue;
     }
@@ -282,7 +282,7 @@ fn handle_shell_mode_key(
     key: KeyEvent,
     #[cfg(windows)] last_key_at: Option<&std::time::Instant>,
 ) -> KeyDispatch {
-    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if keybindings::matches(KeyBindingId::CycleShell, key) {
         app.cycle_shell();
         return KeyDispatch::Continue;
     }
@@ -350,7 +350,7 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
             }
         }
         KeyCode::Char('e')
-            if key.modifiers.contains(KeyModifiers::CONTROL)
+            if keybindings::matches(KeyBindingId::EditProvider, key)
                 && !key.modifiers.contains(KeyModifiers::ALT)
                 && app.in_provider_selection_mode() =>
         {
@@ -363,7 +363,7 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
             }
         }
         KeyCode::Char('r')
-            if key.modifiers.contains(KeyModifiers::CONTROL)
+            if keybindings::matches(KeyBindingId::RemoveProvider, key)
                 && !key.modifiers.contains(KeyModifiers::ALT)
                 && app.in_provider_selection_mode() =>
         {
@@ -500,9 +500,7 @@ fn handle_chat_mode_key(
         return KeyDispatch::Continue;
     }
 
-    if key.code == KeyCode::Char('!')
-        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-    {
+    if keybindings::matches(KeyBindingId::EnterShellMode, key) {
         let chat_input_is_empty = app
             .textarea
             .lines()

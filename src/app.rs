@@ -7,6 +7,7 @@ use crate::{
     auth::{self},
     completion::{self, CompletionItem},
     config::DisplayConfig,
+    keybindings::{BindingContext, KEYBINDINGS},
     live_turn::compose_display,
     llm::{LlmProvider, Message, UsageStats},
     provider_instance::{ApiType, BackendPreset, ProviderInstance},
@@ -484,6 +485,56 @@ impl App {
         };
         self.selection
             .activate(SelectionKind::ResumeSession, "  Resume session  ", items);
+    }
+
+    pub fn enter_keybinding_help_mode(&mut self) {
+        self.reset_textarea();
+        self.session.live_turn.notices.clear();
+
+        let contexts = [
+            BindingContext::Global,
+            BindingContext::Chat,
+            BindingContext::Selection,
+            BindingContext::Shell,
+            BindingContext::ProviderPicker,
+            BindingContext::Mouse,
+        ];
+
+        let mut items = Vec::new();
+        for context in contexts {
+            let bindings: Vec<_> = KEYBINDINGS
+                .iter()
+                .filter(|binding| binding.context == context)
+                .collect();
+            if bindings.is_empty() {
+                continue;
+            }
+
+            items.push(CompletionItem {
+                label: context.label().to_string(),
+                detail: String::new(),
+                complete_to: String::new(),
+                loading: true,
+                error: false,
+                match_range: None,
+            });
+
+            items.extend(bindings.into_iter().map(|binding| CompletionItem {
+                label: binding.shortcut.to_string(),
+                detail: binding.description.to_string(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+                match_range: None,
+            }));
+        }
+
+        self.selection.activate(
+            SelectionKind::KeybindingHelp,
+            "  Keyboard shortcuts  ",
+            items,
+        );
+        self.selection_select_next();
     }
 
     pub(crate) fn make_textarea() -> TextArea<'static> {
