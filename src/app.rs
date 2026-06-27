@@ -744,11 +744,16 @@ impl App {
     }
 
     /// Returns true if a model-list fetch should be triggered now.
-    /// Returns true when a model-list fetch should be triggered automatically
-    /// because the current provider instance has no model explicitly configured.
+    /// Returns true when a model-list fetch should be triggered automatically.
+    ///
+    /// Fires when no fetch is already in-flight and the model list has not yet
+    /// been populated.  This covers two cases:
+    /// 1. No model configured — the list is needed so the user can pick one.
+    /// 2. Model configured — the fetch is still beneficial because it populates
+    ///    the Copilot model metadata cache (context-window size, vendor) from
+    ///    the live API, which otherwise falls back to the hard-coded table.
     pub fn should_auto_query_model(&self) -> bool {
-        self.provider.current_instance.model.is_none()
-            && !self.completion.models_loading
+        !self.completion.models_loading
             && self.completion.available_models.is_none()
             && self.selection.kind != Some(SelectionKind::Model)
     }
