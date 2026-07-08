@@ -182,11 +182,15 @@ impl AuthStore {
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        save_atomic(&self.path, &self.data)
+        save_auth(&self.path, &self.data)
     }
 }
 
-fn save_atomic(path: &Path, data: &AuthFile) -> anyhow::Result<()> {
+fn save_auth(path: &Path, data: &AuthFile) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let serialized = toml::to_string_pretty(data)
         .map_err(|e| anyhow::anyhow!("Cannot serialize auth file: {}", e))?;
     crate::atomic_file::save_atomic(path, &serialized)

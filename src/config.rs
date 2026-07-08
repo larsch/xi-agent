@@ -198,9 +198,17 @@ impl XiConfig {
 
     pub fn save(&self) -> anyhow::Result<()> {
         let path = config_path()?;
-        let body = toml::to_string_pretty(self)?;
-        crate::atomic_file::save_atomic(&path, &body)
+        save_config(&path, self)
     }
+}
+
+fn save_config(path: &std::path::Path, config: &XiConfig) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let body = toml::to_string_pretty(config)?;
+    crate::atomic_file::save_atomic(path, &body)
 }
 
 pub fn config_path() -> anyhow::Result<PathBuf> {
@@ -211,10 +219,21 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HookIpcConfig, XiConfig};
+    use super::{HookIpcConfig, XiConfig, save_config};
     use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
 
     // ── Instance-format config tests ─────────────────────────────────────────
+
+    #[test]
+    fn save_config_creates_missing_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let cfg = XiConfig::default();
+
+        save_config(&path, &cfg).unwrap();
+
+        assert!(path.exists());
+    }
 
     #[test]
     fn provider_sections_parse_without_synthesising_instances() {
