@@ -655,6 +655,8 @@ fn test_read_agents_md() {
 
     use tempfile::tempdir;
 
+    use crate::agent::system_prompt::AgentsKind;
+
     // Create a temporary directory structure.
     let temp_home = tempdir().unwrap();
     let home_path = temp_home.path();
@@ -672,12 +674,22 @@ fn test_read_agents_md() {
 
     // Mock the home and current directory paths.
     let cwd = working_path.display().to_string();
-    let concatenated = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
 
-    assert!(concatenated.contains("Global agents configuration"));
-    assert!(concatenated.contains("Local agents configuration"));
+    assert_eq!(entries.len(), 2);
 
-    // Clean up temporary directories.
+    // Global entry comes first.
+    assert_eq!(entries[0].kind, AgentsKind::Global);
+    assert!(entries[0].content.contains("Global agents configuration"));
+
+    // Local entry comes second.
+    assert_eq!(entries[1].kind, AgentsKind::Local);
+    assert!(entries[1].content.contains("Local agents configuration"));
+
+    // Paths are preserved.
+    assert!(entries[0].path.to_string_lossy().contains(".xi/AGENTS.md"));
+    assert!(entries[1].path.to_string_lossy().contains("AGENTS.md"));
+
     temp_home.close().unwrap();
     temp_working.close().unwrap();
 }
@@ -687,6 +699,8 @@ fn test_read_agents_md_falls_back_to_dot_agents() {
     use std::fs;
 
     use tempfile::tempdir;
+
+    use crate::agent::system_prompt::AgentsKind;
 
     let temp_home = tempdir().unwrap();
     let home_path = temp_home.path();
@@ -699,9 +713,17 @@ fn test_read_agents_md_falls_back_to_dot_agents() {
     fs::write(&agents_md, "Global .agents config\n").unwrap();
 
     let cwd = working_path.display().to_string();
-    let concatenated = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
 
-    assert!(concatenated.contains("Global .agents config"));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, AgentsKind::Global);
+    assert!(entries[0].content.contains("Global .agents config"));
+    assert!(
+        entries[0]
+            .path
+            .to_string_lossy()
+            .contains(".agents/AGENTS.md")
+    );
 
     temp_home.close().unwrap();
     temp_working.close().unwrap();
@@ -712,6 +734,8 @@ fn test_read_agents_md_xi_overrides_agents_at_same_level() {
     use std::fs;
 
     use tempfile::tempdir;
+
+    use crate::agent::system_prompt::AgentsKind;
 
     let temp_home = tempdir().unwrap();
     let home_path = temp_home.path();
@@ -726,14 +750,17 @@ fn test_read_agents_md_xi_overrides_agents_at_same_level() {
     fs::write(&agents_md, ".agents content\n").unwrap();
 
     let cwd = tempdir().unwrap();
-    let concatenated = crate::agent::system_prompt::read_agents_md(
+    let entries = crate::agent::system_prompt::read_agents_md(
         &cwd.path().display().to_string(),
         Some(home_path),
     );
 
-    // .xi takes priority; .agents must not appear.
-    assert!(concatenated.contains(".xi content"));
-    assert!(!concatenated.contains(".agents content"));
+    // .xi takes priority; only one entry, and it's from .xi.
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, AgentsKind::Global);
+    assert!(entries[0].content.contains(".xi content"));
+    assert!(!entries[0].content.contains(".agents content"));
+    assert!(entries[0].path.to_string_lossy().contains(".xi/AGENTS.md"));
 
     temp_home.close().unwrap();
     cwd.close().unwrap();
@@ -744,6 +771,8 @@ fn test_read_agents_md_dot_xi_in_cwd_walk() {
     use std::fs;
 
     use tempfile::tempdir;
+
+    use crate::agent::system_prompt::AgentsKind;
 
     let temp_home = tempdir().unwrap();
     let home_path = temp_home.path();
@@ -761,10 +790,14 @@ fn test_read_agents_md_dot_xi_in_cwd_walk() {
     fs::write(working_path.join("AGENTS.md"), "bare config\n").unwrap();
 
     let cwd = working_path.display().to_string();
-    let concatenated = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
 
-    assert!(concatenated.contains(".xi project config"));
-    assert!(!concatenated.contains("bare config"));
+    // Only one entry (.xi takes priority over bare).
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, AgentsKind::Local);
+    assert!(entries[0].content.contains(".xi project config"));
+    assert!(!entries[0].content.contains("bare config"));
+    assert!(entries[0].path.to_string_lossy().contains(".xi/AGENTS.md"));
 
     temp_home.close().unwrap();
     working.close().unwrap();
@@ -775,6 +808,8 @@ fn test_read_agents_md_from_nested_cwd_includes_parent_chain_in_order() {
     use std::fs;
 
     use tempfile::tempdir;
+
+    use crate::agent::system_prompt::AgentsKind;
 
     let temp_home = tempdir().unwrap();
     let home_path = temp_home.path();
@@ -794,15 +829,19 @@ fn test_read_agents_md_from_nested_cwd_includes_parent_chain_in_order() {
     fs::write(subdir.join("AGENTS.md"), "Subdir-level config\n").unwrap();
 
     let cwd = subdir.display().to_string();
-    let concatenated = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
 
-    let global_idx = concatenated.find("Global config").unwrap();
-    let subdir_idx = concatenated.find("Subdir-level config").unwrap();
-    let project_idx = concatenated.find("Project-level config").unwrap();
+    assert_eq!(entries.len(), 3);
 
-    // read_agents_md appends in this order: global, cwd, then each parent up to root.
-    assert!(global_idx < subdir_idx);
-    assert!(subdir_idx < project_idx);
+    // Order: global, cwd, parent
+    assert_eq!(entries[0].kind, AgentsKind::Global);
+    assert!(entries[0].content.contains("Global config"));
+
+    assert_eq!(entries[1].kind, AgentsKind::Local);
+    assert!(entries[1].content.contains("Subdir-level config"));
+
+    assert_eq!(entries[2].kind, AgentsKind::Local);
+    assert!(entries[2].content.contains("Project-level config"));
 
     temp_home.close().unwrap();
     root.close().unwrap();

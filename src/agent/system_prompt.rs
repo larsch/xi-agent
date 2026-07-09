@@ -5,58 +5,106 @@ use std::{fs, path::Path};
 use crate::agent::types::ToolRegistry;
 use crate::skills::SkillMeta;
 
+/// A sourced AGENTS.md entry with its file path and origin.
+pub struct AgentsEntry {
+    /// Category: user-home or working-directory chain.
+    pub kind: AgentsKind,
+    /// Path to the file that was read.
+    pub path: std::path::PathBuf,
+    /// File contents.
+    pub content: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentsKind {
+    /// From the home directory — user-level, applies everywhere.
+    Global,
+    /// From the cwd-to-root chain — local to this working directory.
+    Local,
+}
+
 /// Read the first existing AGENTS.md candidate from a base directory.
 ///
 /// Priority: `.xi/AGENTS.md` → `.agents/AGENTS.md` → `AGENTS.md`.
-/// Returns `Some(content)` for the first match, or `None` if none exist.
-fn read_directory_agents(base: &Path) -> Option<String> {
+/// Returns `Some((path, content))` for the first match, or `None` if none exist.
+fn read_directory_agents(base: &Path) -> Option<(std::path::PathBuf, String)> {
     let candidates = [
         base.join(".xi/AGENTS.md"),
         base.join(".agents/AGENTS.md"),
         base.join("AGENTS.md"),
     ];
     for candidate in &candidates {
-        if candidate.exists() {
-            return fs::read_to_string(candidate).ok();
+        if candidate.exists()
+            && let Ok(content) = fs::read_to_string(candidate)
+        {
+            return Some((candidate.clone(), content));
         }
     }
     None
 }
 
-/// Helper to read and combine AGENTS.md content.
+/// Collect AGENTS.md entries from home and the cwd→root chain.
 ///
-/// Composes a global file (`.xi/AGENTS.md` preferred, `.agents/AGENTS.md` as
-/// fallback), then walks from `cwd` up to root, taking at most one
-/// AGENTS.md per directory level using the same priority rule.
-pub fn read_agents_md(cwd: &str, test_home: Option<&Path>) -> String {
-    let mut content = String::new();
+/// Returns an ordered list: global entry first (if any), then local entries
+/// from cwd up to root.
+pub fn read_agents_md(cwd: &str, test_home: Option<&Path>) -> Vec<AgentsEntry> {
+    let mut entries: Vec<AgentsEntry> = Vec::new();
 
     // Global: one file from home directory.
     let home_dir_buf = test_home
         .map(|p| p.to_path_buf())
         .or_else(|| BaseDirs::new().map(|bd| bd.home_dir().to_path_buf()));
     if let Some(home_dir) = home_dir_buf.as_deref()
-        && let Some(global) = read_directory_agents(home_dir)
+        && let Some((path, content)) = read_directory_agents(home_dir)
     {
-        content.push_str(&global);
-        content.push('\n');
+        entries.push(AgentsEntry {
+            kind: AgentsKind::Global,
+            path,
+            content,
+        });
     }
 
     // Walk cwd → root, one file per directory level.
-    let mut current_dir = Path::new(cwd);
+    let mut current_dir = Path::new(cwd).to_path_buf();
     loop {
-        if let Some(file_content) = read_directory_agents(current_dir) {
-            content.push_str(&file_content);
-            content.push('\n');
+        if let Some((path, content)) = read_directory_agents(&current_dir) {
+            entries.push(AgentsEntry {
+                kind: AgentsKind::Local,
+                path,
+                content,
+            });
         }
 
         match current_dir.parent() {
-            Some(parent) if parent != current_dir => current_dir = parent,
+            Some(parent) if parent != current_dir => current_dir = parent.to_path_buf(),
             _ => break,
         }
     }
 
-    content
+    entries
+}
+
+/// Render collected AGENTS.md entries into a system prompt section.
+fn render_agents_section(entries: &[AgentsEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("\n\n# AGENTS.md\n\n");
+    section.push_str("The following was read from AGENTS.md files and is already available to you — you do not need to read them again.\n\n");
+
+    for entry in entries {
+        let label = match entry.kind {
+            AgentsKind::Global => "Global Instructions",
+            AgentsKind::Local => "Local Instructions",
+        };
+        let path_display = entry.path.display();
+        section.push_str(&format!("## {label} ({path_display})\n\n"));
+        section.push_str(&entry.content);
+        section.push('\n');
+    }
+
+    section
 }
 
 /// Build the default system prompt for the agent loop.
@@ -138,15 +186,9 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
         .collect::<Vec<_>>()
         .join("\n");
 
-    // AGENTS.md content rendered as a labelled project context section.
-    let agents_md_content = read_agents_md(cwd, None);
-    let project_context_section = if agents_md_content.trim().is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n\n# Project Context\n\nProject-specific instructions and guidelines:\n\n{agents_md_content}"
-        )
-    };
+    // AGENTS.md content, with global and local entries labelled by source path.
+    let agents_entries = read_agents_md(cwd, None);
+    let agents_section = render_agents_section(&agents_entries);
 
     let skills_section = render_skills_block(skills);
 
@@ -161,7 +203,7 @@ In addition to the tools above, you may have access to other custom tools depend
 File paths are relative to the current working directory.\n\
 \n\
 Guidelines:\n\
-{guidelines_text}{project_context_section}{skills_section}\n\
+{guidelines_text}{agents_section}{skills_section}\n\
 Current date: {date}\n\
 Current working directory: {cwd}"
     )
