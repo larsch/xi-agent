@@ -2,17 +2,22 @@
 
 [![Rust](https://github.com/larsch/xi-agent/actions/workflows/rust.yml/badge.svg)](https://github.com/larsch/xi-agent/actions/workflows/rust.yml)
 
-**xi** is a focused AI agent for the terminal, heavily inspired by
-[pi](https://pi.dev/). It provides a minimalistic text-based UI for agentic
-interactions with local and remote models, supporting tool calls, session
-persistence, and interactive authentication.
+**xi** is a fast, transparent terminal agent. Every tool call streams live as it
+happens — you watch the agent read, edit, run commands, and reason in real time.
+No hidden steps, no pre-canned workflows.
 
-* Supported APIs: OpenAI (chat + Responses), Anthropic-compatible, Gemini native, Ollama chat
-* Built-in tools: read_file, write_file, edit_file, find_files, ask_user, exec (Unix), bash (Unix) / cmd, powershell (Windows), python
-* Standard `AGENTS.md` support
-* Standard `SKILL.md` support (see below)
-* Custom tools: define your own tools (see below)
-* Caveats: **No safety guarantees** around tool calls; use with caution
+Inspired by [pi](https://pi.dev/) but more streamlined: colours, emoji, and
+block characters give structure without noise. The UX stays compact even during
+busy tool loops.
+
+* Raw agent workflow — see everything, no black boxes
+* Compact, styled output — clear block delineation with colour and emoji
+* **You** define the instructions and skills that fit your workflows; xi provides a smooth, streamlined harness for the model to interact with your environment
+* Cross-platform from the start — bash, powershell, python, and more (`read_file`, `write_file`, `edit_file`, `find_files`, `ask_user`, `exec` (Unix), `bash` (Unix) / `cmd`, `powershell` (Windows), `python`)
+* Lightweight Rust binary — low memory, fast startup, single executable
+* Standard `AGENTS.md` and `SKILL.md` support
+* Custom tools and skills — extend without bloat
+* Caveats: **No safety guards** on tool calls; you are in control
 
 ## Providers
 
