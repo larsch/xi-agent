@@ -8,7 +8,7 @@ interactions with local and remote models, supporting tool calls, session
 persistence, and interactive authentication.
 
 * Supported APIs: OpenAI (chat + Responses), Anthropic-compatible, Gemini native, Ollama chat
-* Built-in tools: read_file, write_file, edit_file, find_files, ask_user, exec, python, bash/cmd/powershell
+* Built-in tools: read_file, write_file, edit_file, find_files, ask_user, exec (Unix), bash (Unix) / cmd, powershell (Windows), python
 * Standard `AGENTS.md` support
 * Standard `SKILL.md` support (see below)
 * Custom tools: define your own tools (see below)
@@ -72,7 +72,12 @@ cargo install --path .
 | `Ctrl+I`        | Toggle provider/model info bar  |
 | `Ctrl+F`        | Toggle full tool output         |
 | `Ctrl+R`        | Resume latest session for current folder |
+| `Ctrl+D`        | Quit when input is empty (or leave shell mode if shell input is empty) |
+| `Ctrl+E`        | Edit the selected custom provider (provider picker) |
+| `Ctrl+S`        | Cycle between available shells (shell mode) |
 | `!`             | Enter shell mode when input is empty |
+| `Alt+C`         | Copy the last assistant response |
+| `Alt+Up` / `Alt+Down` | Step backward / forward through session history |
 | `Ctrl+C`        | Quit (or leave shell mode)      |
 | `Esc`           | Abort current agent loop; also cancel login/slash/selection contexts |
 
@@ -89,6 +94,10 @@ cargo install --path .
 | `/login`             | Open interactive auth provider picker (copilot / codex / gemini) |
 | `/login <provider>`  | Authenticate provider                            |
 | `/resume`            | Open session picker (local + foreign sessions)   |
+| `/compact [instructions]` | Compact session context now, optionally with summary instructions |
+| `/export [path]`     | Export this session to a self-contained HTML file |
+| `/reload`            | Reload AGENTS.md context and available skills    |
+| `/skill:<name>`      | Invoke a skill by name (e.g. `/skill:plan`)      |
 | `/quit`              | Quit                                             |
 
 ## Skills
