@@ -176,6 +176,7 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
         guidelines.push("Use ask_user only when the task requires a user decision or information you cannot infer.".to_string());
         guidelines.push("Before calling ask_user, gather relevant context with your other tools and include a short summary in the context field.".to_string());
     }
+    guidelines.push("For rich or structured writes, create a UTF-8 no-BOM payload file and pass it through a file/stdin option rather than embedding the payload in PowerShell or cmd command arguments. Retrieve and verify the stored result after every such write.".to_string());
     guidelines.push("Never describe a change as done or claim to have implemented something unless you have called the appropriate tools in this response to make that change. If you intend to make edits, call the tools now.".to_string());
     guidelines.push("Be concise in your responses.".to_string());
     guidelines.push("Show file paths clearly when working with files.".to_string());
@@ -332,6 +333,7 @@ mod tests {
         assert!(prompt.contains("- ask_user: Ask a question."));
         assert!(prompt.contains("- bash: Run shell commands."));
         assert!(prompt.contains("Prefer exec over bash when arguments contain spaces"));
+        assert!(prompt.contains("create a UTF-8 no-BOM payload file"));
     }
 
     #[test]

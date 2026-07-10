@@ -147,8 +147,10 @@ For example:
 }
 ```
 
-The tool will receive input in JSON format according to its declared
-`parameters_schema`, and can respond with text or JSON output.
+The tool will receive input as UTF-8 JSON on stdin according to its declared
+`parameters_schema`, and can respond with UTF-8 text or JSON output. For rich or
+structured writes, tool authors should provide a UTF-8 file/stdin interface
+rather than requiring shell-quoted payload arguments.
 
 ## Non-interactive mode
 

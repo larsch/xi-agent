@@ -11,7 +11,10 @@ use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 ///
 /// The executable must implement the describe/invoke protocol:
 /// - `executable --describe` → JSON descriptor on stdout
-/// - `echo '<json-args>' | executable` → result on stdout; non-zero exit = error
+/// - UTF-8 JSON on stdin → UTF-8 result on stdout; non-zero exit = error
+///
+/// Rich or structured write parameters must document and prefer a UTF-8
+/// `--patch-file`, `--fields-file`, or stdin interface.
 pub struct CustomTool {
     /// Absolute path to the executable.
     path: PathBuf,

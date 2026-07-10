@@ -28,7 +28,7 @@ impl Tool for PowerShellTool {
          paths is appended. \
          Pass a raw PowerShell command string; do not wrap the whole command in extra quotes. \
          For arguments with spaces, use normal PowerShell quoting like \"C:\\Program Files\" or 'C:\\Program Files'. \
-         Avoid literal \\\" sequences in the final command string; PowerShell treats them as backslash+quote characters."
+         Avoid literal \\\" sequences in the final command string; PowerShell treats them as backslash+quote characters. For rich or structured writes, create a UTF-8 no-BOM payload file and pass it through a --patch-file, --fields-file, or stdin option. Do not embed payloads in native command-line arguments."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -64,7 +64,17 @@ impl Tool for PowerShellTool {
     }
 }
 
+const UTF8_BOOTSTRAP: &str = r#"$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = $utf8NoBom
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'
+$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'
+"#;
+
 pub(crate) fn powershell_subprocess(command: impl Into<String>) -> SubprocessCommand {
+    let command = format!("{UTF8_BOOTSTRAP}\n{}", command.into());
     SubprocessCommand::new(preferred_powershell_program())
         .arg("-NoLogo")
         .arg("-NoProfile")
@@ -116,6 +126,46 @@ where
 mod tests {
     use super::*;
     use crate::agent::types::Tool;
+
+    #[tokio::test]
+    async fn powershell_bootstrap_sets_utf8() {
+        let tool = PowerShellTool;
+        // Keep this command ASCII-only: it validates the bootstrap that runs
+        // before every user command without itself exercising argv Unicode.
+        let args = serde_json::json!({
+            "command": "Write-Output \"$($OutputEncoding.WebName)|$([Console]::InputEncoding.WebName)|$([Console]::OutputEncoding.WebName)\""
+        });
+        let result = tool.execute(args).await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(
+            result.content.as_text(),
+            "utf-8|utf-8|utf-8",
+            "PowerShell UTF-8 bootstrap was not applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn powershell_subprocess_preserves_utf8_output() {
+        // The source is ASCII-only; PowerShell constructs the Unicode value so
+        // this tests stdout transport rather than native argv payload passing.
+        let result =
+            powershell_subprocess("Write-Output ('M' + [char]0x00fc + 'nchen – ' + [char]0x2264)")
+                .run(ToolCallContext::noop("powershell-utf8-test"))
+                .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(result.content.as_text(), "München – ≤");
+    }
+
+    #[tokio::test]
+    async fn powershell_direct_unicode_command_argument_round_trips() {
+        let tool = PowerShellTool;
+        let expected = "München, naïve, 日本語, emoji: 😀";
+        let result = tool
+            .execute(serde_json::json!({"command": format!("Write-Output '{expected}'")}))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(result.content.as_text(), expected);
+    }
 
     #[tokio::test]
     async fn powershell_captures_stdout() {

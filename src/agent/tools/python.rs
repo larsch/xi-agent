@@ -246,6 +246,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn python_direct_unicode_script_argument_round_trips() {
+        let Some(tool) = make_tool() else { return };
+        let expected = "München, naïve, 日本語, emoji: 😀";
+        let result = tool
+            .execute(serde_json::json!({"script": format!("print({expected:?})")}))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(result.content.as_text(), expected);
+    }
+
+    #[tokio::test]
+    async fn python_uses_utf8_environment_and_preserves_unicode_output() {
+        let Some(tool) = make_tool() else { return };
+        let expected = "München, naïve, 日本語, emoji: 😀";
+        let result = tool
+            .execute(serde_json::json!({
+                "script": format!(
+                    "import os; assert os.environ['PYTHONUTF8'] == '1'; assert os.environ['PYTHONIOENCODING'] == 'utf-8'; print({expected:?})"
+                )
+            }))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert!(result.content.as_text().contains(expected));
+    }
+
+    #[tokio::test]
     async fn python_captures_stderr() {
         let Some(tool) = make_tool() else { return };
         let result = tool

@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::agent::file_tracker::FileTracker;
 use crate::agent::tools::truncate::{TruncationResult, truncate_head_with_limits};
+use crate::agent::tools::utf8::read_utf8_payload_file;
 use crate::agent::types::{Tool, ToolResult};
 
 pub struct ReadFileTool {
@@ -164,8 +165,11 @@ impl Tool for ReadFileTool {
                 return ToolResult::ok_image(raw_bytes, mime_type);
             }
 
-            // Fall through to text handling.
-            let content = match String::from_utf8(raw_bytes) {
+            // Fall through to strict UTF-8 text handling. Re-read through the
+            // shared payload reader so all text-bearing interfaces use the
+            // same decoding policy.
+            drop(raw_bytes);
+            let content = match read_utf8_payload_file(std::path::Path::new(&path)) {
                 Ok(s) => s,
                 Err(_) => {
                     return ToolResult::err(format!(

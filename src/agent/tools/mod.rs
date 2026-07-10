@@ -167,6 +167,7 @@ pub mod read_skill;
 pub mod subprocess;
 pub mod terminal;
 pub mod truncate;
+pub mod utf8;
 pub mod write;
 
 use ask_user::AskUserTool;

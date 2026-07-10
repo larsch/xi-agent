@@ -87,6 +87,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_subprocess_preserves_utf8_output_and_python_environment() {
+        let tool = BashTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "printf 'München – ≤\\n'; printf '%s|%s\\n' \"$PYTHONUTF8\" \"$PYTHONIOENCODING\""
+            }))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(result.content.as_text(), "München – ≤\n1|utf-8");
+    }
+
+    #[tokio::test]
     async fn bash_captures_stderr() {
         let tool = BashTool;
         let args = serde_json::json!({"command": "echo oops >&2"});

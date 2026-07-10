@@ -121,6 +121,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_subprocess_preserves_utf8_output_and_python_environment() {
+        let tool = ExecTool;
+        // Construct Unicode from UTF-8 byte escapes so argv remains ASCII.
+        let result = tool
+            .execute(serde_json::json!({
+                "program": "sh",
+                "args": ["-c", "printf '\\303\\274\\342\\200\\223\\342\\211\\244\\n'; printf '%s|%s\\n' \"$PYTHONUTF8\" \"$PYTHONIOENCODING\""]
+            }))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(result.content.as_text(), "ü–≤\n1|utf-8");
+    }
+
+    #[tokio::test]
     async fn exec_captures_stderr() {
         let tool = ExecTool;
         // Use sh just to write to stderr; this tests the capture path.

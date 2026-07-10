@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::agent::file_tracker::FileTracker;
+use crate::agent::tools::utf8::write_payload_file;
 use crate::agent::types::{Tool, ToolResult};
 
 pub struct WriteTool {
@@ -106,8 +107,8 @@ impl Tool for WriteTool {
                 return ToolResult::err(format!("Failed to create directories for {path}: {e}"));
             }
 
-            if let Err(e) = tokio::fs::write(&path, content.as_bytes()).await {
-                return ToolResult::err(format!("Failed to write {path}: {e}"));
+            if let Err(e) = write_payload_file(std::path::Path::new(&path), &content) {
+                return ToolResult::err(format!("Failed to write UTF-8 file {path}: {e}"));
             }
 
             self.tracker
