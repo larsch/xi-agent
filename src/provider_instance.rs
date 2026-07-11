@@ -317,11 +317,6 @@ impl BackendPreset {
         self.def().label
     }
 
-    /// All backend presets visible in the "add provider" menu.
-    pub fn user_visible() -> &'static [BackendPreset] {
-        &[Self::Ollama, Self::OpenWebUi, Self::OpenAiCompatible]
-    }
-
     /// Built-in hosted providers that always appear in the provider picker.
     ///
     /// These are unconditional singletons — the user never creates, names, or
@@ -477,18 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn user_visible_presets_only_include_user_addable_backends() {
-        assert_eq!(
-            BackendPreset::user_visible(),
-            &[
-                BackendPreset::Ollama,
-                BackendPreset::OpenWebUi,
-                BackendPreset::OpenAiCompatible,
-            ]
-        );
-    }
-
-    #[test]
     fn built_in_hosted_includes_all_hosted_services() {
         let built_ins = BackendPreset::built_in_hosted();
         assert_eq!(
@@ -502,12 +485,11 @@ mod tests {
                 BackendPreset::OllamaCom,
             ]
         );
-        // Built-in hosted and user-visible sets should be disjoint.
-        let user_visible = BackendPreset::user_visible();
+        // Built-in hosted and user-supplied services should be disjoint.
         for bi in built_ins {
             assert!(
-                !user_visible.contains(bi),
-                "{:?} should not be in user_visible()",
+                bi.def().backend_class == BackendClass::BuiltInHosted,
+                "{:?} should be BuiltInHosted",
                 bi
             );
         }

@@ -10,7 +10,7 @@ use crate::{
     keybindings::{BindingContext, KEYBINDINGS},
     live_turn::compose_display,
     llm::{LlmProvider, Message, UsageStats},
-    provider_instance::{ApiType, BackendPreset, ProviderInstance},
+    provider_instance::{ApiType, ProviderInstance},
     session::SessionStore,
     session_state::SessionState,
     skills::SkillMeta,
@@ -65,14 +65,10 @@ pub enum SelectionResult {
     AskFreeform,
     /// A login-panel action was selected.
     LoginAction(LoginActionKind),
-    /// The user started the add-provider flow.
-    AddProvider,
     /// The user cancelled a pending provider removal confirmation.
     CancelProviderRemoval,
     /// The user confirmed removing a custom provider instance.
     RemoveProvider(String),
-    /// A provider backend type was chosen during add-provider setup.
-    ProviderBackendPreset(BackendPreset),
     /// A provider API type was chosen during add-provider setup.
     ProviderApiType(ApiType),
 }
@@ -846,8 +842,12 @@ impl App {
     /// 2. Model configured — the fetch is still beneficial because it populates
     ///    the Copilot model metadata cache (context-window size, vendor) from
     ///    the live API, which otherwise falls back to the hard-coded table.
+    ///
+    /// Does not trigger when no provider has been selected — on a clean
+    /// install the login menu is shown instead.
     pub fn should_auto_query_model(&self) -> bool {
-        !self.completion.models_loading
+        self.provider.provider_selected
+            && !self.completion.models_loading
             && self.completion.available_models.is_none()
             && self.selection.kind != Some(SelectionKind::Model)
     }
@@ -907,12 +907,17 @@ impl App {
         self.update_completions();
 
         // If no model is configured and the fetch succeeded, open the model
-        // picker automatically so the user can choose one.
+        // picker automatically so the user can choose one.  On a fresh install
+        // (no provider selected), redirect to the login menu instead.
         if self.provider.current_instance.model.is_none()
             && self.completion.available_models.is_some()
             && !self.selection.active
         {
-            self.enter_model_selection_mode();
+            if !self.provider.provider_selected {
+                self.enter_login_selection_mode();
+            } else {
+                self.enter_model_selection_mode();
+            }
             return;
         }
 
@@ -1502,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_provider_selection_mode_lists_add_and_provider_entries() {
+    fn enter_provider_selection_mode_lists_providers_and_login_entry() {
         let mut app = make_app();
         let providers = vec![
             ProviderInstance::new("copilot", BackendPreset::Copilot),
@@ -1519,7 +1524,7 @@ mod tests {
             .map(|item| item.complete_to.as_str())
             .collect();
 
-        assert!(items.contains(&"/provider_add"));
+        assert!(items.contains(&"/login"));
         assert!(items.contains(&"/provider copilot"));
         assert!(items.contains(&"/provider gpu-box"));
         assert!(items.contains(&"/provider work-webui"));
@@ -1595,31 +1600,6 @@ mod tests {
         app.clear_pending_provider_setup();
 
         assert!(app.provider.pending_removal.is_none());
-    }
-
-    #[test]
-    fn enter_provider_backend_preset_selection_mode_uses_backend_type_title() {
-        let mut app = make_app();
-        app.enter_provider_backend_preset_selection_mode();
-        assert_eq!(app.selection.title, "  Select backend type  ");
-    }
-
-    #[test]
-    fn enter_provider_backend_preset_selection_mode_lists_only_user_addable_backends() {
-        let mut app = make_app();
-        app.enter_provider_backend_preset_selection_mode();
-
-        let labels: Vec<_> = app
-            .selection
-            .items
-            .iter()
-            .map(|item| item.label.as_str())
-            .collect();
-
-        assert_eq!(
-            labels,
-            vec!["Ollama", "Open WebUI", "OpenAI-compatible endpoint"]
-        );
     }
 
     #[test]
@@ -1705,7 +1685,7 @@ mod tests {
     #[test]
     fn enter_ollama_endpoint_freeform_mode_prefills_default_for_new_provider() {
         let mut app = make_app();
-        app.begin_new_provider_setup();
+        app.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
 
         app.enter_provider_endpoint_input_mode();
@@ -1757,7 +1737,7 @@ mod tests {
             BackendPreset::OpenWebUi,
         )];
 
-        app.begin_new_provider_setup();
+        app.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
         app.set_pending_provider_backend_preset(BackendPreset::OpenWebUi);
         if let Some(setup) = app.provider.pending_setup.as_mut() {
             setup.base_url = Some("https://work.example.com".to_string());
@@ -1784,7 +1764,7 @@ mod tests {
     #[test]
     fn pending_provider_instance_uses_suggested_id_when_name_not_confirmed_yet() {
         let mut app = make_app();
-        app.begin_new_provider_setup();
+        app.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
         app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
         if let Some(setup) = app.provider.pending_setup.as_mut() {
@@ -1814,7 +1794,7 @@ mod tests {
     #[test]
     fn enter_provider_name_input_mode_prefills_ollama_name_from_endpoint() {
         let mut app = make_app();
-        app.begin_new_provider_setup();
+        app.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
         if let Some(setup) = app.provider.pending_setup.as_mut() {
             setup.base_url = Some("http://localhost:11434".to_string());
@@ -1828,7 +1808,7 @@ mod tests {
     #[test]
     fn pending_provider_instance_uses_backend_based_placeholder_id_before_url_is_known() {
         let mut app = make_app();
-        app.begin_new_provider_setup();
+        app.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
         app.set_pending_provider_backend_preset(BackendPreset::Ollama);
         app.set_pending_provider_api_type(ApiType::AnthropicCompatible);
 

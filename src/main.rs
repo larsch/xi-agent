@@ -90,7 +90,7 @@ use provider_instance::AuthMode;
 use provider_instance::BackendPreset;
 use provider_instance::ProviderInstance;
 use provider_manager::PendingProviderSetup;
-use provider_manager::format_provider_error_for_display;
+use provider_manager::{ProviderSetupStep, format_provider_error_for_display};
 use thinking::ThinkingLevel;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -177,14 +177,8 @@ async fn main() -> io::Result<()> {
         }
     };
 
-    // Synthesise built-in hosted provider instances if they are not yet
-    // present in config.  These are unconditional singletons — the user never
-    // creates, names, or deletes them.
-    if config.ensure_built_in_instances()
-        && let Err(e) = config.save()
-    {
-        log::debug!("failed to persist synthesised built-in instances: {e}");
-    }
+    // Built-in hosted providers are always available from the static catalog.
+    // Config only stores user-configured instances and overrides.
 
     // ── Non-interactive (--print / -p) mode ───────────────────────────────────
     if let Some(words) = cli.print {
@@ -283,7 +277,7 @@ async fn main() -> io::Result<()> {
     app.agent_config.tools = tools;
     app.agent_config.system_prompt = Some(system_prompt);
     app.loaded_skills = (*loaded_skills).clone();
-    app.provider.instances = config.providers.clone();
+    app.provider.instances = config.resolve_effective_providers();
     // Mark provider as explicitly selected when a provider was configured
     // (from config.toml or --provider flag), as opposed to the fallback.
     if config.provider.is_some() || cli.provider.is_some() {
@@ -333,6 +327,15 @@ async fn main() -> io::Result<()> {
 
         if app.should_auto_query_model() {
             app.start_model_fetch(&provider);
+        }
+
+        // On clean install with no provider selected, show the login menu
+        // automatically so the user can connect to a service.
+        if !app.provider.provider_selected
+            && !app.selection.active
+            && app.provider.setup_step == ProviderSetupStep::Idle
+        {
+            app.enter_login_selection_mode();
         }
 
         match run(&mut terminal, &mut app, &provider, &config).await {
@@ -416,7 +419,7 @@ async fn main() -> io::Result<()> {
                 // Invalidate cached model list so the next fetch is fresh.
                 app.completion.available_models = None;
                 persist_provider_model_selection_v2(&mut config, &mut app);
-                app.provider.instances = config.providers.clone();
+                app.provider.instances = config.resolve_effective_providers();
                 maybe_warn_thinking_unsupported(&mut app);
                 if prompt_thinking_selection
                     && thinking_support_for_instance(
@@ -429,7 +432,7 @@ async fn main() -> io::Result<()> {
             }
 
             Ok(RunResult::ChangeProvider(id)) => {
-                if let Some(inst) = config.find_provider(&id).cloned() {
+                if let Some(inst) = config.resolve_provider(&id) {
                     // Mark provider as explicitly selected.
                     app.provider.provider_selected = true;
 
@@ -482,7 +485,7 @@ async fn main() -> io::Result<()> {
                     app.record_thinking_level_changed();
                     app.completion.available_models = None;
                     persist_provider_model_selection_v2(&mut config, &mut app);
-                    app.provider.instances = config.providers.clone();
+                    app.provider.instances = config.resolve_effective_providers();
                     maybe_warn_thinking_unsupported(&mut app);
                 }
                 // Unknown id: silently ignore and loop (provider unchanged).
@@ -501,16 +504,14 @@ async fn main() -> io::Result<()> {
                         "[failed to persist config.toml: {e}]"
                     )));
                 }
-                app.provider.current_instance = config
-                    .find_provider(&instance.id)
-                    .cloned()
-                    .unwrap_or(instance);
+                app.provider.current_instance =
+                    config.resolve_provider(&instance.id).unwrap_or(instance);
                 app.provider.current_model = current_model_for_instance;
                 app.provider.current_thinking =
                     resolve_thinking_level_for_model(&config, &app.provider.current_model);
                 app.record_model_changed();
                 app.record_thinking_level_changed();
-                app.provider.instances = config.providers.clone();
+                app.provider.instances = config.resolve_effective_providers();
                 app.completion.available_models = None;
                 maybe_warn_thinking_unsupported(&mut app);
                 app.push_notice(Message::assistant(format!(
@@ -541,16 +542,14 @@ async fn main() -> io::Result<()> {
                         "[failed to persist config.toml: {e}]"
                     )));
                 }
-                app.provider.current_instance = config
-                    .find_provider(&instance.id)
-                    .cloned()
-                    .unwrap_or(instance);
+                app.provider.current_instance =
+                    config.resolve_provider(&instance.id).unwrap_or(instance);
                 app.provider.current_model = current_model_for_instance;
                 app.provider.current_thinking =
                     resolve_thinking_level_for_model(&config, &app.provider.current_model);
                 app.record_model_changed();
                 app.record_thinking_level_changed();
-                app.provider.instances = config.providers.clone();
+                app.provider.instances = config.resolve_effective_providers();
                 app.completion.available_models = None;
                 maybe_warn_thinking_unsupported(&mut app);
                 app.push_notice(Message::assistant(format!(
@@ -565,7 +564,10 @@ async fn main() -> io::Result<()> {
                 app.clear_pending_provider_removal();
                 if config.remove_provider(&id) {
                     if config.provider.as_deref() == Some(id.as_str()) {
-                        config.provider = config.providers.first().map(|p| p.id.clone());
+                        config.provider = config
+                            .resolve_effective_providers()
+                            .first()
+                            .map(|p| p.id.clone());
                     }
                     if let Err(e) = config.save() {
                         log::debug!("failed to persist provider removal: {e}");
@@ -580,7 +582,7 @@ async fn main() -> io::Result<()> {
                         resolve_thinking_level_for_model(&config, &app.provider.current_model);
                     app.record_model_changed();
                     app.record_thinking_level_changed();
-                    app.provider.instances = config.providers.clone();
+                    app.provider.instances = config.resolve_effective_providers();
                     app.completion.available_models = None;
                     maybe_warn_thinking_unsupported(&mut app);
                     app.push_notice(Message::assistant(format!("[removed provider {id}]")));
@@ -592,7 +594,7 @@ async fn main() -> io::Result<()> {
                 app.provider.current_thinking = level;
                 app.record_thinking_level_changed();
                 persist_provider_model_selection_v2(&mut config, &mut app);
-                app.provider.instances = config.providers.clone();
+                app.provider.instances = config.resolve_effective_providers();
                 maybe_warn_thinking_unsupported(&mut app);
             }
 
@@ -602,10 +604,7 @@ async fn main() -> io::Result<()> {
                 api_key,
             }) => {
                 app.clear_pending_provider_setup();
-                let mut inst = config
-                    .find_provider(&instance.id)
-                    .cloned()
-                    .unwrap_or(instance);
+                let mut inst = config.resolve_provider(&instance.id).unwrap_or(instance);
                 if let Some(url) = url.as_deref() {
                     inst.base_url = Some(url.to_string());
                 }
@@ -622,7 +621,7 @@ async fn main() -> io::Result<()> {
                     )));
                 }
                 app.provider.current_instance = inst;
-                app.provider.instances = config.providers.clone();
+                app.provider.instances = config.resolve_effective_providers();
                 app.provider.current_model =
                     resolve_model_for_instance(None, &app.provider.current_instance);
                 app.provider.current_thinking =
@@ -813,17 +812,19 @@ async fn run(
 /// Resolve the default active [`ProviderInstance`] from config.
 ///
 /// Resolution order:
-/// 1. `config.provider` matched against instance ids
-/// 2. First instance in `config.providers`
+/// 1. `config.provider` matched against effective providers
+/// 2. First effective provider
 /// 3. Synthetic copilot default
-fn resolve_default_provider_instance(config: &XiConfig) -> ProviderInstance {
+pub(crate) fn resolve_default_provider_instance(config: &XiConfig) -> ProviderInstance {
+    let effective = config.resolve_effective_providers();
+
     if let Some(ref id) = config.provider
-        && let Some(inst) = config.find_provider(id)
+        && let Some(inst) = effective.iter().find(|p| p.id == *id)
     {
         return inst.clone();
     }
 
-    config.providers.first().cloned().unwrap_or_else(|| {
+    effective.into_iter().next().unwrap_or_else(|| {
         ProviderInstance::new("copilot", provider_instance::BackendPreset::Copilot)
     })
 }
@@ -839,15 +840,15 @@ fn resolve_provider_instance(
                 provider_instance::BackendPreset::Test,
             ));
         }
-        if let Some(inst) = config.find_provider(id) {
-            return Ok(inst.clone());
+        if let Some(inst) = config.resolve_provider(id) {
+            return Ok(inst);
         }
 
-        let mut allowed = config
-            .providers
+        let effective = config.resolve_effective_providers();
+        let mut allowed: Vec<&str> = effective
             .iter()
             .map(|instance| instance.id.as_str())
-            .collect::<Vec<_>>();
+            .collect();
         allowed.push("test");
         return Err(format!(
             "unknown provider '{id}'. Expected one of: {}",
@@ -1393,7 +1394,7 @@ mod tests {
 
         assert_eq!(
             err,
-            "unknown provider 'does-not-exist'. Expected one of: copilot, work-webui, test"
+            "unknown provider 'does-not-exist'. Expected one of: codex, copilot, gemini, ollama-com, openai, openrouter, work-webui, test"
         );
     }
 
@@ -1417,13 +1418,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_provider_instance_falls_back_to_synthetic_copilot() {
+    fn resolve_default_provider_instance_falls_back_to_first_effective() {
         let cfg = XiConfig::default();
 
         let instance = resolve_default_provider_instance(&cfg);
 
-        assert_eq!(instance.id, "copilot");
-        assert_eq!(instance.backend_preset, BackendPreset::Copilot);
+        // First effective provider is the first built-in alphabetically: codex.
+        assert_eq!(instance.id, "codex");
+        assert_eq!(instance.backend_preset, BackendPreset::Codex);
     }
 
     #[test]

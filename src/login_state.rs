@@ -132,20 +132,32 @@ impl LoginState {
         });
     }
 
-    /// Open provider picker for `/login` command.
+    /// Open provider picker for `/login` command, showing all services from
+    /// the static catalog (except the internal Test provider).
     pub fn enter_login_selection_mode(&mut self, selection: &mut SelectionState) {
-        let items = ["copilot", "codex", "gemini"]
+        use crate::provider_instance::BACKEND_PRESET_CATALOG;
+
+        let items: Vec<CompletionItem> = BACKEND_PRESET_CATALOG
             .iter()
-            .map(|p| CompletionItem {
-                label: (*p).to_string(),
-                detail: String::new(),
-                complete_to: format!("/login {p}"),
+            .filter(|def| def.backend_class != crate::provider_instance::BackendClass::Internal)
+            .map(|def| CompletionItem {
+                label: def.label.to_string(),
+                detail: match def.auth_mode {
+                    crate::provider_instance::AuthMode::OAuthLogin => {
+                        "OAuth login via browser".to_string()
+                    }
+                    crate::provider_instance::AuthMode::ApiKey => "API key required".to_string(),
+                    crate::provider_instance::AuthMode::None => {
+                        "No authentication required".to_string()
+                    }
+                },
+                complete_to: format!("/login {}", def.id),
                 loading: false,
                 error: false,
                 match_range: None,
             })
             .collect();
-        selection.activate(SelectionKind::LoginProvider, "  Login provider  ", items);
+        selection.activate(SelectionKind::LoginProvider, "  Login to service  ", items);
     }
 
     /// Open the action selection menu for the active login panel.

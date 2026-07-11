@@ -37,7 +37,6 @@ impl App {
             | Some(SelectionKind::AskUser)
             | Some(SelectionKind::LoginAction)
             | Some(SelectionKind::ConfirmProviderRemoval)
-            | Some(SelectionKind::ProviderBackendPreset)
             | Some(SelectionKind::ProviderApiType)
             | Some(SelectionKind::KeybindingHelp)
             | None => None,
@@ -125,27 +124,37 @@ impl App {
         self.select_current_default();
     }
 
-    /// Open the provider selection menu with the configured instances plus an
-    /// explicit action to add a new instance.
-    /// Open the provider selection menu with the configured instances plus an
-    /// explicit action to add a new instance.
+    /// Open the provider selection menu showing configured instances.
+    ///
+    /// When no providers are configured, shows a placeholder with a hint to
+    /// use `/login`.  A "Login to a service…" entry is always present at the
+    /// bottom to jump to the login menu.
     pub fn enter_provider_selection_mode(&mut self, instances: &[ProviderInstance]) {
         self.reset_textarea();
         self.session.live_turn.notices.clear();
-        let mut items = Vec::with_capacity(instances.len() + 1);
+        let mut items: Vec<CompletionItem> = if instances.is_empty() {
+            vec![CompletionItem {
+                label: "No providers configured".to_string(),
+                detail: "Use /login to connect to a service".to_string(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+                match_range: None,
+            }]
+        } else {
+            instances
+                .iter()
+                .map(|p| CompletionItem::from_provider(&p.id, &p.label()))
+                .collect()
+        };
         items.push(CompletionItem {
-            label: "Add provider…".to_string(),
-            detail: "Create a new named provider instance".to_string(),
-            complete_to: "/provider_add".to_string(),
+            label: "Login to a service…".to_string(),
+            detail: "Connect to a new provider".to_string(),
+            complete_to: "/login".to_string(),
             loading: false,
             error: false,
             match_range: None,
         });
-        items.extend(
-            instances
-                .iter()
-                .map(|p| CompletionItem::from_provider(&p.id, &p.label())),
-        );
         self.selection
             .activate(SelectionKind::Provider, "  Select provider  ", items);
         self.select_current_default();
@@ -172,14 +181,6 @@ impl App {
     }
 
     /// Begin setup for a new custom provider instance.
-    pub fn begin_new_provider_setup(&mut self) {
-        self.exit_selection_mode();
-        self.reset_textarea();
-        self.provider.setup_step = ProviderSetupStep::Idle;
-        self.provider.pending_setup = Some(PendingProviderSetup::new(String::new()));
-        self.provider.pending_removal = None;
-    }
-
     /// Enter freeform input mode for the new provider instance name.
     pub fn enter_provider_name_input_mode(&mut self) {
         self.exit_selection_mode();
@@ -266,29 +267,6 @@ impl App {
         self.reset_textarea();
         Some(token)
     }
-
-    /// Show the backend-type menu for the pending provider instance.
-    pub fn enter_provider_backend_preset_selection_mode(&mut self) {
-        self.reset_textarea();
-        self.session.live_turn.notices.clear();
-        let items = BackendPreset::user_visible()
-            .iter()
-            .map(|service| CompletionItem {
-                label: service.label().to_string(),
-                detail: service.id().to_string(),
-                complete_to: format!("/provider_service {}", service.id()),
-                loading: false,
-                error: false,
-                match_range: None,
-            })
-            .collect();
-        self.selection.activate(
-            SelectionKind::ProviderBackendPreset,
-            "  Select backend type  ",
-            items,
-        );
-    }
-
     /// Show the API-type menu for the pending provider instance.
     pub fn enter_provider_api_type_selection_mode(&mut self, backend_preset: &BackendPreset) {
         self.reset_textarea();
@@ -310,6 +288,8 @@ impl App {
             .activate(SelectionKind::ProviderApiType, "  Select API type  ", items);
     }
 
+    // Used by tests in app.rs.
+    #[allow(dead_code)]
     pub fn set_pending_provider_backend_preset(&mut self, backend_preset: BackendPreset) {
         self.provider.set_pending_backend_preset(backend_preset);
     }
@@ -557,13 +537,16 @@ impl App {
                 .strip_prefix("/thinking ")
                 .and_then(ThinkingLevel::parse)
                 .map(SelectionResult::Thinking),
-            Some(SelectionKind::Provider) => item
-                .complete_to
-                .strip_prefix("/provider ")
-                .map(|name| SelectionResult::Provider(name.to_string()))
-                .or_else(|| {
-                    (item.complete_to == "/provider_add").then_some(SelectionResult::AddProvider)
-                }),
+            Some(SelectionKind::Provider) => {
+                if let Some(name) = item.complete_to.strip_prefix("/provider ") {
+                    Some(SelectionResult::Provider(name.to_string()))
+                } else if item.complete_to == "/login" {
+                    self.enter_login_selection_mode();
+                    Some(SelectionResult::LoginProvider(String::new()))
+                } else {
+                    None
+                }
+            }
             Some(SelectionKind::ConfirmProviderRemoval) => match item.complete_to.as_str() {
                 "/provider_remove_confirm" => self
                     .provider
@@ -573,11 +556,6 @@ impl App {
                 "/provider_remove_cancel" => Some(SelectionResult::CancelProviderRemoval),
                 _ => None,
             },
-            Some(SelectionKind::ProviderBackendPreset) => item
-                .complete_to
-                .strip_prefix("/provider_service ")
-                .and_then(BackendPreset::from_id)
-                .map(SelectionResult::ProviderBackendPreset),
             Some(SelectionKind::ProviderApiType) => item
                 .complete_to
                 .strip_prefix("/provider_api ")

@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use anyhow::Context;
 
 use crate::hooks::{HookConfig, HookPoint};
-use crate::provider_instance::{BackendPreset, ProviderInstance};
+use crate::provider_instance::{BackendClass, BackendPreset, ProviderInstance};
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct HookIpcConfig {
@@ -100,7 +100,16 @@ impl XiConfig {
     }
 
     /// Return a mutable reference to the provider instance with the given id.
+    ///
+    /// For built-in hosted providers, auto-creates a config entry when none
+    /// exists yet (so that model/API-key changes can be persisted).
     pub fn find_provider_mut(&mut self, id: &str) -> Option<&mut ProviderInstance> {
+        if !self.providers.iter().any(|p| p.id == id)
+            && let Some(preset) = BackendPreset::from_id(id)
+            && preset.def().backend_class == BackendClass::BuiltInHosted
+        {
+            self.providers.push(ProviderInstance::new(id, preset));
+        }
         self.providers.iter_mut().find(|p| p.id == id)
     }
 
@@ -120,22 +129,34 @@ impl XiConfig {
         self.providers.len() < before
     }
 
-    /// Ensure built-in hosted provider instances exist in the providers list.
+    /// Return all available providers: built-in catalog defaults merged with
+    /// user config overrides, plus user-created instances.
     ///
-    /// Returns `true` if any were added.  Idempotent — subsequent calls
-    /// add nothing.  Built-in instances are placed before user-created ones.
-    pub fn ensure_built_in_instances(&mut self) -> bool {
-        let mut added = false;
+    /// Built-in hosted providers always appear (from catalog or config override).
+    /// User-supplied providers appear only when present in config.
+    /// Sorted: built-ins before user-created, alphabetical within each group.
+    pub fn resolve_effective_providers(&self) -> Vec<ProviderInstance> {
+        let mut result = Vec::new();
+
+        // Built-in hosted providers: catalog defaults, overridden by config.
         for preset in BackendPreset::built_in_hosted() {
             let id = preset.id().to_string();
-            if !self.providers.iter().any(|p| p.id == id) {
-                self.providers
-                    .push(ProviderInstance::new(id, preset.clone()));
-                added = true;
+            if let Some(cfg) = self.find_provider(&id) {
+                result.push(cfg.clone());
+            } else {
+                result.push(ProviderInstance::new(id, preset.clone()));
             }
         }
+
+        // User-supplied providers: config only.
+        for provider in &self.providers {
+            if provider.backend_preset.def().backend_class == BackendClass::UserSuppliedService {
+                result.push(provider.clone());
+            }
+        }
+
         // Sort: built-ins before user-created, alphabetical within each group.
-        self.providers.sort_by(|a, b| {
+        result.sort_by(|a, b| {
             let a_builtin = BackendPreset::built_in_hosted()
                 .iter()
                 .any(|p| p.id() == a.id);
@@ -148,7 +169,17 @@ impl XiConfig {
                 _ => a.id.cmp(&b.id),
             }
         });
-        added
+
+        result
+    }
+
+    /// Resolve a provider instance by id, falling back to the built-in catalog
+    /// when no config entry exists.
+    pub fn resolve_provider(&self, id: &str) -> Option<ProviderInstance> {
+        if let Some(inst) = self.find_provider(id) {
+            return Some(inst.clone());
+        }
+        BackendPreset::from_id(id).map(|preset| ProviderInstance::new(id, preset))
     }
 }
 
@@ -396,40 +427,48 @@ base_url = "http://gpu-box:11434"
     }
 
     #[test]
-    fn ensure_built_in_instances_adds_on_first_call() {
-        let mut cfg = XiConfig::default();
-        assert!(cfg.providers.is_empty());
-
-        let added = cfg.ensure_built_in_instances();
-        assert!(added);
-        assert_eq!(cfg.providers.len(), BackendPreset::built_in_hosted().len());
-
-        // All built-in ids are present.
+    fn resolve_effective_providers_includes_builtins_on_empty_config() {
+        let cfg = XiConfig::default();
+        let effective = cfg.resolve_effective_providers();
+        // All built-in hosted presets are present.
         for preset in BackendPreset::built_in_hosted() {
             assert!(
-                cfg.find_provider(preset.id()).is_some(),
+                effective.iter().any(|p| p.id == preset.id()),
                 "missing built-in: {}",
                 preset.id()
             );
         }
-
-        // Built-ins are sorted before any user-created instances.
-        let mut cfg2 = XiConfig::default();
-        cfg2.upsert_provider(ProviderInstance::new("zzz-user", BackendPreset::Ollama));
-        cfg2.ensure_built_in_instances();
-        // The last entry should be the user-created one.
-        assert_eq!(cfg2.providers.last().unwrap().id, "zzz-user");
+        // No user-supplied providers on empty config.
+        let builtin_ids: Vec<&str> = BackendPreset::built_in_hosted()
+            .iter()
+            .map(|p| p.id())
+            .collect();
+        for p in &effective {
+            if !builtin_ids.contains(&p.id.as_str()) {
+                panic!("unexpected non-builtin provider: {}", p.id);
+            }
+        }
     }
 
     #[test]
-    fn ensure_built_in_instances_is_idempotent() {
+    fn resolve_effective_providers_includes_user_providers() {
         let mut cfg = XiConfig::default();
-        cfg.ensure_built_in_instances();
-        let count = cfg.providers.len();
+        cfg.upsert_provider(ProviderInstance::new("my-ollama", BackendPreset::Ollama));
+        let effective = cfg.resolve_effective_providers();
+        assert!(effective.iter().any(|p| p.id == "my-ollama"));
+        // Built-ins still present.
+        assert!(effective.iter().any(|p| p.id == "copilot"));
+    }
 
-        let added = cfg.ensure_built_in_instances();
-        assert!(!added);
-        assert_eq!(cfg.providers.len(), count);
+    #[test]
+    fn resolve_effective_providers_prefers_config_override_for_builtin() {
+        let mut cfg = XiConfig::default();
+        let mut inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
+        inst.model = Some("override-model".to_string());
+        cfg.upsert_provider(inst);
+        let effective = cfg.resolve_effective_providers();
+        let copilot = effective.iter().find(|p| p.id == "copilot").unwrap();
+        assert_eq!(copilot.model.as_deref(), Some("override-model"));
     }
 
     #[test]

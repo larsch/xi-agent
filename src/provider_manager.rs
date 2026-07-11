@@ -44,6 +44,8 @@ pub struct PendingProviderRemoval {
 }
 
 impl PendingProviderSetup {
+    /// Create a new pending setup with the given id.  Used in tests.
+    #[allow(dead_code)]
     pub(crate) fn new(id: String) -> Self {
         Self {
             original_id: id.clone(),
@@ -170,6 +172,8 @@ impl ProviderManager {
         self.pending_removal = None;
     }
 
+    // Used by tests in app.rs via set_pending_provider_backend_preset.
+    #[allow(dead_code)]
     pub fn set_pending_backend_preset(&mut self, backend_preset: BackendPreset) {
         if let Some(setup) = self.pending_setup.as_mut() {
             setup.backend_preset = Some(backend_preset);

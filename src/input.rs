@@ -10,7 +10,8 @@ use crate::{
     llm::{LlmProvider, Message},
     provider::{ThinkingSupport, thinking_support_for_instance},
     provider_instance::{AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
-    provider_manager::ProviderSetupStep,
+    provider_manager::{PendingProviderSetup, ProviderSetupStep},
+    resolve_default_provider_instance,
     thinking::ThinkingLevel,
 };
 
@@ -87,30 +88,15 @@ fn enter_provider_endpoint_input(app: &mut App, _instance: &ProviderInstance) {
 
 fn resolve_current_run_instance(app: &App, config: &XiConfig) -> ProviderInstance {
     config
-        .find_provider(&app.provider.current_instance.id)
-        .cloned()
+        .resolve_provider(&app.provider.current_instance.id)
         .unwrap_or_else(|| resolve_default_provider_instance(config))
-}
-
-fn resolve_default_provider_instance(config: &XiConfig) -> ProviderInstance {
-    if let Some(ref id) = config.provider
-        && let Some(inst) = config.find_provider(id)
-    {
-        return inst.clone();
-    }
-
-    config
-        .providers
-        .first()
-        .cloned()
-        .unwrap_or_else(|| ProviderInstance::new("copilot", BackendPreset::Copilot))
 }
 
 fn thinking_supported_for_current_provider(app: &App, config: &XiConfig) -> bool {
     config
-        .find_provider(&app.provider.current_instance.id)
+        .resolve_provider(&app.provider.current_instance.id)
         .map(|inst| {
-            thinking_support_for_instance(inst, &app.provider.current_model)
+            thinking_support_for_instance(&inst, &app.provider.current_model)
                 == ThinkingSupport::Applied
         })
         .unwrap_or(false)
@@ -411,37 +397,12 @@ fn handle_selection_enter(app: &mut App) -> KeyDispatch {
             KeyDispatch::Return(RunResult::ChangeThinking(level))
         }
         Some(SelectionResult::Provider(p)) => KeyDispatch::Return(RunResult::ChangeProvider(p)),
-        Some(SelectionResult::AddProvider) => {
-            app.begin_new_provider_setup();
-            app.enter_provider_backend_preset_selection_mode();
-            KeyDispatch::Continue
-        }
         Some(SelectionResult::CancelProviderRemoval) => {
             app.clear_pending_provider_removal();
             KeyDispatch::Continue
         }
         Some(SelectionResult::RemoveProvider(id)) => {
             KeyDispatch::Return(RunResult::RemoveProvider(id))
-        }
-        Some(SelectionResult::ProviderBackendPreset(backend_preset)) => {
-            let service_def = backend_preset.def();
-            let default_api = service_def.default_api.clone();
-            app.set_pending_provider_backend_preset(backend_preset.clone());
-            if service_def.user_selects_api {
-                app.enter_provider_api_type_selection_mode(&backend_preset);
-            } else {
-                app.set_pending_provider_api_type(default_api);
-                if let Some(instance) = app.pending_provider_instance() {
-                    if provider_setup_requires_endpoint(&instance) {
-                        enter_provider_endpoint_input(app, &instance);
-                    } else if provider_setup_requires_api_key(&instance) {
-                        app.enter_provider_api_key_input_mode();
-                    } else {
-                        app.enter_provider_name_input_mode();
-                    }
-                }
-            }
-            KeyDispatch::Continue
         }
         Some(SelectionResult::ProviderApiType(api_type)) => {
             app.set_pending_provider_api_type(api_type);
@@ -457,7 +418,33 @@ fn handle_selection_enter(app: &mut App) -> KeyDispatch {
             KeyDispatch::Continue
         }
         Some(SelectionResult::LoginProvider(p)) => {
-            app.start_login(&p);
+            if p.is_empty() {
+                // Login menu was already opened by the caller (e.g. from /provider).
+            } else {
+                let preset = BackendPreset::from_id(&p);
+                match preset.as_ref().map(|pr| pr.def().auth_mode) {
+                    Some(AuthMode::OAuthLogin) => {
+                        app.start_login(&p);
+                    }
+                    _ => {
+                        // Non-OAuth providers: start the add-provider flow.
+                        if let Some(preset) = preset {
+                            let instance = ProviderInstance::new(p.clone(), preset.clone());
+                            app.provider.pending_setup =
+                                Some(PendingProviderSetup::from_instance(&instance));
+                            if preset.def().user_selects_api {
+                                app.enter_provider_api_type_selection_mode(&preset);
+                            } else if provider_setup_requires_endpoint(&instance) {
+                                enter_provider_endpoint_input(app, &instance);
+                            } else if provider_setup_requires_api_key(&instance) {
+                                app.enter_provider_api_key_input_mode();
+                            } else {
+                                app.enter_provider_name_input_mode();
+                            }
+                        }
+                    }
+                }
+            }
             KeyDispatch::Continue
         }
         Some(SelectionResult::ResumeSession(id)) => {
@@ -611,7 +598,7 @@ fn handle_chat_submit(
                 let instance_opt = app.pending_provider_instance();
                 let is_ollama = instance_opt
                     .as_ref()
-                    .map(|i| i.backend_preset == crate::provider_instance::BackendPreset::Ollama)
+                    .map(|i| i.backend_preset == crate::BackendPreset::Ollama)
                     .unwrap_or(false);
                 if is_ollama {
                     app.take_ollama_endpoint_input()
@@ -660,7 +647,8 @@ fn handle_chat_submit(
         ProviderSetupStep::Name => {
             let was_edit = app.pending_provider_setup_is_edit();
             let original_id = app.pending_provider_original_id().map(ToOwned::to_owned);
-            if app.submit_provider_name_input(&config.providers).is_some()
+            let effective = config.resolve_effective_providers();
+            if app.submit_provider_name_input(&effective).is_some()
                 && let Some(instance) = app.finish_pending_provider_setup()
             {
                 if was_edit {
@@ -732,7 +720,8 @@ fn handle_slash_submit(
             return KeyDispatch::Return(RunResult::ChangeProvider(name));
         }
         Some(CommandAction::ProviderNoArg) => {
-            app.enter_provider_selection_mode(&config.providers);
+            let effective = config.resolve_effective_providers();
+            app.enter_provider_selection_mode(&effective);
         }
         Some(CommandAction::Thinking(raw)) => {
             if !thinking_supported_for_current_provider(app, config) {
@@ -757,7 +746,29 @@ fn handle_slash_submit(
         }
         Some(CommandAction::ThinkingNoArg) => {}
         Some(CommandAction::Login(provider_name)) => {
-            app.start_login(&provider_name);
+            let preset = BackendPreset::from_id(&provider_name);
+            match preset.as_ref().map(|pr| pr.def().auth_mode) {
+                Some(AuthMode::OAuthLogin) => {
+                    app.start_login(&provider_name);
+                }
+                _ => {
+                    // Non-OAuth providers: start the add-provider flow.
+                    if let Some(preset) = preset {
+                        let instance = ProviderInstance::new(provider_name.clone(), preset.clone());
+                        app.provider.pending_setup =
+                            Some(PendingProviderSetup::from_instance(&instance));
+                        if preset.def().user_selects_api {
+                            app.enter_provider_api_type_selection_mode(&preset);
+                        } else if provider_setup_requires_endpoint(&instance) {
+                            enter_provider_endpoint_input(app, &instance);
+                        } else if provider_setup_requires_api_key(&instance) {
+                            app.enter_provider_api_key_input_mode();
+                        } else {
+                            app.enter_provider_name_input_mode();
+                        }
+                    }
+                }
+            }
         }
         Some(CommandAction::LoginNoArg) => {
             app.enter_login_selection_mode();
