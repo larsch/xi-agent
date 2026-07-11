@@ -35,6 +35,7 @@ pub struct PendingProviderSetup {
     pub(crate) api_type: Option<ApiType>,
     pub(crate) base_url: Option<String>,
     pub(crate) api_key: Option<String>,
+    pub(crate) model: Option<String>,
     pub(crate) editing_existing: bool,
 }
 
@@ -54,6 +55,7 @@ impl PendingProviderSetup {
             api_type: None,
             base_url: None,
             api_key: None,
+            model: None,
             editing_existing: false,
         }
     }
@@ -66,6 +68,7 @@ impl PendingProviderSetup {
             api_type: Some(instance.api_type.clone()),
             base_url: instance.base_url.clone(),
             api_key: instance.api_key.clone(),
+            model: instance.model.clone(),
             editing_existing: true,
         }
     }
@@ -153,6 +156,7 @@ impl ProviderManager {
         instance.api_type = api_type;
         instance.base_url = setup.base_url.clone();
         instance.api_key = setup.api_key.clone();
+        instance.model = setup.model.clone();
         Some(instance)
     }
 
