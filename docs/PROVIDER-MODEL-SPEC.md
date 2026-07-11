@@ -153,8 +153,8 @@ Examples:
 
 A provider instance is either:
 
-- a **built-in instance**, synthesized by xi-agent from a built-in preset
-- a **custom instance**, created by the user from a preset that allows user configuration
+- a **built-in instance**, always available from the static backend catalog
+- a **custom instance**, created by the user through the login flow
 
 ## Backend classes
 
@@ -167,7 +167,8 @@ service identity, and a predetermined endpoint family.
 
 Properties:
 
-- appears as a first-class provider instance in the main provider picker
+- always available in the provider picker from the static catalog, even on
+  a clean install with no config file
 - does not require the user to invent a custom instance just to use the normal
   hosted service
 - may still require credentials before it becomes usable
@@ -175,29 +176,31 @@ Properties:
 
 Built-in hosted providers include:
 
-- OpenRouter
-- OpenAI
 - Copilot
 - Codex
 - Gemini
+- ollama.com
+- OpenAI
+- OpenRouter
 
-### User-supplied service instances
+### User-supplied service presets
 
-A user-supplied service instance represents a backend where the user supplies
+A user-supplied service preset represents a backend where the user supplies
 an endpoint and optionally chooses among multiple APIs.
 
 Properties:
 
-- created through the add-provider flow
+- created through the `/login` flow
 - represented in the main provider picker as a normal provider instance once
   configured
 - may allow multiple instances
 - may allow multiple APIs
 
-User-supplied service instances include:
+User-supplied service presets include:
 
 - Ollama
 - Open WebUI
+- OpenAI-compatible endpoint
 - generic OpenAI-compatible endpoint
 
 ## Provider preset semantics
@@ -272,73 +275,51 @@ Examples:
 
 ### Main provider picker
 
-The main provider picker contains **provider instances**.
+The main provider picker (`/provider`) contains **provider instances**.
 
 It does not contain raw APIs.
 It does not contain transport types.
-It does not directly contain provider presets unless those presets are realized
-as provider instances.
+
+Built-in hosted providers always appear here from the static catalog, even on
+a clean install with no config file. Custom backends appear here after the user
+creates a provider instance through the login flow.
 
 Each item in the main provider picker is immediately selectable as the active
 backend, subject to any missing credentials or required setup.
 
-Built-in hosted providers appear here as built-in provider instances.
-Custom backends appear here after the user creates a provider instance for
-them.
+When no provider instances are configured, the picker shows a placeholder
+message ("No providers configured") with a hint to use `/login`. A "Login to
+a service…" entry at the bottom of the list opens the login menu.
 
 User-supplied provider instances may also be edited directly from the main
 provider picker via a shortcut on the currently highlighted provider entry.
-That edit action is attached to the existing provider row rather than shown as
-its own separate picker item.
 
-### Add-provider flow
+### Login menu
 
-The add-provider flow creates a **new provider instance**.
+The login menu (`/login`) is the single entry point for connecting to all
+services. It lists every service from the static backend catalog (except the
+internal test provider).
 
-The flow is used for presets that support user-created instances.
+Selecting a service from the login menu starts the appropriate setup flow:
 
-The flow consists of these conceptual steps:
+- **OAuth providers** (Copilot, Codex, Gemini): browser-based OAuth login.
+- **API-key providers** (OpenAI, OpenRouter, ollama.com): inline API key
+  prompt followed by instance naming.
+- **User-supplied presets** (Ollama, Open WebUI, OpenAI-compatible): API
+  selection (if applicable), endpoint entry, API key entry (if applicable),
+  and instance naming.
 
-1. instance naming
-2. provider preset selection
-3. API selection, if user-visible for that preset
-4. endpoint entry, if the preset requires a user-supplied endpoint
-5. credential entry, if required by the preset
+The `/login <id>` command also accepts a service id directly, skipping the menu.
 
-The result of the flow is a provider instance.
+### Setup flow
 
-### Provider preset selection
+Creating a new provider instance through the login menu follows these steps
+depending on the preset:
 
-The provider preset selection step chooses what kind of backend the new
-provider instance will represent.
-
-This selection is about backend identity and setup semantics, not about the
-active provider instance yet.
-
-### API selection
-
-The API selection step chooses which API the provider instance will use.
-
-This step is shown only when the selected preset exposes multiple valid APIs.
-
-### Endpoint prompt
-
-The endpoint prompt collects the provider instance's endpoint.
-
-The endpoint prompt is shown only when the selected preset requires a
-user-supplied endpoint.
-
-Examples:
-
-- Ollama endpoint
-- Open WebUI URL
-- generic OpenAI-compatible endpoint URL
-
-### Credential prompt
-
-The credential prompt collects the provider instance's required credentials.
-
-The prompt type is determined by the preset's authentication mode.
+1. API selection, if user-visible for that preset
+2. Endpoint entry, if the preset requires a user-supplied endpoint
+3. Credential entry, if required by the preset
+4. Instance naming
 
 Examples:
 
@@ -367,24 +348,21 @@ Each provider instance records:
 
 ### Built-in instances
 
-Built-in hosted providers are represented as normal provider instances in
+Built-in hosted providers are always available from the static backend catalog.
+They do not need to be stored in config to appear in the provider picker.
+
+When the user configures a built-in provider (by selecting a model or providing
+credentials), xi-agent persists the instance to config as a normal provider
+entry. On subsequent runs, the persisted entry overrides the catalog default.
+
+### Custom instances
+
+Custom/self-hosted backends are represented as normal provider instances in
 configuration.
 
 Their distinction is semantic, not structural:
 
-- they are synthesized from built-in presets
-- they represent the standard hosted service
-- they may start with incomplete credentials and become usable after login or
-  API key entry
-
-### Custom instances
-
-Custom/self-hosted backends are also represented as normal provider instances
-in configuration.
-
-Their distinction is semantic, not structural:
-
-- they are created through the add-provider flow
+- they are created through the login flow
 - they require a user-supplied endpoint and possibly other choices
 
 ### Active provider
@@ -558,10 +536,10 @@ The following invariants define the provider model.
    user-supplied endpoint.
 6. Credential prompting occurs only according to the preset's authentication
    mode.
-7. Built-in hosted providers appear as built-in provider instances in the main
-   provider picker.
-8. Custom/self-hosted backends become selectable only after creation of a
-   provider instance.
+7. Built-in hosted providers are always available in the main provider picker
+   from the static catalog, without requiring config entries.
+8. Custom/self-hosted backends become selectable only after creation through
+   the login flow.
 9. Built-in and custom backends share the same provider-instance model once
    configured.
 10. Provider identity, service identity, API, endpoint, and credentials are
