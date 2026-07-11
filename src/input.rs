@@ -608,16 +608,6 @@ fn handle_chat_submit(
             };
 
             if let Some(url) = url_opt {
-                if app.pending_provider_setup_is_edit() {
-                    let instance = app
-                        .pending_provider_instance()
-                        .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                    return KeyDispatch::Return(RunResult::ConfigureProvider {
-                        instance,
-                        url: Some(url),
-                        api_key: None,
-                    });
-                }
                 if let Some(setup) = app.provider.pending_setup.as_mut() {
                     setup.base_url = Some(url);
                 }
@@ -628,14 +618,25 @@ fn handle_chat_submit(
 
         ProviderSetupStep::ApiKey { .. } => {
             if let Some((url, token)) = app.take_open_webui_token_input() {
-                let instance = app
-                    .pending_provider_instance()
-                    .unwrap_or_else(|| resolve_current_run_instance(app, config));
-                return KeyDispatch::Return(RunResult::ConfigureProvider {
-                    instance,
-                    url: Some(url),
-                    api_key: Some(token),
-                });
+                if app.pending_provider_setup_is_edit() {
+                    // Store URL+token in pending setup and proceed to name step
+                    // so the user can rename the instance.
+                    if let Some(setup) = app.provider.pending_setup.as_mut() {
+                        setup.base_url = Some(url);
+                        setup.api_key = Some(token);
+                    }
+                    app.enter_provider_name_input_mode();
+                } else {
+                    let instance = app
+                        .pending_provider_instance()
+                        .unwrap_or_else(|| resolve_current_run_instance(app, config));
+                    return KeyDispatch::Return(RunResult::ConfigureProvider {
+                        instance,
+                        url: Some(url),
+                        api_key: Some(token),
+                    });
+                }
+                return KeyDispatch::Continue;
             }
             // Generic ApiKey step (edit flow without two-step URL→token).
             if app.submit_pending_provider_api_key().is_some() {
