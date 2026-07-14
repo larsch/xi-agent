@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::file_tracker::FileTracker;
+use crate::agent::file_tracker::{FileTracker, Staleness};
 use crate::agent::types::{Tool, ToolResult};
 
 pub struct EditTool {
@@ -105,6 +105,37 @@ impl Tool for EditTool {
                 Err(e) => return *e,
             };
 
+            // Guard against editing a file that was modified externally
+            // since it was last read.
+            {
+                let tracker = self.tracker.lock().unwrap();
+                match tracker.staleness(std::path::Path::new(&path)) {
+                    Staleness::NeverRead => {
+                        log::info!("edit_file: rejecting {path} — never read");
+                        return ToolResult::err(format!(
+                            "You must read {path} before editing it. Use read_file first."
+                        ));
+                    }
+                    Staleness::Stale {
+                        mod_time,
+                        read_time,
+                    } => {
+                        log::info!(
+                            "edit_file: rejecting {path} — stale (mod={mod_time:?}, read={read_time:?})"
+                        );
+                        return ToolResult::err(format!(
+                            "{path} was modified since last read. \
+                             Re-read with read_file before editing.\n\
+                             Modified: {mod_time:?}\n\
+                             Last read: {read_time:?}"
+                        ));
+                    }
+                    Staleness::Current => {
+                        log::info!("edit_file: {path} is current");
+                    }
+                }
+            }
+
             let raw_content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) => return ToolResult::err(format!("Failed to read {path}: {e}")),
@@ -177,6 +208,14 @@ mod tests {
         )))
     }
 
+    /// Create a tool and pre-record the given path as "read" so the
+    /// staleness guard passes.
+    fn make_tool_with_read(path: &std::path::Path) -> EditTool {
+        let tracker = Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new()));
+        tracker.lock().unwrap().record(path);
+        EditTool::new(tracker)
+    }
+
     fn write_temp(content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
@@ -187,7 +226,7 @@ mod tests {
     async fn edit_replaces_exact_match() {
         let f = write_temp("hello world\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": path,
             "old_text": "hello",
@@ -207,7 +246,7 @@ mod tests {
     async fn edit_matches_lf_against_crlf_file_and_preserves_crlf() {
         let f = write_temp("a\r\nb\r\nc\r\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": path,
             "old_text": "b\n",
@@ -227,7 +266,7 @@ mod tests {
     async fn edit_preserves_utf8_bom() {
         let f = write_temp("\u{FEFF}hello\r\nworld\r\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": path,
             "old_text": "hello\n",
@@ -248,7 +287,7 @@ mod tests {
     #[tokio::test]
     async fn edit_no_match_is_error() {
         let f = write_temp("hello world\n");
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": "not found",
@@ -261,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn edit_multiple_matches_is_error() {
         let f = write_temp("foo foo foo\n");
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": "foo",
@@ -279,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn edit_wrong_type_for_old_text_is_error() {
         let f = write_temp("hello world\n");
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": false,
@@ -318,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn edit_identical_old_and_new_is_error() {
         let f = write_temp("hello world\n");
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": f.path().to_str().unwrap(),
             "old_text": "hello",
@@ -337,7 +376,7 @@ mod tests {
     async fn edit_extra_fields_are_ignored() {
         let f = write_temp("hello world\n");
         let path = f.path().to_str().unwrap().to_string();
-        let tool = make_tool();
+        let tool = make_tool_with_read(f.path());
         let args = serde_json::json!({
             "path": path,
             "old_text": "hello",
@@ -351,5 +390,51 @@ mod tests {
             result.content.as_text()
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world\n");
+    }
+
+    // ── staleness guard tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn edit_rejects_never_read_file() {
+        let f = write_temp("hello world\n");
+        let tool = make_tool(); // no record — never read
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "old_text": "hello",
+            "new_text": "goodbye"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_error, "expected error for never-read file");
+        assert!(
+            result.content.as_text().contains("must read"),
+            "expected 'must read' in error: {}",
+            result.content.as_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_stale_file() {
+        let f = write_temp("hello world\n");
+        let tool = make_tool_with_read(f.path());
+
+        // Modify the file after recording it.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(f.path(), "modified externally\n").unwrap();
+
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "old_text": "hello",
+            "new_text": "goodbye"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_error, "expected error for stale file");
+        assert!(
+            result
+                .content
+                .as_text()
+                .contains("modified since last read"),
+            "expected 'modified since last read' in error: {}",
+            result.content.as_text()
+        );
     }
 }

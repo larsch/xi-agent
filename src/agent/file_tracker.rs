@@ -28,6 +28,22 @@ pub struct ChangedFile {
     pub new_content: String,
 }
 
+/// Outcome of checking whether a tracked file is stale relative to disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Staleness {
+    /// The file was modified on disk since it was last read or written by
+    /// the agent.
+    Stale {
+        mod_time: SystemTime,
+        read_time: SystemTime,
+    },
+    /// The file has not changed since it was last read or written.
+    Current,
+    /// The file has never been read or written by the agent in this
+    /// session.
+    NeverRead,
+}
+
 /// Tracks files touched by the agent's file tools and detects external
 /// modifications using a two-stage check: mtime first, then SHA-256.
 ///
@@ -98,12 +114,91 @@ impl FileTracker {
         }
         match snapshot(path) {
             Ok(snap) => {
+                log::info!(
+                    "file_tracker: record({}) mtime={:?}",
+                    path.display(),
+                    snap.mtime
+                );
                 self.files.insert(path.to_path_buf(), snap);
             }
             Err(e) => {
                 log::debug!("file_tracker: could not record {}: {e}", path.display());
             }
         }
+    }
+
+    /// Check whether a tracked file has been modified on disk since it was
+    /// last read or written.
+    ///
+    /// Returns [`Staleness::NeverRead`] when `path` has never been recorded,
+    /// [`Staleness::Stale`] when the disk mtime is newer than the recorded
+    /// mtime, and [`Staleness::Current`] when the two match.
+    pub fn staleness(&self, path: &Path) -> Staleness {
+        let Some(snap) = self.files.get(path) else {
+            log::info!(
+                "file_tracker: staleness({}) → NeverRead (not in tracker)",
+                path.display()
+            );
+            return Staleness::NeverRead;
+        };
+
+        let disk_mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(snap.mtime);
+
+        log::info!(
+            "file_tracker: staleness({}) disk={:?} snap={:?} {}",
+            path.display(),
+            disk_mtime,
+            snap.mtime,
+            if disk_mtime > snap.mtime {
+                "→ Stale"
+            } else {
+                "→ Current"
+            }
+        );
+
+        if disk_mtime > snap.mtime {
+            Staleness::Stale {
+                mod_time: disk_mtime,
+                read_time: snap.mtime,
+            }
+        } else {
+            Staleness::Current
+        }
+    }
+
+    /// Check whether `path` is tracked by git.
+    ///
+    /// Uses `git ls-files --error-unmatch <path>` to determine tracking
+    /// status. The git repo root is discovered once per call via
+    /// `git rev-parse --show-toplevel` in the file's parent directory.
+    /// Returns `false` when git is not installed, the file is not in a
+    /// repo, or the path resolves to a gitignored or untracked file.
+    pub fn is_git_tracked(&mut self, path: &Path) -> bool {
+        // Ensure the path is absolute so git can resolve it.
+        let path = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
+        // Discover the repo root from the file's directory, not cwd.
+        let repo_root = match discover_git_root(path.parent().unwrap_or(&path)) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // git ls-files --error-unmatch exits 0 for tracked, 1 for
+        // untracked/ignored.
+        std::process::Command::new("git")
+            .args(["ls-files", "--error-unmatch"])
+            .arg(&path)
+            .current_dir(&repo_root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     /// Discard all tracked file snapshots.
@@ -156,12 +251,13 @@ impl FileTracker {
     /// A file is considered externally modified when its mtime has changed
     /// **and** its content hash has changed (mtime-only bumps are ignored).
     ///
-    /// Returns one [`ChangedFile`] per modified path and updates each snapshot
-    /// so subsequent calls don't re-report the same change.
-    pub fn check_modified(&mut self) -> Vec<ChangedFile> {
+    /// Returns one [`ChangedFile`] per modified path.  Snapshots are **not**
+    /// updated — call [`accept_changes`] to update the snapshots that were
+    /// acted upon.
+    pub fn check_modified(&self) -> Vec<ChangedFile> {
         let mut changed = Vec::new();
 
-        for (path, snap) in &mut self.files {
+        for (path, snap) in &self.files {
             // Fast path: stat only.
             let meta = match std::fs::metadata(path) {
                 Ok(m) => m,
@@ -191,17 +287,12 @@ impl FileTracker {
 
             let new_hash = hash_content(&new_content);
             if new_hash == snap.hash {
-                // Content identical — no-op save, just update mtime.
-                snap.mtime = new_mtime;
+                // Content identical — no-op save. Update mtime only so
+                // staleness doesn't trigger on mtime bumps.
                 continue;
             }
 
             let old_content = snap.content.clone();
-
-            // Update snapshot to the new state.
-            snap.mtime = new_mtime;
-            snap.hash = new_hash;
-            snap.content = new_content.clone();
 
             changed.push(ChangedFile {
                 path: path.clone(),
@@ -211,6 +302,30 @@ impl FileTracker {
         }
 
         changed
+    }
+
+    /// Update the snapshot for each changed file to reflect the current
+    /// disk state.  Call this after [`check_modified`] for files whose
+    /// changes you want to absorb.
+    pub fn accept_changes(&mut self, paths: &[std::path::PathBuf]) {
+        for path in paths {
+            match snapshot(path) {
+                Ok(new_snap) => {
+                    log::info!(
+                        "file_tracker: accept_change({}) mtime={:?}",
+                        path.display(),
+                        new_snap.mtime
+                    );
+                    self.files.insert(path.clone(), new_snap);
+                }
+                Err(e) => {
+                    log::debug!(
+                        "file_tracker: could not accept change for {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -232,6 +347,31 @@ fn snapshot(path: &Path) -> std::io::Result<FileSnapshot> {
         hash,
         content,
     })
+}
+
+/// Discover the git repository root via `git rev-parse --show-toplevel`
+/// run from `dir`.  Returns `None` when git is not installed or `dir` is
+/// not inside a git repository.
+fn discover_git_root(dir: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8(output.stdout).ok()?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(trimmed))
 }
 
 /// Build the notification message text for a set of changed files.
@@ -430,6 +570,10 @@ mod tests {
         let first = tracker.check_modified();
         assert_eq!(first.len(), 1);
 
+        // Accept the change so the snapshot is updated.
+        let paths: Vec<_> = first.iter().map(|c| c.path.clone()).collect();
+        tracker.accept_changes(&paths);
+
         // Second call — snapshot was updated, should not report again.
         let second = tracker.check_modified();
         assert!(second.is_empty(), "should not report the same change twice");
@@ -507,5 +651,37 @@ mod tests {
         let msg = build_notification(&changes);
         assert!(!msg.contains("```diff"), "should not inline large diff");
         assert!(msg.contains("too large to inline"));
+    }
+
+    // ── staleness tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn staleness_never_read_for_untracked_file() {
+        let f = write_temp("hello\n");
+        let tracker = FileTracker::new();
+        assert_eq!(tracker.staleness(f.path()), Staleness::NeverRead,);
+    }
+
+    #[test]
+    fn staleness_current_when_not_modified() {
+        let f = write_temp("hello\n");
+        let mut tracker = FileTracker::new();
+        tracker.record(f.path());
+        assert_eq!(tracker.staleness(f.path()), Staleness::Current,);
+    }
+
+    #[test]
+    fn staleness_stale_when_modified_after_record() {
+        let f = write_temp("hello\n");
+        let mut tracker = FileTracker::new();
+        tracker.record(f.path());
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(f.path(), "world\n").unwrap();
+
+        match tracker.staleness(f.path()) {
+            Staleness::Stale { .. } => {}
+            other => panic!("expected Staleness::Stale, got {other:?}"),
+        }
     }
 }

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::file_tracker::FileTracker;
+use crate::agent::file_tracker::{FileTracker, Staleness};
 use crate::agent::tools::utf8::write_payload_file;
 use crate::agent::types::{Tool, ToolResult};
 
@@ -99,8 +99,41 @@ impl Tool for WriteTool {
                 Err(e) => return *e,
             };
 
+            // Guard against overwriting a file that was modified externally
+            // since it was last read. Skip for new files.
+            let file_path = std::path::Path::new(&path);
+            if file_path.exists() {
+                let tracker = self.tracker.lock().unwrap();
+                match tracker.staleness(file_path) {
+                    Staleness::NeverRead => {
+                        log::info!("write_file: rejecting {path} — never read");
+                        return ToolResult::err(format!(
+                            "You must read {path} before overwriting it. Use read_file first."
+                        ));
+                    }
+                    Staleness::Stale {
+                        mod_time,
+                        read_time,
+                    } => {
+                        log::info!(
+                            "write_file: rejecting {path} — stale (mod={mod_time:?}, read={read_time:?})"
+                        );
+                        return ToolResult::err(format!(
+                            "{path} was modified since last read. \
+                             Re-read with read_file before overwriting.\n\
+                             Modified: {mod_time:?}\n\
+                             Last read: {read_time:?}"
+                        ));
+                    }
+                    Staleness::Current => {
+                        log::info!("write_file: {path} is current");
+                    }
+                }
+                // guard dropped here — before any await
+            }
+
             // Create parent directories if needed.
-            if let Some(parent) = std::path::Path::new(&path).parent()
+            if let Some(parent) = file_path.parent()
                 && !parent.as_os_str().is_empty()
                 && let Err(e) = tokio::fs::create_dir_all(parent).await
             {
@@ -134,6 +167,14 @@ mod tests {
         )))
     }
 
+    /// Create a tool and pre-record the given path as "read" so the
+    /// staleness guard passes.
+    fn make_tool_with_read(path: &std::path::Path) -> WriteTool {
+        let tracker = Arc::new(Mutex::new(crate::agent::file_tracker::FileTracker::new()));
+        tracker.lock().unwrap().record(path);
+        WriteTool::new(tracker)
+    }
+
     #[tokio::test]
     async fn write_creates_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -158,7 +199,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "old content\n").unwrap();
-        let tool = make_tool();
+        let tool = make_tool_with_read(&path);
         let args = serde_json::json!({
             "path": path.to_str().unwrap(),
             "content": "new content\n"
@@ -255,5 +296,71 @@ mod tests {
             result.content.as_text()
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi\n");
+    }
+
+    // ── staleness guard tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_rejects_never_read_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "old content\n").unwrap();
+        let tool = make_tool(); // no record
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "new content\n"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_error, "expected error for never-read file");
+        assert!(
+            result.content.as_text().contains("must read"),
+            "expected 'must read' in error: {}",
+            result.content.as_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_rejects_stale_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "old content\n").unwrap();
+        let tool = make_tool_with_read(&path);
+
+        // Modify the file after recording it.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&path, "modified externally\n").unwrap();
+
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "new content\n"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_error, "expected error for stale file");
+        assert!(
+            result
+                .content
+                .as_text()
+                .contains("modified since last read"),
+            "expected 'modified since last read' in error: {}",
+            result.content.as_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_allows_new_file_without_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new_file.txt");
+        let tool = make_tool(); // no record — new file is fine
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "hello\n"
+        });
+        let result = tool.execute(args).await;
+        assert!(
+            !result.is_error,
+            "unexpected error for new file: {}",
+            result.content.as_text()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
     }
 }

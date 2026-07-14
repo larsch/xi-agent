@@ -577,7 +577,22 @@ pub async fn run_agent_loop(
         }
 
         // ── Check for external file modifications ─────────────────────────────
-        let changes = config.file_tracker.lock().unwrap().check_modified();
+        let changes = {
+            let mut tracker = config.file_tracker.lock().unwrap();
+            let all_changes = tracker.check_modified();
+            // Only report changes to git-tracked files. Gitignored and
+            // untracked files (databases, build artifacts, etc.) are
+            // protected by the per-tool staleness guard instead.
+            let (tracked, _untracked): (Vec<_>, Vec<_>) = all_changes
+                .into_iter()
+                .partition(|c| tracker.is_git_tracked(&c.path));
+            // Absorb only git-tracked changes so they won't re-fire.
+            // Untracked changes stay in the old snapshot so the staleness
+            // guard in edit/write tools can detect them.
+            let paths: Vec<_> = tracked.iter().map(|c| c.path.clone()).collect();
+            tracker.accept_changes(&paths);
+            tracked
+        };
         if !changes.is_empty() {
             let paths: Vec<std::path::PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
             let notification = build_notification(&changes);
