@@ -437,4 +437,38 @@ mod tests {
             result.content.as_text()
         );
     }
+
+    #[tokio::test]
+    async fn edit_twice_succeeds() {
+        let f = write_temp("hello world\n");
+        let path = f.path().to_str().unwrap().to_string();
+        let tool = make_tool_with_read(f.path());
+
+        // First edit.
+        let args1 = serde_json::json!({
+            "path": &path,
+            "old_text": "hello",
+            "new_text": "goodbye"
+        });
+        let result1 = tool.execute(args1).await;
+        assert!(
+            !result1.is_error,
+            "unexpected error on first edit: {}",
+            result1.content.as_text()
+        );
+
+        // Second edit.
+        let args2 = serde_json::json!({
+            "path": &path,
+            "old_text": "goodbye",
+            "new_text": "hello"
+        });
+        let result2 = tool.execute(args2).await;
+        assert!(
+            !result2.is_error,
+            "unexpected error on second edit: {}",
+            result2.content.as_text()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world\n");
+    }
 }

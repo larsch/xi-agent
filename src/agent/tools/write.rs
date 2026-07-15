@@ -363,4 +363,70 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
     }
+
+    #[tokio::test]
+    async fn write_twice_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let tool = make_tool();
+
+        // First write: new file.
+        let args1 = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "first\n"
+        });
+        let result1 = tool.execute(args1).await;
+        assert!(
+            !result1.is_error,
+            "unexpected error on first write: {}",
+            result1.content.as_text()
+        );
+
+        // Second write: overwrite the file just written.
+        let args2 = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "second\n"
+        });
+        let result2 = tool.execute(args2).await;
+        assert!(
+            !result2.is_error,
+            "unexpected error on second write: {}",
+            result2.content.as_text()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+    }
+
+    #[tokio::test]
+    async fn write_then_edit_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let tool = make_tool();
+
+        // Write a new file.
+        let write_args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": "hello world\n"
+        });
+        let write_result = tool.execute(write_args).await;
+        assert!(
+            !write_result.is_error,
+            "unexpected error on write: {}",
+            write_result.content.as_text()
+        );
+
+        // Edit the file just written — must pass staleness guard.
+        let edit_tool = crate::agent::tools::edit::EditTool::new(tool.tracker.clone());
+        let edit_args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_text": "hello",
+            "new_text": "goodbye"
+        });
+        let edit_result = edit_tool.execute(edit_args).await;
+        assert!(
+            !edit_result.is_error,
+            "unexpected error on edit after write: {}",
+            edit_result.content.as_text()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world\n");
+    }
 }

@@ -122,7 +122,7 @@ impl FileTracker {
                 self.files.insert(path.to_path_buf(), snap);
             }
             Err(e) => {
-                log::debug!("file_tracker: could not record {}: {e}", path.display());
+                log::warn!("file_tracker: could not record {}: {e}", path.display());
             }
         }
     }
@@ -132,7 +132,8 @@ impl FileTracker {
     ///
     /// Returns [`Staleness::NeverRead`] when `path` has never been recorded,
     /// [`Staleness::Stale`] when the disk mtime is newer than the recorded
-    /// mtime, and [`Staleness::Current`] when the two match.
+    /// mtime **and** the content hash differs, and [`Staleness::Current`]
+    /// when the two match or when only the mtime bumped without content change.
     pub fn staleness(&self, path: &Path) -> Staleness {
         let Some(snap) = self.files.get(path) else {
             log::info!(
@@ -159,9 +160,40 @@ impl FileTracker {
         );
 
         if disk_mtime > snap.mtime {
-            Staleness::Stale {
-                mod_time: disk_mtime,
-                read_time: snap.mtime,
+            // mtime changed — verify content actually changed via hash.
+            // Avoids false-positives when filesystems report slightly
+            // different mtimes for the same content after a write + stat.
+            match std::fs::read_to_string(path) {
+                Ok(new_content) => {
+                    let new_hash = hash_content(&new_content);
+                    if new_hash == snap.hash {
+                        log::info!(
+                            "file_tracker: staleness({}) mtime changed but content identical → Current",
+                            path.display()
+                        );
+                        Staleness::Current
+                    } else {
+                        log::info!(
+                            "file_tracker: staleness({}) → Stale (content changed)",
+                            path.display()
+                        );
+                        Staleness::Stale {
+                            mod_time: disk_mtime,
+                            read_time: snap.mtime,
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Can't read the file — assume stale.
+                    log::info!(
+                        "file_tracker: staleness({}) → Stale (mtime changed, file unreadable)",
+                        path.display()
+                    );
+                    Staleness::Stale {
+                        mod_time: disk_mtime,
+                        read_time: snap.mtime,
+                    }
+                }
             }
         } else {
             Staleness::Current
@@ -237,7 +269,7 @@ impl FileTracker {
                     *snap = new_snap;
                 }
                 Err(e) => {
-                    log::debug!(
+                    log::warn!(
                         "file_tracker: could not refresh baseline for {}: {e}",
                         path.display()
                     );
