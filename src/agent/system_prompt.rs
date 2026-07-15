@@ -1,4 +1,3 @@
-use chrono::Local;
 use directories::BaseDirs;
 use std::{fs, path::Path};
 
@@ -110,10 +109,8 @@ fn render_agents_section(entries: &[AgentsEntry]) -> String {
 /// Build the default system prompt for the agent loop.
 ///
 /// Structure mirrors pi-mono's `buildSystemPrompt`: identity, tool list,
-/// tool-aware guidelines, project context (AGENTS.md), skills, then date/cwd.
+/// tool-aware guidelines, project context (AGENTS.md), skills, then cwd.
 pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]) -> String {
-    let date = Local::now().format("%Y-%m-%d").to_string();
-
     // Build tool list sorted by name for deterministic output.
     let mut tool_names: Vec<&str> = tools.keys().map(String::as_str).collect();
     tool_names.sort_unstable();
@@ -204,8 +201,7 @@ In addition to the tools above, you may have access to other custom tools depend
 File paths are relative to the current working directory.\n\
 \n\
 Guidelines:\n\
-{guidelines_text}{agents_section}{skills_section}\n\
-Current date: {date}\n\
+{guidelines_text}{agents_section}{skills_section}
 Current working directory: {cwd}"
     )
 }
