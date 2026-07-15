@@ -28,7 +28,6 @@ use std::process::Stdio;
 
 use super::terminal::apply_terminal_render;
 use super::truncate::truncate_tail;
-use super::utf8::assert_unicode_integrity;
 use crate::agent::types::{AgentEvent, ToolCallContext, ToolResult};
 use crate::app_event::AppEvent;
 use crate::process::DetachFromTty;
@@ -204,37 +203,11 @@ async fn collect_output(
     #[cfg(not(unix))]
     let (out_bytes, err_bytes, exit_code) = collect_other(child, &ctx).await;
 
-    let stdout = match String::from_utf8(out_bytes) {
-        Ok(text) => text,
-        Err(error) => {
-            return ToolResult::err(format!(
-                "`{}` produced invalid UTF-8 on stdout: {error}",
-                "subprocess"
-            ));
-        }
-    };
-    let stderr = match String::from_utf8(err_bytes) {
-        Ok(text) => text,
-        Err(error) => {
-            return ToolResult::err(format!(
-                "`{}` produced invalid UTF-8 on stderr: {error}",
-                "subprocess"
-            ));
-        }
-    };
+    let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
 
     let stdout = apply_terminal_render(&stdout);
     let stderr = apply_terminal_render(&stderr);
-    if let Err(error) = assert_unicode_integrity(&stdout, &[]) {
-        return ToolResult::err(format!(
-            "UTF-8 integrity failure in subprocess stdout: {error}"
-        ));
-    }
-    if let Err(error) = assert_unicode_integrity(&stderr, &[]) {
-        return ToolResult::err(format!(
-            "UTF-8 integrity failure in subprocess stderr: {error}"
-        ));
-    }
 
     let stdout = stdout.trim_end().to_string();
     let stderr = stderr.trim_end().to_string();

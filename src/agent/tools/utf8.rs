@@ -7,6 +7,7 @@ use std::path::Path;
 
 /// Known strings commonly produced when UTF-8 has crossed a legacy code-page
 /// boundary. The replacement character catches a separate class of loss.
+#[cfg(test)]
 pub const MOJIBAKE_MARKERS: &[&str] = &["╬ô├ç├┤", "╬ô├½├æ", "Γò¼├┤Γö£├ºΓö£Γöñ", "\u{fffd}"];
 
 /// Write text as UTF-8 without a BOM, creating its parent directories.
@@ -28,6 +29,7 @@ pub fn read_utf8_payload_file(path: &Path) -> anyhow::Result<String> {
 }
 
 /// Check a retrieved value for expected text and signs of Unicode corruption.
+#[cfg(test)]
 pub fn assert_unicode_integrity(text: &str, expected: &[&str]) -> anyhow::Result<()> {
     let found: Vec<_> = MOJIBAKE_MARKERS
         .iter()
