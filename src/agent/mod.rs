@@ -29,7 +29,9 @@ mod tests;
 pub use file_tracker::FileTracker;
 pub use system_prompt::build_system_prompt;
 pub use tool_output_log::ToolOutputLog;
-pub use types::{AgentEvent, AgentLoopConfig, DefaultToolExecutor, ToolExecutor, ToolResult};
+pub use types::{
+    AgentEvent, AgentLoopConfig, DefaultToolExecutor, ToolExecutor, ToolRegistry, ToolResult,
+};
 
 // ── TurnOutcome ───────────────────────────────────────────────────────────────
 
@@ -486,6 +488,27 @@ async fn execute_tool_batch(
     BatchOutcome::Completed
 }
 
+// ── Tool definition helpers ───────────────────────────────────────────────────
+
+/// Build a sorted list of [`ToolDefinition`]s from the tool registry.
+///
+/// Sorted alphabetically by name so the serialized request body is
+/// deterministic across process restarts, keeping the LLM provider's
+/// prompt cache stable.
+pub(crate) fn build_sorted_tool_defs(tools: &ToolRegistry) -> Vec<ToolDefinition> {
+    let mut defs: Vec<ToolDefinition> = tools
+        .values()
+        .map(|t| ToolDefinition {
+            name: t.name().to_string(),
+            description: t.description().to_string(),
+            parameters: t.parameters_schema(),
+            streaming_field: t.streaming_field().map(str::to_owned),
+        })
+        .collect();
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    defs
+}
+
 // ── run_agent_loop ────────────────────────────────────────────────────────────
 
 /// Run the agent loop: call the LLM, execute tool calls, repeat until the
@@ -499,16 +522,7 @@ pub async fn run_agent_loop(
     mut steering_rx: UnboundedReceiver<String>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let tool_defs: Vec<ToolDefinition> = config
-        .tools
-        .values()
-        .map(|t| ToolDefinition {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters_schema(),
-            streaming_field: t.streaming_field().map(str::to_owned),
-        })
-        .collect();
+    let tool_defs: Vec<ToolDefinition> = build_sorted_tool_defs(&config.tools);
 
     let mut session_events = config.session_events.clone();
     let mut projection = LlmProjection::new();

@@ -1142,3 +1142,72 @@ fn post_turn_test_hook_args(path: &std::path::Path) -> Vec<String> {
         format!("Set-Content -Path '{escaped}' -Value 'HOOK OK'"),
     ]
 }
+
+// ── build_sorted_tool_defs ────────────────────────────────────────────────────
+
+/// Helper for tests: build a `ToolRegistry` from a `Vec` of names in a known
+/// insertion order.  The resulting `HashMap` will iterate in an order that
+/// depends on its internal state, so we use this to verify that
+/// `build_sorted_tool_defs` sorts alphabetically regardless.
+#[cfg(test)]
+fn registry_from_names(names: &[&'static str]) -> crate::agent::types::ToolRegistry {
+    use crate::agent::types::Tool;
+    use std::sync::Arc;
+
+    struct NamedTool(&'static str);
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn run(
+            &self,
+            _args: serde_json::Value,
+            _ctx: crate::agent::types::ToolCallContext,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = crate::agent::types::ToolResult> + Send + '_>,
+        > {
+            Box::pin(async { crate::agent::types::ToolResult::ok_str("") })
+        }
+    }
+
+    let mut map = std::collections::HashMap::new();
+    for &name in names {
+        map.insert(name.to_string(), Arc::new(NamedTool(name)) as Arc<dyn Tool>);
+    }
+    map
+}
+
+#[test]
+fn tool_defs_are_sorted_alphabetically() {
+    use crate::agent::build_sorted_tool_defs;
+    use std::collections::HashSet;
+
+    // Run with several different input orderings.  Without the sort in
+    // build_sorted_tool_defs, the output order depends on HashMap iteration
+    // which varies with capacity and key hashes.  With the sort it is always
+    // alphabetical.
+    for input in [
+        vec!["zebra", "alpha", "beta", "gamma"],
+        vec!["delta", "charlie", "bravo", "alpha"],
+        vec!["bash", "exec", "python", "read_file", "ask_user"],
+    ] {
+        let registry = registry_from_names(&input);
+        let defs = build_sorted_tool_defs(&registry);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        // Verify sorted.
+        for pair in names.windows(2) {
+            assert!(pair[0] < pair[1], "{pair:?} not sorted");
+        }
+        // Verify no tools lost.
+        let expected: HashSet<&str> = input.iter().copied().collect();
+        let got: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(got, expected);
+    }
+}
