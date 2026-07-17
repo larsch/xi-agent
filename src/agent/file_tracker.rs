@@ -83,7 +83,8 @@ impl FileTracker {
         }
     }
 
-    /// Returns `true` when `path` should be silently ignored by [`record`].
+    /// Returns `true` when `path` should be skipped in change-notification
+    /// scans ([`check_modified`], [`refresh_baselines`]).
     fn is_excluded(&self, path: &Path) -> bool {
         // Filename-based exclusion (e.g. AGENTS.md, SKILL.md).
         if let Some(name) = path.file_name()
@@ -106,12 +107,9 @@ impl FileTracker {
     /// `read_file`, `write_file`, or `edit_file` tool execution.
     ///
     /// Non-UTF-8 files are silently skipped (binary files are not tracked).
-    /// Paths matching the configured exclusions are also silently skipped.
+    /// All paths are recorded regardless of exclusion settings — exclusions
+    /// only affect change-notification scans (see [`check_modified`]).
     pub fn record(&mut self, path: &Path) {
-        if self.is_excluded(path) {
-            log::debug!("file_tracker: skipping excluded path {}", path.display());
-            return;
-        }
         match snapshot(path) {
             Ok(snap) => {
                 log::info!(
@@ -252,7 +250,17 @@ impl FileTracker {
     /// Uses an mtime fast-path identical to [`check_modified`]: files whose
     /// mtime has not changed are skipped entirely (no read, no hash).
     pub fn refresh_baselines(&mut self) {
+        let excluded_filenames = &self.excluded_filenames;
+        let excluded_prefixes = &self.excluded_prefixes;
         for (path, snap) in &mut self.files {
+            if let Some(name) = path.file_name()
+                && excluded_filenames.contains(name)
+            {
+                continue;
+            }
+            if excluded_prefixes.iter().any(|p| path.starts_with(p)) {
+                continue;
+            }
             // Stat first; if mtime hasn't changed the stored snapshot is still
             // valid and there is nothing to absorb.
             let new_mtime = std::fs::metadata(path)
@@ -290,6 +298,9 @@ impl FileTracker {
         let mut changed = Vec::new();
 
         for (path, snap) in &self.files {
+            if self.is_excluded(path) {
+                continue;
+            }
             // Fast path: stat only.
             let meta = match std::fs::metadata(path) {
                 Ok(m) => m,
