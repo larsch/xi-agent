@@ -21,6 +21,7 @@ use std::{
 
 mod agent;
 mod agent_runtime;
+mod agents;
 mod at_file;
 
 mod atomic_file;
@@ -79,6 +80,7 @@ use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
+use agents::load_agents;
 use app::App;
 use app_event::AppEvent;
 
@@ -273,10 +275,14 @@ async fn main() -> io::Result<()> {
     )
     .await;
     app.init_session_persistence(cwd.clone());
-    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
+    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
     app.agent_config.tools = tools;
     app.agent_config.system_prompt = Some(system_prompt);
     app.loaded_skills = (*loaded_skills).clone();
+    app.agents = load_agents();
+    if let Some(ref agent_name) = config.agent {
+        app.switch_agent(agent_name, &cwd);
+    }
     app.provider.instances = config.resolve_effective_providers();
     // Mark provider as explicitly selected when a provider was configured
     // (from config.toml or --provider flag), as opposed to the fallback.
@@ -354,11 +360,17 @@ async fn main() -> io::Result<()> {
                     custom_tools,
                 )
                 .await;
-                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
+                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
                 let skills_count = loaded_skills.len();
                 app.agent_config.tools = tools;
                 app.agent_config.system_prompt = Some(system_prompt);
                 app.loaded_skills = (*loaded_skills).clone();
+                app.agents = load_agents();
+                // If active agent was removed, fall back to default.
+                if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
+                    app.active_agent = None;
+                    app.rebuild_agent_system_prompt(&cwd);
+                }
                 app.push_notice(Message::assistant(format!(
                     "[reloaded context: {} skill{}, {} custom tool{}]",
                     skills_count,
@@ -389,11 +401,16 @@ async fn main() -> io::Result<()> {
                     custom_tools,
                 )
                 .await;
-                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
+                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
                 let skills_count = loaded_skills.len();
                 app.agent_config.tools = tools;
                 app.agent_config.system_prompt = Some(system_prompt);
                 app.loaded_skills = (*loaded_skills).clone();
+                app.agents = load_agents();
+                if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
+                    app.active_agent = None;
+                    app.rebuild_agent_system_prompt(&cwd);
+                }
                 app.push_notice(Message::assistant(format!(
                     "[new session: {} skill{}, {} custom tool{}]",
                     skills_count,
@@ -1038,7 +1055,7 @@ async fn run_print_mode(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
     let headless_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless")));
-    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills);
+    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
 
     let session_events = vec![crate::session_event::SessionEvent::UserMessage {
         content: prompt.clone(),

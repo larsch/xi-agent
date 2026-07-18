@@ -396,6 +396,12 @@ fn handle_selection_enter(app: &mut App) -> KeyDispatch {
         Some(SelectionResult::Thinking(level)) => {
             KeyDispatch::Return(RunResult::ChangeThinking(level))
         }
+        Some(SelectionResult::Agent(name)) => {
+            let cwd = app.session.current_cwd.clone();
+            app.switch_agent(&name, &cwd);
+            app.push_notice(Message::assistant(format!("[agent: {name}]")));
+            KeyDispatch::Continue
+        }
         Some(SelectionResult::Provider(p)) => KeyDispatch::Return(RunResult::ChangeProvider(p)),
         Some(SelectionResult::CancelProviderRemoval) => {
             app.clear_pending_provider_removal();
@@ -779,6 +785,20 @@ fn handle_slash_submit(
         }
         Some(CommandAction::ResumeNoArg) => {
             app.enter_resume_selection_mode();
+        }
+        Some(CommandAction::Agent(name)) => {
+            let cwd = app.session.current_cwd.clone();
+            app.switch_agent(&name, &cwd);
+            app.push_notice(Message::assistant(format!("[agent: {name}]")));
+        }
+        Some(CommandAction::AgentNoArg) => {
+            if app.primary_agents().is_empty() {
+                app.push_notice(Message::assistant(
+                    "[no agents defined — create an AGENT.md in ~/.xi/agents/<name>/]".to_string(),
+                ));
+            } else {
+                app.enter_agent_selection_mode();
+            }
         }
         Some(CommandAction::Compact(instructions)) => {
             app.trigger_manual_compaction(instructions, provider);

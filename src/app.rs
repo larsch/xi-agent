@@ -71,6 +71,8 @@ pub enum SelectionResult {
     RemoveProvider(String),
     /// A provider API type was chosen during add-provider setup.
     ProviderApiType(ApiType),
+    /// The user selected an agent name from the picker.
+    Agent(String),
 }
 
 /// Target operation to retry after token refresh completes.
@@ -112,6 +114,10 @@ pub struct App {
     pub(crate) agent_config: AgentLoopConfig,
     /// Skills loaded from all supported skill roots.
     pub(crate) loaded_skills: Vec<SkillMeta>,
+    /// User-definable agent profiles loaded from filesystem.
+    pub(crate) agents: Vec<crate::agents::AgentMeta>,
+    /// Name of the currently active agent, or `None` for the default.
+    pub(crate) active_agent: Option<String>,
 
     // ── Completion popup + model fetch ────────────────────────────────────────
     pub(crate) completion: CompletionState,
@@ -178,6 +184,8 @@ impl App {
             provider: ProviderManager::new(initial_instance, initial_model, initial_thinking),
             agent_config,
             loaded_skills: Vec::new(),
+            agents: Vec::new(),
+            active_agent: None,
             completion: CompletionState::new(),
             selection: SelectionState::new(),
             show_info: false,
@@ -270,6 +278,58 @@ impl App {
     /// Toggle the info bar visibility.
     pub fn toggle_info(&mut self) {
         self.show_info = !self.show_info;
+    }
+
+    // ── Agent switching ───────────────────────────────────────────────────────
+
+    /// Switch to the named agent, rebuilding tools, skills, and system prompt.
+    /// Passing an empty string clears the active agent and restores defaults.
+    /// Persists the choice to config.toml.
+    pub fn switch_agent(&mut self, name: &str, cwd: &str) {
+        if name.is_empty() {
+            self.active_agent = None;
+        } else if self.agents.iter().any(|a| a.name == name) {
+            self.active_agent = Some(name.to_string());
+        } else {
+            return; // unknown agent name — ignore
+        }
+        self.rebuild_agent_system_prompt(cwd);
+
+        // Persist to config
+        if let Ok(mut config) = crate::config::XiConfig::load() {
+            config.agent = self.active_agent.clone();
+            let _ = config.save();
+        }
+    }
+
+    /// Rebuild `agent_config.system_prompt` from the currently active agent,
+    /// or the default when none is active.  Skills and tools in the prompt
+    /// are filtered according to the active agent's include/exclude rules.
+    pub(crate) fn rebuild_agent_system_prompt(&mut self, cwd: &str) {
+        let agent = self.resolve_current_agent();
+        let skills: Vec<crate::skills::SkillMeta> = if let Some(a) = agent {
+            crate::agents::filter_skills(&self.loaded_skills, &a.include_skills, &a.exclude_skills)
+        } else {
+            self.loaded_skills.clone()
+        };
+        let system_prompt =
+            crate::agent::build_system_prompt(&self.agent_config.tools, cwd, &skills, agent);
+        self.agent_config.system_prompt = Some(system_prompt);
+    }
+
+    /// Return a reference to the currently active agent, or `None` for default.
+    pub fn resolve_current_agent(&self) -> Option<&crate::agents::AgentMeta> {
+        self.active_agent
+            .as_deref()
+            .and_then(|name| self.agents.iter().find(|a| a.name == name))
+    }
+
+    /// Return the list of primary agents for the picker.
+    pub fn primary_agents(&self) -> Vec<&crate::agents::AgentMeta> {
+        self.agents
+            .iter()
+            .filter(|a| matches!(a.mode, crate::agents::AgentMode::Primary))
+            .collect()
     }
 
     pub(crate) async fn recv_app_event(&mut self) -> Option<AppEvent> {

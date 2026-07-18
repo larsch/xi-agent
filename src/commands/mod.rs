@@ -59,9 +59,15 @@ pub static COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "agent",
+        usage: "/agent [name]",
+        description: "Switch to a named agent or show the agent picker",
+        takes_arg: true,
+    },
+    SlashCommand {
         name: "reload",
         usage: "/reload",
-        description: "Reload AGENTS.md context and available skills",
+        description: "Reload AGENTS.md context, available skills, and agents",
         takes_arg: false,
     },
     SlashCommand {
@@ -103,6 +109,10 @@ pub enum CommandAction {
     ResumeNoArg,
     /// Trigger immediate context compaction with optional user instructions.
     Compact(Option<String>),
+    /// Switch to a named agent.
+    Agent(String),
+    /// `/agent` with no argument — show agent picker.
+    AgentNoArg,
     /// Invoke a skill by name, with optional free-form args.
     Skill {
         name: String,
@@ -148,6 +158,8 @@ pub fn parse(input: &str) -> Option<CommandAction> {
         "resume" => Some(CommandAction::ResumeNoArg),
         "compact" if !arg.is_empty() => Some(CommandAction::Compact(Some(arg.to_string()))),
         "compact" => Some(CommandAction::Compact(None)),
+        "agent" if !arg.is_empty() => Some(CommandAction::Agent(arg.to_string())),
+        "agent" => Some(CommandAction::AgentNoArg),
         _ => None,
     }
 }

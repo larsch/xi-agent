@@ -28,8 +28,24 @@ impl App {
             .expect("start_agent_task called before session_state was initialised")
             .events()
             .to_vec();
+
+        // Apply agent tool filtering when an agent is active.
+        let (tools, system_prompt) = if let Some(agent) = self.resolve_current_agent() {
+            let filtered = crate::agents::filter_tools(
+                &self.agent_config.tools,
+                &agent.include_tools,
+                &agent.exclude_tools,
+            );
+            (filtered, self.agent_config.system_prompt.clone())
+        } else {
+            (
+                self.agent_config.tools.clone(),
+                self.agent_config.system_prompt.clone(),
+            )
+        };
+
         let config = AgentLoopConfig {
-            tools: self.agent_config.tools.clone(),
+            tools,
             file_tracker: Arc::clone(&self.agent_config.file_tracker),
             tool_output_log: Arc::clone(&self.agent_config.tool_output_log),
             session_events,
@@ -46,7 +62,7 @@ impl App {
                 ex.session_id = session_id.clone();
                 ex
             }),
-            system_prompt: self.agent_config.system_prompt.clone(),
+            system_prompt,
             hooks: self.agent_config.hooks.clone(),
             hook_ipc: self.agent_config.hook_ipc.clone(),
             session_id: session_id.clone(),

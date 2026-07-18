@@ -38,6 +38,7 @@ impl App {
             | Some(SelectionKind::LoginAction)
             | Some(SelectionKind::ConfirmProviderRemoval)
             | Some(SelectionKind::ProviderApiType)
+            | Some(SelectionKind::Agent)
             | Some(SelectionKind::KeybindingHelp)
             | None => None,
         };
@@ -80,6 +81,35 @@ impl App {
         self.selection
             .activate(SelectionKind::Model, "  Select model  ", items);
         self.select_current_default();
+    }
+
+    /// Open the agent selection menu.
+    pub fn enter_agent_selection_mode(&mut self) {
+        self.reset_textarea();
+        self.session.live_turn.notices.clear();
+        let items: Vec<CompletionItem> = self
+            .primary_agents()
+            .iter()
+            .map(|a| CompletionItem {
+                label: a.name.clone(),
+                detail: a.description.clone(),
+                complete_to: format!("/agent {}", a.name),
+                loading: false,
+                error: false,
+                match_range: None,
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        self.selection
+            .activate(SelectionKind::Agent, "  Select agent  ", items);
+    }
+
+    /// Returns true when the active selection is the agent picker.
+    #[allow(dead_code)] // Convenience method, follows pattern of other selection mode checks
+    pub fn in_agent_selection_mode(&self) -> bool {
+        self.selection.kind == Some(SelectionKind::Agent)
     }
 
     /// Returns true when the active selection is the provider picker.
@@ -603,6 +633,10 @@ impl App {
                 }
                 _ => None,
             },
+            Some(SelectionKind::Agent) => item
+                .complete_to
+                .strip_prefix("/agent ")
+                .map(|name| SelectionResult::Agent(name.to_string())),
             Some(SelectionKind::KeybindingHelp) => None,
             None => None,
         }?;

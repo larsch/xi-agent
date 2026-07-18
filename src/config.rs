@@ -62,6 +62,9 @@ pub struct XiConfig {
 
     /// The id of the currently active provider instance.
     pub provider: Option<String>,
+    /// The name of the currently active agent.
+    #[serde(default)]
+    pub agent: Option<String>,
     pub thinking: Option<String>,
     #[serde(default)]
     pub thinking_by_model: HashMap<String, String>,

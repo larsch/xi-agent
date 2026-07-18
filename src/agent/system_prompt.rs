@@ -2,6 +2,7 @@ use directories::BaseDirs;
 use std::{fs, path::Path};
 
 use crate::agent::types::ToolRegistry;
+use crate::agents::AgentMeta;
 use crate::skills::SkillMeta;
 
 /// A sourced AGENTS.md entry with its file path and origin.
@@ -108,9 +109,18 @@ fn render_agents_section(entries: &[AgentsEntry]) -> String {
 
 /// Build the default system prompt for the agent loop.
 ///
-/// Structure mirrors pi-mono's `buildSystemPrompt`: identity, tool list,
-/// tool-aware guidelines, project context (AGENTS.md), skills, then cwd.
-pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]) -> String {
+/// When `agent` is `Some`, the agent's body replaces the default identity
+/// paragraph and the caller is expected to pass pre-filtered `tools` and
+/// `skills`.  When `None`, the default identity is used.
+///
+/// Structure: identity, tool list, tool-aware guidelines, project context
+/// (AGENTS.md), skills, then cwd.
+pub fn build_system_prompt(
+    tools: &ToolRegistry,
+    cwd: &str,
+    skills: &[SkillMeta],
+    agent: Option<&AgentMeta>,
+) -> String {
     // Build tool list sorted by name for deterministic output.
     let mut tool_names: Vec<&str> = tools.keys().map(String::as_str).collect();
     tool_names.sort_unstable();
@@ -190,8 +200,17 @@ pub fn build_system_prompt(tools: &ToolRegistry, cwd: &str, skills: &[SkillMeta]
 
     let skills_section = render_skills_block(skills);
 
+    let identity = if let Some(agent) = agent
+        && !agent.system_prompt.is_empty()
+    {
+        agent.system_prompt.clone()
+    } else {
+        "You are a multi-purpose assistant for computational systems, spanning data and code analysis, data processing, software development, and interaction with system environments. You interpret user intent and respond through explanation, analysis, review, suggestions, or actions."
+            .to_string()
+    };
+
     format!(
-        "You are a multi-purpose assistant for computational systems, spanning data and code analysis, data processing, software development, and interaction with system environments. You interpret user intent and respond through explanation, analysis, review, suggestions, or actions.\n\
+        "{identity}\n\
 \n\
 Available tools:\n\
 {tool_list}\n\
@@ -254,6 +273,7 @@ mod tests {
     use super::{build_system_prompt, first_sentence};
     use crate::{
         agent::types::{Tool, ToolRegistry},
+        agents::AgentMeta,
         skills::SkillMeta,
     };
 
@@ -319,7 +339,7 @@ mod tests {
             ("ask_user", "Ask a question."),
         ]);
 
-        let prompt = build_system_prompt(&tools, "/tmp", &[]);
+        let prompt = build_system_prompt(&tools, "/tmp", &[], None);
 
         assert!(prompt.contains("Prefer find_files over bash for filesystem exploration."));
         assert!(prompt.contains("Use read_file to examine files before editing."));
@@ -335,7 +355,7 @@ mod tests {
     #[test]
     fn build_system_prompt_switches_bash_guideline_when_find_is_missing() {
         let tools = registry(&[("bash", "Run shell commands.")]);
-        let prompt = build_system_prompt(&tools, "/tmp", &[]);
+        let prompt = build_system_prompt(&tools, "/tmp", &[], None);
 
         assert!(prompt.contains("Use bash for file operations like ls, find, grep."));
         assert!(!prompt.contains("Prefer find_files over bash for filesystem exploration."));
@@ -352,7 +372,7 @@ mod tests {
             embedded_body: None,
         }];
 
-        let prompt = build_system_prompt(&tools, "/tmp", &skills);
+        let prompt = build_system_prompt(&tools, "/tmp", &skills, None);
 
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("- `plan`: Create an implementation plan"));
@@ -385,7 +405,7 @@ mod tests {
             embedded_body: None,
         }];
 
-        let prompt = build_system_prompt(&tools, "/tmp", &skills);
+        let prompt = build_system_prompt(&tools, "/tmp", &skills, None);
 
         // Prose format — no XML escaping applied
         assert!(
@@ -395,6 +415,71 @@ mod tests {
         assert!(
             prompt.contains("\"quoted\""),
             "quotes should not be escaped"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_with_agent_uses_agent_body_as_identity() {
+        let tools = registry(&[]);
+        let skills = vec![SkillMeta {
+            name: "workflow".to_string(),
+            description: "structured workflow".to_string(),
+            path: Path::new("/tmp/skills/workflow/SKILL.md").to_path_buf(),
+            base_dir: PathBuf::from("/tmp/skills/workflow"),
+            embedded_body: None,
+        }];
+        let agent = AgentMeta {
+            name: "test-agent".into(),
+            description: "test".into(),
+            mode: crate::agents::AgentMode::Primary,
+            include_tools: vec!["*".to_string()],
+            exclude_tools: vec![],
+            include_skills: vec!["*".to_string()],
+            exclude_skills: vec![],
+            system_prompt: "You are a test-only agent.".into(),
+            path: PathBuf::from("/tmp/agents/test/AGENT.md"),
+            base_dir: PathBuf::from("/tmp/agents/test"),
+        };
+
+        let prompt = build_system_prompt(&tools, "/tmp", &skills, Some(&agent));
+
+        assert!(
+            prompt.starts_with("You are a test-only agent."),
+            "should start with agent body: {prompt}"
+        );
+        assert!(
+            !prompt.contains("multi-purpose assistant"),
+            "should not contain default identity: {prompt}"
+        );
+        // Environmental context still present
+        assert!(prompt.contains("Available tools"), "{prompt}");
+        assert!(
+            prompt.contains("Current working directory: /tmp"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_with_empty_agent_body_falls_back_to_default() {
+        let tools = registry(&[]);
+        let agent = AgentMeta {
+            name: "minimal".into(),
+            description: "min".into(),
+            mode: crate::agents::AgentMode::Primary,
+            include_tools: vec!["*".to_string()],
+            exclude_tools: vec![],
+            include_skills: vec!["*".to_string()],
+            exclude_skills: vec![],
+            system_prompt: String::new(),
+            path: PathBuf::from("/tmp/agents/min/AGENT.md"),
+            base_dir: PathBuf::from("/tmp/agents/min"),
+        };
+
+        let prompt = build_system_prompt(&tools, "/tmp", &[], Some(&agent));
+
+        assert!(
+            prompt.starts_with("You are a multi-purpose assistant"),
+            "should fall back to default identity: {prompt}"
         );
     }
 }

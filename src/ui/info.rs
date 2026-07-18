@@ -5,13 +5,14 @@ use ratatui::{
 
 use crate::theme::InfoTheme;
 
-/// Build the single info-bar `Line` showing provider / model / context window.
+/// Build the single info-bar `Line` showing provider / model / agent / context window.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_info_line<'a>(
     theme: &InfoTheme,
     provider: &str,
     model: &str,
     thinking: Option<&str>,
+    agent: Option<&str>,
     context_window: Option<usize>,
     used_tokens: Option<usize>,
     cached_tokens: Option<usize>,
@@ -58,6 +59,13 @@ pub(super) fn build_info_line<'a>(
         content_spans.push(Span::styled(thinking.to_string(), val_style));
     }
 
+    if let Some(agent) = agent {
+        content_spans.push(Span::styled("  │  ", sep_style));
+        content_spans.push(Span::styled("agent", key_style));
+        content_spans.push(Span::styled(" ", fill_style));
+        content_spans.push(Span::styled(agent.to_string(), val_style));
+    }
+
     content_spans.push(Span::styled("  │  ", sep_style));
     content_spans.push(Span::styled("context", key_style));
     content_spans.push(Span::styled(" ", fill_style));
@@ -68,6 +76,10 @@ pub(super) fn build_info_line<'a>(
 
     if let Some(thinking) = thinking {
         used += 5 + "thinking".len() + 1 + thinking.len();
+    }
+
+    if let Some(agent) = agent {
+        used += 5 + "agent".len() + 1 + agent.len();
     }
 
     used += 5 + "context".len() + 1 + context_value.len();

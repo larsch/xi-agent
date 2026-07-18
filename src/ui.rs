@@ -489,6 +489,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             &app.provider.current_instance.id,
             &app.provider.current_model,
             thinking,
+            app.active_agent.as_deref(),
             context_window,
             used_tokens,
             cached_tokens,
@@ -1735,6 +1736,7 @@ mod tests {
             "copilot",
             "gpt-4o",
             Some("medium"),
+            None,
             Some(128_000),
             Some(64_000),
             None,
@@ -1752,6 +1754,7 @@ mod tests {
             "openai",
             "gpt-4o",
             None,
+            None,
             Some(128_000),
             None,
             None,
@@ -1761,6 +1764,43 @@ mod tests {
         let text = line_text(&line);
         assert!(!text.contains("thinking"), "{text}");
     }
+
+    #[test]
+    fn info_line_shows_agent_when_set() {
+        let line = info::build_info_line(
+            &crate::theme::InfoTheme::default(),
+            "copilot",
+            "gpt-4o",
+            None,
+            Some("explorer"),
+            Some(128_000),
+            None,
+            None,
+            false,
+            200,
+        );
+        let text = line_text(&line);
+        assert!(text.contains("agent explorer"), "{text}");
+    }
+
+    #[test]
+    fn info_line_omits_agent_when_none() {
+        let line = info::build_info_line(
+            &crate::theme::InfoTheme::default(),
+            "copilot",
+            "gpt-4o",
+            None,
+            None,
+            Some(128_000),
+            None,
+            None,
+            false,
+            200,
+        );
+        let text = line_text(&line);
+        assert!(!text.contains("agent"), "{text}");
+    }
+
     #[test]
     fn sanitize_for_display_strips_trailing_whitespace_per_line() {
         assert_eq!(
