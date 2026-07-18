@@ -17,6 +17,8 @@ pub struct AgentsEntry {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentsKind {
+    /// From an agent's AGENTS.md — replaces the global entry.
+    Agent,
     /// From the home directory — user-level, applies everywhere.
     Global,
     /// From the cwd-to-root chain — local to this working directory.
@@ -45,23 +47,39 @@ fn read_directory_agents(base: &Path) -> Option<(std::path::PathBuf, String)> {
 
 /// Collect AGENTS.md entries from home and the cwd→root chain.
 ///
-/// Returns an ordered list: global entry first (if any), then local entries
-/// from cwd up to root.
-pub fn read_agents_md(cwd: &str, test_home: Option<&Path>) -> Vec<AgentsEntry> {
+/// When `agent_agents_md` is provided (content of an agent's `AGENTS.md`),
+/// it replaces the global home-directory entry.  The local chain (cwd→root)
+/// is always included.
+///
+/// Returns an ordered list: agent entry first (if any), then global entry
+/// (if any and no agent override), then local entries from cwd up to root.
+pub fn read_agents_md(
+    cwd: &str,
+    test_home: Option<&Path>,
+    agent_agents_md: Option<&str>,
+) -> Vec<AgentsEntry> {
     let mut entries: Vec<AgentsEntry> = Vec::new();
 
-    // Global: one file from home directory.
-    let home_dir_buf = test_home
-        .map(|p| p.to_path_buf())
-        .or_else(|| BaseDirs::new().map(|bd| bd.home_dir().to_path_buf()));
-    if let Some(home_dir) = home_dir_buf.as_deref()
-        && let Some((path, content)) = read_directory_agents(home_dir)
-    {
+    if let Some(content) = agent_agents_md {
         entries.push(AgentsEntry {
-            kind: AgentsKind::Global,
-            path,
-            content,
+            kind: AgentsKind::Agent,
+            path: std::path::PathBuf::from("(agent AGENTS.md)"),
+            content: content.to_string(),
         });
+    } else {
+        // Global: one file from home directory (only when no agent override).
+        let home_dir_buf = test_home
+            .map(|p| p.to_path_buf())
+            .or_else(|| BaseDirs::new().map(|bd| bd.home_dir().to_path_buf()));
+        if let Some(home_dir) = home_dir_buf.as_deref()
+            && let Some((path, content)) = read_directory_agents(home_dir)
+        {
+            entries.push(AgentsEntry {
+                kind: AgentsKind::Global,
+                path,
+                content,
+            });
+        }
     }
 
     // Walk cwd → root, one file per directory level.
@@ -95,6 +113,7 @@ fn render_agents_section(entries: &[AgentsEntry]) -> String {
 
     for entry in entries {
         let label = match entry.kind {
+            AgentsKind::Agent => "Agent Instructions",
             AgentsKind::Global => "Global Instructions",
             AgentsKind::Local => "Local Instructions",
         };
@@ -195,7 +214,8 @@ pub fn build_system_prompt(
         .join("\n");
 
     // AGENTS.md content, with global and local entries labelled by source path.
-    let agents_entries = read_agents_md(cwd, None);
+    let agent_agents_md = agent.and_then(|a| a.agents_md.as_deref());
+    let agents_entries = read_agents_md(cwd, None, agent_agents_md);
     let agents_section = render_agents_section(&agents_entries);
 
     let skills_section = render_skills_block(skills);
@@ -437,6 +457,7 @@ mod tests {
             include_skills: vec!["*".to_string()],
             exclude_skills: vec![],
             system_prompt: "You are a test-only agent.".into(),
+            agents_md: None,
             path: PathBuf::from("/tmp/agents/test/AGENT.md"),
             base_dir: PathBuf::from("/tmp/agents/test"),
         };
@@ -471,6 +492,7 @@ mod tests {
             include_skills: vec!["*".to_string()],
             exclude_skills: vec![],
             system_prompt: String::new(),
+            agents_md: None,
             path: PathBuf::from("/tmp/agents/min/AGENT.md"),
             base_dir: PathBuf::from("/tmp/agents/min"),
         };

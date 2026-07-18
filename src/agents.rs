@@ -1,5 +1,15 @@
-//! User-definable agent profiles — filesystem-based AGENT.md files that
+//! User-definable agent profiles — filesystem-based agent definitions that
 //! customise system prompt, tool availability, and skill availability.
+//!
+//! Each agent lives in a subdirectory under an agent root (e.g.
+//! `~/.xi/agents/{name}/`). Two files are recognised:
+//!
+//! - `SYSTEM.md` (required) — YAML frontmatter with metadata + body that
+//!   replaces the default system-prompt identity. Falls back to `AGENT.md`
+//!   for backwards compatibility.
+//! - `AGENTS.md` (optional) — replaces the global `~/.xi/AGENTS.md`
+//!   instructions. Project-local AGENTS.md files (cwd→root chain) are still
+//!   appended after the agent's AGENTS.md.
 
 use std::{
     collections::HashSet,
@@ -25,7 +35,7 @@ pub enum AgentMode {
 
 // ── AgentMeta ─────────────────────────────────────────────────────────────────
 
-/// Parsed metadata from an `AGENT.md` file.
+/// Parsed metadata from an agent definition directory.
 #[derive(Debug, Clone)]
 pub struct AgentMeta {
     pub name: String,
@@ -35,12 +45,16 @@ pub struct AgentMeta {
     pub exclude_tools: Vec<String>,
     pub include_skills: Vec<String>,
     pub exclude_skills: Vec<String>,
-    /// The system prompt body (markdown content after YAML frontmatter).
+    /// The system prompt body (markdown content after YAML frontmatter of
+    /// `SYSTEM.md`, or `AGENT.md` for backwards compatibility).
     pub system_prompt: String,
-    /// Absolute path to the `AGENT.md` file.
+    /// Content of the agent's `AGENTS.md`, if present. When set, this replaces
+    /// the global `~/.xi/AGENTS.md` entry in the system prompt.
+    pub agents_md: Option<String>,
+    /// Absolute path to the metadata file (`SYSTEM.md` or `AGENT.md`).
     #[allow(dead_code)] // Reserved for future use (subagent file references, etc.)
     pub path: PathBuf,
-    /// Directory containing the `AGENT.md` file.
+    /// Directory containing the agent definition files.
     #[allow(dead_code)] // Reserved for future use (relative path resolution in subagents)
     pub base_dir: PathBuf,
 }
@@ -133,11 +147,30 @@ fn load_agents_recursive(
         return;
     }
 
+    // Prefer SYSTEM.md; fall back to AGENT.md for backwards compatibility.
+    let system_file = dir.join("SYSTEM.md");
     let agent_file = dir.join("AGENT.md");
-    if agent_file.is_file()
-        && let Ok(content) = fs::read_to_string(&agent_file)
-        && let Some(meta) = parse_agent_meta(&content, agent_file)
+
+    let meta_path: Option<PathBuf> = if system_file.is_file() {
+        Some(system_file)
+    } else if agent_file.is_file() {
+        Some(agent_file)
+    } else {
+        None
+    };
+
+    let agents_md_path = dir.join("AGENTS.md");
+    let agents_md = if agents_md_path.is_file() {
+        fs::read_to_string(&agents_md_path).ok()
+    } else {
+        None
+    };
+
+    if let Some(ref path) = meta_path
+        && let Ok(content) = fs::read_to_string(path)
+        && let Some(mut meta) = parse_agent_meta(&content, path.clone())
     {
+        meta.agents_md = agents_md;
         agents.push(meta);
     }
 
@@ -155,7 +188,7 @@ fn load_agents_recursive(
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
 
-/// Parse YAML frontmatter + body from an AGENT.md file.
+/// Parse YAML frontmatter + body from a SYSTEM.md (or legacy AGENT.md) file.
 ///
 /// Uses manual line-by-line parsing (matching `skills.rs`) to avoid an extra
 /// serde_yaml dependency.  Only `name` and `description` are required; all
@@ -252,6 +285,7 @@ fn parse_agent_meta(content: &str, path: PathBuf) -> Option<AgentMeta> {
         include_skills,
         exclude_skills,
         system_prompt: body,
+        agents_md: None, // Set by caller (load_agents_recursive)
         path,
         base_dir,
     })
@@ -687,6 +721,7 @@ No skills here.
             include_skills: vec![],
             exclude_skills: vec![],
             system_prompt: String::new(),
+            agents_md: None,
             path: PathBuf::from("/x"),
             base_dir: PathBuf::from("/x"),
         }];

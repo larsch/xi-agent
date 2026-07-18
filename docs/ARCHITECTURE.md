@@ -337,22 +337,25 @@ summary prompt.
 ## User-definable agents
 
 xi-agent supports user-definable agent profiles via filesystem-based
-`AGENT.md` files. Each agent customises the system prompt, available tools,
-and available skills.
+agent directories. Each agent customises the system prompt, available tools,
+available skills, and can optionally override the global AGENTS.md
+instructions.
 
 ### Agent discovery
 
 Agents are discovered from:
-- `~/.xi/agents/<name>/AGENT.md` (global)
-- `.xi/agents/<name>/AGENT.md` (project-local)
+- `~/.xi/agents/<name>/` (global)
+- `.xi/agents/<name>/` (project-local)
 
 Project-local agents shadow global agents with the same name. Discovery is
 recursive — nested subdirectories under an agent root are scanned.
 
 ### File format
 
-Each `AGENT.md` uses YAML frontmatter followed by a markdown body that
-becomes the system prompt:
+Each agent directory contains up to two files:
+
+**`SYSTEM.md`** (required) — YAML frontmatter with metadata, followed by
+a markdown body that becomes the system prompt identity:
 
 ```markdown
 ---
@@ -367,6 +370,14 @@ exclude_skills: []
 
 You are an exploratory programmer...
 ```
+
+For backwards compatibility, `AGENT.md` is used as a fallback if `SYSTEM.md`
+does not exist.
+
+**`AGENTS.md`** (optional) — raw markdown (no frontmatter). When present,
+its content replaces the global `~/.xi/AGENTS.md` entry in the system prompt.
+Project-local AGENTS.md files (from the cwd→root chain) are still appended
+after the agent's AGENTS.md.
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
@@ -391,13 +402,15 @@ are always available to every agent. Future subagent infrastructure (e.g.
 ### System prompt composition
 
 When an agent is active:
-- The agent's markdown body replaces the default identity paragraph.
+- The agent's `SYSTEM.md` body replaces the default identity paragraph.
+- The agent's `AGENTS.md` (if present) replaces the global AGENTS.md
+  instructions; project-local AGENTS.md files are still appended.
 - Tools and skills in the prompt are filtered according to the agent's
   include/exclude rules.
-- Environmental context (guidelines, AGENTS.md, cwd) is unchanged.
 
-When no agent is active (default), the system prompt is identical to the
-pre-agent behavior.
+When no agent is explicitly selected, the `"default"` agent is used as a
+fallback (if it exists). This lets the default agent carry policy rules
+(e.g. workflow/fastpath/direct-edit) that other agents can opt out of.
 
 ### Runtime
 

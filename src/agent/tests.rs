@@ -674,7 +674,7 @@ fn test_read_agents_md() {
 
     // Mock the home and current directory paths.
     let cwd = working_path.display().to_string();
-    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path), None);
 
     assert_eq!(entries.len(), 2);
 
@@ -713,7 +713,7 @@ fn test_read_agents_md_falls_back_to_dot_agents() {
     fs::write(&agents_md, "Global .agents config\n").unwrap();
 
     let cwd = working_path.display().to_string();
-    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path), None);
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, AgentsKind::Global);
@@ -753,6 +753,7 @@ fn test_read_agents_md_xi_overrides_agents_at_same_level() {
     let entries = crate::agent::system_prompt::read_agents_md(
         &cwd.path().display().to_string(),
         Some(home_path),
+        None,
     );
 
     // .xi takes priority; only one entry, and it's from .xi.
@@ -790,7 +791,7 @@ fn test_read_agents_md_dot_xi_in_cwd_walk() {
     fs::write(working_path.join("AGENTS.md"), "bare config\n").unwrap();
 
     let cwd = working_path.display().to_string();
-    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path), None);
 
     // Only one entry (.xi takes priority over bare).
     assert_eq!(entries.len(), 1);
@@ -829,7 +830,7 @@ fn test_read_agents_md_from_nested_cwd_includes_parent_chain_in_order() {
     fs::write(subdir.join("AGENTS.md"), "Subdir-level config\n").unwrap();
 
     let cwd = subdir.display().to_string();
-    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path));
+    let entries = crate::agent::system_prompt::read_agents_md(&cwd, Some(home_path), None);
 
     assert_eq!(entries.len(), 3);
 

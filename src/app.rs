@@ -317,11 +317,16 @@ impl App {
         self.agent_config.system_prompt = Some(system_prompt);
     }
 
-    /// Return a reference to the currently active agent, or `None` for default.
+    /// Return a reference to the currently active agent.
+    ///
+    /// Falls back to the "default" agent (if present in the agents list) when
+    /// no agent has been explicitly selected.
     pub fn resolve_current_agent(&self) -> Option<&crate::agents::AgentMeta> {
-        self.active_agent
-            .as_deref()
-            .and_then(|name| self.agents.iter().find(|a| a.name == name))
+        if let Some(name) = self.active_agent.as_deref() {
+            self.agents.iter().find(|a| a.name == name)
+        } else {
+            self.agents.iter().find(|a| a.name == "default")
+        }
     }
 
     /// Return the list of primary agents for the picker.
