@@ -28,6 +28,7 @@ src/
   login_state.rs       — LoginState, LoginActionKind: auth panel state, login action menu enum, and all login-flow methods (start_login, cancel_login, enter_login_selection_mode, enter_login_action_menu, apply_login_action, apply_login_event, clipboard_set)
   ask_user_state.rs    — AskUserState, PendingAsk: pending agent ask-user request state
   agent_runtime.rs     — AgentRuntime: agent task handle, event channels, steering queue, cancellation
+  agents.rs            — AgentMeta, load_agents(), filter_tools/filter_skills, /agent command support
   config.rs            — config.toml loading (XDG + HOME fallback)
   provider.rs          — provider routing, thinking support, context-window fallback table
   provider_instance.rs — BackendPreset/ProviderInstance types and preset metadata catalog
@@ -42,7 +43,7 @@ src/
   agent/
     mod.rs             — run_agent_loop: the multi-turn agentic loop
     types.rs           — Tool trait, ToolRegistry, AgentEvent, AgentLoopConfig
-    system_prompt.rs   — build_system_prompt: dynamic system prompt
+    system_prompt.rs   — build_system_prompt: dynamic system prompt, accepts optional AgentMeta
     file_tracker.rs    — FileTracker: mtime+hash snapshot, external-change detection, diff generation
     tools/
       mod.rs           — register_builtin_tools() (built-ins + custom tools)
@@ -332,3 +333,79 @@ assistant tool-call/tool-result pairing, derives cumulative `<read-files>` and
 `<modified-files>` sections from persisted file-tool events, and can be
 triggered manually with `/compact [instructions]` to add user guidance to the
 summary prompt.
+
+## User-definable agents
+
+xi-agent supports user-definable agent profiles via filesystem-based
+`AGENT.md` files. Each agent customises the system prompt, available tools,
+and available skills.
+
+### Agent discovery
+
+Agents are discovered from:
+- `~/.xi/agents/<name>/AGENT.md` (global)
+- `.xi/agents/<name>/AGENT.md` (project-local)
+
+Project-local agents shadow global agents with the same name. Discovery is
+recursive — nested subdirectories under an agent root are scanned.
+
+### File format
+
+Each `AGENT.md` uses YAML frontmatter followed by a markdown body that
+becomes the system prompt:
+
+```markdown
+---
+name: explorer
+description: exploratory coding
+mode: primary
+include_tools: ["*"]
+exclude_tools: []
+include_skills: ["*"]
+exclude_skills: []
+---
+
+You are an exploratory programmer...
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `name` | yes | — | Unique identifier |
+| `description` | yes | — | Shown in the agent picker |
+| `mode` | no | `primary` | `primary` (user-selectable) or `subagent` (reserved for future) |
+| `include_tools` | no | `["*"]` | Tool name glob patterns to include |
+| `exclude_tools` | no | `[]` | Tool name glob patterns to exclude |
+| `include_skills` | no | `["*"]` | Skill name glob patterns to include |
+| `exclude_skills` | no | `[]` | Skill name glob patterns to exclude |
+
+Filtering is applied in order: include first, then exclude. `globset` is used
+for glob matching. When no filter fields are present, all tools and skills are
+available (backward-compatible default).
+
+### Always-present tools
+
+`ask_user` and `read_skill` are always-present — they survive any filter and
+are always available to every agent. Future subagent infrastructure (e.g.
+`spawn_subagent`) will also be always-present.
+
+### System prompt composition
+
+When an agent is active:
+- The agent's markdown body replaces the default identity paragraph.
+- Tools and skills in the prompt are filtered according to the agent's
+  include/exclude rules.
+- Environmental context (guidelines, AGENTS.md, cwd) is unchanged.
+
+When no agent is active (default), the system prompt is identical to the
+pre-agent behavior.
+
+### Runtime
+
+- `/agent <name>` switches agent; `/agent` alone shows a picker of primary agents.
+- Mid-session switch invalidates the LLM prompt cache for the next turn.
+- Active agent name appears in the info bar (`agent: <name>`) when non-default.
+- Active agent is persisted in `config.toml` (`agent` field).
+- `/reload` refreshes agents alongside skills; falls back to default if the
+  active agent was removed.
+- Agent filtering is applied at prompt-build time (Phase 1). Future subagent
+  support (Phase 2) will use the same filter data for execution-level filtering.
