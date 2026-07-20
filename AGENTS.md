@@ -2,6 +2,13 @@
 
 This repository is a AI agent harness for the terminal, built with Rust.
 
+## Repository hosting
+
+- The source code is hosted on **GitHub** at `https://github.com/larsch/xi-agent`.
+- Use `gh` for GitHub PRs, issues on the code repo, and other GitHub operations.
+- Use `tea` (Gitea CLI) **only** for project-tracking issues at `https://gitea.belunktum.dk/larsch/xi-agent`, not for code PRs or code-level issues.
+- When checking PRs or issues, always resolve the relevant remote (`git remote -v`) before picking a tool.
+
 ## General rules
 
 - Format all Rust code before committing (`cargo fmt --all --`).
