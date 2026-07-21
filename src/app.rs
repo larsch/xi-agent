@@ -424,6 +424,7 @@ impl App {
         self.session.resume_available_for_cwd
             && self.display_is_empty()
             && self.ui_is_suspend_idle()
+            && !self.streaming()
     }
 
     pub(crate) fn ui_is_suspend_idle(&self) -> bool {
@@ -1525,6 +1526,20 @@ mod tests {
         app.provider.setup_step = crate::provider_manager::ProviderSetupStep::Idle;
 
         assert!(app.ui_is_suspend_idle());
+    }
+
+    #[test]
+    fn should_show_resume_hint_stays_hidden_while_streaming() {
+        let mut app = make_app();
+        app.session.resume_available_for_cwd = true;
+        assert!(app.display_is_empty());
+        assert!(app.ui_is_suspend_idle());
+        assert!(!app.streaming());
+        assert!(app.should_show_resume_hint());
+
+        app.agent_turn.start();
+        assert!(app.streaming());
+        assert!(!app.should_show_resume_hint());
     }
 
     #[test]
