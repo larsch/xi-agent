@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(crate) enum KeyBindingId {
     ShowHelp,
     Abort,
+    Suspend,
     EndInput,
     ToggleInfo,
     ToggleInfoAlt,
@@ -73,6 +74,12 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         shortcut: "Ctrl+C",
         context: BindingContext::Global,
         description: "Abort agent loop (1: stop after turn, 2: abort, 3: force kill)",
+    },
+    KeyBinding {
+        id: Some(KeyBindingId::Suspend),
+        shortcut: "Ctrl+Z",
+        context: BindingContext::Global,
+        description: "Suspend xi when the UI and agent loop are idle",
     },
     KeyBinding {
         id: Some(KeyBindingId::EndInput),
@@ -196,6 +203,9 @@ pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
         KeyBindingId::Abort => {
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
+        KeyBindingId::Suspend => {
+            key.code == KeyCode::Char('z') && key.modifiers.contains(KeyModifiers::CONTROL)
+        }
         KeyBindingId::EndInput => {
             key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
@@ -262,6 +272,10 @@ mod tests {
             (
                 KeyBindingId::Abort,
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ),
+            (
+                KeyBindingId::Suspend,
+                KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
             ),
             (
                 KeyBindingId::EndInput,
@@ -351,6 +365,11 @@ mod tests {
         assert!(!matches(
             KeyBindingId::ToggleInfo,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
+        // Ctrl+Z should not match Abort
+        assert!(!matches(
+            KeyBindingId::Abort,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)
         ));
         // Alt+S should not match CycleShell (which is Ctrl+S)
         assert!(!matches(

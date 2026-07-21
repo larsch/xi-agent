@@ -20,6 +20,7 @@ use crate::{
 
 pub(crate) enum RunResult {
     Quit,
+    Suspend,
     RebuildProvider,
     ReloadContext,
     /// Start a fresh session: clear session state, reset the file tracker,
@@ -253,6 +254,33 @@ fn handle_global_key_shortcuts(
             app.push_notice(Message::assistant(
                 "[No agent loop running. Press Ctrl-D or type /quit to exit]".to_string(),
             ));
+        }
+        return KeyDispatch::Continue;
+    }
+
+    if keybindings::matches(KeyBindingId::Suspend, key) {
+        if app.streaming() {
+            app.push_notice(Message::assistant(
+                "[Cannot suspend while the agent loop is running]".to_string(),
+            ));
+        } else if app.runtime.pending_shell_handle.is_some() {
+            app.push_notice(Message::assistant(
+                "[Cannot suspend while a local shell command is running]".to_string(),
+            ));
+        } else if app.runtime.pending_finalize {
+            app.push_notice(Message::assistant(
+                "[Cannot suspend while a submission is being finalised]".to_string(),
+            ));
+        } else if app.login.refresh_in_progress {
+            app.push_notice(Message::assistant(
+                "[Cannot suspend while authentication refresh is running]".to_string(),
+            ));
+        } else if !app.ui_is_suspend_idle() {
+            app.push_notice(Message::assistant(
+                "[Cannot suspend unless the UI is idle]".to_string(),
+            ));
+        } else {
+            return KeyDispatch::Return(RunResult::Suspend);
         }
         return KeyDispatch::Continue;
     }
