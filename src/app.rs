@@ -2574,15 +2574,19 @@ mod tests {
             app.session.live_turn.assistant_content = "partial".to_string();
             app.agent_turn.start();
             install_test_agent_task(&mut app);
-            let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(crate::agent::CancelLevel::None);
+            let (cancel_tx, _cancel_rx) =
+                tokio::sync::watch::channel(crate::agent::CancelLevel::None);
             app.runtime.cancel_tx = Some(cancel_tx);
 
             app.request_hard_abort();
 
-            assert!(app.runtime.agent_task.is_none(), "model-phase hard abort should stop the task immediately");
+            assert!(
+                app.runtime.agent_task.is_none(),
+                "model-phase hard abort should stop the task immediately"
+            );
             assert!(matches!(
                 app.agent_turn.status,
-                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[Aborting… Press Ctrl-C again to force kill]"
+                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
             ));
         });
     }
