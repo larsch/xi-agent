@@ -231,12 +231,24 @@ impl FileTracker {
             .unwrap_or(false)
     }
 
-    /// Discard all tracked file snapshots.
+    /// Refresh all tracked file snapshots to current disk state.
     ///
     /// Call this when starting a new session so that file changes from the
-    /// previous session are not detected as external modifications.
+    /// previous session are not detected as external modifications, while
+    /// preserving the "has been read" state so that edit and write tools
+    /// do not reject files the agent was working on in the prior session.
     pub fn reset(&mut self) {
-        self.files.clear();
+        for (path, snap) in &mut self.files {
+            match snapshot(path) {
+                Ok(new_snap) => *snap = new_snap,
+                Err(e) => {
+                    log::warn!(
+                        "file_tracker: reset could not snapshot {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     /// Absorb any file changes that occurred since the last snapshot without
@@ -726,5 +738,34 @@ mod tests {
             Staleness::Stale { .. } => {}
             other => panic!("expected Staleness::Stale, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reset_preserves_tracked_files_and_refreshes_snapshots() {
+        let f = write_temp("hello\n");
+        let mut tracker = FileTracker::new();
+        tracker.record(f.path());
+
+        // Modify the file as if another session changed it.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(f.path(), "session2\n").unwrap();
+
+        // Reset — should refresh snapshot, not discard it.
+        tracker.reset();
+
+        // After reset, the file should be Current (snapshot refreshed),
+        // not NeverRead.
+        assert_eq!(
+            tracker.staleness(f.path()),
+            Staleness::Current,
+            "after reset, file should still be tracked and current"
+        );
+
+        // check_modified should not report it (baseline was refreshed).
+        let changed = tracker.check_modified();
+        assert!(
+            changed.is_empty(),
+            "reset should absorb changes, not report them"
+        );
     }
 }
