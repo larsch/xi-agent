@@ -28,7 +28,7 @@ use std::process::Stdio;
 
 use super::terminal::apply_terminal_render;
 use super::truncate::truncate_tail;
-use crate::agent::types::{AgentEvent, ToolCallContext, ToolResult};
+use crate::agent::types::{AgentEvent, CancelLevel, ToolCallContext, ToolResult};
 use crate::app_event::AppEvent;
 use crate::process::DetachFromTty;
 
@@ -180,7 +180,77 @@ impl SubprocessCommand {
             drop(stdin_handle);
         }
 
-        collect_output(child, ctx, self.error_on_nonzero).await
+        // If no cancel receiver, use the simple path.
+        let cancel_rx_opt = ctx.cancel_rx.clone();
+        if cancel_rx_opt.is_none() {
+            return collect_output(child, ctx, self.error_on_nonzero).await;
+        }
+        let mut cancel_rx = cancel_rx_opt.unwrap();
+
+        // Cancel-aware path: race output collection against cancel signal.
+        #[cfg(unix)]
+        let child_pid = child.id().map(|id| id as i32);
+        let ctx_tx = ctx.tx.clone();
+
+        let collect_fut = collect_output(child, ctx, self.error_on_nonzero);
+        tokio::pin!(collect_fut);
+
+        // Track whether we've sent SIGTERM and when.
+        let mut sigterm_sent_at: Option<std::time::Instant> = None;
+
+        loop {
+            tokio::select! {
+                result = &mut collect_fut => {
+                    return result;
+                }
+                _ = cancel_rx.changed() => {
+                    let level = *cancel_rx.borrow();
+                    match level {
+                        CancelLevel::ForceKill => {
+                            #[cfg(unix)]
+                            if let Some(pid) = child_pid {
+                                unsafe { libc::kill(pid, libc::SIGKILL); }
+                            }
+                            // Fall through to wait for collect_fut to finish.
+                            break;
+                        }
+                        CancelLevel::HardAbort => {
+                            if sigterm_sent_at.is_none() {
+                                #[cfg(unix)]
+                                if let Some(pid) = child_pid {
+                                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                                }
+                                sigterm_sent_at = Some(std::time::Instant::now());
+                            }
+                            // Check if SIGTERM was sent >2s ago — send feedback.
+                            if let Some(sent) = sigterm_sent_at
+                                && sent.elapsed() >= std::time::Duration::from_secs(2)
+                            {
+                                if let Some(tx) = &ctx_tx {
+                                    let _ = tx.send(
+                                        crate::app_event::AppEvent::Agent(
+                                            crate::agent::types::AgentEvent::StatusUpdate(
+                                                "[Tool is not responding. Press Ctrl-C again to force kill.]"
+                                                    .to_string(),
+                                            )
+                                        )
+                                    );
+                                }
+                                // Reset timer so we don't spam.
+                                sigterm_sent_at = Some(std::time::Instant::now());
+                            }
+                            // Keep waiting — loop continues.
+                        }
+                        _ => {
+                            // SoftStop or None — keep waiting for output.
+                        }
+                    }
+                }
+            }
+        }
+
+        // After force kill, wait for output collection to finish.
+        collect_fut.await
     }
 }
 

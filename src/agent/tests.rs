@@ -5,7 +5,7 @@ use futures_util::stream;
 use tokio::sync::mpsc;
 
 use crate::agent::tools::ask_user::AskUserTool;
-use crate::agent::types::{AgentEvent, AskUserResponse, Tool};
+use crate::agent::types::{AgentEvent, AskUserResponse, CancelLevel, Tool};
 use crate::agent::{AgentLoopConfig, DefaultToolExecutor, run_agent_loop};
 use crate::app_event::AppEvent;
 use crate::llm::{
@@ -154,7 +154,7 @@ async fn run_and_collect_with_config(
 ) -> Vec<AgentEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
     let config = AgentLoopConfig {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
@@ -342,7 +342,7 @@ async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
     tools.insert("slow_tool".to_string(), Arc::new(SlowTool));
 
@@ -425,7 +425,7 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
     tools.insert("slow_tool".to_string(), Arc::new(SlowTool));
 
@@ -452,7 +452,9 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
     steering_tx
         .send("interrupt".to_string())
         .expect("queue steering");
-    cancel_tx.send(true).expect("queue cancellation");
+    cancel_tx
+        .send(CancelLevel::HardAbort)
+        .expect("queue cancellation");
 
     handle.await.expect("agent loop join");
 
@@ -511,7 +513,7 @@ async fn steering_after_streamed_text_is_consumed_after_turn_end() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
     let config = AgentLoopConfig {
         tools: HashMap::new(),
         file_tracker: make_tracker(),
@@ -624,7 +626,7 @@ async fn agent_loop_before_hook_blocks_tool() {
         session_id: String::new(),
     };
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
     run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
 
     let mut events = Vec::new();
@@ -884,7 +886,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
     let config = AgentLoopConfig {
         tools,
         file_tracker: make_tracker(),
@@ -969,7 +971,7 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
     // Pre-cancel: send true before the loop even starts.
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::HardAbort);
     drop(cancel_tx); // sender no longer needed
 
     let config = AgentLoopConfig {
@@ -1028,7 +1030,7 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
 
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
     tools.insert("slow_tool".to_string(), Arc::new(SlowTool));
@@ -1041,7 +1043,7 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
             None,
             // Cancel via the watch channel as soon as the tool call finishes.
             Some(Box::new(move |_name, _result| {
-                let _ = cancel_tx.send(true);
+                let _ = cancel_tx.send(CancelLevel::HardAbort);
                 None
             })),
         )),

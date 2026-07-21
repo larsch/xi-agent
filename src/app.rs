@@ -787,6 +787,7 @@ impl App {
             hooks: std::collections::HashMap::new(),
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
+            cancel_rx: None,
         };
 
         let selected_shell = self.shell.selected;
@@ -879,7 +880,21 @@ impl App {
         } else if self.login.active {
             self.cancel_login();
         } else if self.streaming() {
-            self.abort_agent_loop();
+            // Esc no longer aborts the agent loop — use Ctrl-C for that.
+            self.push_notice(Message::assistant(
+                "[Use Ctrl-C to abort the agent loop]".to_string(),
+            ));
+        } else {
+            // Idle: clear input if non-empty, no-op if empty (exception to
+            // the feedback invariant — base state with nothing to dismiss).
+            let input_is_empty = self
+                .textarea
+                .lines()
+                .iter()
+                .all(|line| line.trim().is_empty());
+            if !input_is_empty {
+                self.reset_textarea();
+            }
         }
     }
 
@@ -2132,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_escape_in_chat_mode_aborts_stream_when_not_in_slash_mode() {
+    fn handle_escape_in_chat_mode_shows_notice_when_streaming() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
@@ -2142,18 +2157,27 @@ mod tests {
 
             app.handle_escape_in_chat_mode();
 
+            // Esc no longer aborts the agent loop — it shows a notice.
             assert!(
-                !app.streaming(),
-                "streaming should stop when ESC is used outside slash mode"
+                app.streaming(),
+                "streaming should remain active when Esc is pressed"
             );
             assert!(
-                app.runtime.agent_task.is_none(),
-                "agent task should be removed when stream is aborted"
+                app.runtime.is_running(),
+                "agent task should not be removed by Esc"
             );
-            assert!(matches!(
-                app.agent_turn.status,
-                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
-            ));
+            assert!(
+                app.session
+                    .live_turn
+                    .notices
+                    .iter()
+                    .any(|m| { m.content.contains("Use Ctrl-C to abort") })
+            );
+
+            // Clean up.
+            if let Some(handle) = app.runtime.agent_task.take() {
+                handle.abort();
+            }
         });
     }
 

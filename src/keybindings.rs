@@ -3,8 +3,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyBindingId {
     ShowHelp,
-    Quit,
-    QuitIfInputEmpty,
+    Abort,
+    EndInput,
     ToggleInfo,
     ToggleInfoAlt,
     CopyLastAssistantResponse,
@@ -66,19 +66,19 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         id: Some(KeyBindingId::Cancel),
         shortcut: "Esc",
         context: BindingContext::Global,
-        description: "Cancel or close the current context; abort the agent loop if running",
+        description: "Cancel or close the current context; clear input when idle",
     },
     KeyBinding {
-        id: Some(KeyBindingId::Quit),
+        id: Some(KeyBindingId::Abort),
         shortcut: "Ctrl+C",
         context: BindingContext::Global,
-        description: "Quit, or leave shell mode if active",
+        description: "Abort agent loop (1: stop after turn, 2: abort, 3: force kill)",
     },
     KeyBinding {
-        id: Some(KeyBindingId::QuitIfInputEmpty),
+        id: Some(KeyBindingId::EndInput),
         shortcut: "Ctrl+D",
         context: BindingContext::Global,
-        description: "Quit when input is empty, or leave shell mode if shell input is empty",
+        description: "End input / quit (press twice while agent is running)",
     },
     KeyBinding {
         id: Some(KeyBindingId::ToggleInfo),
@@ -193,10 +193,10 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
 pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
     match id {
         KeyBindingId::ShowHelp => key.code == KeyCode::F(1) && key.modifiers.is_empty(),
-        KeyBindingId::Quit => {
+        KeyBindingId::Abort => {
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
-        KeyBindingId::QuitIfInputEmpty => {
+        KeyBindingId::EndInput => {
             key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
         KeyBindingId::ToggleInfo => {
@@ -260,11 +260,11 @@ mod tests {
                 KeyEvent::new(KeyCode::F(1), KeyModifiers::empty()),
             ),
             (
-                KeyBindingId::Quit,
+                KeyBindingId::Abort,
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             ),
             (
-                KeyBindingId::QuitIfInputEmpty,
+                KeyBindingId::EndInput,
                 KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
             ),
             (

@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::agent::types::CancelLevel;
 use crate::agent::{AgentLoopConfig, ToolOutputLog, run_agent_loop};
 use crate::app::{App, DynProvider, RetryTarget, StreamingStatus};
 use crate::at_file::{AtFileResult, parse_at_tokens, resolve_at_tokens};
@@ -28,6 +29,11 @@ impl App {
             .expect("start_agent_task called before session_state was initialised")
             .events()
             .to_vec();
+
+        // Create cancel channel before the config so the executor can receive
+        // a clone for passing into ToolCallContext.
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        self.runtime.cancel_tx = Some(cancel_tx);
 
         // Apply agent tool filtering when an agent is active.
         let (tools, system_prompt) = if let Some(agent) = self.resolve_current_agent() {
@@ -60,6 +66,7 @@ impl App {
                 ex.hooks = self.agent_config.hooks.clone();
                 ex.hook_ipc = self.agent_config.hook_ipc.clone();
                 ex.session_id = session_id.clone();
+                ex.cancel_rx = Some(cancel_rx.clone());
                 ex
             }),
             system_prompt,
@@ -70,9 +77,6 @@ impl App {
         let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.steering_tx = Some(steering_tx);
         self.runtime.queued_steering.clear();
-
-        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        self.runtime.cancel_tx = Some(cancel_tx);
 
         let provider = Arc::clone(provider);
         let tx = self.app_event_tx();
@@ -97,6 +101,7 @@ impl App {
         self.agent_turn.start();
         self.login.auth_retry_budget = 1;
         self.log_view.auto_scroll = true;
+        self.runtime.reset_abort_stages();
         self.start_agent_task(provider);
     }
 
@@ -310,16 +315,20 @@ impl App {
             return;
         }
 
-        // Pop the trailing error notice if present. Error messages live in
-        // `live_turn.notices` (they are not committed session events).
+        // Pop trailing TurnError from committed session events if present.
+        if let Some(ss) = self.session.session_state.as_mut() {
+            ss.pop_trailing_turn_error();
+        }
+
+        // Pop the trailing error notice if present.
         if let Some(last) = self.session.live_turn.notices.last()
             && last.role == Role::Assistant
             && (last.content.starts_with("[Error:") || last.content.starts_with("[token refresh"))
         {
             self.session.live_turn.notices.pop();
-            self.persist_messages();
         }
 
+        self.persist_messages();
         self.launch_turn(provider);
     }
 
@@ -390,9 +399,9 @@ impl App {
 
     pub fn abort_agent_loop(&mut self) {
         if let Some(handle) = self.runtime.agent_task.take() {
-            // Signal cooperative cancellation first; hard-abort as fallback.
+            // Signal cooperative cancellation; hard-abort as fallback.
             if let Some(tx) = self.runtime.cancel_tx.take() {
-                let _ = tx.send(true);
+                let _ = tx.send(CancelLevel::HardAbort);
             }
             handle.abort();
             self.agent_turn
@@ -407,6 +416,62 @@ impl App {
             self.flush_turn_events();
             self.persist_messages();
         }
+    }
+
+    /// Stage 1: request the agent loop to stop after the current turn completes.
+    /// The turn finishes normally — model response + tool batch — but no new
+    /// turn is started.
+    pub fn request_soft_stop(&mut self) {
+        if !self.runtime.is_running() {
+            return;
+        }
+        self.runtime.abort_stage = CancelLevel::SoftStop;
+        if let Some(tx) = self.runtime.cancel_tx.as_ref() {
+            let _ = tx.send(CancelLevel::SoftStop);
+        }
+        self.agent_turn.set_status(Some(StreamingStatus::Message(
+            "[Stopping after current turn… Press Ctrl-C again to abort now]".to_string(),
+        )));
+    }
+
+    /// Stage 2: abort the current model request and send SIGTERM to the
+    /// current subprocess tool. Waits for the tool to exit.
+    pub fn request_hard_abort(&mut self) {
+        if !self.runtime.is_running() {
+            return;
+        }
+        self.runtime.abort_stage = CancelLevel::HardAbort;
+        if let Some(tx) = self.runtime.cancel_tx.as_ref() {
+            let _ = tx.send(CancelLevel::HardAbort);
+        }
+        // Abort the tokio task to stop model streaming.
+        if let Some(handle) = self.runtime.agent_task.take() {
+            handle.abort();
+        }
+        self.agent_turn.last_output_at = None;
+        self.runtime.steering_tx = None;
+        self.runtime.queued_steering.clear();
+        self.append_abort_results_for_pending_tool_calls();
+        self.finalise_assistant_turn_event();
+        self.flush_turn_events();
+        self.persist_messages();
+        self.agent_turn.set_status(Some(StreamingStatus::Message(
+            "[Aborting… Press Ctrl-C again to force kill]".to_string(),
+        )));
+    }
+
+    /// Stage 3: send SIGKILL to the current subprocess tool immediately.
+    pub fn request_force_kill(&mut self) {
+        if !self.runtime.is_running() {
+            return;
+        }
+        self.runtime.abort_stage = CancelLevel::ForceKill;
+        if let Some(tx) = self.runtime.cancel_tx.as_ref() {
+            let _ = tx.send(CancelLevel::ForceKill);
+        }
+        self.agent_turn.set_status(Some(StreamingStatus::Message(
+            "[Force killing…]".to_string(),
+        )));
     }
 
     // ── Scrolling ─────────────────────────────────────────────────────────────

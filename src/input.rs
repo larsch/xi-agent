@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::{
+    agent::types::CancelLevel,
     app::{App, InputMode, SelectionResult},
     commands::CommandAction,
     config::XiConfig,
@@ -214,15 +215,47 @@ fn handle_global_key_shortcuts(
         return KeyDispatch::Continue;
     }
 
-    if keybindings::matches(KeyBindingId::Quit, key) {
-        if app.input_mode == InputMode::Shell {
-            app.exit_shell_mode();
+    if keybindings::matches(KeyBindingId::Abort, key) {
+        // Ctrl-C: staged abort when agent is running, status hint when idle.
+        if app.streaming() {
+            match app.runtime.abort_stage {
+                CancelLevel::None => {
+                    app.request_soft_stop();
+                }
+                CancelLevel::SoftStop => {
+                    app.request_hard_abort();
+                }
+                CancelLevel::HardAbort | CancelLevel::ForceKill => {
+                    app.request_force_kill();
+                }
+            }
             return KeyDispatch::Continue;
         }
-        return KeyDispatch::Return(RunResult::Quit);
+
+        // Idle — show context-dependent status.
+        if app.input_mode == InputMode::Shell {
+            app.push_notice(Message::assistant(
+                "[Ctrl-C is for aborting the agent loop. Press Ctrl-D to exit shell mode]"
+                    .to_string(),
+            ));
+        } else if app.selection.active
+            || app.login.active
+            || app.provider.setup_step != ProviderSetupStep::Idle
+        {
+            app.push_notice(Message::assistant(
+                "[Ctrl-C is for aborting the agent loop. Press Esc to go back]".to_string(),
+            ));
+        } else {
+            app.push_notice(Message::assistant(
+                "[No agent loop running. Press Ctrl-D or type /quit to exit]".to_string(),
+            ));
+        }
+        return KeyDispatch::Continue;
     }
 
-    if keybindings::matches(KeyBindingId::QuitIfInputEmpty, key) {
+    if keybindings::matches(KeyBindingId::EndInput, key) {
+        // Ctrl-D: two-stage end input. First press while streaming warns;
+        // second press quits. Idle + empty input quits immediately.
         if app.input_mode == InputMode::Shell {
             if app.shell_input_is_empty() {
                 app.exit_shell_mode();
@@ -235,8 +268,44 @@ fn handle_global_key_shortcuts(
             .lines()
             .iter()
             .all(|line| line.trim().is_empty());
-        if input_is_empty {
+
+        if input_is_empty && !app.streaming() {
             return KeyDispatch::Return(RunResult::Quit);
+        }
+
+        if app.streaming() {
+            let now = std::time::Instant::now();
+            match app.runtime.ctrl_d_last_press {
+                Some(last) if now.duration_since(last) < std::time::Duration::from_secs(2) => {
+                    // Second press within timeout — quit + abort.
+                    app.request_hard_abort();
+                    return KeyDispatch::Return(RunResult::Quit);
+                }
+                _ => {
+                    // First press — show warning.
+                    app.runtime.ctrl_d_last_press = Some(now);
+                    app.push_notice(Message::assistant(
+                        "[Agent is working. Press Ctrl-D again to quit and abort the agent loop]"
+                            .to_string(),
+                    ));
+                    return KeyDispatch::Continue;
+                }
+            }
+        }
+
+        // Input is non-empty — show hint.
+        if app.selection.active
+            || app.login.active
+            || app.provider.setup_step != ProviderSetupStep::Idle
+        {
+            app.push_notice(Message::assistant(
+                "[Press Ctrl-D again on an empty line to quit. Press Esc to close this first]"
+                    .to_string(),
+            ));
+        } else {
+            app.push_notice(Message::assistant(
+                "[Press Ctrl-D again on an empty line to quit]".to_string(),
+            ));
         }
         return KeyDispatch::Continue;
     }
@@ -373,7 +442,10 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
             } else if app.in_slash_mode() {
                 app.reset_textarea();
             } else if app.streaming() {
-                app.abort_agent_loop();
+                // Esc no longer aborts the agent loop — use Ctrl-C for that.
+                app.push_notice(Message::assistant(
+                    "[Use Ctrl-C to abort the agent loop]".to_string(),
+                ));
             } else {
                 if app.in_provider_removal_confirmation_mode() {
                     app.clear_pending_provider_removal();
@@ -802,6 +874,16 @@ fn handle_slash_submit(
         }
         Some(CommandAction::Compact(instructions)) => {
             app.trigger_manual_compaction(instructions, provider);
+        }
+        Some(CommandAction::Retry) => {
+            if app.streaming() {
+                app.push_notice(Message::assistant(
+                    "[Cannot retry while agent is running. Press Ctrl-C to abort first]"
+                        .to_string(),
+                ));
+            } else {
+                app.retry_last_request(provider);
+            }
         }
         Some(CommandAction::Skill { name, args }) => {
             match app.loaded_skills.iter().find(|s| s.name == name) {

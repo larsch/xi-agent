@@ -76,6 +76,7 @@ mod tracked;
 mod ui;
 
 use agent::tools::custom::custom_tool_dirs;
+use agent::types::CancelLevel;
 use agent::{
     AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
@@ -1102,7 +1103,7 @@ async fn run_print_mode_loop(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
 
     tokio::spawn(async move {
         agent::run_agent_loop(config, provider, tx, steering_rx, cancel_rx).await;
@@ -1250,7 +1251,7 @@ async fn run_print_mode_loop_inner(
 ) -> i32 {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
 
     // AgentLoopConfig is not Clone; rebuild a minimal headless one for the retry.
     let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));

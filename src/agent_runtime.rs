@@ -1,5 +1,6 @@
 use tokio::task::JoinHandle;
 
+use crate::agent::types::CancelLevel;
 use crate::app_event::{AppEvent, AppEventTx};
 
 /// Owns the agent task handle, event channels, steering queue, and
@@ -28,8 +29,14 @@ pub(crate) struct AgentRuntime {
     /// JoinHandle for the currently running agent loop task (if any).
     pub(crate) agent_task: Option<JoinHandle<()>>,
     /// Cancellation sender for the active agent loop task.
-    /// Sending `true` signals the loop to exit at its next cooperative checkpoint.
-    pub(crate) cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
+    /// Sends [`CancelLevel`] values: `SoftStop` → `HardAbort` → `ForceKill`.
+    pub(crate) cancel_tx: Option<tokio::sync::watch::Sender<CancelLevel>>,
+    /// Current abort stage, tracking which level of cancel has been requested.
+    /// Reset on each `launch_turn()`.
+    pub(crate) abort_stage: CancelLevel,
+    /// Timestamp of the last Ctrl-D press, used for two-stage end-input
+    /// (first press warns, second press quits).
+    pub(crate) ctrl_d_last_press: Option<std::time::Instant>,
     /// Set by [`submit`] / [`submit_with_text`] when a user message has been
     /// committed to in-memory display state but the I/O-heavy finalisation
     /// (persist, token check, launch) is still pending.  The main loop checks
@@ -52,9 +59,18 @@ impl AgentRuntime {
             queued_steering: Vec::new(),
             agent_task: None,
             cancel_tx: None,
+            abort_stage: CancelLevel::None,
+            ctrl_d_last_press: None,
             pending_finalize: false,
             pending_shell_handle: None,
         }
+    }
+
+    /// Reset abort stages — called at the start of each agent turn so
+    /// Ctrl-C and Ctrl-D counters are fresh.
+    pub(crate) fn reset_abort_stages(&mut self) {
+        self.abort_stage = CancelLevel::None;
+        self.ctrl_d_last_press = None;
     }
 
     /// Returns a clone of the sender side of the app-event channel.
@@ -102,6 +118,8 @@ mod tests {
         assert!(rt.queued_steering().is_empty());
         assert!(rt.steering_tx.is_none());
         assert!(rt.cancel_tx.is_none());
+        assert_eq!(rt.abort_stage, CancelLevel::None);
+        assert!(rt.ctrl_d_last_press.is_none());
     }
 
     #[test]
@@ -110,6 +128,17 @@ mod tests {
         let b = AgentRuntime::default();
         assert_eq!(a.is_running(), b.is_running());
         assert_eq!(a.queued_steering(), b.queued_steering());
+        assert_eq!(a.abort_stage, b.abort_stage);
+    }
+
+    #[test]
+    fn reset_abort_stages_clears_state() {
+        let mut rt = AgentRuntime::new();
+        rt.abort_stage = CancelLevel::SoftStop;
+        rt.ctrl_d_last_press = Some(std::time::Instant::now());
+        rt.reset_abort_stages();
+        assert_eq!(rt.abort_stage, CancelLevel::None);
+        assert!(rt.ctrl_d_last_press.is_none());
     }
 
     #[test]

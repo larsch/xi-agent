@@ -216,7 +216,28 @@ impl ToolResult {
     }
 }
 
-// ── ToolCallContext ───────────────────────────────────────────────────────────
+// ── CancelLevel ───────────────────────────────────────────────────────────────
+
+/// Progressive cancellation level sent from the UI to the agent loop.
+///
+/// Ordered: `SoftStop` < `HardAbort` < `ForceKill`.  The agent loop checks
+/// this at turn boundaries and tools check it mid-execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum CancelLevel {
+    /// No cancellation requested.
+    #[default]
+    None,
+    /// Stop after the current turn completes (finish model response + tool
+    /// batch, log results, but do not invoke the model again).
+    SoftStop,
+    /// Abort the current model request (if streaming), send SIGTERM to the
+    /// current subprocess tool, and wait for it to exit.
+    HardAbort,
+    /// Send SIGKILL to the current subprocess tool immediately.
+    ForceKill,
+}
+
+// ── ToolCallContext ────────────────────────────────────────────────��──────────
 
 /// Context passed to every tool execution.
 ///
@@ -238,6 +259,10 @@ pub struct ToolCallContext {
     pub hook_ipc: crate::hooks::HookIpcPublisherHandle,
     /// Persistent session identifier.
     pub session_id: String,
+    /// Optional cancellation receiver for mid-tool abort checks.
+    /// When `Some`, tools can poll this to detect when the user has requested
+    /// a hard abort or force kill.
+    pub cancel_rx: Option<tokio::sync::watch::Receiver<CancelLevel>>,
 }
 
 #[cfg(test)]
@@ -250,6 +275,7 @@ impl ToolCallContext {
             hooks: std::collections::HashMap::new(),
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
+            cancel_rx: None,
         }
     }
 }
@@ -336,6 +362,9 @@ pub struct DefaultToolExecutor {
     pub hook_ipc: crate::hooks::HookIpcPublisherHandle,
     /// Persistent session identifier.
     pub session_id: String,
+    /// Optional cancellation receiver for mid-tool abort checks (passed to
+    /// [`ToolCallContext`]).
+    pub cancel_rx: Option<tokio::sync::watch::Receiver<CancelLevel>>,
 }
 
 impl DefaultToolExecutor {
@@ -347,6 +376,7 @@ impl DefaultToolExecutor {
             hooks: std::collections::HashMap::new(),
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
+            cancel_rx: None,
         }
     }
 
@@ -398,6 +428,7 @@ impl ToolExecutor for DefaultToolExecutor {
                             hooks: self.hooks.clone(),
                             hook_ipc: self.hook_ipc.clone(),
                             session_id: self.session_id.clone(),
+                            cancel_rx: self.cancel_rx.clone(),
                         };
                         let r = tool.run(args.clone(), ctx).await;
                         let cmd_summary = args.get("command").and_then(|v| v.as_str());

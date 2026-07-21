@@ -133,6 +133,18 @@ impl SessionState {
         self.llm.ensure_current(&self.event_log.events);
         self.llm.messages()
     }
+
+    /// Remove the trailing `TurnError` event if the last event is one.
+    /// Used by `/retry` to clean up before re-launching a turn.
+    pub(crate) fn pop_trailing_turn_error(&mut self) {
+        if let Some(last) = self.event_log.events.last()
+            && matches!(last, SessionEvent::TurnError { .. })
+        {
+            self.event_log.events.pop();
+            self.display.rebuild(&self.event_log.events);
+            self.llm.apply_new_events(&self.event_log.events);
+        }
+    }
 }
 
 #[cfg(test)]

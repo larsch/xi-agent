@@ -30,7 +30,8 @@ pub use file_tracker::FileTracker;
 pub use system_prompt::build_system_prompt;
 pub use tool_output_log::ToolOutputLog;
 pub use types::{
-    AgentEvent, AgentLoopConfig, DefaultToolExecutor, ToolExecutor, ToolRegistry, ToolResult,
+    AgentEvent, AgentLoopConfig, CancelLevel, DefaultToolExecutor, ToolExecutor, ToolRegistry,
+    ToolResult,
 };
 
 // ── TurnOutcome ───────────────────────────────────────────────────────────────
@@ -400,7 +401,7 @@ async fn execute_tool_batch(
     config: &AgentLoopConfig,
     pending_tool_calls: &[(String, String, serde_json::Value)],
     tx: &UnboundedSender<AppEvent>,
-    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+    cancel_rx: &tokio::sync::watch::Receiver<CancelLevel>,
     session_events: &mut Vec<SessionEvent>,
 ) -> BatchOutcome {
     for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
@@ -460,7 +461,7 @@ async fn execute_tool_batch(
         record_tool_call_result(session_events, &id, &name, args, result);
 
         // Check for cancellation before the next call.
-        if *cancel_rx.borrow() {
+        if *cancel_rx.borrow() >= CancelLevel::HardAbort {
             for (skip_id, skip_name, skip_args) in pending_tool_calls.iter().skip(idx + 1).cloned()
             {
                 tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
@@ -520,7 +521,7 @@ pub async fn run_agent_loop(
     provider: Arc<dyn LlmProvider>,
     tx: UnboundedSender<AppEvent>,
     mut steering_rx: UnboundedReceiver<String>,
-    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
 ) {
     let tool_defs: Vec<ToolDefinition> = build_sorted_tool_defs(&config.tools);
 
@@ -572,7 +573,8 @@ pub async fn run_agent_loop(
 
     loop {
         // ── Cancellation check ────────────────────────────────────────────────
-        if *cancel_rx.borrow() {
+        let cancel_level = *cancel_rx.borrow();
+        if cancel_level >= CancelLevel::HardAbort {
             config.hook_ipc.publish(
                 &config.session_id,
                 HookPoint::OnCancel,
@@ -928,6 +930,40 @@ pub async fn run_agent_loop(
                         None,
                     )
                     .await;
+                    return;
+                }
+
+                // ── Soft-stop check after turn completes ─────────────────────
+                if *cancel_rx.borrow() >= CancelLevel::SoftStop {
+                    config.hook_ipc.publish(
+                        &config.session_id,
+                        HookPoint::OnDone,
+                        None,
+                        empty_payload(),
+                    );
+                    crate::hooks::maybe_run_hook(
+                        &config.hooks,
+                        HookPoint::OnDone,
+                        &config.session_id,
+                        None,
+                        None,
+                    )
+                    .await;
+                    config.hook_ipc.publish(
+                        &config.session_id,
+                        HookPoint::OnIdle,
+                        None,
+                        empty_payload(),
+                    );
+                    crate::hooks::maybe_run_hook(
+                        &config.hooks,
+                        HookPoint::OnIdle,
+                        &config.session_id,
+                        None,
+                        None,
+                    )
+                    .await;
+                    tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
                     return;
                 }
 

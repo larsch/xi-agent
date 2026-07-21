@@ -71,6 +71,12 @@ pub static COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "retry",
+        usage: "/retry",
+        description: "Retry the last turn after an error",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "quit",
         usage: "/quit",
         description: "Quit the application",
@@ -118,6 +124,8 @@ pub enum CommandAction {
         name: String,
         args: String,
     },
+    /// Retry the last agent turn after a non-recoverable error.
+    Retry,
 }
 
 /// Parse a complete slash command input string into an action.
@@ -160,6 +168,7 @@ pub fn parse(input: &str) -> Option<CommandAction> {
         "compact" => Some(CommandAction::Compact(None)),
         "agent" if !arg.is_empty() => Some(CommandAction::Agent(arg.to_string())),
         "agent" => Some(CommandAction::AgentNoArg),
+        "retry" => Some(CommandAction::Retry),
         _ => None,
     }
 }
