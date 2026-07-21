@@ -1,5 +1,6 @@
 use clap::Parser;
 use crossterm::{
+    cursor::Show,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, EventStream, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
@@ -207,6 +208,7 @@ async fn main() -> io::Result<()> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| ".".to_string());
     let window_title = format!("ξ - {window_folder}");
+    let default_window_title = "ξ".to_string();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -347,6 +349,15 @@ async fn main() -> io::Result<()> {
 
         match run(&mut terminal, &mut app, &provider, &config).await {
             Ok(RunResult::Quit) | Err(_) => break,
+
+            Ok(RunResult::Suspend) => {
+                suspend_interactive_ui(
+                    &mut terminal,
+                    keyboard_enhancements_enabled,
+                    &default_window_title,
+                    &window_title,
+                )?;
+            }
 
             Ok(RunResult::RebuildProvider) => {}
 
@@ -675,6 +686,61 @@ async fn main() -> io::Result<()> {
 }
 
 use input::{RunResult, apply_paste, handle_key_event, provider_setup_requires_api_key};
+
+#[cfg(unix)]
+fn suspend_interactive_ui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    keyboard_enhancements_enabled: bool,
+    suspended_window_title: &str,
+    resumed_window_title: &str,
+) -> io::Result<()> {
+    disable_raw_mode()?;
+    if keyboard_enhancements_enabled {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        Show
+    )?;
+
+    let pid = std::process::id() as i32;
+    // SAFETY: sends SIGTSTP to the current process so the parent shell can resume it with fg.
+    let rc = unsafe { libc::kill(pid, libc::SIGTSTP) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        SetTitle(suspended_window_title)
+    )?;
+    if keyboard_enhancements_enabled {
+        execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        )?;
+    }
+    terminal.clear()?;
+    execute!(terminal.backend_mut(), SetTitle(resumed_window_title))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn suspend_interactive_ui(
+    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _keyboard_enhancements_enabled: bool,
+    _suspended_window_title: &str,
+    _resumed_window_title: &str,
+) -> io::Result<()> {
+    Ok(())
+}
 
 struct UnavailableProvider {
     message: String,

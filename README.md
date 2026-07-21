@@ -77,6 +77,7 @@ cargo install --path .
 | `Ctrl+I`        | Toggle provider/model info bar  |
 | `Ctrl+F`        | Toggle full tool output         |
 | `Ctrl+R`        | Resume latest session for current folder |
+| `Ctrl+Z`        | Suspend xi only when the UI is idle and no agent/shell subprocess is running |
 | `Ctrl+D`        | Quit when input is empty (or leave shell mode if shell input is empty) |
 | `Ctrl+E`        | Edit the selected custom provider (provider picker) |
 | `Ctrl+S`        | Cycle between available shells (shell mode) |

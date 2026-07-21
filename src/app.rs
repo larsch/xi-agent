@@ -423,9 +423,15 @@ impl App {
     pub fn should_show_resume_hint(&self) -> bool {
         self.session.resume_available_for_cwd
             && self.display_is_empty()
-            && !self.selection.active
-            && !self.login.active
+            && self.ui_is_suspend_idle()
             && !self.streaming()
+    }
+
+    pub(crate) fn ui_is_suspend_idle(&self) -> bool {
+        !self.selection.active
+            && !self.login.active
+            && self.provider.setup_step == ProviderSetupStep::Idle
+            && self.input_mode == InputMode::Chat
     }
 
     pub fn resume_latest_for_current_cwd(&mut self) {
@@ -1496,6 +1502,44 @@ mod tests {
             !app.provider.provider_selected,
             "fresh App should not have a provider selected"
         );
+    }
+
+    #[test]
+    fn ui_is_suspend_idle_only_in_plain_chat_idle_state() {
+        let mut app = make_app();
+        assert!(app.ui_is_suspend_idle());
+
+        app.input_mode = super::InputMode::Shell;
+        assert!(!app.ui_is_suspend_idle());
+        app.input_mode = super::InputMode::Chat;
+
+        app.selection.active = true;
+        assert!(!app.ui_is_suspend_idle());
+        app.selection.active = false;
+
+        app.login.active = true;
+        assert!(!app.ui_is_suspend_idle());
+        app.login.active = false;
+
+        app.provider.setup_step = crate::provider_manager::ProviderSetupStep::Endpoint;
+        assert!(!app.ui_is_suspend_idle());
+        app.provider.setup_step = crate::provider_manager::ProviderSetupStep::Idle;
+
+        assert!(app.ui_is_suspend_idle());
+    }
+
+    #[test]
+    fn should_show_resume_hint_stays_hidden_while_streaming() {
+        let mut app = make_app();
+        app.session.resume_available_for_cwd = true;
+        assert!(app.display_is_empty());
+        assert!(app.ui_is_suspend_idle());
+        assert!(!app.streaming());
+        assert!(app.should_show_resume_hint());
+
+        app.agent_turn.start();
+        assert!(app.streaming());
+        assert!(!app.should_show_resume_hint());
     }
 
     #[test]
