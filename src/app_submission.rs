@@ -455,14 +455,19 @@ impl App {
         self.finalise_assistant_turn_event();
         self.flush_turn_events();
         self.persist_messages();
-        self.agent_turn.set_status(Some(StreamingStatus::Message(
-            "[Aborting… Press Ctrl-C again to force kill]".to_string(),
-        )));
+        self.agent_turn
+            .set_status(Some(StreamingStatus::CompletedMessage(
+                "[Aborting… Press Ctrl-C again to force kill]".to_string(),
+            )));
     }
 
     /// Stage 3: send SIGKILL to the current subprocess tool immediately.
     pub fn request_force_kill(&mut self) {
         if !self.runtime.is_running() {
+            self.agent_turn
+                .set_status(Some(StreamingStatus::CompletedMessage(
+                    "[Agent loop already stopped]".to_string(),
+                )));
             return;
         }
         self.runtime.abort_stage = CancelLevel::ForceKill;
