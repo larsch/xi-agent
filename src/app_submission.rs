@@ -467,7 +467,7 @@ impl App {
         self.runtime.abort_stage = CancelLevel::HardAbort;
         self.agent_turn
             .set_status(Some(StreamingStatus::CompletedMessage(
-                "[Aborting… Press Ctrl-C again to force kill]".to_string(),
+                "[agent loop aborted]".to_string(),
             )));
     }
 
@@ -484,9 +484,10 @@ impl App {
         if let Some(tx) = self.runtime.cancel_tx.as_ref() {
             let _ = tx.send(CancelLevel::ForceKill);
         }
-        self.agent_turn.set_status(Some(StreamingStatus::Message(
-            "[Force killing…]".to_string(),
-        )));
+        self.agent_turn
+            .set_status(Some(StreamingStatus::CompletedMessage(
+                "[agent loop aborted]".to_string(),
+            )));
     }
 
     // ── Scrolling ─────────────────────────────────────────────────────────────
