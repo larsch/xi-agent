@@ -678,7 +678,10 @@ fn render_tool_result(
     }
 
     // bash / cmd / powershell / exec / python: tail-truncated.
-    if matches!(prev_name, "bash" | "cmd" | "powershell" | "exec" | "python") {
+    if matches!(
+        prev_name,
+        "bash" | "cmd" | "powershell" | "exec" | "run_python"
+    ) {
         let color = if msg.is_error {
             theme.log.diff.removed.fg.unwrap_or(Color::LightRed)
         } else {
@@ -1874,7 +1877,7 @@ mod tests {
     fn python_result_tail_truncated() {
         let call = Message::tool_call(
             "c1",
-            "python",
+            "run_python",
             serde_json::json!({"script": "for i in range(1, 21): print(i)"}),
         );
         let content = (1..=20)

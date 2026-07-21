@@ -140,7 +140,7 @@ bash = "echo \"[$XI_HOOK_POINT] $(date): $XI_SESSION_ID\" >> /tmp/xi-hooks.log"
 [[hooks.post_tool]]
 command = "/home/user/bin/log-tool-execution"
 args = ["--to", "syslog"]
-include_tools = ["bash", "exec", "python"]
+include_tools = ["bash", "exec", "run_python"]
 ```
 
 **Alert on errors, excluding read_file errors:**

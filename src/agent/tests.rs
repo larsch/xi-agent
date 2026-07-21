@@ -1202,7 +1202,7 @@ fn tool_defs_are_sorted_alphabetically() {
     for input in [
         vec!["zebra", "alpha", "beta", "gamma"],
         vec!["delta", "charlie", "bravo", "alpha"],
-        vec!["bash", "exec", "python", "read_file", "ask_user"],
+        vec!["bash", "exec", "run_python", "read_file", "ask_user"],
     ] {
         let registry = registry_from_names(&input);
         let defs = build_sorted_tool_defs(&registry);

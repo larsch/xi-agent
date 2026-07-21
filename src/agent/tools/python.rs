@@ -162,7 +162,7 @@ struct PythonArgs {
 
 impl Tool for PythonTool {
     fn name(&self) -> &str {
-        "python"
+        "run_python"
     }
 
     fn description(&self) -> &str {

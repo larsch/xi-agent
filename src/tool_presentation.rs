@@ -16,7 +16,7 @@ fn max_one_line_chars(cfg: &DisplayConfig) -> usize {
 pub fn tool_pending_label(name: &str) -> String {
     let emoji = tool_emoji(name);
     let action = match name {
-        "bash" | "cmd" | "powershell" | "exec" | "python" => "running…",
+        "bash" | "cmd" | "powershell" | "exec" | "run_python" => "running…",
         "ask_user" => "asking…",
         "read" | "read_file" => "reading…",
         "write" | "write_file" => "writing…",
@@ -46,7 +46,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "write" | "write_file" => "📄",
         "edit" | "edit_file" => "📝",
         "bash" | "cmd" | "powershell" | "exec" => "💻",
-        "python" => "🐍",
+        "run_python" => "🐍",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
         "read_skill" => "🎓",
@@ -60,8 +60,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
 pub fn tool_streaming_field(name: &str) -> Option<&'static str> {
     match name {
         "bash" | "cmd" | "powershell" => Some("command"),
-        "python" => Some("script"),
-        "exec" => Some("program"),
+        "run_python" => Some("script"),
         "ask_user" => Some("question"),
         "read" | "read_file" => Some("path"),
         "write" | "write_file" => Some("path"),
@@ -102,7 +101,7 @@ pub fn tool_invocation_label(
     let emoji = tool_emoji(name);
 
     // Shell and script tools: multiline invocation, head-truncated with continuation marker.
-    if matches!(name, "bash" | "cmd" | "powershell" | "python") {
+    if matches!(name, "bash" | "cmd" | "powershell" | "run_python") {
         let field = streaming_field.unwrap_or("command");
         let text = args.get(field).and_then(|v| v.as_str()).unwrap_or("");
         if text.is_empty() {
@@ -275,7 +274,7 @@ mod tests {
         match name {
             "bash" | "cmd" | "powershell" => Some("command"),
             "exec" => Some("program"),
-            "python" => Some("script"),
+            "run_python" => Some("script"),
             "ask_user" => Some("question"),
             "read" | "read_file" => Some("path"),
             "write" | "write_file" => Some("path"),
@@ -501,7 +500,7 @@ mod tests {
 
     #[test]
     fn python_emoji() {
-        let (lbl, ph) = label("python", &json!({"script": "print('hello')"}));
+        let (lbl, ph) = label("run_python", &json!({"script": "print('hello')"}));
         assert!(!ph);
         assert!(lbl.starts_with("🐍"), "expected 🐍 prefix, got: {lbl}");
     }
@@ -509,7 +508,7 @@ mod tests {
     #[test]
     fn python_multiline_preserves_newlines() {
         let (lbl, ph) = label(
-            "python",
+            "run_python",
             &json!({"script": "import time\nfor i in range(3):\n    print(i)"}),
         );
         assert!(!ph);
@@ -518,21 +517,24 @@ mod tests {
 
     #[test]
     fn python_multiline_truncates_with_line_count() {
-        let (lbl, ph) = label("python", &json!({"script": "l1\nl2\nl3\nl4\nl5\nl6\nl7"}));
+        let (lbl, ph) = label(
+            "run_python",
+            &json!({"script": "l1\nl2\nl3\nl4\nl5\nl6\nl7"}),
+        );
         assert!(!ph);
         assert!(lbl.contains("… 7 total lines"), "got: {lbl}");
     }
 
     #[test]
     fn python_placeholder_when_script_empty() {
-        let (lbl, ph) = label("python", &json!({"script": ""}));
+        let (lbl, ph) = label("run_python", &json!({"script": ""}));
         assert!(ph);
         assert_eq!(lbl, "🐍 running…");
     }
 
     #[test]
     fn python_placeholder_when_script_missing() {
-        let (lbl, ph) = label("python", &json!({}));
+        let (lbl, ph) = label("run_python", &json!({}));
         assert!(ph);
         assert_eq!(lbl, "🐍 running…");
     }
@@ -541,7 +543,10 @@ mod tests {
     fn python_trims_leading_newlines() {
         // Regression: scripts that start with \n would put the emoji alone
         // on the first line. Leading empty lines must be trimmed.
-        let (lbl, ph) = label("python", &json!({"script": "\nimport time\nprint('ok')"}));
+        let (lbl, ph) = label(
+            "run_python",
+            &json!({"script": "\nimport time\nprint('ok')"}),
+        );
         assert!(!ph);
         assert_eq!(lbl, "🐍 import time\nprint('ok')");
     }
@@ -550,7 +555,10 @@ mod tests {
     fn python_trims_trailing_newlines() {
         // Trailing empty lines should also be stripped so no dangling empty
         // line appears after the last visible content.
-        let (lbl, ph) = label("python", &json!({"script": "print('ok')\nimport time\n\n"}));
+        let (lbl, ph) = label(
+            "run_python",
+            &json!({"script": "print('ok')\nimport time\n\n"}),
+        );
         assert!(!ph);
         assert_eq!(lbl, "🐍 print('ok')\nimport time");
     }
@@ -665,7 +673,7 @@ mod tests {
     #[test]
     fn partial_python_multiline() {
         let (lbl, ph) = tool_invocation_label_from_partial(
-            "python",
+            "run_python",
             r#"{"script": "import time\nfor i in range(3):\n    print(i)"}"#,
             Some("script"),
             &DisplayConfig::default(),

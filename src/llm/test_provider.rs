@@ -671,7 +671,7 @@ fn exec_tool_stream(invocation: String) -> LlmStream {
 /// output over time to exercise both the streaming headline and live output body.
 fn streaming_python_stream() -> LlmStream {
     streaming_tool_call(
-        "python".to_string(),
+        "run_python".to_string(),
         serde_json::json!({
             "script": "import time\nfor i in range(1, 11):\n    print(f'line {i}: processing chunk {i}...')\n    time.sleep(1)\n"
         }),
@@ -746,11 +746,11 @@ fn python_stream() -> LlmStream {
     Box::pin(stream! {
         yield LlmEvent::ToolCallStart {
             id: "test-1".to_string(),
-            name: "python".to_string(),
+            name: "run_python".to_string(),
         };
         yield LlmEvent::ToolCall {
             id: "test-1".to_string(),
-            name: "python".to_string(),
+            name: "run_python".to_string(),
             args: serde_json::json!({ "script": "print('hello from test provider')" }),
         };
         yield LlmEvent::Done;
@@ -1111,7 +1111,7 @@ impl super::LlmProvider for TestProvider {
 
             "stream-python" => streaming_python_stream(),
 
-            "python" => python_stream(),
+            "run_python" => python_stream(),
 
             "write" => write_file_stream(),
 

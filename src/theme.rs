@@ -1132,7 +1132,7 @@ fn default_tools_map() -> HashMap<String, ToolTheme> {
         ..Default::default()
     };
     // body inherits from executing group (same as bash/exec program output)
-    map.insert("python".to_string(), python);
+    map.insert("run_python".to_string(), python);
 
     // individual file tools
     let mut read = default_tool_file();
@@ -1203,7 +1203,7 @@ fn default_tools_map() -> HashMap<String, ToolTheme> {
 /// 1. Named tool entry (e.g. `tools["bash"]`)
 /// 2. `tools["executing"]` — for bash, exec, cmd, powershell
 /// 3. `tools["default"]`
-const EXECUTING_TOOLS: &[&str] = &["bash", "exec", "cmd", "powershell", "python"];
+const EXECUTING_TOOLS: &[&str] = &["bash", "exec", "cmd", "powershell", "run_python"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsTheme(#[serde(default = "default_tools_map")] pub HashMap<String, ToolTheme>);
