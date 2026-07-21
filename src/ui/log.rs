@@ -126,7 +126,12 @@ pub(super) fn build_log_lines(
 
     for (idx, msg) in messages.iter().enumerate() {
         let is_last = idx == messages.len() - 1;
-        let msg_streaming = streaming && is_last;
+        let is_static_assistant_notice = matches!(msg.role, Role::Assistant)
+            && msg.thinking.as_deref().unwrap_or("").is_empty()
+            && msg.assistant_phase.is_none()
+            && msg.content.starts_with('[')
+            && msg.content.ends_with(']');
+        let msg_streaming = streaming && is_last && !is_static_assistant_notice;
 
         match msg.role {
             Role::User => {
@@ -141,7 +146,7 @@ pub(super) fn build_log_lines(
             Role::System => {}
             Role::Assistant => {
                 let thinking = msg.thinking.as_deref().unwrap_or("");
-                let is_streaming_last = streaming && is_last;
+                let is_streaming_last = msg_streaming;
                 let content = trim_assistant_block_edges(&msg.content);
                 let has_answer = !content.is_empty();
 

@@ -211,7 +211,11 @@ fn handle_global_key_shortcuts(
     #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
 ) -> KeyDispatch {
     if keybindings::matches(KeyBindingId::ShowHelp, key) {
-        app.enter_keybinding_help_mode();
+        if app.selection.kind == Some(crate::selection_state::SelectionKind::KeybindingHelp) {
+            app.exit_selection_mode();
+        } else {
+            app.enter_keybinding_help_mode();
+        }
         return KeyDispatch::Continue;
     }
 
@@ -441,6 +445,10 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
                 app.cancel_pending_ask();
             } else if app.in_slash_mode() {
                 app.reset_textarea();
+            } else if app.selection.kind
+                == Some(crate::selection_state::SelectionKind::KeybindingHelp)
+            {
+                app.exit_selection_mode();
             } else if app.streaming() {
                 // Esc no longer aborts the agent loop — use Ctrl-C for that.
                 app.push_notice(Message::assistant(

@@ -327,7 +327,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     "↑↓ navigate   Enter select   Esc cancel  "
                 }
             } else if app.selection.kind == Some(SelectionKind::KeybindingHelp) {
-                "↑↓ navigate   PageUp/PageDown scroll   type filter   Esc close  "
+                "↑↓ navigate   PageUp/PageDown scroll   Esc close  "
             } else if app.in_provider_selection_mode() {
                 if app.selection_filter_enabled() {
                     "↑↓ navigate   Enter select   Ctrl+E edit provider   Ctrl+R remove provider   type filter   Esc cancel  "
@@ -1432,6 +1432,25 @@ mod tests {
             &crate::config::DisplayConfig::default(),
         );
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
+    }
+
+    #[test]
+    fn static_assistant_notice_does_not_get_streaming_cursor() {
+        let msg = Message::assistant(
+            "[Agent is working. Press Ctrl-D again to quit and abort the agent loop]",
+        );
+        let (lines, _) = log::build_log_lines(
+            &[msg],
+            true,
+            120,
+            &log::ToolBodyConfig::default(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        );
+        assert_eq!(
+            line_text(&lines[0]),
+            "💬 [Agent is working. Press Ctrl-D again to quit and abort the agent loop]"
+        );
     }
 
     #[test]

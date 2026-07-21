@@ -435,7 +435,9 @@ impl App {
     }
 
     /// Stage 2: abort the current model request and send SIGTERM to the
-    /// current subprocess tool. Waits for the tool to exit.
+    /// current subprocess tool. When a tool is currently executing, keep the
+    /// agent task alive so the tool can observe the cancel level and exit
+    /// cooperatively. When no tool is running, abort immediately.
     pub fn request_hard_abort(&mut self) {
         if !self.runtime.is_running() {
             return;
@@ -444,17 +446,25 @@ impl App {
         if let Some(tx) = self.runtime.cancel_tx.as_ref() {
             let _ = tx.send(CancelLevel::HardAbort);
         }
-        // Abort the tokio task to stop model streaming.
-        if let Some(handle) = self.runtime.agent_task.take() {
-            handle.abort();
+
+        let tool_running = self
+            .session
+            .live_turn
+            .tool_entries
+            .iter()
+            .any(|entry| entry.result.is_none());
+
+        if tool_running {
+            self.agent_turn.set_status(Some(StreamingStatus::Message(
+                "[Aborting… Press Ctrl-C again to force kill]".to_string(),
+            )));
+            return;
         }
-        self.agent_turn.last_output_at = None;
-        self.runtime.steering_tx = None;
-        self.runtime.queued_steering.clear();
-        self.append_abort_results_for_pending_tool_calls();
-        self.finalise_assistant_turn_event();
-        self.flush_turn_events();
-        self.persist_messages();
+
+        // No tool is currently running, so abort the task immediately to stop
+        // model streaming and commit the partial turn.
+        self.abort_agent_loop();
+        self.runtime.abort_stage = CancelLevel::HardAbort;
         self.agent_turn
             .set_status(Some(StreamingStatus::CompletedMessage(
                 "[Aborting… Press Ctrl-C again to force kill]".to_string(),

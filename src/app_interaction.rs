@@ -463,11 +463,15 @@ impl App {
     }
 
     /// Returns true if the active selection menu supports free-text filtering.
-    /// The login-action menu is a fixed short list and disables filtering.
+    /// Fixed overlays like login actions, provider removal confirmation, and
+    /// keyboard help disable filtering so the normal chat draft remains visible
+    /// in the input panel.
     pub fn selection_filter_enabled(&self) -> bool {
         !matches!(
             self.selection.kind,
-            Some(SelectionKind::LoginAction) | Some(SelectionKind::ConfirmProviderRemoval)
+            Some(SelectionKind::LoginAction)
+                | Some(SelectionKind::ConfirmProviderRemoval)
+                | Some(SelectionKind::KeybindingHelp)
         )
     }
 

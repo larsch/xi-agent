@@ -51,6 +51,28 @@ pub struct SubprocessCommand {
     error_on_nonzero: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedTermination {
+    Sigterm,
+    Sigkill,
+}
+
+#[derive(Debug)]
+struct CollectedOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    #[cfg(unix)]
+    signal: Option<i32>,
+}
+
+#[derive(Debug)]
+struct ProcessOutcome {
+    result: ToolResult,
+    #[cfg(unix)]
+    signal: Option<i32>,
+}
+
 impl SubprocessCommand {
     /// Create a new builder for `program`.
     pub fn new(program: impl Into<String>) -> Self {
@@ -183,9 +205,11 @@ impl SubprocessCommand {
         // If no cancel receiver, use the simple path.
         let cancel_rx_opt = ctx.cancel_rx.clone();
         if cancel_rx_opt.is_none() {
-            return collect_output(child, ctx, self.error_on_nonzero).await;
+            return collect_output(child, ctx, self.error_on_nonzero)
+                .await
+                .result;
         }
-        let mut cancel_rx = cancel_rx_opt.unwrap();
+        let mut cancel_rx = cancel_rx_opt.expect("checked is_some");
 
         // Cancel-aware path: race output collection against cancel signal.
         #[cfg(unix)]
@@ -195,36 +219,39 @@ impl SubprocessCommand {
         let collect_fut = collect_output(child, ctx, self.error_on_nonzero);
         tokio::pin!(collect_fut);
 
-        // Track whether we've sent SIGTERM and when.
-        let mut sigterm_sent_at: Option<std::time::Instant> = None;
+        // Track whether we've requested termination and whether the user has
+        // already been reminded that force kill is available.
+        let mut termination_requested: Option<RequestedTermination> = None;
+        let mut force_kill_reminder_sent = false;
 
         loop {
             tokio::select! {
                 result = &mut collect_fut => {
-                    return result;
+                    return annotate_termination_result(result, termination_requested);
                 }
                 _ = cancel_rx.changed() => {
                     let level = *cancel_rx.borrow();
                     match level {
                         CancelLevel::ForceKill => {
-                            #[cfg(unix)]
-                            if let Some(pid) = child_pid {
-                                unsafe { libc::kill(pid, libc::SIGKILL); }
-                            }
-                            // Fall through to wait for collect_fut to finish.
-                            break;
-                        }
-                        CancelLevel::HardAbort => {
-                            if sigterm_sent_at.is_none() {
+                            if termination_requested != Some(RequestedTermination::Sigkill) {
                                 #[cfg(unix)]
                                 if let Some(pid) = child_pid {
+                                    // SAFETY: libc::kill only sends a signal to the child PID.
+                                    unsafe { libc::kill(pid, libc::SIGKILL); }
+                                }
+                                termination_requested = Some(RequestedTermination::Sigkill);
+                            }
+                        }
+                        CancelLevel::HardAbort => {
+                            if termination_requested.is_none() {
+                                #[cfg(unix)]
+                                if let Some(pid) = child_pid {
+                                    // SAFETY: libc::kill only sends a signal to the child PID.
                                     unsafe { libc::kill(pid, libc::SIGTERM); }
                                 }
-                                sigterm_sent_at = Some(std::time::Instant::now());
-                            }
-                            // Check if SIGTERM was sent >2s ago — send feedback.
-                            if let Some(sent) = sigterm_sent_at
-                                && sent.elapsed() >= std::time::Duration::from_secs(2)
+                                termination_requested = Some(RequestedTermination::Sigterm);
+                            } else if termination_requested == Some(RequestedTermination::Sigterm)
+                                && !force_kill_reminder_sent
                             {
                                 if let Some(tx) = &ctx_tx {
                                     let _ = tx.send(
@@ -236,10 +263,8 @@ impl SubprocessCommand {
                                         )
                                     );
                                 }
-                                // Reset timer so we don't spam.
-                                sigterm_sent_at = Some(std::time::Instant::now());
+                                force_kill_reminder_sent = true;
                             }
-                            // Keep waiting — loop continues.
                         }
                         _ => {
                             // SoftStop or None — keep waiting for output.
@@ -248,9 +273,6 @@ impl SubprocessCommand {
                 }
             }
         }
-
-        // After force kill, wait for output collection to finish.
-        collect_fut.await
     }
 }
 
@@ -266,50 +288,96 @@ async fn collect_output(
     child: tokio::process::Child,
     ctx: ToolCallContext,
     error_on_nonzero: bool,
-) -> ToolResult {
-    #[cfg(unix)]
-    let (out_bytes, err_bytes, exit_code) = collect_unix(child, &ctx).await;
-
-    #[cfg(not(unix))]
-    let (out_bytes, err_bytes, exit_code) = collect_other(child, &ctx).await;
-
-    let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
-
-    let stdout = apply_terminal_render(&stdout);
-    let stderr = apply_terminal_render(&stderr);
-
-    let stdout = stdout.trim_end().to_string();
-    let stderr = stderr.trim_end().to_string();
+) -> ProcessOutcome {
+    let collected = collect_output_inner(child, &ctx).await;
 
     let mut merged = String::new();
-    if !stdout.is_empty() {
-        merged.push_str(&stdout);
+    if !collected.stdout.is_empty() {
+        merged.push_str(&collected.stdout);
     }
-    if !stderr.is_empty() {
+    if !collected.stderr.is_empty() {
         if !merged.is_empty() {
             merged.push('\n');
         }
-        merged.push_str(&stderr);
+        merged.push_str(&collected.stderr);
     }
-    if exit_code != 0 {
+    if collected.exit_code != 0 {
         if !merged.is_empty() && !merged.ends_with('\n') {
             merged.push('\n');
         }
-        merged.push_str(&format!("exit {exit_code}\n"));
+        merged.push_str(&format!("exit {}\n", collected.exit_code));
     }
 
     let tr = truncate_tail(&merged);
     let result = if tr.truncated {
-        ToolResult::ok_truncated(tr, stdout, stderr)
+        ToolResult::ok_truncated(tr, collected.stdout, collected.stderr)
     } else {
         ToolResult::ok(tr)
     };
 
-    if error_on_nonzero && exit_code != 0 {
+    let result = if error_on_nonzero && collected.exit_code != 0 {
         ToolResult::err(result.content.as_text().to_string())
     } else {
         result
+    };
+
+    ProcessOutcome {
+        result,
+        #[cfg(unix)]
+        signal: collected.signal,
+    }
+}
+
+async fn collect_output_inner(
+    child: tokio::process::Child,
+    ctx: &ToolCallContext,
+) -> CollectedOutput {
+    #[cfg(unix)]
+    let (out_bytes, err_bytes, exit_code, signal) = collect_unix(child, ctx).await;
+
+    #[cfg(not(unix))]
+    let (out_bytes, err_bytes, exit_code) = collect_other(child, ctx).await;
+
+    let stdout = apply_terminal_render(&String::from_utf8_lossy(&out_bytes))
+        .trim_end()
+        .to_string();
+    let stderr = apply_terminal_render(&String::from_utf8_lossy(&err_bytes))
+        .trim_end()
+        .to_string();
+
+    CollectedOutput {
+        stdout,
+        stderr,
+        exit_code,
+        #[cfg(unix)]
+        signal,
+    }
+}
+
+fn annotate_termination_result(
+    outcome: ProcessOutcome,
+    termination_requested: Option<RequestedTermination>,
+) -> ToolResult {
+    #[cfg(unix)]
+    {
+        match (termination_requested, outcome.signal) {
+            (Some(RequestedTermination::Sigterm), Some(libc::SIGTERM)) => {
+                ToolResult::err("killed by user (SIGTERM)")
+            }
+            (Some(RequestedTermination::Sigkill), Some(libc::SIGKILL)) => {
+                ToolResult::err("killed by user (SIGKILL)")
+            }
+            _ => outcome.result,
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        match termination_requested {
+            Some(RequestedTermination::Sigterm) => ToolResult::err("killed by user"),
+            Some(RequestedTermination::Sigkill) => ToolResult::err("killed by user"),
+            None => outcome.result,
+        }
     }
 }
 
@@ -332,7 +400,7 @@ fn send_chunk(ctx: &ToolCallContext, chunk: &[u8]) {
 async fn collect_unix(
     mut child: tokio::process::Child,
     ctx: &ToolCallContext,
-) -> (Vec<u8>, Vec<u8>, i32) {
+) -> (Vec<u8>, Vec<u8>, i32, Option<i32>) {
     use tokio::io::AsyncReadExt;
 
     let mut stdout_handle = child.stdout.take().expect("stdout is piped");
@@ -357,7 +425,7 @@ async fn collect_unix(
                     Err(e) => {
                         let exit_code = -1_i32;
                         log::debug!("collect_unix: wait failed: {e}");
-                        return (out_buf, err_buf, exit_code);
+                        return (out_buf, err_buf, exit_code, None);
                     }
                 }
             }
@@ -416,8 +484,10 @@ async fn collect_unix(
         }
     }
 
+    use std::os::unix::process::ExitStatusExt;
     let exit_code = status.code().unwrap_or(-1);
-    (out_buf, err_buf, exit_code)
+    let signal = status.signal();
+    (out_buf, err_buf, exit_code, signal)
 }
 
 // ── Non-Unix: simple wait_with_output ────────────────────────────────────────
@@ -438,5 +508,105 @@ async fn collect_other(
             log::debug!("collect_other: wait_with_output failed: {e}");
             (Vec::new(), Vec::new(), -1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::types::CancelLevel;
+    use crate::app_event::AppEvent;
+    use tokio::sync::mpsc;
+
+    fn test_ctx(
+        cancel_rx: tokio::sync::watch::Receiver<CancelLevel>,
+        tx: Option<mpsc::UnboundedSender<AppEvent>>,
+    ) -> ToolCallContext {
+        ToolCallContext {
+            id: "call_1".to_string(),
+            tx,
+            hooks: std::collections::HashMap::new(),
+            hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
+            session_id: String::new(),
+            cancel_rx: Some(cancel_rx),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_abort_sigterms_subprocess_and_returns_user_killed_error() {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        let ctx = test_ctx(cancel_rx, None);
+
+        let task = tokio::spawn(async move {
+            SubprocessCommand::new("sh")
+                .arg("-c")
+                .arg("trap '' TERM; while :; do sleep 1; done")
+                .run(ctx)
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_tx
+            .send(CancelLevel::HardAbort)
+            .expect("send hard abort");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_tx
+            .send(CancelLevel::ForceKill)
+            .expect("send force kill");
+
+        let result = task.await.expect("join subprocess task");
+        assert!(result.is_error);
+        assert!(result.content.as_text().contains("killed by user"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repeated_hard_abort_emits_force_kill_hint_while_tool_hangs() {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let ctx = test_ctx(cancel_rx, Some(tx));
+
+        let task = tokio::spawn(async move {
+            SubprocessCommand::new("sh")
+                .arg("-c")
+                .arg("trap '' TERM; while :; do sleep 1; done")
+                .run(ctx)
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_tx
+            .send(CancelLevel::HardAbort)
+            .expect("send first hard abort");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_tx
+            .send(CancelLevel::SoftStop)
+            .expect("intermediate change to retrigger watch");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        cancel_tx
+            .send(CancelLevel::HardAbort)
+            .expect("send second hard abort");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_tx
+            .send(CancelLevel::ForceKill)
+            .expect("send force kill");
+
+        let result = task.await.expect("join subprocess task");
+        assert!(result.is_error);
+
+        let mut saw_hint = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::Agent(crate::agent::types::AgentEvent::StatusUpdate(msg)) = ev
+                && msg.contains("Press Ctrl-C again to force kill")
+            {
+                saw_hint = true;
+                break;
+            }
+        }
+        assert!(
+            saw_hint,
+            "expected force-kill reminder after repeated hard abort"
+        );
     }
 }

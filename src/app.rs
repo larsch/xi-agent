@@ -565,7 +565,6 @@ impl App {
     }
 
     pub fn enter_keybinding_help_mode(&mut self) {
-        self.reset_textarea();
         self.session.live_turn.notices.clear();
 
         let contexts = [
@@ -858,7 +857,8 @@ impl App {
     /// 4) cancel Ollama endpoint input
     /// 5) cancel Open WebUI setup input
     /// 6) cancel login flow
-    /// 7) abort streaming agent loop
+    /// 7) when streaming, show a Ctrl-C hint instead of aborting
+    /// 8) when idle, clear non-empty input
     pub fn handle_escape_in_chat_mode(&mut self) {
         if self.is_stepping() {
             // Clean up any in-flight ask_user UI state before cancelling.
@@ -2182,6 +2182,127 @@ mod tests {
     }
 
     #[test]
+    fn enter_and_exit_keybinding_help_leaves_draft_input_untouched() {
+        let mut app = make_app();
+        app.textarea =
+            ratatui_textarea::TextArea::new(vec!["hello".to_string(), "world".to_string()]);
+
+        app.enter_keybinding_help_mode();
+        assert!(
+            app.selection.active,
+            "help should open as a selection modal"
+        );
+        assert_eq!(
+            app.textarea.lines(),
+            &["hello".to_string(), "world".to_string()]
+        );
+
+        app.exit_selection_mode();
+        assert_eq!(
+            app.textarea.lines(),
+            &["hello".to_string(), "world".to_string()]
+        );
+    }
+
+    #[test]
+    fn keybinding_help_does_not_enable_selection_filter_mode() {
+        let mut app = make_app();
+        app.textarea = ratatui_textarea::TextArea::new(vec!["draft".to_string()]);
+
+        app.enter_keybinding_help_mode();
+
+        assert_eq!(
+            app.selection.kind,
+            Some(crate::selection_state::SelectionKind::KeybindingHelp)
+        );
+        assert!(
+            !app.selection_filter_enabled(),
+            "keyboard help should not replace the input field with a filter query"
+        );
+        assert_eq!(app.textarea.lines(), &["draft".to_string()]);
+    }
+
+    #[test]
+    fn f1_toggles_keybinding_help_without_clearing_draft() {
+        let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+            std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+        let mut app = make_app();
+        app.textarea = ratatui_textarea::TextArea::new(vec!["draft".to_string()]);
+
+        let f1 = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(1),
+            crossterm::event::KeyModifiers::NONE,
+        );
+
+        let first = crate::input::handle_key_event(
+            &mut app,
+            &provider,
+            &crate::config::XiConfig::default(),
+            f1,
+        );
+        assert!(first.is_none());
+        assert_eq!(
+            app.selection.kind,
+            Some(crate::selection_state::SelectionKind::KeybindingHelp)
+        );
+        assert_eq!(app.textarea.lines(), &["draft".to_string()]);
+
+        let second = crate::input::handle_key_event(
+            &mut app,
+            &provider,
+            &crate::config::XiConfig::default(),
+            f1,
+        );
+        assert!(second.is_none());
+        assert!(!app.selection.active, "second F1 should close help");
+        assert_eq!(app.textarea.lines(), &["draft".to_string()]);
+    }
+
+    #[test]
+    fn escape_closes_keybinding_help_while_streaming() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.agent_turn.start();
+            install_test_agent_task(&mut app);
+            app.textarea = ratatui_textarea::TextArea::new(vec!["draft".to_string()]);
+            app.enter_keybinding_help_mode();
+
+            let key = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            let dispatch = crate::input::handle_key_event(
+                &mut app,
+                &(std::sync::Arc::new(crate::llm::test_provider::TestProvider::new())
+                    as std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync>),
+                &crate::config::XiConfig::default(),
+                key,
+            );
+
+            assert!(dispatch.is_none());
+            assert!(!app.selection.active, "Esc should close keybinding help");
+            assert!(
+                app.streaming(),
+                "closing help should not stop the agent loop"
+            );
+            assert_eq!(app.textarea.lines(), &["draft".to_string()]);
+            assert!(
+                app.session
+                    .live_turn
+                    .notices
+                    .iter()
+                    .all(|m| !m.content.contains("Use Ctrl-C to abort")),
+                "closing help should not show the streaming abort hint"
+            );
+
+            if let Some(handle) = app.runtime.agent_task.take() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
     fn abort_agent_loop_appends_error_result_for_pending_tool_call() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
@@ -2399,6 +2520,69 @@ mod tests {
             assert!(matches!(
                 app.agent_turn.status,
                 Some(StreamingStatus::Waiting)
+            ));
+        });
+    }
+
+    #[test]
+    fn request_hard_abort_keeps_running_tool_alive_for_cooperative_cancel() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.agent_turn.start();
+            install_test_agent_task(&mut app);
+            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(crate::agent::CancelLevel::None);
+            app.runtime.cancel_tx = Some(cancel_tx);
+            app.session.live_turn.tool_entries.push(crate::live_turn::LiveToolEntry {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                args: serde_json::json!({"command": "sleep 10"}),
+                partial_args: String::new(),
+                partial_snapshot: None,
+                streaming_field: None,
+                running_output: String::new(),
+                result: None,
+            });
+
+            app.request_hard_abort();
+
+            assert!(app.runtime.agent_task.is_some(), "tool-phase hard abort should keep agent task alive");
+            assert_eq!(app.runtime.abort_stage, crate::agent::CancelLevel::HardAbort);
+            assert_eq!(*cancel_rx.borrow(), crate::agent::CancelLevel::HardAbort);
+            assert!(matches!(
+                app.agent_turn.status,
+                Some(StreamingStatus::Message(ref s)) if s == "[Aborting… Press Ctrl-C again to force kill]"
+            ));
+
+            if let Some(handle) = app.runtime.agent_task.take() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
+    fn request_hard_abort_without_running_tool_aborts_immediately() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("session.jsonl");
+
+            let mut app = make_app();
+            app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
+                crate::event_log::EventLog::load(&path).expect("load event log"),
+            ));
+            app.session.live_turn.assistant_content = "partial".to_string();
+            app.agent_turn.start();
+            install_test_agent_task(&mut app);
+            let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(crate::agent::CancelLevel::None);
+            app.runtime.cancel_tx = Some(cancel_tx);
+
+            app.request_hard_abort();
+
+            assert!(app.runtime.agent_task.is_none(), "model-phase hard abort should stop the task immediately");
+            assert!(matches!(
+                app.agent_turn.status,
+                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[Aborting… Press Ctrl-C again to force kill]"
             ));
         });
     }

@@ -485,7 +485,11 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         "expected cancellation to win before steering is consumed"
     );
 
-    assert!(matches!(events.last(), Some(AgentEvent::TurnEnd)));
+    assert!(matches!(
+        events.get(events.len().saturating_sub(2)),
+        Some(AgentEvent::TurnEnd)
+    ));
+    assert!(matches!(events.last(), Some(AgentEvent::Done)));
 }
 
 #[tokio::test]

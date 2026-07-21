@@ -930,6 +930,21 @@ pub async fn run_agent_loop(
                         None,
                     )
                     .await;
+                    config.hook_ipc.publish(
+                        &config.session_id,
+                        HookPoint::OnIdle,
+                        None,
+                        empty_payload(),
+                    );
+                    crate::hooks::maybe_run_hook(
+                        &config.hooks,
+                        HookPoint::OnIdle,
+                        &config.session_id,
+                        None,
+                        None,
+                    )
+                    .await;
+                    tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
                     return;
                 }
 
