@@ -1,6 +1,7 @@
 use clap::Parser;
+#[cfg(unix)]
+use crossterm::cursor::Show;
 use crossterm::{
-    cursor::Show,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, EventStream, KeyboardEnhancementFlags, MouseButton, MouseEventKind,

@@ -1,0 +1,26 @@
+FROM archlinux:latest
+
+# Install Rust toolchain and Windows cross-compilation dependencies
+RUN pacman -Syu --needed --noconfirm rustup mingw-w64-gcc gcc wine
+RUN rustup default stable
+RUN rustup target add x86_64-pc-windows-gnu
+
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine
+
+WORKDIR /build
+
+# Copy dependency manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+
+# Fetch dependencies by building a stub, so they're cached in a layer
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    cargo build --target x86_64-pc-windows-gnu --release 2>&1 || true && \
+    rm -rf src
+
+# Copy actual source and build
+COPY src/ src/
+RUN cargo build --target x86_64-pc-windows-gnu --release
+
+# Run tests under wine
+RUN cargo test --target x86_64-pc-windows-gnu --release -- --test-threads=1

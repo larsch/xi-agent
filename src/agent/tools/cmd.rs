@@ -75,8 +75,27 @@ mod tests {
     use super::*;
     use crate::agent::types::Tool;
 
+    /// Returns true if `cmd.exe` is functional with proper UTF-8 support
+    /// (not running under wine where code-page handling is broken).
+    fn cmd_available() -> bool {
+        std::process::Command::new("cmd.exe")
+            .arg("/D")
+            .arg("/S")
+            .arg("/C")
+            .arg("chcp 65001 >nul & echo München")
+            .output()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.trim() == "München"
+            })
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn cmd_utf8_code_page_preserves_direct_unicode_and_emoji() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let expected = "München, naïve, 日本語, emoji: 😀 👩🏽‍💻 🧪 é";
         let result = tool
@@ -88,6 +107,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_direct_unicode_command_argument_round_trips() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let expected = "München, naïve, 日本語, emoji: 😀";
         let result = tool
@@ -99,6 +121,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_captures_stdout() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({"command": "echo hello"});
         let result = tool.execute(args).await;
@@ -113,6 +138,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_code_page_prefix_preserves_command_chaining_and_exit_code() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let result = tool
             .execute(serde_json::json!({"command": "echo first && echo second && exit /b 42"}))
@@ -125,6 +153,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_code_page_prefix_preserves_pipelines_and_conditional_fallback() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let pipeline = tool
             .execute(serde_json::json!({"command": "echo pipeline | findstr pipeline"}))
@@ -141,6 +172,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_code_page_prefix_preserves_redirection_and_grouping() {
+        if !cmd_available() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("redirected.txt");
         let path = path.to_string_lossy();
@@ -159,6 +193,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_code_page_prefix_preserves_escaped_metacharacters_and_percent_expansion() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let metacharacters = tool
             .execute(
@@ -185,6 +222,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_nonzero_exit_not_error() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({"command": "exit /b 42"});
         let result = tool.execute(args).await;
@@ -198,6 +238,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_zero_exit_omits_exit_line() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({"command": "echo ok"});
         let result = tool.execute(args).await;
@@ -208,6 +251,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_allows_double_quoted_arguments() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({"command": "echo \"a b\""});
         let result = tool.execute(args).await;
@@ -223,6 +269,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_backslash_escaped_quotes_are_literal() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({"command": "echo \\\"a b\\\""});
         let result = tool.execute(args).await;
@@ -242,6 +291,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_wrapped_command_string_fails() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({"command": "\"echo \\\"a b\\\"\""});
         let result = tool.execute(args).await;
@@ -266,6 +318,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_invokes_external_program_with_spaced_argument() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({
             "command": "powershell -NoProfile -Command \"Write-Output 'a b'\""
@@ -283,6 +338,9 @@ mod tests {
 
     #[tokio::test]
     async fn cmd_handles_double_quoted_windows_path_argument() {
+        if !cmd_available() {
+            return;
+        }
         let tool = CmdTool;
         let args = serde_json::json!({
             "command": "dir \"C:\\Program Files\""

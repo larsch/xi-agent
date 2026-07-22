@@ -127,8 +127,26 @@ mod tests {
     use super::*;
     use crate::agent::types::Tool;
 
+    /// Returns true if `powershell.exe` is functional (not running under wine
+    /// without a real Windows shell).
+    fn powershell_available() -> bool {
+        std::process::Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("Write-Output ok")
+            .output()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.trim() == "ok"
+            })
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn powershell_bootstrap_sets_utf8() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         // Keep this command ASCII-only: it validates the bootstrap that runs
         // before every user command without itself exercising argv Unicode.
@@ -146,6 +164,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_subprocess_preserves_utf8_output() {
+        if !powershell_available() {
+            return;
+        }
         // The source is ASCII-only; PowerShell constructs the Unicode value so
         // this tests stdout transport rather than native argv payload passing.
         let result =
@@ -158,6 +179,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_direct_unicode_command_argument_round_trips() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let expected = "München, naïve, 日本語, emoji: 😀";
         let result = tool
@@ -169,6 +193,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_captures_stdout() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "Write-Output hello"});
         let result = tool.execute(args).await;
@@ -183,6 +210,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_nonzero_exit_not_error() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "exit 42"});
         let result = tool.execute(args).await;
@@ -196,6 +226,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_zero_exit_omits_exit_line() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "Write-Output ok"});
         let result = tool.execute(args).await;
@@ -206,6 +239,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_allows_double_quoted_arguments() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "Write-Output \"a b\""});
         let result = tool.execute(args).await;
@@ -221,6 +257,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_handles_spaces_in_double_quoted_paths() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "Test-Path \"C:\\Program Files\""});
         let result = tool.execute(args).await;
@@ -235,6 +274,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_backslash_escaped_quotes_are_literal() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "Write-Output \\\"a b\\\""});
         let result = tool.execute(args).await;
@@ -249,6 +291,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_wrapped_command_string_causes_parse_error() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "\"Write-Output \\\"a b\\\"\""});
         let result = tool.execute(args).await;
@@ -265,6 +310,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_invokes_external_program_with_spaced_argument() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "& cmd.exe '/d' '/c' 'echo' 'a b'"});
         let result = tool.execute(args).await;
@@ -280,6 +328,9 @@ mod tests {
 
     #[tokio::test]
     async fn powershell_invokes_external_program_with_double_quoted_argument() {
+        if !powershell_available() {
+            return;
+        }
         let tool = PowerShellTool;
         let args = serde_json::json!({"command": "'foo bar' | & findstr.exe \"foo bar\""});
         let result = tool.execute(args).await;

@@ -2278,11 +2278,15 @@ mod tests {
             crossterm::event::KeyModifiers::NONE,
         );
 
+        #[allow(unused_mut)]
+        let mut _last_key_at: Option<std::time::Instant> = None;
         let first = crate::input::handle_key_event(
             &mut app,
             &provider,
             &crate::config::XiConfig::default(),
             f1,
+            #[cfg(windows)]
+            &mut _last_key_at,
         );
         assert!(first.is_none());
         assert_eq!(
@@ -2291,11 +2295,15 @@ mod tests {
         );
         assert_eq!(app.textarea.lines(), &["draft".to_string()]);
 
+        #[allow(unused_mut)]
+        let mut _last_key_at2: Option<std::time::Instant> = None;
         let second = crate::input::handle_key_event(
             &mut app,
             &provider,
             &crate::config::XiConfig::default(),
             f1,
+            #[cfg(windows)]
+            &mut _last_key_at2,
         );
         assert!(second.is_none());
         assert!(!app.selection.active, "second F1 should close help");
@@ -2316,12 +2324,16 @@ mod tests {
                 crossterm::event::KeyCode::Esc,
                 crossterm::event::KeyModifiers::NONE,
             );
+            #[allow(unused_mut)]
+            let mut _last_key_at3: Option<std::time::Instant> = None;
             let dispatch = crate::input::handle_key_event(
                 &mut app,
                 &(std::sync::Arc::new(crate::llm::test_provider::TestProvider::new())
                     as std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync>),
                 &crate::config::XiConfig::default(),
                 key,
+                #[cfg(windows)]
+                &mut _last_key_at3,
             );
 
             assert!(dispatch.is_none());
