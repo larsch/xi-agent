@@ -4,6 +4,7 @@ FROM archlinux:latest
 RUN pacman -Syu --needed --noconfirm rustup mingw-w64-gcc gcc wine
 RUN rustup default stable
 RUN rustup target add x86_64-pc-windows-gnu
+RUN rustup component add rustfmt clippy
 
 ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine
 
@@ -18,8 +19,19 @@ RUN mkdir -p src && \
     cargo build --target x86_64-pc-windows-gnu --release 2>&1 || true && \
     rm -rf src
 
-# Copy actual source and build
+# Copy actual source
 COPY src/ src/
+
+# Format check (target-agnostic, runs first to fail fast)
+RUN cargo fmt --all -- --check
+
+# Clippy with warnings as errors
+RUN cargo clippy --all-targets --all-features --target x86_64-pc-windows-gnu -- -D warnings
+
+# Full check (compilation without codegen)
+RUN cargo check --all-targets --all-features --target x86_64-pc-windows-gnu
+
+# Release build
 RUN cargo build --target x86_64-pc-windows-gnu --release
 
 # Run tests under wine

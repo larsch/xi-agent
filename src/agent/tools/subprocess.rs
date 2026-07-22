@@ -513,11 +513,16 @@ async fn collect_other(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::agent::types::CancelLevel;
+    #[cfg(unix)]
     use crate::app_event::AppEvent;
+    #[cfg(unix)]
     use tokio::sync::mpsc;
 
+    #[cfg(unix)]
     fn test_ctx(
         cancel_rx: tokio::sync::watch::Receiver<CancelLevel>,
         tx: Option<mpsc::UnboundedSender<AppEvent>>,
