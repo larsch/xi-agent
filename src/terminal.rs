@@ -61,6 +61,17 @@ pub(crate) fn shutdown_terminal(
     Ok(())
 }
 
+pub(crate) fn recreate_terminal(
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    keyboard_enhancements_enabled: &mut bool,
+    window_title: &str,
+) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    drop(terminal);
+    let (new_terminal, new_kbe) = init_terminal(window_title)?;
+    *keyboard_enhancements_enabled = new_kbe;
+    Ok(new_terminal)
+}
+
 #[cfg(unix)]
 pub(crate) fn suspend_interactive_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,

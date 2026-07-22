@@ -319,11 +319,11 @@ async fn main() -> io::Result<()> {
 
             Ok(RunResult::Suspend) => {
                 terminal::suspend_interactive_ui(&mut terminal, keyboard_enhancements_enabled)?;
-                drop(terminal);
-                let (new_terminal, new_keyboard_enhancements_enabled) =
-                    terminal::init_terminal(&window_title)?;
-                terminal = new_terminal;
-                keyboard_enhancements_enabled = new_keyboard_enhancements_enabled;
+                terminal = terminal::recreate_terminal(
+                    terminal,
+                    &mut keyboard_enhancements_enabled,
+                    &window_title,
+                )?;
             }
 
             Ok(RunResult::RebuildProvider) => {}
