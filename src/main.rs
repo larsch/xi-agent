@@ -816,6 +816,16 @@ async fn run(
                             #[cfg(windows)]
                             &mut last_key_at,
                         ) {
+                            if matches!(result, RunResult::Suspend) {
+                                drop(crossterm_events);
+                                // Give crossterm's EventStream worker a moment to
+                                // observe the shutdown wake and release its global
+                                // internal event reader before the process stops.
+                                // Without this, resume can race a stale reader and
+                                // time out on a cursor-position query in some
+                                // terminals, especially in optimized builds.
+                                std::thread::sleep(std::time::Duration::from_millis(25));
+                            }
                             return Ok(result);
                         }
                     }
