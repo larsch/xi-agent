@@ -142,6 +142,54 @@ fn build_file_tracker() -> FileTracker {
     FileTracker::with_exclusions(excluded_prefixes, &["AGENTS.md", "SKILL.md"])
 }
 
+fn init_terminal(window_title: &str) -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        SetTitle(window_title),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
+
+    let mut keyboard_enhancements_enabled = false;
+    match execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+    ) {
+        Ok(()) => keyboard_enhancements_enabled = true,
+        Err(e) if e.kind() == ErrorKind::Unsupported => {
+            log::debug!(
+                "keyboard progressive enhancement unsupported on this terminal; continuing without it"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+    Ok((terminal, keyboard_enhancements_enabled))
+}
+
+fn shutdown_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    keyboard_enhancements_enabled: bool,
+) -> io::Result<()> {
+    disable_raw_mode()?;
+    if keyboard_enhancements_enabled {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     migrate::run();
@@ -211,32 +259,7 @@ async fn main() -> io::Result<()> {
     let window_title = format!("ξ - {window_folder}");
     let default_window_title = "ξ".to_string();
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        SetTitle(&window_title),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
-
-    let mut keyboard_enhancements_enabled = false;
-    match execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-    ) {
-        Ok(()) => keyboard_enhancements_enabled = true,
-        Err(e) if e.kind() == ErrorKind::Unsupported => {
-            log::debug!(
-                "keyboard progressive enhancement unsupported on this terminal; continuing without it"
-            );
-        }
-        Err(e) => return Err(e),
-    }
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let (mut terminal, mut keyboard_enhancements_enabled) = init_terminal(&window_title)?;
 
     let file_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
@@ -356,8 +379,12 @@ async fn main() -> io::Result<()> {
                     &mut terminal,
                     keyboard_enhancements_enabled,
                     &default_window_title,
-                    &window_title,
                 )?;
+                drop(terminal);
+                let (new_terminal, new_keyboard_enhancements_enabled) =
+                    init_terminal(&window_title)?;
+                terminal = new_terminal;
+                keyboard_enhancements_enabled = new_keyboard_enhancements_enabled;
             }
 
             Ok(RunResult::RebuildProvider) => {}
@@ -671,17 +698,7 @@ async fn main() -> io::Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    if keyboard_enhancements_enabled {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )?;
-    terminal.show_cursor()?;
+    shutdown_terminal(&mut terminal, keyboard_enhancements_enabled)?;
 
     Ok(())
 }
@@ -693,7 +710,6 @@ fn suspend_interactive_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     keyboard_enhancements_enabled: bool,
     suspended_window_title: &str,
-    resumed_window_title: &str,
 ) -> io::Result<()> {
     disable_raw_mode()?;
     if keyboard_enhancements_enabled {
@@ -714,22 +730,7 @@ fn suspend_interactive_ui(
         return Err(io::Error::last_os_error());
     }
 
-    enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        SetTitle(suspended_window_title)
-    )?;
-    if keyboard_enhancements_enabled {
-        execute!(
-            terminal.backend_mut(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        )?;
-    }
-    terminal.clear()?;
-    execute!(terminal.backend_mut(), SetTitle(resumed_window_title))?;
+    execute!(terminal.backend_mut(), SetTitle(suspended_window_title))?;
     Ok(())
 }
 
@@ -738,7 +739,6 @@ fn suspend_interactive_ui(
     _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     _keyboard_enhancements_enabled: bool,
     _suspended_window_title: &str,
-    _resumed_window_title: &str,
 ) -> io::Result<()> {
     Ok(())
 }
@@ -819,13 +819,6 @@ async fn run(
                         ) {
                             if matches!(result, RunResult::Suspend) {
                                 drop(crossterm_events);
-                                // Give crossterm's EventStream worker a moment to
-                                // observe the shutdown wake and release its global
-                                // internal event reader before the process stops.
-                                // Without this, resume can race a stale reader and
-                                // time out on a cursor-position query in some
-                                // terminals, especially in optimized builds.
-                                std::thread::sleep(std::time::Duration::from_millis(25));
                             }
                             return Ok(result);
                         }
