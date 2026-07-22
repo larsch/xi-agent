@@ -12,7 +12,7 @@ use crate::{
     provider::{ThinkingSupport, thinking_support_for_instance},
     provider_instance::{AuthMode, BackendPreset, EndpointBehavior, ProviderInstance},
     provider_manager::{PendingProviderSetup, ProviderSetupStep},
-    resolve_default_provider_instance,
+    provider_setup::resolve_default_provider_instance,
     thinking::ThinkingLevel,
 };
 

@@ -48,11 +48,13 @@ mod login_state;
 mod markdown;
 mod migrate;
 mod mouse_select;
+mod print_mode;
 mod process;
 mod projection;
 mod provider;
 mod provider_instance;
 mod provider_manager;
+mod provider_setup;
 mod selection_state;
 mod session;
 mod session_event;
@@ -70,9 +72,8 @@ mod tracked;
 mod ui;
 
 use agent::tools::custom::custom_tool_dirs;
-use agent::types::CancelLevel;
 use agent::{
-    AgentEvent, AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
+    AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
 use agents::load_agents;
@@ -81,13 +82,13 @@ use app_event::AppEvent;
 
 use config::XiConfig;
 use hook_ipc::HookIpcPublisherHandle;
-use llm::{LlmEvent, LlmProvider, LlmStream, Message, ModelListFuture};
+use llm::{LlmProvider, Message};
 use provider::{ThinkingSupport, build_provider_for_instance, thinking_support_for_instance};
 use provider_instance::AuthMode;
 use provider_instance::BackendPreset;
 use provider_instance::ProviderInstance;
 use provider_manager::PendingProviderSetup;
-use provider_manager::{ProviderSetupStep, format_provider_error_for_display};
+use provider_manager::ProviderSetupStep;
 use thinking::ThinkingLevel;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -186,16 +187,25 @@ async fn main() -> io::Result<()> {
                 "--print requires --provider <name>",
             )
         })?;
-        return run_print_mode(prompt, provider_override, cli.model.as_deref(), &config).await;
+        return print_mode::run_print_mode(
+            prompt,
+            provider_override,
+            cli.model.as_deref(),
+            &config,
+        )
+        .await;
     }
 
     // Priority: --provider flag > config.toml > default.
-    let initial_instance = resolve_provider_instance(cli.provider.as_deref(), &config)
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
+    let initial_instance =
+        provider_setup::resolve_provider_instance(cli.provider.as_deref(), &config)
+            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
 
     // Priority: --model flag > config.toml > provider default.
-    let initial_model = resolve_model_for_instance(cli.model.as_deref(), &initial_instance);
-    let initial_thinking = resolve_thinking_level_for_model(&config, &initial_model);
+    let initial_model =
+        provider_setup::resolve_model_for_instance(cli.model.as_deref(), &initial_instance);
+    let initial_thinking =
+        provider_setup::resolve_thinking_level_for_model(&config, &initial_model);
     let window_folder = std::env::current_dir()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -259,14 +269,14 @@ async fn main() -> io::Result<()> {
     if config.provider.is_some() || cli.provider.is_some() {
         app.provider.provider_selected = true;
     }
-    maybe_warn_thinking_unsupported(&mut app);
+    provider_setup::maybe_warn_thinking_unsupported(&mut app);
 
     loop {
         // Build (or re-build) the provider for the current instance.
         // When no provider has been explicitly selected, skip the build
         // to avoid spurious "not authenticated" notices on fresh install.
         let provider = if !app.provider.provider_selected {
-            Arc::new(UnavailableProvider {
+            Arc::new(provider_setup::UnavailableProvider {
                 message: String::new(),
             }) as Arc<dyn LlmProvider + Send + Sync>
         } else {
@@ -285,7 +295,7 @@ async fn main() -> io::Result<()> {
                         e
                     );
                     app.push_notice(llm::Message::assistant(msg.clone()));
-                    Arc::new(UnavailableProvider { message: msg })
+                    Arc::new(provider_setup::UnavailableProvider { message: msg })
                         as Arc<dyn LlmProvider + Send + Sync>
                 }
             }
@@ -329,269 +339,43 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::RebuildProvider) => {}
 
             Ok(RunResult::ReloadContext) => {
-                let custom_tools = load_custom_tools(&custom_tool_dirs());
-                let custom_count = custom_tools.len();
-                let loaded_skills = Arc::new(skills::load_skills());
-                let tools = register_builtin_tools(
-                    Some(app_event_tx.clone()),
-                    Arc::clone(&file_tracker),
-                    Arc::clone(&loaded_skills),
-                    custom_tools,
-                )
-                .await;
-                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
-                let skills_count = loaded_skills.len();
-                app.agent_config.tools = tools;
-                app.agent_config.system_prompt = Some(system_prompt);
-                app.loaded_skills = (*loaded_skills).clone();
-                app.agents = load_agents();
-                // If active agent was removed, fall back to default.
-                if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
-                    app.active_agent = None;
-                    app.rebuild_agent_system_prompt(&cwd);
-                }
-                app.push_notice(Message::assistant(format!(
-                    "[reloaded context: {} skill{}, {} custom tool{}]",
-                    skills_count,
-                    if skills_count == 1 { "" } else { "s" },
-                    custom_count,
-                    if custom_count == 1 { "" } else { "s" },
-                )));
-                app.completion.available_models = None;
+                handle_reload_context(&mut app, &file_tracker, app_event_tx.clone(), &cwd).await;
             }
 
             Ok(RunResult::NewSession) => {
-                // Reset the file tracker so changes from the previous session
-                // are not detected as external modifications.
-                file_tracker.lock().unwrap().reset();
-
-                // Clear all session state (conversation history, input, etc.).
-                app.clear_session_state();
-
-                // Reload skills, custom tools, and rebuild the system prompt —
-                // same as a full xi restart.
-                let custom_tools = load_custom_tools(&custom_tool_dirs());
-                let custom_count = custom_tools.len();
-                let loaded_skills = Arc::new(skills::load_skills());
-                let tools = register_builtin_tools(
-                    Some(app_event_tx.clone()),
-                    Arc::clone(&file_tracker),
-                    Arc::clone(&loaded_skills),
-                    custom_tools,
-                )
-                .await;
-                let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
-                let skills_count = loaded_skills.len();
-                app.agent_config.tools = tools;
-                app.agent_config.system_prompt = Some(system_prompt);
-                app.loaded_skills = (*loaded_skills).clone();
-                app.agents = load_agents();
-                if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
-                    app.active_agent = None;
-                    app.rebuild_agent_system_prompt(&cwd);
-                }
-                app.push_notice(Message::assistant(format!(
-                    "[new session: {} skill{}, {} custom tool{}]",
-                    skills_count,
-                    if skills_count == 1 { "" } else { "s" },
-                    custom_count,
-                    if custom_count == 1 { "" } else { "s" },
-                )));
-                app.completion.available_models = None;
+                handle_new_session(&mut app, &file_tracker, app_event_tx.clone(), &cwd).await;
             }
 
             Ok(RunResult::ChangeModel {
                 name,
                 prompt_thinking_selection,
             }) => {
-                // Update the current instance's model.
-                app.provider.current_instance.model = Some(name.clone());
-                app.provider.current_model = name.clone();
-                app.provider.current_model = name;
-                app.provider.current_thinking =
-                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
-                app.record_model_changed();
-                app.record_thinking_level_changed();
-                // Invalidate cached model list so the next fetch is fresh.
-                app.completion.available_models = None;
-                persist_provider_model_selection_v2(&mut config, &mut app);
-                app.provider.instances = config.resolve_effective_providers();
-                maybe_warn_thinking_unsupported(&mut app);
-                if prompt_thinking_selection
-                    && thinking_support_for_instance(
-                        &app.provider.current_instance,
-                        &app.provider.current_model,
-                    ) == ThinkingSupport::Applied
-                {
-                    app.enter_thinking_selection_mode();
-                }
+                handle_change_model(&mut app, &mut config, name, prompt_thinking_selection);
             }
 
             Ok(RunResult::ChangeProvider(id)) => {
-                if let Some(inst) = config.resolve_provider(&id) {
-                    // Mark provider as explicitly selected.
-                    app.provider.provider_selected = true;
-
-                    let requires_api_key = provider_setup_requires_api_key(&inst);
-                    if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
-                        app.provider.pending_setup =
-                            Some(PendingProviderSetup::from_instance(&inst));
-                        app.enter_provider_api_key_input_mode();
-                        continue;
-                    }
-
-                    // For OAuth providers, start login if no credentials exist.
-                    if inst.backend_preset.def().auth_mode == AuthMode::OAuthLogin {
-                        let has_creds = match inst.backend_preset {
-                            BackendPreset::Copilot => auth::AuthStore::load_default()
-                                .ok()
-                                .and_then(|s| s.get_copilot())
-                                .is_some(),
-                            BackendPreset::Codex => auth::AuthStore::load_default()
-                                .ok()
-                                .and_then(|s| s.get_codex())
-                                .is_some(),
-                            BackendPreset::Gemini => auth::AuthStore::load_default()
-                                .ok()
-                                .and_then(|s| s.get_gemini())
-                                .is_some(),
-                            _ => false,
-                        };
-                        if !has_creds {
-                            // Switch to this provider first so the rebuild after
-                            // login picks it up.
-                            app.provider.current_instance = inst;
-                            app.provider.current_model =
-                                resolve_model_for_instance(None, &app.provider.current_instance);
-                            app.provider.current_thinking = resolve_thinking_level_for_model(
-                                &config,
-                                &app.provider.current_model,
-                            );
-                            app.start_login(&id);
-                            continue;
-                        }
-                    }
-
-                    app.provider.current_instance = inst;
-                    app.provider.current_model =
-                        resolve_model_for_instance(None, &app.provider.current_instance);
-                    app.provider.current_thinking =
-                        resolve_thinking_level_for_model(&config, &app.provider.current_model);
-                    app.record_model_changed();
-                    app.record_thinking_level_changed();
-                    app.completion.available_models = None;
-                    persist_provider_model_selection_v2(&mut config, &mut app);
-                    app.provider.instances = config.resolve_effective_providers();
-                    maybe_warn_thinking_unsupported(&mut app);
+                if handle_change_provider(&mut app, &mut config, id) {
+                    continue;
                 }
-                // Unknown id: silently ignore and loop (provider unchanged).
             }
 
             Ok(RunResult::AddProvider(instance)) => {
-                app.clear_pending_provider_setup();
-                let instance_id = instance.id.clone();
-                let current_model_for_instance = resolve_model_for_instance(None, &instance);
-                config.upsert_provider(instance.clone());
-                config.provider = Some(instance_id);
-                app.provider.provider_selected = true;
-                if let Err(e) = config.save() {
-                    log::debug!("failed to persist new provider config: {e}");
-                    app.push_notice(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
-                }
-                app.provider.current_instance =
-                    config.resolve_provider(&instance.id).unwrap_or(instance);
-                app.provider.current_model = current_model_for_instance;
-                app.provider.current_thinking =
-                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
-                app.record_model_changed();
-                app.record_thinking_level_changed();
-                app.provider.instances = config.resolve_effective_providers();
-                app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(&mut app);
-                app.push_notice(Message::assistant(format!(
-                    "[added provider {} ({})]",
-                    app.provider.current_instance.id,
-                    app.provider.current_instance.backend_preset.label(),
-                )));
+                handle_add_provider(&mut app, &mut config, instance);
             }
 
             Ok(RunResult::UpdateProvider {
                 original_id,
                 instance,
             }) => {
-                app.clear_pending_provider_setup();
-                let instance_id = instance.id.clone();
-                app.provider.provider_selected = true;
-                let current_model_for_instance = resolve_model_for_instance(None, &instance);
-                if let Some(original_id) = original_id.as_deref()
-                    && original_id != instance.id
-                {
-                    config.remove_provider(original_id);
-                }
-                config.upsert_provider(instance.clone());
-                config.provider = Some(instance_id);
-                if let Err(e) = config.save() {
-                    log::debug!("failed to persist updated provider config: {e}");
-                    app.push_notice(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
-                }
-                app.provider.current_instance =
-                    config.resolve_provider(&instance.id).unwrap_or(instance);
-                app.provider.current_model = current_model_for_instance;
-                app.provider.current_thinking =
-                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
-                app.record_model_changed();
-                app.record_thinking_level_changed();
-                app.provider.instances = config.resolve_effective_providers();
-                app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(&mut app);
-                app.push_notice(Message::assistant(format!(
-                    "[edited provider {} ({})]",
-                    app.provider.current_instance.id,
-                    app.provider.current_instance.backend_preset.label(),
-                )));
+                handle_update_provider(&mut app, &mut config, original_id, instance);
             }
 
             Ok(RunResult::RemoveProvider(id)) => {
-                app.clear_pending_provider_setup();
-                app.clear_pending_provider_removal();
-                if config.remove_provider(&id) {
-                    if config.provider.as_deref() == Some(id.as_str()) {
-                        config.provider = config
-                            .resolve_effective_providers()
-                            .first()
-                            .map(|p| p.id.clone());
-                    }
-                    if let Err(e) = config.save() {
-                        log::debug!("failed to persist provider removal: {e}");
-                        app.push_notice(Message::assistant(format!(
-                            "[failed to persist config.toml: {e}]"
-                        )));
-                    }
-                    app.provider.current_instance = resolve_default_provider_instance(&config);
-                    app.provider.current_model =
-                        resolve_model_for_instance(None, &app.provider.current_instance);
-                    app.provider.current_thinking =
-                        resolve_thinking_level_for_model(&config, &app.provider.current_model);
-                    app.record_model_changed();
-                    app.record_thinking_level_changed();
-                    app.provider.instances = config.resolve_effective_providers();
-                    app.completion.available_models = None;
-                    maybe_warn_thinking_unsupported(&mut app);
-                    app.push_notice(Message::assistant(format!("[removed provider {id}]")));
-                }
+                handle_remove_provider(&mut app, &mut config, id);
             }
 
             Ok(RunResult::ChangeThinking(level)) => {
-                app.provider.current_thinking = level;
-                app.provider.current_thinking = level;
-                app.record_thinking_level_changed();
-                persist_provider_model_selection_v2(&mut config, &mut app);
-                app.provider.instances = config.resolve_effective_providers();
-                maybe_warn_thinking_unsupported(&mut app);
+                handle_change_thinking(&mut app, &mut config, level);
             }
 
             Ok(RunResult::ConfigureProvider {
@@ -599,40 +383,7 @@ async fn main() -> io::Result<()> {
                 url,
                 api_key,
             }) => {
-                app.clear_pending_provider_setup();
-                let mut inst = config.resolve_provider(&instance.id).unwrap_or(instance);
-                if let Some(url) = url.as_deref() {
-                    inst.base_url = Some(url.to_string());
-                }
-                if let Some(api_key) = api_key {
-                    inst.api_key = Some(api_key.clone());
-                }
-                config.upsert_provider(inst.clone());
-                config.provider = Some(inst.id.clone());
-                app.provider.provider_selected = true;
-                if let Err(e) = config.save() {
-                    log::debug!("failed to persist provider config: {e}");
-                    app.push_notice(Message::assistant(format!(
-                        "[failed to persist config.toml: {e}]"
-                    )));
-                }
-                app.provider.current_instance = inst;
-                app.provider.instances = config.resolve_effective_providers();
-                app.provider.current_model =
-                    resolve_model_for_instance(None, &app.provider.current_instance);
-                app.provider.current_thinking =
-                    resolve_thinking_level_for_model(&config, &app.provider.current_model);
-                app.record_model_changed();
-                app.record_thinking_level_changed();
-                app.completion.available_models = None;
-                maybe_warn_thinking_unsupported(&mut app);
-                let endpoint_msg = url
-                    .map(|u| format!(" endpoint set to {u}"))
-                    .unwrap_or_default();
-                app.push_notice(Message::assistant(format!(
-                    "[provider {}{endpoint_msg}]",
-                    app.provider.current_instance.id,
-                )));
+                handle_configure_provider(&mut app, &mut config, instance, url, api_key);
             }
         }
     }
@@ -643,32 +394,6 @@ async fn main() -> io::Result<()> {
 }
 
 use input::{RunResult, apply_paste, handle_key_event, provider_setup_requires_api_key};
-
-struct UnavailableProvider {
-    message: String,
-}
-
-impl LlmProvider for UnavailableProvider {
-    fn stream_chat(&self, _messages: Vec<Message>, _context: llm::LlmRequestContext) -> LlmStream {
-        let msg = self.message.clone();
-        Box::pin(async_stream::stream! {
-            yield LlmEvent::Error(llm::ProviderError::other("unavailable", msg));
-        })
-    }
-
-    fn stream_chat_with_tools(
-        &self,
-        _messages: Vec<Message>,
-        _tools: Vec<llm::ToolDefinition>,
-        _context: llm::LlmRequestContext,
-    ) -> LlmStream {
-        self.stream_chat(vec![], llm::LlmRequestContext::default())
-    }
-
-    fn list_models(&self) -> ModelListFuture {
-        Box::pin(async { Ok(vec![]) })
-    }
-}
 
 // ── Inner event loop ──────────────────────────────────────────────────────────
 
@@ -798,536 +523,322 @@ async fn run(
     }
 }
 
-/// Resolve the default active [`ProviderInstance`] from config.
-///
-/// Resolution order:
-/// 1. `config.provider` matched against effective providers
-/// 2. First effective provider
-/// 3. Synthetic copilot default
-pub(crate) fn resolve_default_provider_instance(config: &XiConfig) -> ProviderInstance {
-    let effective = config.resolve_effective_providers();
+// ── Event-loop handlers ──────────────────────────────────────────────────
 
-    if let Some(ref id) = config.provider
-        && let Some(inst) = effective.iter().find(|p| p.id == *id)
-    {
-        return inst.clone();
-    }
-
-    effective.into_iter().next().unwrap_or_else(|| {
-        ProviderInstance::new("copilot", provider_instance::BackendPreset::Copilot)
-    })
-}
-
-fn resolve_provider_instance(
-    cli_override: Option<&str>,
-    config: &XiConfig,
-) -> Result<ProviderInstance, String> {
-    if let Some(id) = cli_override {
-        if id == "test" {
-            return Ok(ProviderInstance::new(
-                "test",
-                provider_instance::BackendPreset::Test,
-            ));
-        }
-        if let Some(inst) = config.resolve_provider(id) {
-            return Ok(inst);
-        }
-
-        let effective = config.resolve_effective_providers();
-        let mut allowed: Vec<&str> = effective
-            .iter()
-            .map(|instance| instance.id.as_str())
-            .collect();
-        allowed.push("test");
-        return Err(format!(
-            "unknown provider '{id}'. Expected one of: {}",
-            allowed.join(", ")
-        ));
-    }
-
-    Ok(resolve_default_provider_instance(config))
-}
-
-/// Resolve the effective model for a provider instance.
-fn resolve_model_for_instance(cli_override: Option<&str>, instance: &ProviderInstance) -> String {
-    cli_override
-        .map(ToString::to_string)
-        .or_else(|| instance.model.clone())
-        .unwrap_or_else(|| instance.backend_preset.default_model().to_string())
-}
-
-fn with_resolved_model(
-    cli_override: Option<&str>,
-    instance: &ProviderInstance,
-) -> ProviderInstance {
-    let mut resolved = instance.clone();
-    resolved.model = Some(resolve_model_for_instance(cli_override, instance));
-    resolved
-}
-
-/// Instance-based variant of `persist_provider_model_selection`.
-///
-/// Updates the named instance's model in the providers list and persists config.
-fn persist_provider_model_selection_v2(config: &mut XiConfig, app: &mut App) {
-    let instance = &app.provider.current_instance;
-    let model = &app.provider.current_model;
-    let thinking = app.provider.current_thinking;
-    // Never persist the test provider.
-    if instance.backend_preset == provider_instance::BackendPreset::Test {
-        return;
-    }
-    app.provider.provider_selected = true;
-    config.provider = Some(instance.id.clone());
-    config.thinking = Some(thinking.as_str().to_string());
-    config
-        .thinking_by_model
-        .insert(model.to_string(), thinking.as_str().to_string());
-
-    // Update the model on the stored instance.
-    if let Some(stored) = config.find_provider_mut(&instance.id) {
-        stored.model = Some(model.to_string());
-    }
-
-    if let Err(e) = config.save() {
-        log::debug!("failed to persist provider/model config: {}", e);
-        app.push_notice(Message::assistant(format!(
-            "[failed to persist config.toml: {e}]"
-        )));
-    }
-}
-
-fn resolve_thinking_level_for_model(config: &XiConfig, model: &str) -> ThinkingLevel {
-    config
-        .thinking_by_model
-        .get(model)
-        .and_then(|raw| ThinkingLevel::parse(raw))
-        .or_else(|| config.thinking.as_deref().and_then(ThinkingLevel::parse))
-        .unwrap_or(ThinkingLevel::Off)
-}
-
-fn maybe_warn_thinking_unsupported(app: &mut App) {
-    let instance = &app.provider.current_instance;
-    let model = &app.provider.current_model;
-    let thinking = app.provider.current_thinking;
-    // Always keep app.provider.thinking_supported in sync regardless of the level.
-    app.provider.thinking_supported =
-        thinking_support_for_instance(instance, model) == ThinkingSupport::Applied;
-
-    if thinking == ThinkingLevel::Off {
-        return;
-    }
-    if let ThinkingSupport::Ignored(reason) = thinking_support_for_instance(instance, model) {
-        log::debug!(
-            "thinking '{}' ignored for provider={} model={}: {}",
-            thinking.as_str(),
-            instance.id,
-            model,
-            reason
-        );
-    }
-}
-// ── Non-interactive helpers ───────────────────────────────────────────────────
-
-/// Parameters needed to rebuild a provider after a reactive token refresh.
-struct PrintModeProviderCtx<'a> {
-    instance: &'a ProviderInstance,
-    thinking: ThinkingLevel,
-    xi_config: &'a XiConfig,
-    name: &'a str,
-}
-
-fn provider_display_name(instance: &ProviderInstance) -> String {
-    instance.backend_preset.label().to_string()
-}
-
-/// Non-interactive mode: run the agent loop for `prompt`, stream output to
-/// stdout, and exit when the loop finishes.
-/// Returns `true` if `provider` is one of the three OAuth providers that
-/// support token refresh (copilot, codex, gemini).
-fn provider_supports_token_refresh(provider: &str) -> bool {
-    matches!(provider, "copilot" | "codex" | "gemini")
-}
-
-/// Proactively refresh the token for `provider` if it is expired or expiring
-/// soon. Does nothing (and returns `false`) for providers that do not support
-/// refresh. Returns `true` when a refresh was performed successfully.
-async fn preflight_token_refresh(provider: &str) -> bool {
-    if !provider_supports_token_refresh(provider) {
-        return false;
-    }
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    let state = match auth::token_state(provider, now_secs, auth::AUTH_REFRESH_LEEWAY_SECS) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("preflight token check failed: {e}");
-            return false;
-        }
-    };
-
-    match state {
-        auth::AuthTokenState::Expired | auth::AuthTokenState::ExpiringSoon => {
-            log::debug!("preflight: token {state:?}, refreshing before request");
-            let refresh_result = match auth::real_backend_for(provider) {
-                Ok(backend) => auth::refresh_token(provider, backend).await,
-                Err(e) => Err(e),
-            };
-            match refresh_result {
-                Ok(()) => {
-                    log::debug!("preflight: token refreshed successfully");
-                    true
-                }
-                Err(e) => {
-                    log::warn!("preflight: token refresh failed: {e}");
-                    false
-                }
-            }
-        }
-        _ => false,
-    }
-}
-
-async fn run_print_mode(
-    prompt: String,
-    provider_override: &str,
-    model_override: Option<&str>,
-    config: &XiConfig,
-) -> io::Result<()> {
-    let resolved_instance = with_resolved_model(
-        model_override,
-        &resolve_provider_instance(Some(provider_override), config)
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?,
-    );
-    let current_thinking =
-        resolve_thinking_level_for_model(config, resolved_instance.effective_model());
-    let provider_name = resolved_instance.backend_preset.id().to_string();
-
-    // Proactive preflight: refresh the token before building the provider so
-    // that build_provider reads fresh credentials from the auth store.
-    preflight_token_refresh(&provider_name).await;
-
-    let provider = build_provider_for_instance(&resolved_instance, current_thinking, config)
-        .map_err(|e| io::Error::other(format!("provider error: {e}")))?;
-
+async fn handle_reload_context(
+    app: &mut App,
+    file_tracker: &Arc<Mutex<FileTracker>>,
+    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    cwd: &str,
+) {
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let headless_tracker = Arc::new(Mutex::new(build_file_tracker()));
+    let custom_count = custom_tools.len();
     let loaded_skills = Arc::new(skills::load_skills());
     let tools = register_builtin_tools(
-        None,
-        Arc::clone(&headless_tracker),
+        Some(app_event_tx),
+        Arc::clone(file_tracker),
         Arc::clone(&loaded_skills),
         custom_tools,
     )
     .await;
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_string());
-    let headless_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless")));
-    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
-
-    let session_events = vec![crate::session_event::SessionEvent::UserMessage {
-        content: prompt.clone(),
-        timestamp: crate::app_agent_handlers::now_ts(),
-    }];
-
-    let loop_config = AgentLoopConfig {
-        tools,
-        file_tracker: headless_tracker,
-        tool_output_log: headless_log,
-        session_events,
-        current_model: resolved_instance.effective_model().to_string(),
-        auto_compaction_enabled: true,
-        manual_compaction_instructions: None,
-        executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
-        system_prompt: Some(system_prompt),
-        hooks: std::collections::HashMap::new(),
-        hook_ipc: HookIpcPublisherHandle::disabled(),
-        session_id: String::new(),
-    };
-
-    let provider_ctx = PrintModeProviderCtx {
-        instance: &resolved_instance,
-        thinking: current_thinking,
-        xi_config: config,
-        name: &provider_name,
-    };
-
-    let exit_code = run_print_mode_loop(loop_config, provider, &provider_ctx).await;
-
-    std::process::exit(exit_code);
-}
-
-/// Drive the agent event loop for `--print` mode, handling one reactive token
-/// refresh + retry on a 401 Unauthorized error. Returns the process exit code.
-async fn run_print_mode_loop(
-    config: AgentLoopConfig,
-    provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
-    ctx: &PrintModeProviderCtx<'_>,
-) -> i32 {
-    // Keep a copy of what we need for the retry path.
-    let session_events_for_retry = config.session_events.clone();
-    let system_prompt_for_retry = config.system_prompt.clone();
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
-
-    tokio::spawn(async move {
-        agent::run_agent_loop(config, provider, tx, steering_rx, cancel_rx).await;
-    });
-
-    while let Some(ev) = rx.recv().await {
-        let AppEvent::Agent(ev) = ev else {
-            continue;
-        };
-        match ev {
-            AgentEvent::TextToken { text, .. } => {
-                print!("{text}");
-                use std::io::Write;
-                let _ = io::stdout().flush();
-            }
-            AgentEvent::ThinkingToken(_) => {
-                // Suppress thinking tokens in print mode.
-            }
-            AgentEvent::Usage(_) => {
-                // Suppress usage events in print mode.
-            }
-            AgentEvent::ToolCallIntent { .. } => {
-                // No-op in print mode.
-            }
-            AgentEvent::ToolCallArgsDelta { .. } => {
-                // No-op in print mode.
-            }
-            AgentEvent::SteeringConsumed { .. } => {
-                // No-op in print mode.
-            }
-            AgentEvent::StatusUpdate(msg) => {
-                eprintln!("{msg}");
-            }
-            AgentEvent::Compacting => {
-                eprintln!("compacting…");
-            }
-            AgentEvent::CompactionDone(outcome) => {
-                eprintln!(
-                    "compacted: {}k → {}k tokens",
-                    outcome.tokens_before / 1000,
-                    outcome.tokens_after / 1000
-                );
-            }
-            AgentEvent::ToolCallStart { name, args, .. } => {
-                let (label, _) = tool_presentation::tool_invocation_label(
-                    &name,
-                    &args,
-                    None,
-                    &crate::config::DisplayConfig::default(),
-                );
-                eprintln!("{label}");
-            }
-            AgentEvent::ToolCallEnd { result, .. } => {
-                if result.is_error {
-                    eprintln!(
-                        "  ✗ {}",
-                        result.content.as_text().lines().next().unwrap_or("error")
-                    );
-                }
-            }
-            AgentEvent::ToolOutputChunk { .. } => {}
-            AgentEvent::TurnEnd => {}
-            AgentEvent::ExternalFileChange { paths, .. } => {
-                // Print the file change notification to stderr in headless mode.
-                for path in &paths {
-                    eprintln!("⚠️  {} was modified externally", path.display());
-                }
-            }
-            AgentEvent::Done => {
-                println!(); // final newline after streamed output
-                return 0;
-            }
-            AgentEvent::Error(e) => {
-                // Reactive 401 handling: refresh the token once and retry.
-                if e.kind == llm::ProviderErrorKind::Unauthorized
-                    && provider_supports_token_refresh(ctx.name)
-                {
-                    log::debug!("received 401 in print mode, attempting token refresh");
-                    let refresh_result = match auth::real_backend_for(ctx.name) {
-                        Ok(backend) => auth::refresh_token(ctx.name, backend).await,
-                        Err(e) => Err(e),
-                    };
-                    match refresh_result {
-                        Ok(()) => {
-                            log::debug!(
-                                "reactive refresh succeeded, rebuilding provider and retrying"
-                            );
-                            match build_provider_for_instance(
-                                ctx.instance,
-                                ctx.thinking,
-                                ctx.xi_config,
-                            ) {
-                                Ok(new_provider) => {
-                                    // Run the loop a second time with the refreshed provider.
-                                    // `retried = true` prevents further recursive retries.
-                                    return run_print_mode_loop_inner(
-                                        session_events_for_retry,
-                                        system_prompt_for_retry,
-                                        new_provider,
-                                        &provider_display_name(ctx.instance),
-                                    )
-                                    .await;
-                                }
-                                Err(build_err) => {
-                                    eprintln!(
-                                        "error: token refreshed but failed to rebuild provider: {build_err}"
-                                    );
-                                    return 1;
-                                }
-                            }
-                        }
-                        Err(refresh_err) => {
-                            log::warn!("reactive refresh failed: {refresh_err}");
-                            let rendered = format_provider_error_for_display(
-                                &provider_display_name(ctx.instance),
-                                &e,
-                            );
-                            eprintln!(
-                                "error: {rendered} (token refresh also failed: {refresh_err})"
-                            );
-                            return 1;
-                        }
-                    }
-                }
-
-                let rendered =
-                    format_provider_error_for_display(&provider_display_name(ctx.instance), &e);
-                eprintln!("error: {rendered}");
-                return 1;
-            }
-        }
+    let system_prompt = build_system_prompt(&tools, cwd, &loaded_skills, None);
+    let skills_count = loaded_skills.len();
+    app.agent_config.tools = tools;
+    app.agent_config.system_prompt = Some(system_prompt);
+    app.loaded_skills = (*loaded_skills).clone();
+    app.agents = load_agents();
+    if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
+        app.active_agent = None;
+        app.rebuild_agent_system_prompt(cwd);
     }
-
-    0
+    app.push_notice(Message::assistant(format!(
+        "[reloaded context: {} skill{}, {} custom tool{}]",
+        skills_count,
+        if skills_count == 1 { "" } else { "s" },
+        custom_count,
+        if custom_count == 1 { "" } else { "s" },
+    )));
+    app.completion.available_models = None;
 }
 
-/// Inner agent loop used for the single retry after a reactive token refresh.
-/// Identical event handling to `run_print_mode_loop` but without a further
-/// retry on 401 (budget is exhausted after one attempt).
-async fn run_print_mode_loop_inner(
-    session_events: Vec<crate::session_event::SessionEvent>,
-    system_prompt: Option<String>,
-    provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
-    provider_label: &str,
-) -> i32 {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+async fn handle_new_session(
+    app: &mut App,
+    file_tracker: &Arc<Mutex<FileTracker>>,
+    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    cwd: &str,
+) {
+    file_tracker.lock().unwrap().reset();
+    app.clear_session_state();
 
-    // AgentLoopConfig is not Clone; rebuild a minimal headless one for the retry.
-    let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));
-    let retry_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless-retry")));
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let retry_skills = Arc::new(skills::load_skills());
-    let retry_tools = register_builtin_tools(
-        None,
-        Arc::clone(&retry_tracker),
-        Arc::clone(&retry_skills),
+    let custom_count = custom_tools.len();
+    let loaded_skills = Arc::new(skills::load_skills());
+    let tools = register_builtin_tools(
+        Some(app_event_tx),
+        Arc::clone(file_tracker),
+        Arc::clone(&loaded_skills),
         custom_tools,
     )
     .await;
-    let retry_config = AgentLoopConfig {
-        tools: retry_tools,
-        file_tracker: retry_tracker,
-        tool_output_log: retry_log,
-        session_events,
-        current_model: String::new(),
-        auto_compaction_enabled: true,
-        manual_compaction_instructions: None,
-        executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
-        system_prompt,
-        hooks: std::collections::HashMap::new(),
-        hook_ipc: HookIpcPublisherHandle::disabled(),
-        session_id: String::new(),
-    };
+    let system_prompt = build_system_prompt(&tools, cwd, &loaded_skills, None);
+    let skills_count = loaded_skills.len();
+    app.agent_config.tools = tools;
+    app.agent_config.system_prompt = Some(system_prompt);
+    app.loaded_skills = (*loaded_skills).clone();
+    app.agents = load_agents();
+    if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
+        app.active_agent = None;
+        app.rebuild_agent_system_prompt(cwd);
+    }
+    app.push_notice(Message::assistant(format!(
+        "[new session: {} skill{}, {} custom tool{}]",
+        skills_count,
+        if skills_count == 1 { "" } else { "s" },
+        custom_count,
+        if custom_count == 1 { "" } else { "s" },
+    )));
+    app.completion.available_models = None;
+}
 
-    tokio::spawn(async move {
-        agent::run_agent_loop(retry_config, provider, tx, steering_rx, cancel_rx).await;
-    });
+fn handle_change_model(
+    app: &mut App,
+    config: &mut XiConfig,
+    name: String,
+    prompt_thinking_selection: bool,
+) {
+    app.provider.current_instance.model = Some(name.clone());
+    app.provider.current_model = name.clone();
+    app.provider.current_model = name;
+    app.provider.current_thinking =
+        provider_setup::resolve_thinking_level_for_model(config, &app.provider.current_model);
+    app.record_model_changed();
+    app.record_thinking_level_changed();
+    app.completion.available_models = None;
+    provider_setup::persist_provider_model_selection_v2(config, app);
+    app.provider.instances = config.resolve_effective_providers();
+    provider_setup::maybe_warn_thinking_unsupported(app);
+    if prompt_thinking_selection
+        && thinking_support_for_instance(
+            &app.provider.current_instance,
+            &app.provider.current_model,
+        ) == ThinkingSupport::Applied
+    {
+        app.enter_thinking_selection_mode();
+    }
+}
 
-    while let Some(ev) = rx.recv().await {
-        let AppEvent::Agent(ev) = ev else {
-            continue;
-        };
-        match ev {
-            AgentEvent::TextToken { text, .. } => {
-                print!("{text}");
-                use std::io::Write;
-                let _ = io::stdout().flush();
-            }
-            AgentEvent::ThinkingToken(_)
-            | AgentEvent::Usage(_)
-            | AgentEvent::ToolCallIntent { .. }
-            | AgentEvent::ToolCallArgsDelta { .. }
-            | AgentEvent::SteeringConsumed { .. }
-            | AgentEvent::TurnEnd => {}
-            AgentEvent::StatusUpdate(msg) => {
-                eprintln!("{msg}");
-            }
-            AgentEvent::Compacting => {
-                eprintln!("compacting…");
-            }
-            AgentEvent::CompactionDone(outcome) => {
-                eprintln!(
-                    "compacted: {}k → {}k tokens",
-                    outcome.tokens_before / 1000,
-                    outcome.tokens_after / 1000
-                );
-            }
-            AgentEvent::ToolCallStart { name, args, .. } => {
-                let (label, _) = tool_presentation::tool_invocation_label(
-                    &name,
-                    &args,
+/// Returns `true` if the outer loop should `continue` (skip provider rebuild).
+fn handle_change_provider(app: &mut App, config: &mut XiConfig, id: String) -> bool {
+    if let Some(inst) = config.resolve_provider(&id) {
+        app.provider.provider_selected = true;
+
+        let requires_api_key = provider_setup_requires_api_key(&inst);
+        if requires_api_key && inst.api_key.as_deref().unwrap_or("").is_empty() {
+            app.provider.pending_setup = Some(PendingProviderSetup::from_instance(&inst));
+            app.enter_provider_api_key_input_mode();
+            return true;
+        }
+
+        if inst.backend_preset.def().auth_mode == AuthMode::OAuthLogin {
+            let has_creds = match inst.backend_preset {
+                BackendPreset::Copilot => auth::AuthStore::load_default()
+                    .ok()
+                    .and_then(|s| s.get_copilot())
+                    .is_some(),
+                BackendPreset::Codex => auth::AuthStore::load_default()
+                    .ok()
+                    .and_then(|s| s.get_codex())
+                    .is_some(),
+                BackendPreset::Gemini => auth::AuthStore::load_default()
+                    .ok()
+                    .and_then(|s| s.get_gemini())
+                    .is_some(),
+                _ => false,
+            };
+            if !has_creds {
+                app.provider.current_instance = inst;
+                app.provider.current_model = provider_setup::resolve_model_for_instance(
                     None,
-                    &crate::config::DisplayConfig::default(),
+                    &app.provider.current_instance,
                 );
-                eprintln!("{label}");
-            }
-            AgentEvent::ToolCallEnd { result, .. } => {
-                if result.is_error {
-                    eprintln!(
-                        "  ✗ {}",
-                        result.content.as_text().lines().next().unwrap_or("error")
-                    );
-                }
-            }
-            AgentEvent::ToolOutputChunk { .. } => {}
-            AgentEvent::ExternalFileChange { paths, .. } => {
-                for path in &paths {
-                    eprintln!("⚠️  {} was modified externally", path.display());
-                }
-            }
-            AgentEvent::Done => {
-                println!();
-                return 0;
-            }
-            AgentEvent::Error(e) => {
-                let rendered = format_provider_error_for_display(provider_label, &e);
-                eprintln!("error: {rendered}");
-                return 1;
+                app.provider.current_thinking = provider_setup::resolve_thinking_level_for_model(
+                    config,
+                    &app.provider.current_model,
+                );
+                app.start_login(&id);
+                return true;
             }
         }
-    }
 
-    0
+        app.provider.current_instance = inst;
+        app.provider.current_model =
+            provider_setup::resolve_model_for_instance(None, &app.provider.current_instance);
+        app.provider.current_thinking =
+            provider_setup::resolve_thinking_level_for_model(config, &app.provider.current_model);
+        app.record_model_changed();
+        app.record_thinking_level_changed();
+        app.completion.available_models = None;
+        provider_setup::persist_provider_model_selection_v2(config, app);
+        app.provider.instances = config.resolve_effective_providers();
+        provider_setup::maybe_warn_thinking_unsupported(app);
+    }
+    false
+}
+
+fn handle_add_provider(app: &mut App, config: &mut XiConfig, instance: ProviderInstance) {
+    app.clear_pending_provider_setup();
+    let instance_id = instance.id.clone();
+    let current_model_for_instance = provider_setup::resolve_model_for_instance(None, &instance);
+    config.upsert_provider(instance.clone());
+    config.provider = Some(instance_id);
+    app.provider.provider_selected = true;
+    if let Err(e) = config.save() {
+        log::debug!("failed to persist new provider config: {e}");
+        app.push_notice(Message::assistant(format!(
+            "[failed to persist config.toml: {e}]"
+        )));
+    }
+    app.provider.current_instance = config.resolve_provider(&instance.id).unwrap_or(instance);
+    app.provider.current_model = current_model_for_instance;
+    app.provider.current_thinking =
+        provider_setup::resolve_thinking_level_for_model(config, &app.provider.current_model);
+    app.record_model_changed();
+    app.record_thinking_level_changed();
+    app.provider.instances = config.resolve_effective_providers();
+    app.completion.available_models = None;
+    provider_setup::maybe_warn_thinking_unsupported(app);
+    app.push_notice(Message::assistant(format!(
+        "[added provider {} ({})]",
+        app.provider.current_instance.id,
+        app.provider.current_instance.backend_preset.label(),
+    )));
+}
+
+fn handle_update_provider(
+    app: &mut App,
+    config: &mut XiConfig,
+    original_id: Option<String>,
+    instance: ProviderInstance,
+) {
+    app.clear_pending_provider_setup();
+    let instance_id = instance.id.clone();
+    app.provider.provider_selected = true;
+    let current_model_for_instance = provider_setup::resolve_model_for_instance(None, &instance);
+    if let Some(original_id) = original_id.as_deref()
+        && original_id != instance.id
+    {
+        config.remove_provider(original_id);
+    }
+    config.upsert_provider(instance.clone());
+    config.provider = Some(instance_id);
+    if let Err(e) = config.save() {
+        log::debug!("failed to persist updated provider config: {e}");
+        app.push_notice(Message::assistant(format!(
+            "[failed to persist config.toml: {e}]"
+        )));
+    }
+    app.provider.current_instance = config.resolve_provider(&instance.id).unwrap_or(instance);
+    app.provider.current_model = current_model_for_instance;
+    app.provider.current_thinking =
+        provider_setup::resolve_thinking_level_for_model(config, &app.provider.current_model);
+    app.record_model_changed();
+    app.record_thinking_level_changed();
+    app.provider.instances = config.resolve_effective_providers();
+    app.completion.available_models = None;
+    provider_setup::maybe_warn_thinking_unsupported(app);
+    app.push_notice(Message::assistant(format!(
+        "[edited provider {} ({})]",
+        app.provider.current_instance.id,
+        app.provider.current_instance.backend_preset.label(),
+    )));
+}
+
+fn handle_remove_provider(app: &mut App, config: &mut XiConfig, id: String) {
+    app.clear_pending_provider_setup();
+    app.clear_pending_provider_removal();
+    if config.remove_provider(&id) {
+        if config.provider.as_deref() == Some(id.as_str()) {
+            config.provider = config
+                .resolve_effective_providers()
+                .first()
+                .map(|p| p.id.clone());
+        }
+        if let Err(e) = config.save() {
+            log::debug!("failed to persist provider removal: {e}");
+            app.push_notice(Message::assistant(format!(
+                "[failed to persist config.toml: {e}]"
+            )));
+        }
+        app.provider.current_instance = provider_setup::resolve_default_provider_instance(config);
+        app.provider.current_model =
+            provider_setup::resolve_model_for_instance(None, &app.provider.current_instance);
+        app.provider.current_thinking =
+            provider_setup::resolve_thinking_level_for_model(config, &app.provider.current_model);
+        app.record_model_changed();
+        app.record_thinking_level_changed();
+        app.provider.instances = config.resolve_effective_providers();
+        app.completion.available_models = None;
+        provider_setup::maybe_warn_thinking_unsupported(app);
+        app.push_notice(Message::assistant(format!("[removed provider {id}]")));
+    }
+}
+
+fn handle_change_thinking(app: &mut App, config: &mut XiConfig, level: ThinkingLevel) {
+    app.provider.current_thinking = level;
+    app.provider.current_thinking = level;
+    app.record_thinking_level_changed();
+    provider_setup::persist_provider_model_selection_v2(config, app);
+    app.provider.instances = config.resolve_effective_providers();
+    provider_setup::maybe_warn_thinking_unsupported(app);
+}
+
+fn handle_configure_provider(
+    app: &mut App,
+    config: &mut XiConfig,
+    instance: ProviderInstance,
+    url: Option<String>,
+    api_key: Option<String>,
+) {
+    app.clear_pending_provider_setup();
+    let mut inst = config.resolve_provider(&instance.id).unwrap_or(instance);
+    if let Some(url) = url.as_deref() {
+        inst.base_url = Some(url.to_string());
+    }
+    if let Some(api_key) = api_key {
+        inst.api_key = Some(api_key.clone());
+    }
+    config.upsert_provider(inst.clone());
+    config.provider = Some(inst.id.clone());
+    app.provider.provider_selected = true;
+    if let Err(e) = config.save() {
+        log::debug!("failed to persist provider config: {e}");
+        app.push_notice(Message::assistant(format!(
+            "[failed to persist config.toml: {e}]"
+        )));
+    }
+    app.provider.current_instance = inst;
+    app.provider.instances = config.resolve_effective_providers();
+    app.provider.current_model =
+        provider_setup::resolve_model_for_instance(None, &app.provider.current_instance);
+    app.provider.current_thinking =
+        provider_setup::resolve_thinking_level_for_model(config, &app.provider.current_model);
+    app.record_model_changed();
+    app.record_thinking_level_changed();
+    app.completion.available_models = None;
+    provider_setup::maybe_warn_thinking_unsupported(app);
+    let endpoint_msg = url
+        .map(|u| format!(" endpoint set to {u}"))
+        .unwrap_or_default();
+    app.push_notice(Message::assistant(format!(
+        "[provider {}{endpoint_msg}]",
+        app.provider.current_instance.id,
+    )));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        provider_display_name, resolve_default_provider_instance, resolve_model_for_instance,
-        resolve_provider_instance, resolve_thinking_level_for_model, with_resolved_model,
-    };
+    use super::print_mode::provider_display_name;
+    use super::provider_setup::{self, with_resolved_model};
     use crate::input::normalize_paste_text;
     use crate::{
         config::XiConfig,
@@ -1351,8 +862,8 @@ mod tests {
             BackendPreset::OpenWebUi,
         ));
 
-        let instance =
-            resolve_provider_instance(Some("work-webui"), &cfg).expect("provider should resolve");
+        let instance = provider_setup::resolve_provider_instance(Some("work-webui"), &cfg)
+            .expect("provider should resolve");
 
         assert_eq!(instance.id, "work-webui");
         assert_eq!(instance.backend_preset, BackendPreset::OpenWebUi);
@@ -1362,7 +873,8 @@ mod tests {
     fn resolve_provider_instance_accepts_hidden_test_provider() {
         let cfg = XiConfig::default();
 
-        let instance = resolve_provider_instance(Some("test"), &cfg).expect("test should resolve");
+        let instance = provider_setup::resolve_provider_instance(Some("test"), &cfg)
+            .expect("test should resolve");
 
         assert_eq!(instance.id, "test");
         assert_eq!(instance.backend_preset, BackendPreset::Test);
@@ -1378,7 +890,7 @@ mod tests {
             BackendPreset::OpenWebUi,
         ));
 
-        let err = resolve_provider_instance(Some("does-not-exist"), &cfg)
+        let err = provider_setup::resolve_provider_instance(Some("does-not-exist"), &cfg)
             .expect_err("unknown provider should be rejected");
 
         assert_eq!(
@@ -1400,7 +912,7 @@ mod tests {
             BackendPreset::OpenWebUi,
         ));
 
-        let instance = resolve_default_provider_instance(&cfg);
+        let instance = provider_setup::resolve_default_provider_instance(&cfg);
 
         assert_eq!(instance.id, "work-webui");
         assert_eq!(instance.backend_preset, BackendPreset::OpenWebUi);
@@ -1410,7 +922,7 @@ mod tests {
     fn resolve_default_provider_instance_falls_back_to_first_effective() {
         let cfg = XiConfig::default();
 
-        let instance = resolve_default_provider_instance(&cfg);
+        let instance = provider_setup::resolve_default_provider_instance(&cfg);
 
         // First effective provider is the first built-in alphabetically: codex.
         assert_eq!(instance.id, "codex");
@@ -1421,14 +933,14 @@ mod tests {
     fn resolve_model_uses_instance_model() {
         let mut inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
         inst.model = Some("gpt-5.3-codex".to_string());
-        let model = resolve_model_for_instance(None, &inst);
+        let model = provider_setup::resolve_model_for_instance(None, &inst);
         assert_eq!(model, "gpt-5.3-codex");
     }
 
     #[test]
     fn resolve_model_falls_back_to_service_default() {
         let inst = ProviderInstance::new("copilot", BackendPreset::Copilot);
-        let model = resolve_model_for_instance(None, &inst);
+        let model = provider_setup::resolve_model_for_instance(None, &inst);
         assert_eq!(model, BackendPreset::Copilot.default_model());
     }
 
@@ -1463,7 +975,7 @@ mod tests {
         cfg.thinking_by_model
             .insert("gpt-5".to_string(), "high".to_string());
 
-        let level = resolve_thinking_level_for_model(&cfg, "gpt-5");
+        let level = provider_setup::resolve_thinking_level_for_model(&cfg, "gpt-5");
         assert_eq!(level, ThinkingLevel::High);
     }
 
@@ -1473,14 +985,14 @@ mod tests {
             thinking: Some("minimal".to_string()),
             ..XiConfig::default()
         };
-        let level = resolve_thinking_level_for_model(&cfg, "gpt-4o");
+        let level = provider_setup::resolve_thinking_level_for_model(&cfg, "gpt-4o");
         assert_eq!(level, ThinkingLevel::Minimal);
     }
 
     #[test]
     fn resolve_thinking_defaults_to_off() {
         let cfg = XiConfig::default();
-        let level = resolve_thinking_level_for_model(&cfg, "gpt-4o");
+        let level = provider_setup::resolve_thinking_level_for_model(&cfg, "gpt-4o");
         assert_eq!(level, ThinkingLevel::Off);
     }
 
