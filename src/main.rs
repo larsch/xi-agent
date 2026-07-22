@@ -1,17 +1,8 @@
 use clap::Parser;
-#[cfg(unix)]
-use crossterm::cursor::Show;
 use crossterm::{
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
+    event::{Event, EventStream, MouseButton, MouseEventKind},
     execute,
-    terminal::{
-        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
-        SetTitle, disable_raw_mode, enable_raw_mode,
-    },
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -71,6 +62,7 @@ mod shell;
 mod shell_state;
 mod skills;
 mod step_back_state;
+mod terminal;
 mod theme;
 mod thinking;
 mod tool_presentation;
@@ -142,54 +134,6 @@ fn build_file_tracker() -> FileTracker {
     FileTracker::with_exclusions(excluded_prefixes, &["AGENTS.md", "SKILL.md"])
 }
 
-fn init_terminal(window_title: &str) -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        SetTitle(window_title),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
-
-    let mut keyboard_enhancements_enabled = false;
-    match execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-    ) {
-        Ok(()) => keyboard_enhancements_enabled = true,
-        Err(e) if e.kind() == ErrorKind::Unsupported => {
-            log::debug!(
-                "keyboard progressive enhancement unsupported on this terminal; continuing without it"
-            );
-        }
-        Err(e) => return Err(e),
-    }
-
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok((terminal, keyboard_enhancements_enabled))
-}
-
-fn shutdown_terminal(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    keyboard_enhancements_enabled: bool,
-) -> io::Result<()> {
-    disable_raw_mode()?;
-    if keyboard_enhancements_enabled {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> io::Result<()> {
     migrate::run();
@@ -258,7 +202,7 @@ async fn main() -> io::Result<()> {
         .unwrap_or_else(|| ".".to_string());
     let window_title = format!("ξ - {window_folder}");
 
-    let (mut terminal, mut keyboard_enhancements_enabled) = init_terminal(&window_title)?;
+    let (mut terminal, mut keyboard_enhancements_enabled) = terminal::init_terminal(&window_title)?;
 
     let file_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
@@ -374,10 +318,10 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::Quit) | Err(_) => break,
 
             Ok(RunResult::Suspend) => {
-                suspend_interactive_ui(&mut terminal, keyboard_enhancements_enabled)?;
+                terminal::suspend_interactive_ui(&mut terminal, keyboard_enhancements_enabled)?;
                 drop(terminal);
                 let (new_terminal, new_keyboard_enhancements_enabled) =
-                    init_terminal(&window_title)?;
+                    terminal::init_terminal(&window_title)?;
                 terminal = new_terminal;
                 keyboard_enhancements_enabled = new_keyboard_enhancements_enabled;
             }
@@ -693,47 +637,12 @@ async fn main() -> io::Result<()> {
         }
     }
 
-    shutdown_terminal(&mut terminal, keyboard_enhancements_enabled)?;
+    terminal::shutdown_terminal(&mut terminal, keyboard_enhancements_enabled)?;
 
     Ok(())
 }
 
 use input::{RunResult, apply_paste, handle_key_event, provider_setup_requires_api_key};
-
-#[cfg(unix)]
-fn suspend_interactive_ui(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    keyboard_enhancements_enabled: bool,
-) -> io::Result<()> {
-    disable_raw_mode()?;
-    if keyboard_enhancements_enabled {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        Show
-    )?;
-
-    let pid = std::process::id() as i32;
-    // SAFETY: sends SIGTSTP to the current process so the parent shell can resume it with fg.
-    let rc = unsafe { libc::kill(pid, libc::SIGTSTP) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn suspend_interactive_ui(
-    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    _keyboard_enhancements_enabled: bool,
-) -> io::Result<()> {
-    Ok(())
-}
 
 struct UnavailableProvider {
     message: String,
