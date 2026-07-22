@@ -468,6 +468,19 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
         KeyCode::Enter if key.modifiers.is_empty() => {
             return handle_selection_enter(app);
         }
+        KeyCode::Tab
+            if app.selection.kind == Some(crate::selection_state::SelectionKind::AskUser) =>
+        {
+            if let Some(item) = app.selection.items.get(app.selection.selected) {
+                if item.complete_to == "/ask_user_freeform" {
+                    app.enter_ask_freeform_mode();
+                } else {
+                    let label = item.label.clone();
+                    app.begin_ask_freeform_typing();
+                    app.textarea.insert_str(label);
+                }
+            }
+        }
         KeyCode::Esc => {
             if app.has_pending_ask() {
                 app.cancel_pending_ask();
