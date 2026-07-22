@@ -257,7 +257,6 @@ async fn main() -> io::Result<()> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| ".".to_string());
     let window_title = format!("ξ - {window_folder}");
-    let default_window_title = "ξ".to_string();
 
     let (mut terminal, mut keyboard_enhancements_enabled) = init_terminal(&window_title)?;
 
@@ -375,11 +374,7 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::Quit) | Err(_) => break,
 
             Ok(RunResult::Suspend) => {
-                suspend_interactive_ui(
-                    &mut terminal,
-                    keyboard_enhancements_enabled,
-                    &default_window_title,
-                )?;
+                suspend_interactive_ui(&mut terminal, keyboard_enhancements_enabled)?;
                 drop(terminal);
                 let (new_terminal, new_keyboard_enhancements_enabled) =
                     init_terminal(&window_title)?;
@@ -709,7 +704,6 @@ use input::{RunResult, apply_paste, handle_key_event, provider_setup_requires_ap
 fn suspend_interactive_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     keyboard_enhancements_enabled: bool,
-    suspended_window_title: &str,
 ) -> io::Result<()> {
     disable_raw_mode()?;
     if keyboard_enhancements_enabled {
@@ -730,7 +724,6 @@ fn suspend_interactive_ui(
         return Err(io::Error::last_os_error());
     }
 
-    execute!(terminal.backend_mut(), SetTitle(suspended_window_title))?;
     Ok(())
 }
 
@@ -738,7 +731,6 @@ fn suspend_interactive_ui(
 fn suspend_interactive_ui(
     _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     _keyboard_enhancements_enabled: bool,
-    _suspended_window_title: &str,
 ) -> io::Result<()> {
     Ok(())
 }
