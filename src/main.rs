@@ -202,8 +202,11 @@ async fn main() -> io::Result<()> {
             .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
 
     // Priority: --model flag > config.toml > provider default.
-    let initial_model =
-        provider_setup::resolve_model_for_instance(cli.model.as_deref(), &initial_instance);
+    // Apply the CLI model override to the instance so that
+    // build_provider_for_instance sees the correct effective_model().
+    let initial_instance =
+        provider_setup::with_resolved_model(cli.model.as_deref(), &initial_instance);
+    let initial_model = initial_instance.effective_model().to_string();
     let initial_thinking =
         provider_setup::resolve_thinking_level_for_model(&config, &initial_model);
     let window_folder = std::env::current_dir()
