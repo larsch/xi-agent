@@ -344,9 +344,6 @@ impl SetupInputKind {
                     AuthMode::ApiKey => match p.backend_preset {
                         BackendPreset::OpenRouter => "OpenRouter API key: ".to_string(),
                         BackendPreset::OpenWebUi => "open-webui token: ".to_string(),
-                        _ if p.base_url.is_some() => {
-                            "API key (leave empty to keep current): ".to_string()
-                        }
                         _ => "API key: ".to_string(),
                     },
                     _ => "token: ".to_string(),
