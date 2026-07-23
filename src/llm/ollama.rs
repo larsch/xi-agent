@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -12,12 +12,23 @@ use super::{
 
 // ── Model context-window cache ────────────────────────────────────────────────
 
-/// Process-global cache mapping Ollama model names to their context-window size
-/// (in tokens), populated by [`OllamaProvider::list_models`] via `/api/show`.
-static OLLAMA_CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, usize>>> = OnceLock::new();
+/// Process-global cache mapping Ollama model names to their runtime
+/// context-window size (in tokens), populated by querying `/api/ps`.
+///
+/// This is the ground truth — `/api/ps` reports the actual `num_ctx` the
+/// server is using.  It only covers models currently loaded in memory.
+static OLLAMA_RUNTIME_CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, usize>>> = OnceLock::new();
 
-fn context_cache() -> &'static RwLock<HashMap<String, usize>> {
-    OLLAMA_CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+/// Process-global set of model names known to be available from the Ollama
+/// server (populated by `/api/tags`).  Names are normalised (no `:latest`).
+static OLLAMA_KNOWN_MODELS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+
+fn runtime_context_cache() -> &'static RwLock<HashMap<String, usize>> {
+    OLLAMA_RUNTIME_CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn known_models() -> &'static RwLock<HashSet<String>> {
+    OLLAMA_KNOWN_MODELS.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
 pub struct OllamaProvider {
@@ -39,15 +50,28 @@ impl OllamaProvider {
         }
     }
 
-    /// Look up the context-window size for `model` from the cache populated by
-    /// [`OllamaProvider::list_models`].  Returns `None` on cache miss.
+    /// Look up the context-window size for `model` from the runtime cache
+    /// populated by [`fetch_and_cache_running_contexts`] via `/api/ps`.
     ///
     /// Normalises the model name by stripping a trailing `:latest` tag so that
     /// `qwen3-coder` and `qwen3-coder:latest` hit the same cache entry.
+    ///
+    /// Returns `None` when the model is not currently loaded (we cannot
+    /// trust the GGUF `context_length` from `/api/show` because the server
+    /// may override it with `num_ctx`).
     pub fn cached_context_window(model: &str) -> Option<usize> {
-        let map = context_cache().read().ok()?;
+        let map = runtime_context_cache().read().ok()?;
         let normalized = model.strip_suffix(":latest").unwrap_or(model);
         map.get(normalized).or_else(|| map.get(model)).copied()
+    }
+
+    /// Returns `true` if `model` is known to be available from the Ollama
+    /// server (was listed by `/api/tags` during a `list_models` call).
+    pub fn is_known_model(model: &str) -> bool {
+        let set = known_models().read().ok();
+        let normalized = model.strip_suffix(":latest").unwrap_or(model);
+        set.map(|s| s.contains(normalized) || s.contains(model))
+            .unwrap_or(false)
     }
 }
 
@@ -55,60 +79,62 @@ impl OllamaProvider {
 /// by calling `{base_url}/api/show`.  Failures are logged at debug level
 /// and do not disturb the caller.
 ///
+/// Query `{base_url}/api/ps` and populate the runtime context-window cache
+/// with the actual `context_length` for each currently loaded model.
+///
 /// This is the canonical context-window discovery routine, shared by
 /// [`OllamaProvider::list_models`] and by providers that proxy through
 /// an Ollama-compatible backend (e.g. Open WebUI).
-pub async fn fetch_and_cache_context_window(
-    base_url: &str,
-    model_name: &str,
-    api_key: Option<&str>,
-) {
-    let show_url = format!("{}/api/show", base_url.trim_end_matches('/'));
+///
+/// Failures are logged at debug level and do not disturb the caller.
+pub async fn fetch_and_cache_running_contexts(base_url: &str, api_key: Option<&str>) {
+    let ps_url = format!("{}/api/ps", base_url.trim_end_matches('/'));
     let client = build_http_client();
 
-    let mut req = client
-        .post(&show_url)
-        .json(&serde_json::json!({ "model": model_name, "verbose": false }));
+    let mut req = client.get(&ps_url);
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
     }
 
     match req.send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<ShowResponse>().await {
-            Ok(show) => {
-                let ctx = show
-                    .model_info
-                    .iter()
-                    .find(|(k, _)| k.ends_with(".context_length"))
-                    .and_then(|(_, v)| v.as_u64())
-                    .map(|n| n as usize);
-                if let Some(ctx_len) = ctx {
-                    log::debug!("ollama model {model_name} context_length={ctx_len}");
-                    if let Ok(mut map) = context_cache().write() {
-                        // Store both the raw name and the tag-normalised form so
-                        // that cached_context_window hits regardless of :latest.
-                        let normalized = model_name.strip_suffix(":latest").unwrap_or(model_name);
-                        map.insert(model_name.to_string(), ctx_len);
-                        if normalized != model_name {
-                            map.insert(normalized.to_string(), ctx_len);
+        Ok(resp) if resp.status().is_success() => match resp.json::<PsResponse>().await {
+            Ok(ps) => {
+                if let Ok(mut map) = runtime_context_cache().write() {
+                    for m in &ps.models {
+                        let ctx = m.context_length;
+                        log::debug!("ollama running model {} context_length={ctx}", m.name);
+                        map.insert(m.name.clone(), ctx);
+                        if let Some(normalized) = m.name.strip_suffix(":latest")
+                            && normalized != m.name
+                        {
+                            map.insert(normalized.to_string(), ctx);
                         }
                     }
                 }
             }
             Err(e) => {
-                log::debug!("ollama /api/show parse error for {model_name}: {e}");
+                log::debug!("ollama /api/ps parse error: {e}");
             }
         },
         Ok(resp) => {
-            log::debug!(
-                "ollama /api/show returned {} for {model_name}",
-                resp.status()
-            );
+            log::debug!("ollama /api/ps returned {}", resp.status());
         }
         Err(e) => {
-            log::debug!("ollama /api/show request failed for {model_name}: {e}");
+            log::debug!("ollama /api/ps request failed: {e}");
         }
     }
+}
+
+/// Response from `GET /api/ps`.
+#[derive(Deserialize)]
+struct PsResponse {
+    models: Vec<PsModel>,
+}
+
+#[derive(Deserialize)]
+struct PsModel {
+    name: String,
+    context_length: usize,
 }
 
 // ── Serde types ───────────────────────────────────────────────────────────────
@@ -197,14 +223,6 @@ struct TagsResponse {
 #[derive(Deserialize)]
 struct TagModel {
     name: String,
-}
-
-/// Response from `POST /api/show` — we only need the `model_info` map which
-/// contains architecture-specific parameters including `llama.context_length`.
-#[derive(Deserialize, Default)]
-struct ShowResponse {
-    #[serde(default)]
-    model_info: HashMap<String, serde_json::Value>,
 }
 
 // ── History serialisation ─────────────────────────────────────────────────────
@@ -410,13 +428,23 @@ impl LlmProvider for OllamaProvider {
             )
             .await?;
 
-            // For each model, fetch /api/show to get its context window size.
-            // We do this best-effort: failures are logged and skipped.
-            for model_name in &models {
-                // Delegate to the shared context-window discovery helper so
-                // other paths (e.g. Open WebUI → OpenAI API) can also use it.
-                fetch_and_cache_context_window(&base_url, model_name, api_key.as_deref()).await;
+            // Populate the known-models set so that context_window_for_model
+            // can tell that these are Ollama models (and skip the hard-coded
+            // fallback table when /api/ps doesn't have a runtime context).
+            if let Ok(mut set) = known_models().write() {
+                for name in &models {
+                    set.insert(name.clone());
+                    if let Some(normalized) = name.strip_suffix(":latest")
+                        && normalized != name
+                    {
+                        set.insert(normalized.to_string());
+                    }
+                }
             }
+
+            // Query /api/ps to cache the actual runtime context window
+            // for currently loaded models.  We do this best-effort.
+            fetch_and_cache_running_contexts(&base_url, api_key.as_deref()).await;
 
             Ok(models)
         })

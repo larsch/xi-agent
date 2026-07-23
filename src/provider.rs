@@ -294,9 +294,8 @@ pub fn build_provider_for_instance(
                     };
                     if OllamaProvider::cached_context_window(&model_owned).is_none() {
                         tokio::spawn(async move {
-                            ollama::fetch_and_cache_context_window(
+                            ollama::fetch_and_cache_running_contexts(
                                 &ollama_base,
-                                &model_owned,
                                 api_key_for_task.as_deref(),
                             )
                             .await;

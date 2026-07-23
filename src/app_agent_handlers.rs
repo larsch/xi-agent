@@ -6,6 +6,7 @@ use crate::agent::compaction::CompactionOutcome;
 use crate::agent::types::AgentEvent;
 use crate::app::{App, RetryTarget, StreamingStatus};
 use crate::app_event::AppEvent;
+use crate::context_window::context_window_for_model;
 use crate::live_turn::{LiveToolEntry, LiveToolResult};
 use crate::llm::{AssistantPhase, DisplayRange, UsageStats};
 use crate::provider_manager::{active_provider_display_name, format_provider_error_for_display};
@@ -408,6 +409,35 @@ impl App {
         self.finalise_assistant_turn_event();
         self.flush_turn_events();
         self.persist_messages();
+
+        // If the context window is still unknown for an Ollama model,
+        // the first turn may have just loaded it — refresh /api/ps.
+        self.maybe_refresh_ollama_context();
+    }
+
+    /// If the current provider is Ollama (or Open WebUI with Ollama API)
+    /// and the context window is unknown, query `/api/ps` to see if the
+    /// model was loaded during the just-completed turn.
+    fn maybe_refresh_ollama_context(&self) {
+        use crate::provider_instance::ApiType;
+
+        if context_window_for_model(&self.provider.current_model).is_some() {
+            return;
+        }
+        let instance = &self.provider.current_instance;
+        if instance.api_type != ApiType::OllamaChatApi {
+            return;
+        }
+        let base_url = instance
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+        let api_key = instance.api_key.clone();
+
+        tokio::spawn(async move {
+            crate::llm::ollama::fetch_and_cache_running_contexts(&base_url, api_key.as_deref())
+                .await;
+        });
     }
 
     fn on_agent_done(&mut self) {

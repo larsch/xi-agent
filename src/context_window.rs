@@ -3,23 +3,29 @@ use crate::llm::{copilot::CopilotProvider, ollama::OllamaProvider};
 /// Return the context-window size (in tokens) for a known model name.
 ///
 /// Checks the Copilot model metadata cache first (populated by
-/// `CopilotProvider::list_models()`), then the Ollama `/api/show` metadata
-/// cache (covers Ollama and Open WebUI providers — the GGUF context_length
-/// reflects the model's default, which users may override with `num_ctx`),
-/// and finally a hard-coded fallback table for providers and models not
-/// covered by the above.
+/// `CopilotProvider::list_models()`), then the Ollama `/api/ps` runtime
+/// cache (actual context for currently loaded models), and finally a
+/// hard-coded fallback table for providers and models not covered above.
 ///
-/// Returns `None` for unrecognised models.
+/// Returns `None` for unrecognised models or Ollama models that are not
+/// currently loaded (we cannot trust the GGUF `context_length` from
+/// `/api/show` because the server may override it with `num_ctx`).
 pub fn context_window_for_model(model: &str) -> Option<usize> {
     // Primary: live metadata from the Copilot /models API.
     if let Some(cw) = CopilotProvider::cached_context_window(model) {
         return Some(cw);
     }
 
-    // Secondary: live metadata fetched by the Ollama /api/show endpoint
-    // (covers both Ollama and Open WebUI providers).
+    // Secondary: runtime context from Ollama /api/ps (loaded models only).
     if let Some(cw) = OllamaProvider::cached_context_window(model) {
         return Some(cw);
+    }
+
+    // If we know this is an Ollama model but /api/ps didn't have it,
+    // don't fall back to hard-coded guesses — the runtime context size
+    // is configurable per model and we can't know it until loaded.
+    if OllamaProvider::is_known_model(model) {
+        return None;
     }
 
     // Fallback: hard-coded table for all other providers and cold-start.
