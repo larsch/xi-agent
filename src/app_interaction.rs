@@ -576,7 +576,7 @@ impl App {
                     Some(SelectionResult::Provider(name.to_string()))
                 } else if item.complete_to == "/login" {
                     self.enter_login_selection_mode();
-                    Some(SelectionResult::LoginProvider(String::new()))
+                    return None;
                 } else {
                     None
                 }
