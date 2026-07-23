@@ -98,6 +98,7 @@ impl App {
                 complete_to: format!("/agent {}", a.name),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -149,6 +150,7 @@ impl App {
                 complete_to: format!("/thinking {}", lvl.as_str()),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -172,6 +174,7 @@ impl App {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             }]
         } else {
@@ -186,6 +189,7 @@ impl App {
             complete_to: "/login".to_string(),
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         });
         self.selection
@@ -314,6 +318,7 @@ impl App {
                 complete_to: format!("/provider_api {}", api.label()),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -360,6 +365,7 @@ impl App {
                 complete_to: "/provider_remove_confirm".to_string(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
             CompletionItem {
@@ -368,6 +374,7 @@ impl App {
                 complete_to: "/provider_remove_cancel".to_string(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
         ];
@@ -736,6 +743,7 @@ impl App {
                 complete_to: format!("/ask_user_option {}", opt.title),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -747,6 +755,7 @@ impl App {
                 complete_to: "/ask_user_freeform".to_string(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             });
         }
@@ -810,6 +819,7 @@ impl App {
                 complete_to: format!("/ask_user_option {}", opt.title),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -821,6 +831,7 @@ impl App {
                 complete_to: "/ask_user_freeform".to_string(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             });
         }
@@ -1137,8 +1148,8 @@ impl App {
 
 // ── Selection navigation helpers ──────────────────────────────────────────────
 
-/// Advance `selected` by one index (wrapping), skipping loading items.
-/// Returns the new index, or the original if all items are loading.
+/// Advance `selected` by one index (wrapping), skipping loading and hint items.
+/// Returns the new index, or the original if all items are loading or hint.
 fn advance_selection(items: &[CompletionItem], current: usize, forward: bool) -> usize {
     let len = items.len();
     if len <= 1 {
@@ -1152,13 +1163,13 @@ fn advance_selection(items: &[CompletionItem], current: usize, forward: bool) ->
         } else {
             (idx + len - 1) % len
         };
-        if !items[idx].loading || idx == start {
+        if (!items[idx].loading && !items[idx].hint) || idx == start {
             return idx;
         }
     }
 }
 
-/// Find the nearest non-loading item starting from `idx`.
+/// Find the nearest non-loading, non-hint item starting from `idx`.
 ///
 /// When `prefer_forward` is true, scans forward from `idx` to the end, then
 /// backward from `idx - 1` to the start. When false, scans backward first,
@@ -1169,23 +1180,23 @@ fn nearest_non_loading(items: &[CompletionItem], idx: usize, prefer_forward: boo
     }
     if prefer_forward {
         for (i, item) in items.iter().enumerate().skip(idx) {
-            if !item.loading {
+            if !item.loading && !item.hint {
                 return i;
             }
         }
         for (i, item) in items.iter().enumerate().take(idx).rev() {
-            if !item.loading {
+            if !item.loading && !item.hint {
                 return i;
             }
         }
     } else {
         for (i, item) in items.iter().enumerate().take(idx + 1).rev() {
-            if !item.loading {
+            if !item.loading && !item.hint {
                 return i;
             }
         }
         for (i, item) in items.iter().enumerate().skip(idx + 1) {
-            if !item.loading {
+            if !item.loading && !item.hint {
                 return i;
             }
         }
@@ -1209,6 +1220,7 @@ mod selection_nav_tests {
             },
             loading,
             error: false,
+            hint: false,
             match_range: None,
         }
     }

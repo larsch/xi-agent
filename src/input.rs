@@ -728,6 +728,11 @@ fn handle_chat_mode_key(
                 app.apply_completion();
             }
         }
+        KeyCode::BackTab => {
+            if !app.completion.completions.is_empty() {
+                app.apply_completion_path_only();
+            }
+        }
         KeyCode::Enter if key.modifiers.is_empty() => {
             #[cfg(windows)]
             if let (Some(threshold), Some(t)) = (PASTE_ENTER_THRESHOLD_MS, last_key_at)

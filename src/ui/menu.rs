@@ -25,7 +25,7 @@ pub(super) fn build_completion_lines(
 
     let label_col = completions
         .iter()
-        .filter(|c| !c.loading)
+        .filter(|c| !c.loading && !c.hint)
         .map(|c| c.label.len())
         .max()
         .unwrap_or(0)
@@ -51,6 +51,22 @@ pub(super) fn build_completion_lines(
                         Style::default().fg(fg).bg(bg).add_modifier(
                             ratatui::style::Modifier::ITALIC | ratatui::style::Modifier::DIM,
                         ),
+                    ),
+                    Span::styled(fill, Style::default().bg(bg)),
+                ]);
+            }
+
+            if item.hint {
+                let fill =
+                    " ".repeat(terminal_width.saturating_sub(INDENT.len() + item.label.len()));
+                return Line::from(vec![
+                    Span::styled(INDENT, Style::default().bg(bg)),
+                    Span::styled(
+                        item.label.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .bg(bg)
+                            .add_modifier(ratatui::style::Modifier::DIM),
                     ),
                     Span::styled(fill, Style::default().bg(bg)),
                 ]);

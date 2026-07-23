@@ -1387,6 +1387,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
             CompletionItem {
@@ -1395,6 +1396,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
         ];
@@ -1570,6 +1572,7 @@ mod tests {
             complete_to: "/model gpt-4o".to_string(),
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         }];
         let lines = build_completion_lines(&crate::theme::MenuTheme::default(), &items, 0, 80);
@@ -1584,6 +1587,7 @@ mod tests {
             complete_to: String::new(),
             loading: true,
             error: false,
+            hint: false,
             match_range: None,
         }];
         let lines = build_completion_lines(&crate::theme::MenuTheme::default(), &items, 0, 80);
@@ -1601,6 +1605,7 @@ mod tests {
                 complete_to: "/m".to_string(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
             CompletionItem {
@@ -1609,6 +1614,7 @@ mod tests {
                 complete_to: "/very-long-command".to_string(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
         ];
@@ -1628,6 +1634,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -1648,6 +1655,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();
@@ -1666,6 +1674,7 @@ mod tests {
             complete_to: String::new(),
             loading: true,
             error: false,
+            hint: false,
             match_range: None,
         }];
 
@@ -1685,6 +1694,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
             CompletionItem {
@@ -1693,6 +1703,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             },
         ];
@@ -2195,6 +2206,7 @@ mod tests {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();

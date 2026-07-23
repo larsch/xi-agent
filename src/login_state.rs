@@ -76,6 +76,7 @@ impl LoginState {
             complete_to: token.to_string(),
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         }
     }
@@ -154,6 +155,7 @@ impl LoginState {
                 complete_to: format!("/login {}", def.id),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect();

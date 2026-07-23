@@ -18,6 +18,10 @@ pub struct CompletionItem {
     pub loading: bool,
     /// When true the item represents a fetch error and should be rendered in red.
     pub error: bool,
+    /// When true the item is a non-interactive hint row (e.g. keybinding hints
+    /// at the bottom of the completion popup). Navigation skips hint rows the
+    /// same way it skips loading rows.
+    pub hint: bool,
     /// Byte range within `label` that matches the user's typed query, used for
     /// visual highlighting. `None` means no highlight (e.g. prefix match where
     /// the match is implied, or non-interactive rows).
@@ -36,6 +40,7 @@ impl CompletionItem {
             },
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         }
     }
@@ -47,6 +52,7 @@ impl CompletionItem {
             complete_to: format!("/model {}", name),
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         }
     }
@@ -58,6 +64,7 @@ impl CompletionItem {
             complete_to: format!("/provider {}", name),
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         }
     }
@@ -70,6 +77,7 @@ impl CompletionItem {
             complete_to: format!("/skill:{} ", skill.name),
             loading: false,
             error: false,
+            hint: false,
             match_range: None,
         }
     }
@@ -81,6 +89,7 @@ impl CompletionItem {
             complete_to: String::new(),
             loading: true,
             error: false,
+            hint: false,
             match_range: None,
         }
     }
@@ -92,6 +101,21 @@ impl CompletionItem {
             complete_to: String::new(),
             loading: true,
             error: true,
+            hint: false,
+            match_range: None,
+        }
+    }
+
+    /// A non-interactive hint row displayed at the bottom of a completion
+    /// popup (e.g. keybinding hints). Navigation skips hint items.
+    pub(crate) fn hint(text: &str) -> Self {
+        Self {
+            label: text.to_string(),
+            detail: String::new(),
+            complete_to: String::new(),
+            loading: false,
+            error: false,
+            hint: true,
             match_range: None,
         }
     }
@@ -144,7 +168,13 @@ pub fn at_completions(input: &str, cwd: &Path) -> Vec<CompletionItem> {
         None => return vec![],
     };
     let partial = &input[start..path_end];
-    file_completions_for(partial, cwd)
+    let mut items = file_completions_for(partial, cwd);
+    if !items.is_empty() {
+        items.push(CompletionItem::hint(
+            "Tab: inject file  |  Shift+Tab: path only",
+        ));
+    }
+    items
 }
 
 /// Generate file completion items for a partial path relative to `cwd`.
@@ -235,6 +265,7 @@ fn list_dir_entries(
                 complete_to: path,
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             }
         })
@@ -327,6 +358,7 @@ pub fn completions_for(
                         complete_to: format!("/login {p}"),
                         loading: false,
                         error: false,
+                        hint: false,
                         match_range: None,
                     })
                     .collect(),
@@ -340,6 +372,7 @@ pub fn completions_for(
                         complete_to: format!("/thinking {lvl}"),
                         loading: false,
                         error: false,
+                        hint: false,
                         match_range: None,
                     })
                     .collect(),
@@ -707,6 +740,7 @@ mod tests {
         std::fs::write(dir.path().join("gamma.py"), "").unwrap();
 
         let items = completions_for("@al", None, false, None, &[], true, &[], dir.path());
+        let items: Vec<_> = items.into_iter().filter(|i| !i.hint).collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "alpha.txt");
         assert_eq!(items[0].complete_to, "alpha.txt");
@@ -735,6 +769,7 @@ mod tests {
         std::fs::write(sub.join("lib.rs"), "").unwrap();
 
         let items = completions_for("@src/ma", None, false, None, &[], true, &[], dir.path());
+        let items: Vec<_> = items.into_iter().filter(|i| !i.hint).collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "src/main.rs");
         assert_eq!(items[0].complete_to, "src/main.rs");
@@ -747,6 +782,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("artifacts")).unwrap();
 
         let items = completions_for("@a", None, false, None, &[], true, &[], dir.path());
+        let items: Vec<_> = items.into_iter().filter(|i| !i.hint).collect();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].label, "artifacts/");
         assert_eq!(items[0].detail, "dir");

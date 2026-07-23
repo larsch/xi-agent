@@ -47,20 +47,42 @@ impl CompletionState {
         self.completion_selected = 0;
     }
 
-    /// Navigate the completion selection down (wraps around).
+    /// Navigate the completion selection down (wraps around), skipping
+    /// loading and hint items.
     pub fn select_next(&mut self) {
         let len = self.completions.len();
-        if len > 0 {
-            self.completion_selected = (self.completion_selected + 1) % len;
+        if len == 0 {
+            return;
         }
+        let start = self.completion_selected;
+        for _ in 0..len {
+            self.completion_selected = (self.completion_selected + 1) % len;
+            let item = &self.completions[self.completion_selected];
+            if !item.loading && !item.hint {
+                return;
+            }
+        }
+        // All items are loading or hint; stay put.
+        self.completion_selected = start;
     }
 
-    /// Navigate the completion selection up (wraps around).
+    /// Navigate the completion selection up (wraps around), skipping
+    /// loading and hint items.
     pub fn select_prev(&mut self) {
         let len = self.completions.len();
-        if len > 0 {
-            self.completion_selected = (self.completion_selected + len - 1) % len;
+        if len == 0 {
+            return;
         }
+        let start = self.completion_selected;
+        for _ in 0..len {
+            self.completion_selected = (self.completion_selected + len - 1) % len;
+            let item = &self.completions[self.completion_selected];
+            if !item.loading && !item.hint {
+                return;
+            }
+        }
+        // All items are loading or hint; stay put.
+        self.completion_selected = start;
     }
     /// Recompute the completion list from the current textarea content.
     ///
@@ -113,6 +135,7 @@ mod tests {
                 complete_to: format!("/item{i} "),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             })
             .collect()
@@ -171,6 +194,66 @@ mod tests {
         let mut state = CompletionState::new();
         state.clear();
         assert!(state.completions.is_empty());
+        assert_eq!(state.completion_selected, 0);
+    }
+
+    #[test]
+    fn select_next_skips_hint_items() {
+        let mut state = CompletionState::new();
+        state.completions = vec![
+            CompletionItem {
+                label: "a".into(),
+                detail: String::new(),
+                complete_to: "a".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+            CompletionItem::hint("hint"),
+            CompletionItem {
+                label: "b".into(),
+                detail: String::new(),
+                complete_to: "b".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+        ];
+        state.completion_selected = 0;
+        state.select_next();
+        // Should skip the hint item at index 1 and land on "b" at index 2.
+        assert_eq!(state.completion_selected, 2);
+    }
+
+    #[test]
+    fn select_prev_skips_hint_items() {
+        let mut state = CompletionState::new();
+        state.completions = vec![
+            CompletionItem {
+                label: "a".into(),
+                detail: String::new(),
+                complete_to: "a".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+            CompletionItem::hint("hint"),
+            CompletionItem {
+                label: "b".into(),
+                detail: String::new(),
+                complete_to: "b".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+        ];
+        state.completion_selected = 2;
+        state.select_prev();
+        // Should skip the hint item at index 1 and land on "a" at index 0.
         assert_eq!(state.completion_selected, 0);
     }
 }

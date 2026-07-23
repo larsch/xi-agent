@@ -22,6 +22,7 @@ pub(crate) enum KeyBindingId {
     Submit,
     InsertNewline,
     ApplyCompletion,
+    ApplyCompletionPathOnly,
     Cancel,
     ExitShellOnEmptyBackspace,
     SelectionUp,
@@ -162,6 +163,12 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         description: "Apply the highlighted completion",
     },
     KeyBinding {
+        id: Some(KeyBindingId::ApplyCompletionPathOnly),
+        shortcut: "Shift+Tab",
+        context: BindingContext::Chat,
+        description: "Apply the highlighted @-file completion as a plain path (no file injection)",
+    },
+    KeyBinding {
         id: Some(KeyBindingId::Submit),
         shortcut: "Enter",
         context: BindingContext::Global,
@@ -265,6 +272,10 @@ pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
             key.code == KeyCode::Enter && key.modifiers == KeyModifiers::SHIFT
         }
         KeyBindingId::ApplyCompletion => key.code == KeyCode::Tab,
+        KeyBindingId::ApplyCompletionPathOnly => {
+            key.code == KeyCode::BackTab
+                || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        }
         KeyBindingId::Cancel => key.code == KeyCode::Esc,
         KeyBindingId::ExitShellOnEmptyBackspace => key.code == KeyCode::Backspace,
         KeyBindingId::SelectionUp => {
@@ -362,6 +373,10 @@ mod tests {
             (
                 KeyBindingId::ApplyCompletion,
                 KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            ),
+            (
+                KeyBindingId::ApplyCompletionPathOnly,
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
             ),
             (
                 KeyBindingId::Cancel,

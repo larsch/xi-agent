@@ -724,6 +724,7 @@ impl App {
                     complete_to: String::new(),
                     loading: true,
                     error: false,
+                    hint: false,
                     match_range: None,
                 }]
             } else {
@@ -748,6 +749,7 @@ impl App {
                             complete_to: format!("/resume_session {}", meta.id),
                             loading: false,
                             error: false,
+                            hint: false,
                             match_range: None,
                         }
                     })
@@ -760,6 +762,7 @@ impl App {
                 complete_to: String::new(),
                 loading: true,
                 error: false,
+                hint: false,
                 match_range: None,
             }]
         };
@@ -795,6 +798,7 @@ impl App {
                 complete_to: String::new(),
                 loading: true,
                 error: false,
+                hint: false,
                 match_range: None,
             });
 
@@ -804,6 +808,7 @@ impl App {
                 complete_to: String::new(),
                 loading: false,
                 error: false,
+                hint: false,
                 match_range: None,
             }));
         }
@@ -1247,14 +1252,32 @@ impl App {
     /// move the cursor to the end of the line. No-ops on loading indicators.
     ///
     /// For `@<file>` completions, replaces only the `@` token portion of the
-    /// input rather than the entire textarea, preserving surrounding text.
+    /// input rather than the entire textarea, preserving surrounding text and
+    /// keeping the `@` prefix so the file is injected on submit.
     pub fn apply_completion(&mut self) {
+        self.apply_completion_inner(true);
+    }
+
+    /// Like [`apply_completion`] but drops the `@` prefix so the completed
+    /// path becomes plain text (no file injection on submit). Only meaningful
+    /// for `@<file>` completions; behaves identically for other completions.
+    pub fn apply_completion_path_only(&mut self) {
+        self.apply_completion_inner(false);
+    }
+
+    /// Shared implementation for [`apply_completion`] and
+    /// [`apply_completion_path_only`].
+    ///
+    /// When `preserve_at` is true and the textarea has an `@` token, the
+    /// `@` is kept so the file is injected on submit. When `false`, the `@`
+    /// is dropped and only the raw path remains.
+    fn apply_completion_inner(&mut self, preserve_at: bool) {
         let item = match self
             .completion
             .completions
             .get(self.completion.completion_selected)
         {
-            Some(i) if !i.loading && !i.complete_to.is_empty() => i,
+            Some(i) if !i.loading && !i.hint && !i.complete_to.is_empty() => i,
             _ => return,
         };
 
@@ -1263,14 +1286,22 @@ impl App {
 
         // Check if the textarea contains an @ token that triggered file completions.
         if let Some(range) = Self::find_at_token(&input) {
-            // Replace just the @token portion with @ + completed path.
             let completed_path = &item.complete_to;
-            let new_text = format!(
-                "{}@{}{}",
-                &input[..range.0],
-                completed_path,
-                &input[range.1..]
-            );
+            let new_text = if preserve_at {
+                format!(
+                    "{}@{}{}",
+                    &input[..range.0],
+                    completed_path,
+                    &input[range.1..]
+                )
+            } else {
+                format!(
+                    "{}{}{}",
+                    &input[..range.0],
+                    completed_path,
+                    &input[range.1..]
+                )
+            };
             self.textarea = TextArea::new(new_text.lines().map(|s| s.to_string()).collect());
         } else {
             // Standard completion: replace entire textarea.
