@@ -41,9 +41,13 @@ impl OllamaProvider {
 
     /// Look up the context-window size for `model` from the cache populated by
     /// [`OllamaProvider::list_models`].  Returns `None` on cache miss.
+    ///
+    /// Normalises the model name by stripping a trailing `:latest` tag so that
+    /// `qwen3-coder` and `qwen3-coder:latest` hit the same cache entry.
     pub fn cached_context_window(model: &str) -> Option<usize> {
         let map = context_cache().read().ok()?;
-        map.get(model).copied()
+        let normalized = model.strip_suffix(":latest").unwrap_or(model);
+        map.get(normalized).or_else(|| map.get(model)).copied()
     }
 }
 
@@ -81,7 +85,13 @@ pub async fn fetch_and_cache_context_window(
                 if let Some(ctx_len) = ctx {
                     log::debug!("ollama model {model_name} context_length={ctx_len}");
                     if let Ok(mut map) = context_cache().write() {
+                        // Store both the raw name and the tag-normalised form so
+                        // that cached_context_window hits regardless of :latest.
+                        let normalized = model_name.strip_suffix(":latest").unwrap_or(model_name);
                         map.insert(model_name.to_string(), ctx_len);
+                        if normalized != model_name {
+                            map.insert(normalized.to_string(), ctx_len);
+                        }
                     }
                 }
             }

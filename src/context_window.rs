@@ -3,9 +3,11 @@ use crate::llm::{copilot::CopilotProvider, ollama::OllamaProvider};
 /// Return the context-window size (in tokens) for a known model name.
 ///
 /// Checks the Copilot model metadata cache first (populated by
-/// `CopilotProvider::list_models()`), then falls back to a hard-coded table
-/// for other providers and for Copilot models used before `list_models()` has
-/// been called.
+/// `CopilotProvider::list_models()`), then the Ollama `/api/show` metadata
+/// cache (covers Ollama and Open WebUI providers — the GGUF context_length
+/// reflects the model's default, which users may override with `num_ctx`),
+/// and finally a hard-coded fallback table for providers and models not
+/// covered by the above.
 ///
 /// Returns `None` for unrecognised models.
 pub fn context_window_for_model(model: &str) -> Option<usize> {
@@ -21,7 +23,16 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
     }
 
     // Fallback: hard-coded table for all other providers and cold-start.
-    // Normalise to lowercase for matching.
+    if let Some(cw) = hardcoded_context_window(model) {
+        return Some(cw);
+    }
+
+    None
+}
+
+/// Hard-coded context window table for known model families.
+/// Used only as a fallback for providers that don't supply live metadata.
+fn hardcoded_context_window(model: &str) -> Option<usize> {
     let m = model.to_ascii_lowercase();
     // Check prefixes / substrings for common model families.
     if m.starts_with("o3-mini") {
