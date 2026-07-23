@@ -910,11 +910,39 @@ impl App {
                     // can read it.
                     self.textarea = TextArea::new(vec![text.clone()]);
                     self.textarea.move_cursor(CursorMove::End);
+                    // Snapshot the ToolCall id before commit_step_branch
+                    // switches sessions.  The cursor points to the ask_user
+                    // ToolResult, whose id matches the preceding ToolCall.
+                    let tool_call_id = self.step_back.cursor.and_then(|idx| {
+                        self.session
+                            .session_state
+                            .as_ref()
+                            .and_then(|ss| ss.events().get(idx))
+                            .and_then(|ev| match ev {
+                                crate::session_event::SessionEvent::ToolResult {
+                                    id, name, ..
+                                } if name == "ask_user" => Some(id.clone()),
+                                _ => None,
+                            })
+                    });
                     // Commit the step branch (creates new session from events
                     // up to the ask_user ToolResult, excluding it).
                     self.commit_step_branch();
-                    // Append the answer as a UserMessage to the branch session.
-                    self.append_user_message(text);
+                    // Append a replacement ToolResult, completing the turn
+                    // with the new answer.
+                    if let Some(id) = tool_call_id {
+                        self.session.append_event_immediate(
+                            crate::session_event::SessionEvent::ToolResult {
+                                id,
+                                name: "ask_user".to_string(),
+                                content: text,
+                                is_error: false,
+                                display_range: None,
+                                include_in_llm: true,
+                                timestamp: Self::now_ts(),
+                            },
+                        );
+                    }
                     self.reset_textarea();
                     // Set pending_finalize so the main loop launches the turn
                     // on the next iteration.
