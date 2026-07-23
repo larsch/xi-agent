@@ -88,8 +88,6 @@ pub struct UrlNormalization {
     pub default_scheme: &'static str,
     /// Default port to apply when none is present (e.g. `Some(11434)` for Ollama).
     pub default_port: Option<u16>,
-    /// Example URL hint shown to the user in the textarea.
-    pub endpoint_hint: &'static str,
     /// Input label shown next to the textarea (e.g. `"ollama URL: "`).
     pub endpoint_label: &'static str,
 }
@@ -187,7 +185,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
             default_scheme: "https",
             default_port: None,
             endpoint_label: "URL: ",
-            endpoint_hint: "https://openrouter.ai/api/v1   Enter confirm   Esc cancel",
         }),
     },
     BackendPresetDef {
@@ -229,7 +226,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
             default_scheme: "http",
             default_port: Some(11434),
             endpoint_label: "ollama URL: ",
-            endpoint_hint: "http://host:11434   Enter confirm   Esc cancel",
         }),
     },
     BackendPresetDef {
@@ -256,7 +252,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
             default_scheme: "https",
             default_port: None,
             endpoint_label: "open-webui URL: ",
-            endpoint_hint: "https://my-webui.example.com   Enter confirm   Esc cancel",
         }),
     },
     BackendPresetDef {
@@ -272,7 +267,6 @@ pub const BACKEND_PRESET_CATALOG: &[BackendPresetDef] = &[
             default_scheme: "https",
             default_port: None,
             endpoint_label: "URL: ",
-            endpoint_hint: "https://my-endpoint.example.com/v1   Enter confirm   Esc cancel",
         }),
     },
     BackendPresetDef {

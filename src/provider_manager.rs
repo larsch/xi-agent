@@ -352,36 +352,6 @@ impl SetupInputKind {
             },
         }
     }
-
-    pub fn prompt_hint(self, instance: Option<&ProviderInstance>) -> String {
-        match self {
-            Self::Name => "work-webui   Enter confirm   Esc cancel".to_string(),
-            Self::BaseUrl => match instance {
-                Some(p) => p
-                    .backend_preset
-                    .def()
-                    .url_normalization
-                    .as_ref()
-                    .map(|n| n.endpoint_hint.to_string())
-                    .unwrap_or_else(|| {
-                        "https://example.com   Enter confirm   Esc cancel".to_string()
-                    }),
-                None => "https://example.com   Enter confirm   Esc cancel".to_string(),
-            },
-            Self::ApiKey => match instance {
-                Some(p) if p.api_key.is_some() => "Enter keep current   Esc cancel".to_string(),
-                Some(p) => match p.backend_preset {
-                    BackendPreset::OpenRouter => "sk-or-…   Enter confirm   Esc cancel".to_string(),
-                    BackendPreset::OpenWebUi => "sk-…   Enter confirm   Esc cancel".to_string(),
-                    BackendPreset::OpenAiCompatible | BackendPreset::OpenAi => {
-                        "sk-…   Enter confirm   Esc cancel".to_string()
-                    }
-                    _ => "token   Enter confirm   Esc cancel".to_string(),
-                },
-                None => "token   Enter confirm   Esc cancel".to_string(),
-            },
-        }
-    }
 }
 
 /// Format a provider error into a user-friendly English sentence.

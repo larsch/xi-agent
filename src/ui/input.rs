@@ -298,7 +298,7 @@ pub(super) fn render_input_panel(
             app.textarea.lines().to_vec(),
             app.textarea.cursor(),
             kind.prompt_label(instance.as_ref()),
-            Some(kind.prompt_hint(instance.as_ref())),
+            None,
         )
     } else {
         (
