@@ -165,6 +165,7 @@ impl App {
             partial_snapshot: None,
             streaming_field,
             running_output: String::new(),
+            last_output_line_count: 0,
             result: None,
         });
     }
@@ -266,6 +267,7 @@ impl App {
                 partial_snapshot: Some(args.clone()),
                 streaming_field: None,
                 running_output: String::new(),
+                last_output_line_count: 0,
                 result: None,
             });
         }
@@ -282,11 +284,20 @@ impl App {
     }
 
     fn on_tool_output_chunk(&mut self, id: String, chunk: String) {
-        if !chunk.trim().is_empty() {
-            self.agent_turn.record_output("tool_output_chunk");
-        }
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.running_output.push_str(&chunk);
+            // Only signal visible output when the visual block grows.
+            // Tail-truncated bodies are capped at 8 lines (default tail_lines).
+            // Once the visual block stops growing, new chunks merely scroll
+            // within the same window — keep the throbber visible so it
+            // doesn't flicker and shift the text.
+            let new_count = entry.running_output.lines().count();
+            let new_visual = new_count.min(8);
+            let prev_visual = entry.last_output_line_count.min(8);
+            if new_visual > prev_visual && !chunk.trim().is_empty() {
+                self.agent_turn.record_output("tool_output_chunk");
+            }
+            entry.last_output_line_count = new_count;
         }
     }
 

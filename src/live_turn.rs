@@ -46,6 +46,9 @@ pub struct LiveToolEntry {
     /// Live output chunks received while the tool is still running.
     /// Cleared when `result` is populated.
     pub running_output: String,
+    /// Track the last recorded line count of `running_output` so we only
+    /// signal a throbber-hiding output event when the visual block grows.
+    pub last_output_line_count: usize,
     pub result: Option<LiveToolResult>,
 }
 
@@ -268,6 +271,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: None,
             running_output: String::new(),
+            last_output_line_count: 0,
             result: Some(LiveToolResult {
                 content: "content".to_string(),
                 is_error: false,
@@ -337,6 +341,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: Some("path".to_string()),
             running_output: String::new(),
+            last_output_line_count: 0,
             result: None, // result not yet arrived
         });
         let overlay = live.render_overlay(false);
@@ -377,6 +382,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: Some("path".to_string()),
             running_output: String::new(),
+            last_output_line_count: 0,
             result: None,
         });
         let overlay = live.render_overlay(false);
@@ -402,6 +408,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: Some("path".to_string()),
             running_output: String::new(),
+            last_output_line_count: 0,
             result: None,
         });
         let overlay = live.render_overlay(false);
