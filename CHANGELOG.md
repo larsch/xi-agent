@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.5.0 — 2026-07-20
+
+### Added
+
+- **Ctrl-Z suspend/resume**: idle-only Ctrl‑Z suspend and foreground resume
+  support. The TUI is recreated on resume to avoid cursor query races (#4, #5, #6).
+- **Tab in ask_user**: pressing Tab in the ask_user prompt copies the
+  highlighted option into the input field for editing before submitting.
+
+### Fixed
+
+- **Streaming edit diff stabilisation**: prefix-matching and symmetric
+  common-lines computation produce fewer flickering diffs during streaming
+  `edit_file` results.
+- **Throbber gaps**: the bottom gap now shrinks instead of shifting content
+  when the throbber appears, and the throbber is hidden only when tool output
+  visually grows.
+- **Streaming tool call labels**: streaming tool call labels and results use
+  `┆` (not `╰`) for a cleaner flowing look.
+- **Newlines in user messages**: newlines are now correctly preserved when
+  rendering user messages in the log.
+- **Provider menu login**: the login option in `/provider` menu no longer
+  does nothing.
+- **Provider setup prompt**: removed misleading "leave empty to keep
+  current" hint from the API key prompt.
+- **Ollama context window**: context window is now discovered via
+  `/api/ps` instead of GGUF metadata; model tags are normalised in the
+  cache.
+- **`--model` CLI override**: the `--model` flag is now correctly applied
+  to the provider instance on startup.
+- **Step-back ask_user**: the ask_user question text is preserved when
+  stepping back and re-answering.
+- **Windows build**: `fmt`, `clippy`, and `check` now pass with zero
+  warnings on Windows; cross-compile build scripts fixed.
+
+### Internal
+
+- `main.rs` decomposed into modules and handler functions.
+- Terminal lifecycle extracted into its own module with a `recreate_terminal`
+  helper.
+- Dimmed hint text removed from provider setup input.
+- Python program test command added.
+
 ## v0.4.0 — 2026-07-05
 
 ### Added
