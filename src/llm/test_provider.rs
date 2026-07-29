@@ -481,10 +481,10 @@ fn edit_file_stream(old_text: String, new_text: String) -> LlmStream {
 }
 
 /// Stream the JSON args of a tool call in small chunks (~4-8 chars each) at
-/// 20 chunks per second (50 ms delay between chunks).
+/// Stream tool call args in small chunks (~4-8 chars each).
 ///
 /// Yields: `ToolCallStart`, N×`ToolCallArgsDelta`, then `ToolCall`, then `Done`.
-fn streaming_tool_call(tool_name: String, args: serde_json::Value) -> LlmStream {
+fn streaming_tool_call(tool_name: String, args: serde_json::Value, delay_ms: u64) -> LlmStream {
     let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
     Box::pin(stream! {
         let id = "test-1".to_string();
@@ -503,7 +503,7 @@ fn streaming_tool_call(tool_name: String, args: serde_json::Value) -> LlmStream 
             let partial_json = args_str[pos..end].to_string();
             pos = end;
             chunk_size = if chunk_size == 4 { 8 } else { 4 };
-            sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(delay_ms)).await;
             yield LlmEvent::ToolCallArgsDelta {
                 id: id.clone(),
                 partial_json,
@@ -543,6 +543,7 @@ fn write_edit_write_stream(path: String) -> LlmStream {
             "path": path,
             "content": WRITE_EDIT_CONTENT,
         }),
+        50,
     )
 }
 
@@ -586,6 +587,7 @@ context line 12: jigs vex bud\n\
             "old_text": old_text,
             "new_text": new_text,
         }),
+        50,
     )
 }
 
@@ -681,6 +683,7 @@ fn streaming_python_stream() -> LlmStream {
         serde_json::json!({
             "script": "import time\nfor i in range(1, 11):\n    print(f'line {i}: processing chunk {i}...')\n    time.sleep(1)\n"
         }),
+        50,
     )
 }
 
@@ -692,6 +695,7 @@ fn streaming_python_program_stream() -> LlmStream {
         serde_json::json!({
             "script": "import json, math, time\n\ndef stats(values):\n    n = len(values)\n    mean = sum(values) / n\n    sv = sorted(values)\n    var = sum((x - mean) ** 2 for x in values) / n\n    return {\n        \"n\": n,\n        \"mean\": round(mean, 2),\n        \"std\": round(math.sqrt(var), 2),\n        \"median\": sv[n // 2],\n        \"min\": sv[0],\n        \"max\": sv[-1],\n    }\n\nprint(\"Running stats demo...\", flush=True)\ntime.sleep(0.3)\ndata = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]\nprint(f\"Data ({len(data)} values): {data}\", flush=True)\ntime.sleep(0.3)\nresult = stats(data)\nprint(json.dumps(result, indent=2))\nprint(\"Done.\", flush=True)"
         }),
+        50,
     )
 }
 
@@ -703,6 +707,7 @@ fn streaming_bash_stream() -> LlmStream {
         serde_json::json!({
             "command": "for i in $(seq 1 10); do echo \"line $i: $(date +%H:%M:%S)\"; sleep 1; done"
         }),
+        50,
     )
 }
 
@@ -721,7 +726,7 @@ fn streaming_ask_stream(question: String, context: Option<&'static str>) -> LlmS
     if let Some(ctx) = context {
         args["context"] = serde_json::Value::String(ctx.to_string());
     }
-    streaming_tool_call("ask_user".to_string(), args)
+    streaming_tool_call("ask_user".to_string(), args, 50)
 }
 
 /// Build a streaming ask_user tool call with context, options, and freeform.
@@ -738,6 +743,7 @@ fn streaming_ask_type_stream(question: String) -> LlmStream {
             "options": [],
             "allowFreeform": true,
         }),
+        50,
     )
 }
 
@@ -755,6 +761,7 @@ fn streaming_ask_notype_stream(question: String) -> LlmStream {
             "options": options,
             "allowFreeform": false,
         }),
+        50,
     )
 }
 

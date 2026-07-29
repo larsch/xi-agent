@@ -949,11 +949,17 @@ fn render_diff_body(
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
 
+    /// True when `a` and `b` match — either exactly, or one is a prefix of
+    /// the other (the streaming case: a partial line being built up).
+    fn lines_match(a: &str, b: &str) -> bool {
+        a == b || a.starts_with(b) || b.starts_with(a)
+    }
+
     // Compute common head length.
     let common_head = old_lines
         .iter()
         .zip(new_lines.iter())
-        .take_while(|(a, b)| a == b)
+        .take_while(|(a, b)| lines_match(a, b))
         .count();
 
     // Compute common tail length (must not overlap with head).
@@ -967,7 +973,7 @@ fn render_diff_body(
                 .iter()
                 .rev(),
         )
-        .take_while(|(a, b)| a == b)
+        .take_while(|(a, b)| lines_match(a, b))
         .count();
 
     let old_diff = &old_lines[common_head..old_lines.len() - common_tail];
@@ -975,9 +981,6 @@ fn render_diff_body(
 
     let old_total = old_diff.len();
     let new_total = new_diff.len();
-
-    let is_pure_addition = old_total == 0;
-    let is_pure_removal = new_total == 0;
 
     let content_width = width.saturating_sub(3).max(1);
 
@@ -1035,14 +1038,18 @@ fn render_diff_body(
             }
         };
 
-    // Removed block (omit common-line placeholders when it's a pure addition).
+    let has_content = old_total > 0 || new_total > 0;
+
+    // ── Common head — once in each block for symmetry ─────────────────────
+    if common_head > 0 && has_content {
+        out.push(placeholder_result_line(
+            format!("… {common_head} common lines"),
+            removed_color,
+        ));
+    }
+
+    // ── Removed lines ────────────────────────────────────────────────────
     if old_total > 0 {
-        if common_head > 0 && !is_pure_removal {
-            out.push(placeholder_result_line(
-                format!("… {common_head} common lines"),
-                removed_color,
-            ));
-        }
         if full_output {
             render_diff_block(out, old_diff, removed_color);
         } else {
@@ -1050,22 +1057,28 @@ fn render_diff_body(
         }
         let truncated = !full_output && old_total > max_lines_per_side;
         let total_filler = if truncated { old_total } else { 0 };
-        let common_filler = if common_tail > 0 && !is_pure_removal {
-            common_tail
-        } else {
-            0
-        };
+        let common_filler = if common_tail > 0 { common_tail } else { 0 };
         push_total_common(out, total_filler, common_filler, removed_color);
     }
 
-    // Added block (omit common-line placeholders when it's a pure removal).
+    // ── Common tail filler (removed side) ─────────────────────────────────
+    if common_tail > 0 && has_content && old_total == 0 {
+        out.push(placeholder_result_line(
+            format!("… {common_tail} common lines"),
+            removed_color,
+        ));
+    }
+
+    // ── Common head (added side) ─────────────────────────────────────────
+    if common_head > 0 && has_content {
+        out.push(placeholder_result_line(
+            format!("… {common_head} common lines"),
+            added_color,
+        ));
+    }
+
+    // ── Added lines ──────────────────────────────────────────────────────
     if new_total > 0 {
-        if common_head > 0 && !is_pure_addition {
-            out.push(placeholder_result_line(
-                format!("… {common_head} common lines"),
-                added_color,
-            ));
-        }
         if full_output {
             render_diff_block(out, new_diff, added_color);
         } else {
@@ -1073,12 +1086,16 @@ fn render_diff_body(
         }
         let truncated = !full_output && new_total > max_lines_per_side;
         let total_filler = if truncated { new_total } else { 0 };
-        let common_filler = if common_tail > 0 && !is_pure_addition {
-            common_tail
-        } else {
-            0
-        };
+        let common_filler = if common_tail > 0 { common_tail } else { 0 };
         push_total_common(out, total_filler, common_filler, added_color);
+    }
+
+    // ── Common tail filler (added side) ───────────────────────────────────
+    if common_tail > 0 && has_content && new_total == 0 {
+        out.push(placeholder_result_line(
+            format!("… {common_tail} common lines"),
+            added_color,
+        ));
     }
 }
 
@@ -1772,7 +1789,8 @@ mod tests {
 
     #[test]
     fn edit_file_pure_addition_no_common_lines_placeholders() {
-        // old_text is empty → pure addition; common-line placeholders must not appear.
+        // Pure addition: old_text=prefix, new_text=prefix+new_line.
+        // common-lines annotation must appear so the user knows context was skipped.
         let call = Message::tool_call(
             "c1",
             "edit_file",
@@ -1797,8 +1815,8 @@ mod tests {
             })
             .collect();
         assert!(
-            !text.iter().any(|t| t.contains("common lines")),
-            "pure addition should not show common-lines placeholders; got: {text:?}"
+            text.iter().any(|t| t.contains("1 common lines")),
+            "pure addition must show common-lines annotation; got: {text:?}"
         );
         assert!(
             text.iter().any(|t| t.contains("new line")),
@@ -1808,7 +1826,8 @@ mod tests {
 
     #[test]
     fn edit_file_pure_removal_no_common_lines_placeholders() {
-        // new_text is empty → pure removal; common-line placeholders must not appear.
+        // Pure removal: old_text=prefix+old_line, new_text=prefix.
+        // common-lines annotation must appear so the user knows context was skipped.
         let call = Message::tool_call(
             "c1",
             "edit_file",
@@ -1833,8 +1852,8 @@ mod tests {
             })
             .collect();
         assert!(
-            !text.iter().any(|t| t.contains("common lines")),
-            "pure removal should not show common-lines placeholders; got: {text:?}"
+            text.iter().any(|t| t.contains("1 common lines")),
+            "pure removal must show common-lines annotation; got: {text:?}"
         );
         assert!(
             text.iter().any(|t| t.contains("old line")),
@@ -2417,6 +2436,186 @@ mod tests {
         assert!(
             !body_text.contains("total lines"),
             "full_output must not truncate:\n{body_text}"
+        );
+    }
+
+    // ── Streaming diff stability regression ───────────────────────────────────
+
+    /// Simulate the write-edit streaming chunk-by-chunk (as
+    /// `streaming_tool_call` does: 4-8 chars alternating).  At each chunk,
+    /// complete the partial JSON with `jawohl`, extract `old_text` / `new_text`,
+    /// render the diff body, and verify two invariants:
+    ///
+    /// 1. The first diff body line must be either `context line 1` (the first
+    ///    shared-context line) or a `… N common lines` placeholder — **never**
+    ///    a mid-context line without the annotation.
+    ///
+    /// 2. The diff body changes shape at least once during streaming (the flicker).
+    #[test]
+    fn streaming_edit_diff_flickers_when_old_text_arrives_before_new_text() {
+        // Real write-edit content: 6 lines of shared context above, one
+        // differing target line, 6 lines of shared context below.
+        let shared_head = "\
+context line 1: The quick brown fox\n\
+context line 2: jumps over the lazy dog\n\
+context line 3: Pack my box with five\n\
+context line 4: dozen liquor jugs\n\
+context line 5: How vexingly quick\n\
+context line 6: daft zebras jump\n\
+";
+        let shared_tail = "\
+context line 7: The five boxing wizards\n\
+context line 8: jump quickly\n\
+context line 9: Sphinx of black quartz\n\
+context line 10: judge my vow\n\
+context line 11: Waltz nymph for quick\n\
+context line 12: jigs vex bud\n\
+";
+        let full_old =
+            format!("{shared_head}TARGET LINE: original content to be replaced\n{shared_tail}");
+        let full_new =
+            format!("{shared_head}TARGET LINE: replaced content — edit succeeded!\n{shared_tail}");
+
+        // Build the exact JSON that write_edit_edit_stream emits, then chunk it
+        // the same way streaming_tool_call does (4-8 chars alternating).
+        let full_json = serde_json::to_string(&serde_json::json!({
+            "path": "/tmp/test.txt",
+            "old_text": full_old,
+            "new_text": full_new,
+        }))
+        .unwrap();
+        let chunks: Vec<String> = {
+            let bytes = full_json.as_bytes();
+            let mut pos = 0;
+            let mut chunk_size = 4usize;
+            let mut v = Vec::new();
+            while pos < bytes.len() {
+                let end = (pos + chunk_size).min(bytes.len());
+                let end = (pos..=end)
+                    .rev()
+                    .find(|&i| full_json.is_char_boundary(i))
+                    .unwrap_or(end);
+                v.push(full_json[pos..end].to_string());
+                pos = end;
+                chunk_size = if chunk_size == 4 { 8 } else { 4 };
+            }
+            v
+        };
+
+        // Helper: render the diff body given old_text / new_text strings.
+        let render_body = |old: &str, new: &str| -> String {
+            let mut msg = Message {
+                role: Role::ToolCall,
+                tool_call_id: Some("c1".to_string()),
+                tool_name: Some("edit_file".to_string()),
+                tool_args: None,
+                tool_partial_snapshot: Some(serde_json::json!({
+                    "path": "/tmp/test.txt",
+                    "old_text": old,
+                    "new_text": new,
+                })),
+                ..Message::default()
+            };
+            msg.role = Role::ToolCall;
+            let (lines, _) = build_log_lines(
+                std::slice::from_ref(&msg),
+                false,
+                120,
+                &cfg(),
+                &crate::theme::Theme::default(),
+                &crate::config::DisplayConfig::default(),
+            );
+            if lines.len() <= 1 {
+                return String::new();
+            }
+            lines[1..]
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut prev_body: Option<String> = None;
+        let mut flickered = false;
+        let mut partial = String::new();
+
+        for (_i, chunk) in chunks.iter().enumerate() {
+            partial.push_str(chunk);
+
+            // Mimic on_tool_call_args_delta: complete + parse partial JSON.
+            let (old_str, new_str) = if let Ok(completed) = jawohl::complete_json(&partial)
+                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&completed)
+            {
+                (
+                    parsed
+                        .get("old_text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    parsed
+                        .get("new_text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            } else {
+                continue; // JSON not yet completable
+            };
+
+            if old_str.is_empty() && new_str.is_empty() {
+                continue; // no fields available yet
+            }
+
+            let body = render_body(&old_str, &new_str);
+            if body.is_empty() {
+                continue;
+            }
+
+            // ── Invariant: once old_text contains at least one full line, the
+            //    first diff body line must contain either "context line 1"
+            //    (the first shared-context line) or "common lines"
+            //    (a "… N common lines" placeholder). ──
+            if old_str.contains('\n') {
+                let first_line = body.lines().next().unwrap_or("");
+                assert!(
+                    first_line.contains("context line 1") || first_line.contains("common lines"),
+                    "chunk {_i}: first diff body line must contain 'context line 1' or 'common lines'\n\
+                     old_text  len={}  new_text len={}\n\
+                     first_line: {first_line}\n\
+                     body:\n{body}",
+                    old_str.len(),
+                    new_str.len(),
+                );
+            }
+
+            // Track whether the body shape actually changes (the flicker).
+            if let Some(ref prev) = prev_body
+                && prev != &body
+            {
+                flickered = true;
+            }
+            prev_body = Some(body);
+        }
+
+        assert!(
+            flickered,
+            "diff body never changed during streaming — flicker not reproduced"
+        );
+
+        // Sanity: final diff contains the expected target lines.
+        let final_body = prev_body.unwrap();
+        assert!(
+            final_body.contains("original content to be replaced"),
+            "final diff must contain old target line:\n{final_body}"
+        );
+        assert!(
+            final_body.contains("replaced content — edit succeeded!"),
+            "final diff must contain new target line:\n{final_body}"
         );
     }
 }
