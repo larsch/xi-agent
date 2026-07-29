@@ -1383,7 +1383,14 @@ fn append_message_markdown(
     bg: Color,
     markdown_theme: &crate::theme::MarkdownTheme,
 ) {
-    let md_lines = crate::markdown::render_with_theme(content, width, "", markdown_theme);
+    // Preserve user newlines: convert isolated \n to markdown hard breaks (  \n)
+    // while leaving \n\n (paragraph breaks) intact.
+    // Uses \x00 as a temporary placeholder for \n\n.
+    let processed = content
+        .replace("\n\n", "\x00")
+        .replace('\n', "  \n")
+        .replace('\x00', "\n\n");
+    let md_lines = crate::markdown::render_with_theme(&processed, width, "", markdown_theme);
     if md_lines.is_empty() {
         return;
     }
