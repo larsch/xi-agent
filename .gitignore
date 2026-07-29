@@ -4,8 +4,8 @@
 # User-specific Cargo config
 .cargo/
 
-# Cargo lock file (keep for binaries, remove for libraries)
-# Cargo.lock
+# Local xi-agent project files
+.xi/
 
 # Editor / IDE
 .vscode/
