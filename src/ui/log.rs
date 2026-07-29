@@ -235,12 +235,30 @@ pub(super) fn build_log_lines(
             }
             Role::ToolCall => {
                 let prev = lines.len();
-                render_tool_call(messages, idx, width, cfg, theme, display, &mut lines);
+                render_tool_call(
+                    messages,
+                    idx,
+                    width,
+                    cfg,
+                    theme,
+                    display,
+                    &mut lines,
+                    msg_streaming,
+                );
                 push_sources(&mut sources, &lines, prev, idx, 3, msg_streaming);
             }
             Role::ToolResult => {
                 let prev = lines.len();
-                render_tool_result(messages, idx, width, cfg, theme, display, &mut lines);
+                render_tool_result(
+                    messages,
+                    idx,
+                    width,
+                    cfg,
+                    theme,
+                    display,
+                    &mut lines,
+                    msg_streaming,
+                );
                 push_sources(&mut sources, &lines, prev, idx, 3, msg_streaming);
             }
         }
@@ -251,6 +269,7 @@ pub(super) fn build_log_lines(
 
 // ── Tool call rendering ───────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_tool_call(
     messages: &[Message],
     idx: usize,
@@ -259,6 +278,7 @@ fn render_tool_call(
     theme: &Theme,
     display: &DisplayConfig,
     out: &mut Vec<Line<'static>>,
+    streaming: bool,
 ) {
     let msg = &messages[idx];
     let name = msg.tool_name.as_deref().unwrap_or("unknown");
@@ -421,10 +441,10 @@ fn render_tool_call(
         if !text.is_empty() {
             append_message_colored_dim_with_icon(out, icon, text, width, color);
         } else {
-            append_message_colored(out, &intent_label, width, color, true, false);
+            append_message_colored(out, &intent_label, width, color, true, streaming);
         }
     } else {
-        append_message_colored(out, &intent_label, width, color, false, false);
+        append_message_colored(out, &intent_label, width, color, false, streaming);
     }
 
     // Show streaming write_file intent body.
@@ -530,6 +550,7 @@ fn render_tool_call(
 
 // ── Tool result rendering ─────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_tool_result(
     messages: &[Message],
     idx: usize,
@@ -538,6 +559,7 @@ fn render_tool_result(
     theme: &Theme,
     _display: &DisplayConfig,
     out: &mut Vec<Line<'static>>,
+    streaming: bool,
 ) {
     let msg = &messages[idx];
     let prev = messages.get(idx.saturating_sub(1));
@@ -573,7 +595,7 @@ fn render_tool_result(
             cfg.full_output,
             color,
             width,
-            false,
+            streaming,
         );
         return;
     }
@@ -619,7 +641,7 @@ fn render_tool_result(
             cfg.full_output,
             color,
             width,
-            false,
+            streaming,
         );
         return;
     }
@@ -643,7 +665,7 @@ fn render_tool_result(
             cfg.full_output,
             color,
             width,
-            false,
+            streaming,
         );
         return;
     }
@@ -667,7 +689,7 @@ fn render_tool_result(
             cfg.full_output,
             color,
             width,
-            false,
+            streaming,
         );
         return;
     }
@@ -699,7 +721,7 @@ fn render_tool_result(
             cfg.full_output,
             color,
             width,
-            false,
+            streaming,
         );
         return;
     }
@@ -722,7 +744,7 @@ fn render_tool_result(
         cfg.full_output,
         color,
         width,
-        false,
+        streaming,
     );
 }
 
@@ -1218,7 +1240,18 @@ fn append_message_colored(
     let visible = visible_segments(&segments);
     let content_width = width.saturating_sub(3).max(1);
     let last_visible_idx = visible.len() - 1;
-    let ending = if streaming { " ┆ " } else { " ╰ " };
+
+    // The last line of a truncated block is a "… N total lines" placeholder
+    // which should always use ┆, not ╰ — truncation implies more content exists.
+    let last_is_truncation_marker = visible.last().is_some_and(|&idx| {
+        let text = segments[idx];
+        text.starts_with("… ") && text.ends_with(" total lines")
+    });
+    let ending = if streaming || last_is_truncation_marker {
+        " ┆ "
+    } else {
+        " ╰ "
+    };
 
     for (vi, &seg_idx) in visible.iter().enumerate() {
         let normalized = normalize_terminal_segment(segments[seg_idx], 0);

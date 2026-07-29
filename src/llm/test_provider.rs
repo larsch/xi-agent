@@ -237,6 +237,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `bash-background-job` | 4-step scripted loop: start `sleep 60` in background, check it is running, kill it, confirm it is gone |
 | `stream-bash` | Streaming `bash` tool call (~4–8 chars/chunk at 20/sec); runs a 10 s script with live output |
 | `stream-python` | Streaming `python` tool call (~4–8 chars/chunk at 20/sec); runs a 10 s script with live output |
+| `python-program` | Streaming `python` tool call with a ~21-line stats program (streamed in chunks at 20/sec) |
 
 ## File tool calls
 
@@ -678,6 +679,17 @@ fn streaming_python_stream() -> LlmStream {
     )
 }
 
+/// Build a streaming python tool call with a medium-length (~21 line) program
+/// that computes descriptive statistics on a sample dataset.
+fn streaming_python_program_stream() -> LlmStream {
+    streaming_tool_call(
+        "run_python".to_string(),
+        serde_json::json!({
+            "script": "import json, math, time\n\ndef stats(values):\n    n = len(values)\n    mean = sum(values) / n\n    sv = sorted(values)\n    var = sum((x - mean) ** 2 for x in values) / n\n    return {\n        \"n\": n,\n        \"mean\": round(mean, 2),\n        \"std\": round(math.sqrt(var), 2),\n        \"median\": sv[n // 2],\n        \"min\": sv[0],\n        \"max\": sv[-1],\n    }\n\nprint(\"Running stats demo...\", flush=True)\ntime.sleep(0.3)\ndata = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]\nprint(f\"Data ({len(data)} values): {data}\", flush=True)\ntime.sleep(0.3)\nresult = stats(data)\nprint(json.dumps(result, indent=2))\nprint(\"Done.\", flush=True)"
+        }),
+    )
+}
+
 /// Build a streaming bash tool call — a 10-second script that produces
 /// output over time to exercise both the streaming headline and live output body.
 fn streaming_bash_stream() -> LlmStream {
@@ -1110,6 +1122,8 @@ impl super::LlmProvider for TestProvider {
             "stream-bash" => streaming_bash_stream(),
 
             "stream-python" => streaming_python_stream(),
+
+            "python-program" => streaming_python_program_stream(),
 
             "run_python" => python_stream(),
 
