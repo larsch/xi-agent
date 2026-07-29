@@ -30,6 +30,9 @@ pub struct TestProvider {
     long_lines_step: Arc<AtomicU8>,
     /// Temp file path used by the long-lines sequence.
     long_lines_path: Arc<std::sync::Mutex<String>>,
+    /// When true, the write-edit sequence will delay 4s after the edit
+    /// result before emitting the summary — enough to trigger the throbber.
+    write_edit_throbber: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TestProvider {
@@ -41,6 +44,7 @@ impl TestProvider {
             write_edit_path: Arc::new(std::sync::Mutex::new(String::new())),
             long_lines_step: Arc::new(AtomicU8::new(0)),
             long_lines_path: Arc::new(std::sync::Mutex::new(String::new())),
+            write_edit_throbber: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -249,6 +253,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 |---------|-------------|
 | `write` | Issue a `write_file` tool call to the system temp directory |
 | `write-edit` | Stream `write_file` then `edit_file` (~4–8 chars/chunk at 20 chunks/sec); edit uses 6 lines of context each side |
+| `write-edit-throbber` | Same as `write-edit` but waits 4 s after edit result before summary — exercises throbber-after-shrink rendering |
 | `long-lines` | 3-step sequence: write 10 very long lines (~200 chars each), grep all, read back (exercises wrapped-line limit in shell and read_file output) |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
@@ -877,13 +882,26 @@ impl super::LlmProvider for TestProvider {
             // Check write-edit sequence first.
             let we_step = self.write_edit_step.load(Ordering::SeqCst);
             if we_step == 1 {
-                self.write_edit_step.store(0, Ordering::SeqCst);
+                self.write_edit_step.store(2, Ordering::SeqCst);
                 let path = self.write_edit_path.lock().unwrap().clone();
                 return write_edit_edit_stream(path);
             }
             if we_step == 2 {
-                // Edit result received — emit summary.
+                // Edit result received — emit summary (after optional throbber delay).
                 self.write_edit_step.store(0, Ordering::SeqCst);
+                if self.write_edit_throbber.swap(false, Ordering::SeqCst) {
+                    return Box::pin(stream! {
+                        // Delay long enough for the edit_file result block to finish
+                        // rendering and the throbber to appear (240 ms idle threshold).
+                        sleep(Duration::from_secs(4)).await;
+                        let summary = "write-edit sequence complete: wrote the file and edited it with 6 lines of context on each side.\n\
+                                      (4 s delay inserted after edit to exercise throbber-after-shrink rendering.)\n";
+                        for word in summary.split_inclusive(' ').map(ToOwned::to_owned).collect::<Vec<_>>() {
+                            yield LlmEvent::Token { text: word, phase: AssistantPhase::Final };
+                        }
+                        yield LlmEvent::Done;
+                    });
+                }
                 return stream_owned(
                     "write-edit sequence complete: wrote the file and edited it with 6 lines of context on each side.\n"
                         .to_string(),
@@ -1133,6 +1151,26 @@ impl super::LlmProvider for TestProvider {
                 // Generate a random temp file path, store it, then stream write_file.
                 let fname = format!(
                     "xi-test-write-edit-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0)
+                );
+                let path = std::env::temp_dir()
+                    .join(fname)
+                    .to_string_lossy()
+                    .into_owned();
+                *self.write_edit_path.lock().unwrap() = path.clone();
+                self.write_edit_step.store(1, Ordering::SeqCst);
+                write_edit_write_stream(path)
+            }
+
+            "write-edit-throbber" => {
+                // Same as write-edit but inserts a 4 s delay after the edit
+                // result so the throbber appears while the bottom gap is visible.
+                self.write_edit_throbber.store(true, Ordering::SeqCst);
+                let fname = format!(
+                    "xi-test-write-edit-throbber-{}.txt",
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.subsec_nanos())

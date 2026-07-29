@@ -43,6 +43,7 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
 fn build_log_lines_cached(
     app: &mut App,
     width: usize,
+    inner_height: usize,
     display: &DisplayConfig,
 ) -> (Vec<Line<'static>>, Vec<LineSource>) {
     // Flush any pending session-mutation dirty flag into the log cache.
@@ -78,11 +79,13 @@ fn build_log_lines_cached(
                     Some(ps) => {
                         if total > ps.max_total_lines {
                             ps.max_total_lines = total;
+                            ps.inner_height_when_set = inner_height;
                         }
                     }
                     None => {
                         app.log_view.last_block_padding = Some(PaddingState {
                             max_total_lines: total,
+                            inner_height_when_set: inner_height,
                         });
                     }
                 }
@@ -179,7 +182,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let display = app.display.clone();
 
-    let (cached_lines, hit_map) = build_log_lines_cached(app, log_width, &display);
+    let (cached_lines, hit_map) = build_log_lines_cached(app, log_width, inner_height, &display);
     let total_lines = cached_lines.len();
     // Store hit map for mouse selection in the next event loop iteration.
     app.mouse_select.hit_map = hit_map;
@@ -218,6 +221,17 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.clear_padding();
     }
 
+    let stored_height = app
+        .log_view
+        .last_block_padding
+        .as_ref()
+        .map(|ps| ps.inner_height_when_set)
+        .unwrap_or(inner_height);
+
+    // When the log area shrinks (e.g. throbber appears), the bottom
+    // padding absorbs it so the content position stays stable.
+    let height_decrease = stored_height.saturating_sub(inner_height);
+
     let max_total = app
         .log_view
         .last_block_padding
@@ -234,14 +248,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let visible_lines: Vec<Line<'static>> = {
         let all = cached_lines;
         if block_padding > 0 {
-            // Anchor the viewport top at the content position it had before
-            // the block shrank (max_total_lines - inner_height).  Show all
-            // remaining content from there, then pad with blank lines below.
-            let anchor_top = max_total.saturating_sub(inner_height);
+            // Anchor against the stored height so content stays put when the
+            // log area resizes.  Bottom padding absorbs any shrinkage.
+            let anchor_top = max_total.saturating_sub(stored_height);
             let raw_start = anchor_top.min(total_lines);
             let raw_end = total_lines;
             let raw_lines = raw_end.saturating_sub(raw_start);
-            let bottom_padding = block_padding;
+            let bottom_padding = block_padding.saturating_sub(height_decrease);
             let top_padding = inner_height.saturating_sub(raw_lines + bottom_padding);
 
             let mut v: Vec<Line<'static>> = vec![Line::default(); top_padding];

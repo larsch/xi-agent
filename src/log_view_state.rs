@@ -33,6 +33,10 @@ pub struct LogCache {
 pub(crate) struct PaddingState {
     /// Maximum total rendered line count observed.
     pub(crate) max_total_lines: usize,
+    /// Log area height (inner_height) at the time `max_total_lines` was last
+    /// set.  Used to compensate when the log area shrinks (e.g. throbber
+    /// appears) so the gap absorbs the shrinkage instead of shifting content.
+    pub(crate) inner_height_when_set: usize,
 }
 
 impl LogCache {
