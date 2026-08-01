@@ -198,6 +198,46 @@ impl FileTracker {
         }
     }
 
+    /// Seed the tracker from a session event log so that files the agent
+    /// read or wrote in a previous session are not considered "never read"
+    /// after a session resume.
+    ///
+    /// Scans all [`SessionEvent::ToolCall`] entries for `read_file`,
+    /// `write_file`, and `edit_file` calls and records a current disk
+    /// snapshot for each file path found.  Paths already present in the
+    /// tracker are skipped (their existing snapshot is preserved).  Files
+    /// that no longer exist on disk are silently skipped via the existing
+    /// `record` error handling.
+    ///
+    /// Call this after loading a session from disk so that the staleness
+    /// guard in write/edit tools does not spuriously reject files the
+    /// agent previously interacted with.
+    pub fn seed_from_events(&mut self, events: &[crate::session_event::SessionEvent]) {
+        use crate::session_event::SessionEvent;
+        let mut seen = HashSet::new();
+        for ev in events {
+            let SessionEvent::ToolCall { name, args, .. } = ev else {
+                continue;
+            };
+            if !matches!(name.as_str(), "read_file" | "write_file" | "edit_file") {
+                continue;
+            }
+            let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let path = Path::new(path);
+            if seen.contains(path) {
+                continue;
+            }
+            seen.insert(path.to_path_buf());
+            // Only record if not already tracked — preserves snapshots
+            // from the current session.
+            if !self.files.contains_key(path) {
+                self.record(path);
+            }
+        }
+    }
+
     /// Check whether `path` is tracked by git.
     ///
     /// Uses `git ls-files --error-unmatch <path>` to determine tracking
@@ -766,6 +806,130 @@ mod tests {
         assert!(
             changed.is_empty(),
             "reset should absorb changes, not report them"
+        );
+    }
+
+    // ── seed_from_events tests ──────────────────────────────────────────────
+
+    #[test]
+    fn seed_from_events_records_paths_from_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        std::fs::write(&file_a, "content a\n").unwrap();
+        std::fs::write(&file_b, "content b\n").unwrap();
+
+        use crate::session_event::SessionEvent;
+
+        let events = vec![
+            SessionEvent::ToolCall {
+                id: "c1".to_string(),
+                name: "write_file".to_string(),
+                args: serde_json::json!({"path": file_a.to_str().unwrap(), "content": "x"}),
+                include_in_llm: true,
+                timestamp: 1,
+            },
+            SessionEvent::ToolCall {
+                id: "c2".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": file_b.to_str().unwrap()}),
+                include_in_llm: true,
+                timestamp: 2,
+            },
+            SessionEvent::ToolCall {
+                id: "c3".to_string(),
+                name: "edit_file".to_string(),
+                args: serde_json::json!({"path": file_a.to_str().unwrap(), "old_text": "a", "new_text": "b"}),
+                include_in_llm: true,
+                timestamp: 3,
+            },
+        ];
+
+        let mut tracker = FileTracker::new();
+        tracker.seed_from_events(&events);
+
+        assert!(
+            matches!(tracker.staleness(&file_a), Staleness::Current),
+            "file_a should be tracked after seed"
+        );
+        assert!(
+            matches!(tracker.staleness(&file_b), Staleness::Current),
+            "file_b should be tracked after seed"
+        );
+    }
+
+    #[test]
+    fn seed_from_events_skips_nonexistent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does_not_exist.txt");
+
+        use crate::session_event::SessionEvent;
+
+        let events = vec![SessionEvent::ToolCall {
+            id: "c1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": missing.to_str().unwrap()}),
+            include_in_llm: true,
+            timestamp: 1,
+        }];
+
+        let mut tracker = FileTracker::new();
+        tracker.seed_from_events(&events);
+
+        // File doesn't exist — should not be tracked.
+        assert!(
+            matches!(tracker.staleness(&missing), Staleness::NeverRead),
+            "missing file should not be tracked after seed"
+        );
+    }
+
+    #[test]
+    fn seed_from_events_skips_non_file_tool_calls() {
+        use crate::session_event::SessionEvent;
+
+        let events = vec![SessionEvent::ToolCall {
+            id: "c1".to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "ls"}),
+            include_in_llm: true,
+            timestamp: 1,
+        }];
+
+        let mut tracker = FileTracker::new();
+        // Just ensure no panic.
+        tracker.seed_from_events(&events);
+        // Tracker should still be empty.
+        assert!(tracker.files.is_empty());
+    }
+
+    #[test]
+    fn seed_from_events_does_not_overwrite_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+
+        use crate::session_event::SessionEvent;
+
+        // Record the file first.
+        let mut tracker = FileTracker::new();
+        tracker.record(&file);
+
+        // Now seed with a stale reference to the same file.
+        // The existing snapshot should be preserved.
+        let events = vec![SessionEvent::ToolCall {
+            id: "c1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": file.to_str().unwrap()}),
+            include_in_llm: true,
+            timestamp: 1,
+        }];
+
+        tracker.seed_from_events(&events);
+
+        // File should still be Current.
+        assert!(
+            matches!(tracker.staleness(&file), Staleness::Current),
+            "existing snapshot should be preserved after seed"
         );
     }
 }
