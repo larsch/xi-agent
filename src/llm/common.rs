@@ -427,6 +427,44 @@ where
     })
 }
 
+// ── JSON sanitisation ────────────────────────────────────────────────────────
+
+/// Replace literal ASCII control characters (0x00–0x1F) inside a JSON string
+/// with their JSON escape sequences so that `serde_json::from_str` can parse
+/// the result.
+///
+/// Some models (notably DeepSeek) emit literal newlines (`\n`, 0x0A) inside
+/// JSON string values instead of the required `\\n` escape.  This function
+/// is a best-effort repair that turns those literal characters back into
+/// their escaped form without double-escaping already-escaped sequences.
+///
+/// Tab (0x09) is left alone because it is harmless in practice and
+/// double-escaping `\\t` would be worse than a literal tab.
+pub fn sanitize_json_control_chars(raw: &str) -> String {
+    // Fast path: most accumulated tool-call JSON strings have no control chars.
+    if raw.bytes().all(|b| b >= 0x20) {
+        return raw.to_string();
+    }
+
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            // Leave tab alone — `\t` is already valid JSON whitespace between
+            // tokens, and double-escaping a pre-existing `\\t` is worse than
+            // accepting a stray literal tab character.
+            '\t' => out.push('\t'),
+            // All other control characters → `\uXXXX`.
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -604,5 +642,57 @@ mod tests {
         let err = map_http_error("test", reqwest::StatusCode::IM_A_TEAPOT, "teapot".into());
         assert_eq!(err.kind, crate::llm::ProviderErrorKind::Other);
         assert_eq!(err.status_code, Some(418));
+    }
+
+    // ── sanitize_json_control_chars ──────────────────────────────────────────
+
+    #[test]
+    fn sanitize_passthrough_clean_json() {
+        let input = r#"{"program":"git","args":["commit","-m","fix"]}"#;
+        assert_eq!(sanitize_json_control_chars(input), input);
+    }
+
+    #[test]
+    fn sanitize_escapes_literal_newlines() {
+        let input = "{\"msg\":\"line1\nline2\n\"}";
+        let expected = "{\"msg\":\"line1\\nline2\\n\"}";
+        assert_eq!(sanitize_json_control_chars(input), expected);
+    }
+
+    #[test]
+    fn sanitize_escapes_carriage_return() {
+        let input = "{\"msg\":\"line1\r\nline2\"}";
+        let expected = "{\"msg\":\"line1\\r\\nline2\"}";
+        assert_eq!(sanitize_json_control_chars(input), expected);
+    }
+
+    #[test]
+    fn sanitize_leaves_tab_alone() {
+        let input = "{\"msg\":\"col1\tcol2\"}";
+        assert_eq!(sanitize_json_control_chars(input), input);
+    }
+
+    #[test]
+    fn sanitize_other_control_char_to_unicode_escape() {
+        // 0x01 is SOH — should become \u0001
+        let input = "{\"msg\":\"\u{01}bad\"}";
+        let expected = "{\"msg\":\"\\u0001bad\"}";
+        assert_eq!(sanitize_json_control_chars(input), expected);
+    }
+
+    #[test]
+    fn sanitize_already_escaped_newline_unchanged() {
+        // The two characters backslash + n, NOT a literal 0x0A.
+        let input = r#"{"msg":"line1\\nline2"}"#;
+        assert_eq!(sanitize_json_control_chars(input), input);
+    }
+
+    #[test]
+    fn sanitize_parses_after_repair() {
+        // Simulates the actual DeepSeek bug: literal newlines in commit message.
+        let broken = "{\"args\": [\"commit\",\"-m\",\"fix: hello\n\nworld\"]}";
+        let repaired = sanitize_json_control_chars(broken);
+        let parsed: serde_json::Value = serde_json::from_str(&repaired).unwrap();
+        assert_eq!(parsed["args"][2].as_str().unwrap(), "fix: hello\n\nworld");
     }
 }

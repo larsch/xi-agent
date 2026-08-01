@@ -4,7 +4,8 @@ use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmRequestContext, LlmStream, Message, ModelListFuture,
     ProviderError, ToolDefinition, UsageStats,
     common::{
-        StreamControl, build_http_client, infer_initiator, send_streaming_request, stream_sse_lines,
+        StreamControl, build_http_client, infer_initiator, sanitize_json_control_chars,
+        send_streaming_request, stream_sse_lines,
     },
     provider_format::to_openai_wire,
 };
@@ -161,13 +162,26 @@ impl OpenAiProvider {
                         v.into_iter().map(|(_, tc)| tc).collect()
                     };
                     for (i, tc) in calls.iter_mut().enumerate() {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
-                        events.push(LlmEvent::ToolCall {
-                            id: tc.id.clone().unwrap_or_else(|| format!("call_{i}")),
-                            name: tc.name.clone(),
-                            args,
-                        });
+                        let sanitized = sanitize_json_control_chars(&tc.arguments);
+                        match serde_json::from_str(&sanitized) {
+                            Ok(args) => {
+                                events.push(LlmEvent::ToolCall {
+                                    id: tc.id.clone().unwrap_or_else(|| format!("call_{i}")),
+                                    name: tc.name.clone(),
+                                    args,
+                                });
+                            }
+                            Err(e) => {
+                                events.push(LlmEvent::Error(ProviderError::other(
+                                    "OpenAI",
+                                    format!(
+                                        "failed to parse JSON arguments for tool call '{}': {e}",
+                                        tc.name,
+                                    ),
+                                )));
+                                return StreamControl::Done;
+                            }
+                        }
                     }
                     events.push(LlmEvent::Done);
                     return StreamControl::Done;
