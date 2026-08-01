@@ -5,7 +5,8 @@ use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmRequestContext, LlmStream, Message, ModelListFuture,
     ProviderError, Role, ToolDefinition, UsageStats,
     common::{
-        StreamControl, build_http_client, infer_initiator, send_streaming_request, stream_sse_lines,
+        StreamControl, build_http_client, infer_initiator, sanitize_json_control_chars,
+        send_streaming_request, stream_sse_lines,
     },
     provider_format::to_anthropic_wire,
 };
@@ -301,14 +302,26 @@ impl AnthropicProvider {
 
                     AnthropicEvent::ContentBlockStop { index } => {
                         if let Some(block) = tool_blocks.remove(&index) {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&block.partial_json)
-                                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                            events.push(LlmEvent::ToolCall {
-                                id: block.id,
-                                name: block.name,
-                                args,
-                            });
+                            let sanitized = sanitize_json_control_chars(&block.partial_json);
+                            match serde_json::from_str(&sanitized) {
+                                Ok(args) => {
+                                    events.push(LlmEvent::ToolCall {
+                                        id: block.id,
+                                        name: block.name,
+                                        args,
+                                    });
+                                }
+                                Err(e) => {
+                                    events.push(LlmEvent::Error(ProviderError::other(
+                                        "Anthropic",
+                                        format!(
+                                            "failed to parse JSON arguments for tool call '{}': {e}",
+                                            block.name,
+                                        ),
+                                    )));
+                                    return StreamControl::Done;
+                                }
+                            }
                         }
                     }
 

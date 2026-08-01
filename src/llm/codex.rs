@@ -5,7 +5,8 @@ use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmRequestContext, LlmStream, Message, ModelListFuture,
     ProviderError, Role, ToolDefinition, UsageStats,
     common::{
-        StreamControl, build_http_client, infer_initiator, send_streaming_request, stream_sse_lines,
+        StreamControl, build_http_client, infer_initiator, sanitize_json_control_chars,
+        send_streaming_request, stream_sse_lines,
     },
     provider_format::to_codex_wire,
 };
@@ -324,13 +325,26 @@ impl CodexProvider {
                     CodexEvent::OutputItemDone {
                         item: OutputItem::FunctionCall { id, call_id, name, arguments },
                     } => {
-                        let args: serde_json::Value = serde_json::from_str(&arguments)
-                            .unwrap_or(serde_json::Value::Object(Default::default()));
-                        pending_calls.remove(&id);
-                        if current_call_item_id.as_deref() == Some(&id) {
-                            current_call_item_id = None;
+                        let sanitized = sanitize_json_control_chars(&arguments);
+                        match serde_json::from_str(&sanitized) {
+                            Ok(args) => {
+                                pending_calls.remove(&id);
+                                if current_call_item_id.as_deref() == Some(&id) {
+                                    current_call_item_id = None;
+                                }
+                                events.push(LlmEvent::ToolCall { id: call_id, name, args });
+                            }
+                            Err(e) => {
+                                events.push(LlmEvent::Error(ProviderError::other(
+                                    "Codex",
+                                    format!(
+                                        "failed to parse JSON arguments for tool call '{}': {e}",
+                                        name,
+                                    ),
+                                )));
+                                return StreamControl::Done;
+                            }
                         }
-                        events.push(LlmEvent::ToolCall { id: call_id, name, args });
                     }
 
                     CodexEvent::ResponseCompleted { response }
