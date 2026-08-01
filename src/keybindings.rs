@@ -107,7 +107,7 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
     },
     KeyBinding {
         id: Some(KeyBindingId::ToggleFullOutput),
-        shortcut: "Ctrl+F",
+        shortcut: "Alt+O",
         context: BindingContext::Global,
         description: "Toggle full tool output in the log",
     },
@@ -219,7 +219,7 @@ pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT)
         }
         KeyBindingId::ToggleFullOutput => {
-            key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL)
+            key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::ALT)
         }
         KeyBindingId::ResumeLatestSession => {
             key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -295,7 +295,7 @@ mod tests {
             ),
             (
                 KeyBindingId::ToggleFullOutput,
-                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
             ),
             (
                 KeyBindingId::ResumeLatestSession,

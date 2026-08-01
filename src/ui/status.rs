@@ -36,7 +36,7 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled("[full output — Ctrl+F to toggle]", hint_style));
+        spans.push(Span::styled("[full output — Alt+O to toggle]", hint_style));
     }
 
     let line = if spans.is_empty() {
