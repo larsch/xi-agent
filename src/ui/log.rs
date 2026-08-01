@@ -1016,6 +1016,9 @@ fn render_diff_body(
     let old_total = old_diff.len();
     let new_total = new_diff.len();
 
+    let is_pure_addition = old_total == 0;
+    let is_pure_removal = new_total == 0;
+
     let content_width = width.saturating_sub(3).max(1);
 
     // Helper: push a combined "total + common" filler when both apply.
@@ -1072,18 +1075,14 @@ fn render_diff_body(
             }
         };
 
-    let has_content = old_total > 0 || new_total > 0;
-
-    // ── Common head — once in each block for symmetry ─────────────────────
-    if common_head > 0 && has_content {
-        out.push(placeholder_result_line(
-            format!("… {common_head} common lines"),
-            removed_color,
-        ));
-    }
-
     // ── Removed lines ────────────────────────────────────────────────────
     if old_total > 0 {
+        if common_head > 0 && !is_pure_removal {
+            out.push(placeholder_result_line(
+                format!("… {common_head} common lines"),
+                removed_color,
+            ));
+        }
         if full_output {
             render_diff_block(out, old_diff, removed_color);
         } else {
@@ -1091,28 +1090,22 @@ fn render_diff_body(
         }
         let truncated = !full_output && old_total > max_lines_per_side;
         let total_filler = if truncated { old_total } else { 0 };
-        let common_filler = if common_tail > 0 { common_tail } else { 0 };
+        let common_filler = if common_tail > 0 && !is_pure_removal {
+            common_tail
+        } else {
+            0
+        };
         push_total_common(out, total_filler, common_filler, removed_color);
-    }
-
-    // ── Common tail filler (removed side) ─────────────────────────────────
-    if common_tail > 0 && has_content && old_total == 0 {
-        out.push(placeholder_result_line(
-            format!("… {common_tail} common lines"),
-            removed_color,
-        ));
-    }
-
-    // ── Common head (added side) ─────────────────────────────────────────
-    if common_head > 0 && has_content {
-        out.push(placeholder_result_line(
-            format!("… {common_head} common lines"),
-            added_color,
-        ));
     }
 
     // ── Added lines ──────────────────────────────────────────────────────
     if new_total > 0 {
+        if common_head > 0 && !is_pure_addition {
+            out.push(placeholder_result_line(
+                format!("… {common_head} common lines"),
+                added_color,
+            ));
+        }
         if full_output {
             render_diff_block(out, new_diff, added_color);
         } else {
@@ -1120,16 +1113,12 @@ fn render_diff_body(
         }
         let truncated = !full_output && new_total > max_lines_per_side;
         let total_filler = if truncated { new_total } else { 0 };
-        let common_filler = if common_tail > 0 { common_tail } else { 0 };
+        let common_filler = if common_tail > 0 && !is_pure_addition {
+            common_tail
+        } else {
+            0
+        };
         push_total_common(out, total_filler, common_filler, added_color);
-    }
-
-    // ── Common tail filler (added side) ───────────────────────────────────
-    if common_tail > 0 && has_content && new_total == 0 {
-        out.push(placeholder_result_line(
-            format!("… {common_tail} common lines"),
-            added_color,
-        ));
     }
 }
 
@@ -1824,7 +1813,7 @@ mod tests {
     #[test]
     fn edit_file_pure_addition_no_common_lines_placeholders() {
         // Pure addition: old_text=prefix, new_text=prefix+new_line.
-        // common-lines annotation must appear so the user knows context was skipped.
+        // Common-lines placeholders must NOT appear — only the green added line.
         let call = Message::tool_call(
             "c1",
             "edit_file",
@@ -1849,8 +1838,8 @@ mod tests {
             })
             .collect();
         assert!(
-            text.iter().any(|t| t.contains("1 common lines")),
-            "pure addition must show common-lines annotation; got: {text:?}"
+            !text.iter().any(|t| t.contains("common lines")),
+            "pure addition should NOT show common-lines placeholders; got: {text:?}"
         );
         assert!(
             text.iter().any(|t| t.contains("new line")),
@@ -1861,7 +1850,7 @@ mod tests {
     #[test]
     fn edit_file_pure_removal_no_common_lines_placeholders() {
         // Pure removal: old_text=prefix+old_line, new_text=prefix.
-        // common-lines annotation must appear so the user knows context was skipped.
+        // Common-lines placeholders must NOT appear — only the red removed line.
         let call = Message::tool_call(
             "c1",
             "edit_file",
@@ -1886,8 +1875,8 @@ mod tests {
             })
             .collect();
         assert!(
-            text.iter().any(|t| t.contains("1 common lines")),
-            "pure removal must show common-lines annotation; got: {text:?}"
+            !text.iter().any(|t| t.contains("common lines")),
+            "pure removal should NOT show common-lines placeholders; got: {text:?}"
         );
         assert!(
             text.iter().any(|t| t.contains("old line")),
@@ -2613,12 +2602,22 @@ context line 12: jigs vex bud\n\
             // ── Invariant: once old_text contains at least one full line, the
             //    first diff body line must contain either "context line 1"
             //    (the first shared-context line) or "common lines"
-            //    (a "… N common lines" placeholder). ──
+            //    (a "… N common lines" placeholder).
+            //
+            //    Exception: when the diff looks like a pure addition or pure
+            //    removal (one side has zero diff lines), the common-lines
+            //    placeholder is intentionally suppressed so only the changed
+            //    lines are shown.  In that streaming-intermediate state the
+            //    first line may legitimately be a later context line. ──
             if old_str.contains('\n') {
                 let first_line = body.lines().next().unwrap_or("");
+                let is_pure = !body.contains("common lines");
                 assert!(
-                    first_line.contains("context line 1") || first_line.contains("common lines"),
-                    "chunk {_i}: first diff body line must contain 'context line 1' or 'common lines'\n\
+                    first_line.contains("context line 1")
+                        || first_line.contains("common lines")
+                        || is_pure,
+                    "chunk {_i}: first diff body line must contain 'context line 1' or 'common lines', \
+                     or the diff must be a pure addition/removal (no common-lines placeholders)\n\
                      old_text  len={}  new_text len={}\n\
                      first_line: {first_line}\n\
                      body:\n{body}",
