@@ -44,6 +44,9 @@ pub(crate) enum RunResult {
         url: Option<String>,
         api_key: Option<String>,
     },
+    /// Terminate the process in response to an OS signal, passing the exit code.
+    /// Used for clean shutdown on SIGTERM / SIGINT / SIGHUP / SIGQUIT.
+    Terminate(i32),
 }
 
 pub(crate) enum KeyDispatch {

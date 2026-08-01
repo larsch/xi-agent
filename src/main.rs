@@ -330,6 +330,15 @@ async fn main() -> io::Result<()> {
         match run(&mut terminal, &mut app, &provider, &config).await {
             Ok(RunResult::Quit) | Err(_) => break,
 
+            Ok(RunResult::Terminate(code)) => {
+                // OS signal received — completed turns are already persisted
+                // via the event log.  Install a last-resort guard against hung
+                // cleanup, then restore the terminal and exit.
+                terminal::install_termination_guard();
+                let _ = terminal::shutdown_terminal(&mut terminal, keyboard_enhancements_enabled);
+                std::process::exit(code);
+            }
+
             Ok(RunResult::Suspend) => {
                 terminal::suspend_interactive_ui(&mut terminal, keyboard_enhancements_enabled)?;
                 terminal = terminal::recreate_terminal(
@@ -397,6 +406,49 @@ async fn main() -> io::Result<()> {
 }
 
 use input::{RunResult, apply_paste, handle_key_event, provider_setup_requires_api_key};
+
+// ── Signal event abstraction ─────────────────────────────────────────────
+
+/// A signal event delivered from the OS to the event loop.
+enum SignalEvent {
+    /// Process should terminate with the given exit code.
+    Terminate(i32),
+    /// Process should suspend (SIGTSTP).
+    Suspend,
+}
+
+/// Wait for the next OS signal that requires action.
+///
+/// On Unix this registers handlers for SIGTERM, SIGINT, SIGHUP, SIGQUIT,
+/// and SIGTSTP, then races them against each other.  On non-Unix platforms
+/// this future never resolves.
+async fn next_signal() -> SignalEvent {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        let mut sigint =
+            signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
+        let mut sighup = signal(SignalKind::hangup()).expect("failed to register SIGHUP handler");
+        let mut sigquit = signal(SignalKind::quit()).expect("failed to register SIGQUIT handler");
+        let mut sigtstp = signal(SignalKind::from_raw(libc::SIGTSTP))
+            .expect("failed to register SIGTSTP handler");
+
+        tokio::select! {
+            _ = sigterm.recv() => SignalEvent::Terminate(0),
+            _ = sigint.recv() => SignalEvent::Terminate(130),   // 128 + SIGINT(2)
+            _ = sighup.recv() => SignalEvent::Terminate(129),   // 128 + SIGHUP(1)
+            _ = sigquit.recv() => SignalEvent::Terminate(131),  // 128 + SIGQUIT(3)
+            _ = sigtstp.recv() => SignalEvent::Suspend,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix, never resolve — signals don't apply.
+        std::future::pending().await
+    }
+}
 
 // ── Inner event loop ──────────────────────────────────────────────────────────
 
@@ -520,6 +572,14 @@ async fn run(
                 // flight — the throbber should animate in both cases.
                 if app.streaming() || app.login.refresh_in_progress {
                     needs_redraw = true;
+                }
+            }
+
+            // ── OS signals (Unix) ─────────────────────────────────────────────
+            sig = next_signal() => {
+                match sig {
+                    SignalEvent::Terminate(code) => return Ok(RunResult::Terminate(code)),
+                    SignalEvent::Suspend => return Ok(RunResult::Suspend),
                 }
             }
         }
