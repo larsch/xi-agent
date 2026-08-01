@@ -18,6 +18,10 @@ pub struct OpenAiProvider {
     /// as `reasoning_effort` in the request body.  Only meaningful for
     /// models that support reasoning/thinking (e.g. DeepSeek-R1, o-series).
     reasoning_effort: Option<String>,
+    /// DeepSeek-style `thinking` param (`{"type": "enabled"}`).  Sent in
+    /// addition to `reasoning_effort` when using the DeepSeek API, which
+    /// does not support OpenAI's `reasoning_effort` parameter.
+    deepseek_thinking: Option<serde_json::Value>,
     client: reqwest::Client,
 }
 
@@ -42,6 +46,7 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             extra_headers,
             reasoning_effort: None,
+            deepseek_thinking: None,
             client: build_http_client(),
         }
     }
@@ -53,6 +58,20 @@ impl OpenAiProvider {
     /// thinking (e.g. DeepSeek-R1, OpenAI o-series) will act on it.
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
         self.reasoning_effort = effort;
+        self
+    }
+
+    /// Enable DeepSeek-style thinking mode.
+    ///
+    /// Sends `"thinking": {"type": "enabled"}` in the request body when
+    /// `level` is anything other than [`ThinkingLevel::Off`].  DeepSeek's
+    /// API does not accept OpenAI-style `reasoning_effort`, so this is used
+    /// instead for DeepSeek endpoints.
+    pub fn with_deepseek_thinking(mut self, level: crate::thinking::ThinkingLevel) -> Self {
+        self.deepseek_thinking = match level {
+            crate::thinking::ThinkingLevel::Off => None,
+            _ => Some(serde_json::json!({"type": "enabled"})),
+        };
         self
     }
 
@@ -68,13 +87,15 @@ impl OpenAiProvider {
         let extra_headers = self.extra_headers.clone();
         let prompt_cache_key = context.prompt_cache_key.clone();
         let reasoning_effort = self.reasoning_effort.clone();
+        let deepseek_thinking = self.deepseek_thinking.clone();
         let client = self.client.clone();
 
         log::debug!(
-            "OpenAiProvider::stream_inner: model={} prompt_cache_key={:?} reasoning_effort={:?}",
+            "OpenAiProvider::stream_inner: model={} prompt_cache_key={:?} reasoning_effort={:?} deepseek_thinking={}",
             model,
             prompt_cache_key,
             reasoning_effort,
+            deepseek_thinking.is_some(),
         );
 
         Box::pin(async_stream::stream! {
@@ -92,6 +113,7 @@ impl OpenAiProvider {
                 },
                 prompt_cache_key,
                 reasoning_effort,
+                thinking: deepseek_thinking,
             };
 
             if let Ok(payload) = serde_json::to_value(&body) {
@@ -255,6 +277,11 @@ struct ChatRequest {
     /// support configurable reasoning/thinking.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// DeepSeek-style thinking parameter (`{"type": "enabled"}`).  Mutually
+    /// exclusive with `reasoning_effort` in practice — DeepSeek rejects
+    /// `reasoning_effort` and OpenAI ignores `thinking`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
