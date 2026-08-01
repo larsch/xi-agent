@@ -874,6 +874,10 @@ fn render_head_truncated_body(
 /// always uses `╰` (confirmed) or `┆` (streaming) — the end is always visible.
 /// A single-line body uses `·` (self-contained, no continuation implied).
 /// Wrapped chunks of the same logical line continue with `│`.
+///
+/// To avoid wrapping the entire content when only the last few visual lines are
+/// needed, we only process the tail portion of logical lines (up to
+/// `max_lines * 16` logical lines from the end, a generous over-estimate).
 fn render_tail_truncated_body(
     out: &mut Vec<Line<'static>>,
     content: &str,
@@ -888,11 +892,41 @@ fn render_tail_truncated_body(
     }
     let content_width = width.saturating_sub(3).max(1);
     let total_logical = content.lines().count();
-    let wrapped = wrap_content(content, content_width);
+
+    // Only process the tail portion: enough logical lines to fill the visual
+    // budget even with very long lines.  If full_output is set we still wrap
+    // everything — that path is for user-requested untruncated display.
+    let tail_logical = if full_output {
+        total_logical
+    } else {
+        (max_lines * 16).min(total_logical)
+    };
+    let logical_offset = total_logical - tail_logical;
+
+    let content_to_wrap: String = if logical_offset > 0 {
+        content
+            .lines()
+            .skip(logical_offset)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        content.to_string()
+    };
+
+    let wrapped_full = wrap_content(&content_to_wrap, content_width);
+    // Adjust logical_idx so it is relative to the full original content.
+    let wrapped: Vec<WrappedLine> = wrapped_full
+        .into_iter()
+        .map(|mut wl| {
+            wl.logical_idx += logical_offset;
+            wl
+        })
+        .collect();
+
     let total_wrapped = wrapped.len();
 
-    let truncated = !full_output && total_wrapped > max_lines;
-    if truncated {
+    let truncated = !full_output && (total_wrapped > max_lines || logical_offset > 0);
+    if truncated && (logical_offset > 0 || total_wrapped > max_lines) {
         out.push(placeholder_result_line(
             format!("… {total_logical} total lines"),
             color,

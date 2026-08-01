@@ -165,6 +165,7 @@ impl App {
             partial_snapshot: None,
             streaming_field,
             running_output: String::new(),
+            running_output_line_count: 0,
             last_output_line_count: 0,
             result: None,
         });
@@ -267,6 +268,7 @@ impl App {
                 partial_snapshot: Some(args.clone()),
                 streaming_field: None,
                 running_output: String::new(),
+                running_output_line_count: 0,
                 last_output_line_count: 0,
                 result: None,
             });
@@ -285,19 +287,44 @@ impl App {
 
     fn on_tool_output_chunk(&mut self, id: String, chunk: String) {
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            // Count newlines in just the incoming chunk (O(1) relative to
+            // the accumulated output) instead of re-scanning the entire
+            // running_output string every time.
+            let chunk_newlines = chunk.chars().filter(|&c| c == '\n').count();
+            let prev_visual = entry.last_output_line_count.min(8);
+
             entry.running_output.push_str(&chunk);
+            entry.running_output_line_count += chunk_newlines;
+
+            // Truncate running_output during streaming so that memory and
+            // render cost stay bounded even for long-running commands that
+            // produce huge volumes of output (e.g. reading from /dev/ttyUSB0).
+            // Uses the same limits as the final truncation: 2000 lines / 50 KiB.
+            use crate::agent::tools::truncate::truncate_tail_with_limits;
+            let tr = truncate_tail_with_limits(
+                &entry.running_output,
+                crate::agent::tools::truncate::DEFAULT_MAX_LINES,
+                crate::agent::tools::truncate::DEFAULT_MAX_BYTES,
+            );
+            if tr.truncated {
+                entry.running_output = tr.content;
+                // The pre-truncation line count is no longer accurate after
+                // lines were dropped from the head.  Cap it at the number of
+                // lines actually kept.
+                entry.running_output_line_count =
+                    entry.running_output_line_count.min(tr.output_lines);
+            }
+
             // Only signal visible output when the visual block grows.
             // Tail-truncated bodies are capped at 8 lines (default tail_lines).
             // Once the visual block stops growing, new chunks merely scroll
             // within the same window — keep the throbber visible so it
             // doesn't flicker and shift the text.
-            let new_count = entry.running_output.lines().count();
-            let new_visual = new_count.min(8);
-            let prev_visual = entry.last_output_line_count.min(8);
+            let new_visual = entry.running_output_line_count.min(8);
             if new_visual > prev_visual && !chunk.trim().is_empty() {
                 self.agent_turn.record_output("tool_output_chunk");
             }
-            entry.last_output_line_count = new_count;
+            entry.last_output_line_count = entry.running_output_line_count;
         }
     }
 
@@ -553,13 +580,24 @@ impl App {
         }
     }
 
+    /// Drain buffered app events from the channel, processing at most
+    /// [`DRAIN_BATCH_LIMIT`] events before yielding back to the main loop
+    /// so the renderer and throbber tick get CPU time even when the channel
+    /// is flooded with tool-output chunks.
+    const DRAIN_BATCH_LIMIT: usize = 64;
+
     pub fn drain_app_events(&mut self) {
+        let mut remaining = Self::DRAIN_BATCH_LIMIT;
         loop {
+            if remaining == 0 {
+                break;
+            }
             match self.runtime.try_recv_app_event() {
                 Ok(AppEvent::Agent(ev)) => self.apply_agent_event(ev),
                 Ok(other) => self.apply_app_event(other),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
+            remaining -= 1;
         }
     }
 }

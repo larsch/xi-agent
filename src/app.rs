@@ -777,6 +777,7 @@ impl App {
                 partial_snapshot: None,
                 streaming_field: Some("command".to_string()),
                 running_output: String::new(),
+                running_output_line_count: 0,
                 last_output_line_count: 0,
                 result: None,
             });
@@ -2335,6 +2336,7 @@ mod tests {
                     partial_snapshot: None,
                     streaming_field: None,
                     running_output: String::new(),
+                    running_output_line_count: 0,
                     last_output_line_count: 0,
                     result: None,
                 });
@@ -2388,6 +2390,7 @@ mod tests {
                     partial_snapshot: None,
                     streaming_field: None,
                     running_output: String::new(),
+                    running_output_line_count: 0,
                     last_output_line_count: 0,
                     result: None,
                 });
@@ -2542,6 +2545,7 @@ mod tests {
                 partial_snapshot: None,
                 streaming_field: None,
                 running_output: String::new(),
+                running_output_line_count: 0,
                 last_output_line_count: 0,
                 result: None,
             });

@@ -44,8 +44,12 @@ pub struct LiveToolEntry {
     /// The argument field to stream for display (from ToolDefinition).
     pub streaming_field: Option<String>,
     /// Live output chunks received while the tool is still running.
-    /// Cleared when `result` is populated.
+    /// Cleared when `result` is populated.  Kept at or below the standard
+    /// tail-truncation limits (2000 lines / 50 KiB) to bound render cost.
     pub running_output: String,
+    /// Incremental line count of `running_output` (tracked per-chunk rather
+    /// than re-counted from scratch so that chunk processing is O(1)).
+    pub running_output_line_count: usize,
     /// Track the last recorded line count of `running_output` so we only
     /// signal a throbber-hiding output event when the visual block grows.
     pub last_output_line_count: usize,
@@ -271,6 +275,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: None,
             running_output: String::new(),
+            running_output_line_count: 0,
             last_output_line_count: 0,
             result: Some(LiveToolResult {
                 content: "content".to_string(),
@@ -341,6 +346,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: Some("path".to_string()),
             running_output: String::new(),
+            running_output_line_count: 0,
             last_output_line_count: 0,
             result: None, // result not yet arrived
         });
@@ -382,6 +388,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: Some("path".to_string()),
             running_output: String::new(),
+            running_output_line_count: 0,
             last_output_line_count: 0,
             result: None,
         });
@@ -408,6 +415,7 @@ mod tests {
             partial_snapshot: None,
             streaming_field: Some("path".to_string()),
             running_output: String::new(),
+            running_output_line_count: 0,
             last_output_line_count: 0,
             result: None,
         });
