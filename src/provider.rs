@@ -59,6 +59,15 @@ fn classify_copilot_route(model: &str) -> CopilotApiRoute {
     }
 }
 
+/// Detect whether a base URL belongs to the DeepSeek API.
+///
+/// DeepSeek uses its own `thinking` parameter (`{"type": "enabled"}`)
+/// instead of OpenAI's `reasoning_effort`.  This helper lets us
+/// auto-detect DeepSeek endpoints and send the correct parameter.
+fn is_deepseek_url(base_url: &str) -> bool {
+    base_url.contains("deepseek.com") || base_url.contains("deepseek.ai")
+}
+
 // ── Instance-based API ────────────────────────────────────────────────────────
 
 /// Return the thinking support level for a named provider instance.
@@ -94,16 +103,12 @@ pub fn thinking_support_for_instance(instance: &ProviderInstance, model: &str) -
             } else if instance.backend_preset == BackendPreset::OpenAi
                 || instance.backend_preset == BackendPreset::OpenRouter
             {
-                // OpenAI API and OpenRouter support `reasoning_effort` in the
-                // chat completions request body (OpenAI o-series convention).
+                ThinkingSupport::Applied
+            } else if instance.base_url.as_deref().is_some_and(is_deepseek_url) {
+                // DeepSeek endpoints support thinking via the `thinking`
+                // parameter in chat completions.
                 ThinkingSupport::Applied
             } else {
-                // Generic OpenAI-compatible endpoints (e.g. DeepSeek) may or
-                // may not support `reasoning_effort`.  Many don't — they still
-                // produce `reasoning_content` in responses autonomously, but
-                // sending the parameter triggers a 400 error.  Mark thinking
-                // as unsupported so the parameter is not sent; the model's
-                // autonomous reasoning tokens are still parsed from responses.
                 ThinkingSupport::Ignored(
                     "generic openai-compatible: reasoning_effort not reliably supported",
                 )
@@ -204,6 +209,8 @@ pub fn build_provider_for_instance(
                     instance.id
                 )
             })?;
+            // Check DeepSeek before `base_url` is moved into the provider.
+            let is_ds = is_deepseek_url(&base_url);
             let mut p = OpenAiProvider::new(base_url, model, api_key);
             log::debug!(
                 "provider build: id={} backend={:?} api={:?} thinking={:?}",
@@ -212,11 +219,17 @@ pub fn build_provider_for_instance(
                 instance.api_type,
                 thinking,
             );
-            // Only send reasoning_effort for OpenAI API; generic
-            // openai-compatible endpoints (e.g. DeepSeek) may reject it.
+            // Send the appropriate thinking/reasoning parameter for
+            // the detected backend.  OpenAI uses `reasoning_effort`;
+            // DeepSeek uses both `thinking` (on/off toggle) and
+            // `reasoning_effort` (with DeepSeek-specific values).
             if instance.backend_preset == BackendPreset::OpenAi {
                 log::debug!("provider build: enabling reasoning_effort for OpenAi backend");
                 p = p.with_reasoning_effort(thinking.to_reasoning_effort_string());
+            } else if is_ds {
+                log::debug!("provider build: enabling deepseek thinking mode");
+                p = p.with_reasoning_effort(thinking.to_deepseek_reasoning_effort_string());
+                p = p.with_deepseek_thinking(thinking);
             } else {
                 log::debug!("provider build: skipping reasoning_effort (backend is not OpenAi)");
             }

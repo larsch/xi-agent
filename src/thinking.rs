@@ -67,6 +67,23 @@ impl ThinkingLevel {
         self.to_reasoning_effort().map(str::to_string)
     }
 
+    /// Map our thinking level to DeepSeek's `reasoning_effort` values.
+    ///
+    /// DeepSeek accepts `"low"`, `"high"`, `"max"` (unlike OpenAI which
+    /// uses `"minimal"`, `"low"`, `"medium"`, `"high"`).
+    pub fn to_deepseek_reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Minimal | Self::Low => Some("low"),
+            Self::Medium => Some("high"),
+            Self::High | Self::XHigh => Some("max"),
+        }
+    }
+
+    pub fn to_deepseek_reasoning_effort_string(self) -> Option<String> {
+        self.to_deepseek_reasoning_effort().map(str::to_string)
+    }
+
     pub fn to_gemini_thinking_level(self) -> Option<GeminiThinkingLevel> {
         match self {
             Self::Off => None,
@@ -137,6 +154,34 @@ mod tests {
         assert_eq!(
             ThinkingLevel::XHigh.to_gemini_thinking_level(),
             Some(GeminiThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn deepseek_reasoning_effort_matches_expected_strings() {
+        assert_eq!(
+            ThinkingLevel::Off.to_deepseek_reasoning_effort_string(),
+            None
+        );
+        assert_eq!(
+            ThinkingLevel::Minimal.to_deepseek_reasoning_effort_string(),
+            Some("low".to_string())
+        );
+        assert_eq!(
+            ThinkingLevel::Low.to_deepseek_reasoning_effort_string(),
+            Some("low".to_string())
+        );
+        assert_eq!(
+            ThinkingLevel::Medium.to_deepseek_reasoning_effort_string(),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            ThinkingLevel::High.to_deepseek_reasoning_effort_string(),
+            Some("max".to_string())
+        );
+        assert_eq!(
+            ThinkingLevel::XHigh.to_deepseek_reasoning_effort_string(),
+            Some("max".to_string())
         );
     }
 }
