@@ -286,11 +286,12 @@ fn handle_global_key_shortcuts(
     }
 
     if keybindings::matches(KeyBindingId::EndInput, key) {
-        // Ctrl-D: two-stage end input. First press while streaming warns;
-        // second press quits. Idle + empty input quits immediately.
+        // Ctrl-D: delete-next-char when input is non-empty; quit/exit when empty.
         if app.input_mode == InputMode::Shell {
             if app.shell_input_is_empty() {
                 app.exit_shell_mode();
+            } else {
+                app.shell.textarea.delete_next_char();
             }
             return KeyDispatch::Continue;
         }
@@ -325,19 +326,17 @@ fn handle_global_key_shortcuts(
             }
         }
 
-        // Input is non-empty — show hint.
-        if app.selection.active
-            || app.login.active
-            || app.provider.setup_step != ProviderSetupStep::Idle
-        {
-            app.push_notice(Message::assistant(
-                "[Press Ctrl-D again on an empty line to quit. Press Esc to close this first]"
-                    .to_string(),
-            ));
+        // Input is non-empty — delete forward (readline-style delete-char).
+        if app.selection.active && !app.ask_user_freeform_mode() {
+            // Selection filter: cursor is always at end, forward delete is a no-op.
+        } else if app.login.active {
+            // No editable text in login mode.
         } else {
-            app.push_notice(Message::assistant(
-                "[Press Ctrl-D again on an empty line to quit]".to_string(),
-            ));
+            app.textarea.delete_next_char();
+            app.update_completions();
+            if app.ask_user_freeform_mode() && app.textarea.lines().iter().all(|l| l.is_empty()) {
+                app.cancel_ask_freeform_typing();
+            }
         }
         return KeyDispatch::Continue;
     }

@@ -85,7 +85,7 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         id: Some(KeyBindingId::EndInput),
         shortcut: "Ctrl+D",
         context: BindingContext::Global,
-        description: "End input / quit (press twice while agent is running)",
+        description: "Delete forward (non-empty input) / end input or quit (empty input)",
     },
     KeyBinding {
         id: Some(KeyBindingId::ToggleInfo),
