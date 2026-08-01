@@ -1025,7 +1025,18 @@ impl App {
     /// through `SessionEvent` ingestion and `SessionState` is always present
     /// before a turn launches.
     pub(crate) fn ensure_event_log_for_submit(&mut self) {
+        let had_state = self.session.session_state.is_some();
         self.session.ensure_event_log_for_submit();
+        // Seed the file tracker with files the agent previously read or
+        // wrote so that write_file/edit_file staleness checks don't
+        // spuriously reject them as "never read" after a session reload.
+        if !had_state && let Some(ss) = self.session.session_state.as_ref() {
+            self.agent_config
+                .file_tracker
+                .lock()
+                .unwrap()
+                .seed_from_events(ss.events());
+        }
     }
 
     pub(crate) fn persist_messages(&mut self) {

@@ -457,6 +457,16 @@ impl App {
                 // before moving the event log into session_state.
                 self.latest_usage = Self::find_last_usage_from_events(&log.events);
                 self.session.session_state = Some(SessionState::from_event_log(log));
+                // Seed the file tracker with files the agent previously
+                // read or wrote so that write_file/edit_file staleness
+                // checks don't spuriously reject them as "never read".
+                if let Some(ss) = self.session.session_state.as_ref() {
+                    self.agent_config
+                        .file_tracker
+                        .lock()
+                        .unwrap()
+                        .seed_from_events(ss.events());
+                }
                 self.session.live_turn.clear_all();
                 self.session.current_session_id = Some(session_id.to_string());
                 self.log_view.auto_scroll = true;
