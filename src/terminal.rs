@@ -11,6 +11,31 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::{self, ErrorKind};
 
+/// Install a "last resort" signal guard that forces immediate exit if a
+/// second termination signal arrives while the primary cleanup path is
+/// already running.  Prevents a hung process when terminal restoration stalls.
+///
+/// # Safety
+///
+/// Installs bare `libc::signal` handlers.  Call only after the tokio signal
+/// streams have been dropped (post-event-loop), and only on Unix.
+pub(crate) fn install_termination_guard() {
+    #[cfg(unix)]
+    unsafe {
+        extern "C" fn force_exit(_sig: i32) {
+            unsafe {
+                libc::_exit(1);
+            }
+        }
+        libc::signal(libc::SIGTERM, force_exit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, force_exit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, force_exit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGQUIT, force_exit as *const () as libc::sighandler_t);
+    }
+    #[cfg(not(unix))]
+    let _ = (); // no-op on non-Unix
+}
+
 pub(crate) fn init_terminal(
     window_title: &str,
 ) -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {

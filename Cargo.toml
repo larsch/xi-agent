@@ -28,7 +28,7 @@ textwrap = "0.16"
 ignore = "0.4"
 globset = "0.4"
 chrono = "0.4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "signal"] }
 ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
 unicode-width = "0.2"
 directories = "5.0"
