@@ -523,6 +523,7 @@ fn render_tool_call(
                 cfg.full_output,
                 width,
                 theme,
+                true, // streaming — args may be partial
             );
         }
     }
@@ -623,6 +624,7 @@ fn render_tool_result(
                     cfg.full_output,
                     width,
                     theme,
+                    false, // finalized — args are complete, exact match only
                 );
                 return;
             }
@@ -969,6 +971,7 @@ fn render_tail_truncated_body(
 /// The per-side line limit is enforced on wrapped (visual) lines, not logical
 /// lines, so very long logical lines that wrap to many visual lines are still
 /// bounded.
+#[allow(clippy::too_many_arguments)]
 fn render_diff_body(
     out: &mut Vec<Line<'static>>,
     old_text: &str,
@@ -977,23 +980,27 @@ fn render_diff_body(
     full_output: bool,
     width: usize,
     theme: &Theme,
+    streaming: bool,
 ) {
     let removed_color = theme.log.diff.removed.fg.unwrap_or(Color::LightRed);
     let added_color = theme.log.diff.added.fg.unwrap_or(Color::LightGreen);
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
 
-    /// True when `a` and `b` match — either exactly, or one is a prefix of
-    /// the other (the streaming case: a partial line being built up).
-    fn lines_match(a: &str, b: &str) -> bool {
-        a == b || a.starts_with(b) || b.starts_with(a)
+    /// True when `a` and `b` match.  During streaming a partial line that
+    /// is a prefix of the other side is treated as matching so the diff
+    /// doesn't flicker while content is still arriving.  Once the result is
+    /// finalized we only accept exact matches — otherwise a new line whose
+    /// text starts with the old line's content is silently swallowed.
+    fn lines_match(a: &str, b: &str, streaming: bool) -> bool {
+        a == b || (streaming && (a.starts_with(b) || b.starts_with(a)))
     }
 
     // Compute common head length.
     let common_head = old_lines
         .iter()
         .zip(new_lines.iter())
-        .take_while(|(a, b)| lines_match(a, b))
+        .take_while(|(a, b)| lines_match(a, b, streaming))
         .count();
 
     // Compute common tail length (must not overlap with head).
@@ -1007,7 +1014,7 @@ fn render_diff_body(
                 .iter()
                 .rev(),
         )
-        .take_while(|(a, b)| lines_match(a, b))
+        .take_while(|(a, b)| lines_match(a, b, streaming))
         .count();
 
     let old_diff = &old_lines[common_head..old_lines.len() - common_tail];
