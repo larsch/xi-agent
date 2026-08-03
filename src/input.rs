@@ -46,6 +46,7 @@ pub(crate) enum RunResult {
     },
     /// Terminate the process in response to an OS signal, passing the exit code.
     /// Used for clean shutdown on SIGTERM / SIGINT / SIGHUP / SIGQUIT.
+    #[cfg(unix)]
     Terminate(i32),
 }
 

@@ -330,6 +330,7 @@ async fn main() -> io::Result<()> {
         match run(&mut terminal, &mut app, &provider, &config).await {
             Ok(RunResult::Quit) | Err(_) => break,
 
+            #[cfg(unix)]
             Ok(RunResult::Terminate(code)) => {
                 // OS signal received — completed turns are already persisted
                 // via the event log.  Install a last-resort guard against hung
@@ -412,16 +413,18 @@ use input::{RunResult, apply_paste, handle_key_event, provider_setup_requires_ap
 /// A signal event delivered from the OS to the event loop.
 enum SignalEvent {
     /// Process should terminate with the given exit code.
+    #[cfg(unix)]
     Terminate(i32),
     /// Process should suspend (SIGTSTP).
+    #[cfg(unix)]
     Suspend,
 }
 
 /// Wait for the next OS signal that requires action.
 ///
-/// On Unix this registers handlers for SIGTERM, SIGINT, SIGHUP, SIGQUIT,
-/// and SIGTSTP, then races them against each other.  On non-Unix platforms
-/// this future never resolves.
+/// Registers handlers for SIGTERM, SIGINT, SIGHUP, SIGQUIT, and SIGTSTP,
+/// then races them against each other on Unix. On other platforms, the future
+/// never resolves.
 async fn next_signal() -> SignalEvent {
     #[cfg(unix)]
     {
@@ -578,7 +581,9 @@ async fn run(
             // ── OS signals (Unix) ─────────────────────────────────────────────
             sig = next_signal() => {
                 match sig {
+                    #[cfg(unix)]
                     SignalEvent::Terminate(code) => return Ok(RunResult::Terminate(code)),
+                    #[cfg(unix)]
                     SignalEvent::Suspend => return Ok(RunResult::Suspend),
                 }
             }
