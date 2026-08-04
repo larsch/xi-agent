@@ -1403,7 +1403,7 @@ mod tests {
     use super::{App, StreamingStatus, format_provider_error_for_display};
     use crate::{
         agent::{
-            AgentLoopConfig,
+            AgentActivity, AgentLoopConfig,
             types::{AskRequest, AskUserOption, AskUserResponse},
         },
         app_event::AppEvent,
@@ -2966,6 +2966,31 @@ mod tests {
         app.apply_agent_event(crate::agent::types::AgentEvent::ThinkingToken(
             "\n\n".to_string(),
         ));
+
+        assert!(app.throbber_visible());
+    }
+
+    #[test]
+    fn end_resets_activity_to_model_request() {
+        let mut app = make_app();
+        app.agent_turn.start();
+        app.agent_turn.set_activity(AgentActivity::LocalWork);
+
+        app.agent_turn.end();
+
+        assert_eq!(app.agent_turn.activity, AgentActivity::ModelRequest);
+    }
+
+    #[test]
+    fn model_request_activity_keeps_throbber_visible_after_tool_output() {
+        let mut app = make_app();
+        app.agent_turn.start();
+        app.agent_turn.set_activity(AgentActivity::LocalWork);
+        app.agent_turn.record_output("tool_result");
+
+        assert!(!app.throbber_visible());
+
+        app.agent_turn.set_activity(AgentActivity::ModelRequest);
 
         assert!(app.throbber_visible());
     }

@@ -79,9 +79,11 @@ User keystroke → App::submit
                   check FileTracker for externally modified files
                     └─ if any: inject ⚠️ user message with unified diff (or warn-only if large)
                                send AgentEvent::ExternalFileChange
+                  sends AgentEvent::ActivityChanged(ModelRequest)
                   provider.stream_chat_with_tools(messages, tool_defs)
                     └─ yields LlmEvent::{Token{..}, ThinkingToken, Usage,
                                          ToolIntentStart, ToolCall, Done, Error}
+                  sends AgentEvent::ActivityChanged(LocalWork)
                   if ToolCall → tool.execute(args) → ToolResult
                     └─ drain steering_rx after each tool → skip remaining tools if non-empty
                   loop until no tool calls

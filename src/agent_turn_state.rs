@@ -1,3 +1,4 @@
+use crate::agent::types::AgentActivity;
 use crate::app::StreamingStatus;
 use std::cell::Cell;
 
@@ -12,6 +13,8 @@ pub(crate) struct AgentTurnState {
     pub(crate) status: Option<StreamingStatus>,
     /// Throbber animation frame index, advanced on every UI tick while streaming.
     pub(crate) tick: u8,
+    /// Current agent-loop activity, used only to select throbber visuals.
+    pub(crate) activity: AgentActivity,
     /// Instant of the last visible agent output (text/thinking tokens, tool
     /// calls, tool results, etc.); used to suppress the throbber while output
     /// is actively arriving and re-show it after a short idle time.
@@ -25,6 +28,7 @@ impl AgentTurnState {
         Self {
             status: None,
             tick: 0,
+            activity: AgentActivity::ModelRequest,
             last_output_at: None,
             last_reported_visible: Cell::new(None),
         }
@@ -38,8 +42,19 @@ impl AgentTurnState {
         )
     }
 
+    /// Set the agent-loop activity used to select throbber visuals.
+    pub(crate) fn set_activity(&mut self, activity: AgentActivity) {
+        self.activity = activity;
+        if activity == AgentActivity::ModelRequest {
+            // A tool result may have just suppressed the activity row. Keep
+            // the row present while switching to the next model request.
+            self.last_output_at = None;
+        }
+    }
+
     /// Begin a new agent turn: set status to Waiting and clear last_output_at.
     pub(crate) fn start(&mut self) {
+        self.activity = AgentActivity::ModelRequest;
         log::debug!(
             "[THROB] start() — status → Waiting, last_output_at cleared | was_active={}",
             self.is_active()
@@ -56,6 +71,7 @@ impl AgentTurnState {
             self.last_output_at.map(|t| t.elapsed()),
         );
         self.status = None;
+        self.activity = AgentActivity::ModelRequest;
         self.last_output_at = None;
     }
 

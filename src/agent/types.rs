@@ -478,9 +478,20 @@ pub enum AskUserResponse {
 
 // ── Agent events ──────────────────────────────────────────────────────────────
 
+/// The kind of work currently being performed by the agent loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivity {
+    /// Waiting for the model/provider to produce a response.
+    ModelRequest,
+    /// Performing local agent-loop work, such as executing tools.
+    LocalWork,
+}
+
 /// Events emitted by the agent loop to `App` over a tokio channel.
 #[derive(Debug)]
 pub enum AgentEvent {
+    /// The loop's current activity changed; presentation only.
+    ActivityChanged(AgentActivity),
     // ── LLM streaming ─────────────────────────────────────────────────────────
     /// A text token chunk from the model's answer.
     TextToken { text: String, phase: AssistantPhase },

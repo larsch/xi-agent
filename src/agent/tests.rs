@@ -197,11 +197,14 @@ async fn agent_loop_single_text_turn() {
     ]]);
     let events = run_and_collect(provider).await;
 
-    // First event must be TextToken("hello").
+    // The model activity event is presentation-only and precedes the first token.
     assert!(
-        matches!(&events[0], AgentEvent::TextToken { text, .. } if text == "hello"),
-        "unexpected first event: {:?}",
-        events[0]
+        matches!(
+            events.iter().find(|event| matches!(event, AgentEvent::TextToken { .. })),
+            Some(AgentEvent::TextToken { text, .. }) if text == "hello"
+        ),
+        "expected TextToken(hello), got: {:?}",
+        events
     );
     // Last event must be Done.
     assert!(
