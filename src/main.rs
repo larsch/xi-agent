@@ -490,9 +490,9 @@ async fn run(
         tokio::select! {
             // ── Terminal input ────────────────────────────────────────────────
             Some(Ok(ev)) = crossterm_events.next() => {
-                needs_redraw = true;
                 match ev {
                     Event::Key(key) => {
+                        needs_redraw = true;
                         if let Some(result) = handle_key_event(
                             app,
                             provider,
@@ -509,8 +509,14 @@ async fn run(
                     }
                     Event::Mouse(mouse) => {
                         match mouse.kind {
-                            MouseEventKind::ScrollUp => app.scroll_up_lines(3),
-                            MouseEventKind::ScrollDown => app.scroll_down_lines(3),
+                            MouseEventKind::ScrollUp => {
+                                app.scroll_up_lines(3);
+                                needs_redraw = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.scroll_down_lines(3);
+                                needs_redraw = true;
+                            }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let col = mouse.column;
                                 let row = mouse.row;
@@ -543,7 +549,11 @@ async fn run(
                     Event::Paste(text)
                         if !app.login.active => {
                             apply_paste(app, provider, &text);
+                            needs_redraw = true;
                         },
+                    Event::Resize(_, _) => {
+                        needs_redraw = true;
+                    }
                     _ => {}
                 }
 
