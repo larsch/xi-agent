@@ -30,8 +30,8 @@ pub use file_tracker::FileTracker;
 pub use system_prompt::build_system_prompt;
 pub use tool_output_log::ToolOutputLog;
 pub use types::{
-    AgentEvent, AgentLoopConfig, CancelLevel, DefaultToolExecutor, ToolExecutor, ToolRegistry,
-    ToolResult,
+    AgentActivity, AgentEvent, AgentLoopConfig, CancelLevel, DefaultToolExecutor, ToolExecutor,
+    ToolRegistry, ToolResult,
 };
 
 // ── TurnOutcome ───────────────────────────────────────────────────────────────
@@ -671,6 +671,9 @@ pub async fn run_agent_loop(
         .await;
 
         // ── Stream assistant turn ─────────────────────────────────────────────
+        tx.send_ignore(AppEvent::Agent(AgentEvent::ActivityChanged(
+            AgentActivity::ModelRequest,
+        )));
         let turn = stream_assistant_turn(
             Arc::clone(&provider),
             messages,
@@ -684,6 +687,10 @@ pub async fn run_agent_loop(
             },
         )
         .await;
+
+        tx.send_ignore(AppEvent::Agent(AgentEvent::ActivityChanged(
+            AgentActivity::LocalWork,
+        )));
 
         match turn {
             TurnOutcome::Error(e) => {

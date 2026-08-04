@@ -60,6 +60,7 @@ impl App {
     /// Dispatch an `AgentEvent` to the appropriate named handler.
     pub fn apply_agent_event(&mut self, ev: AgentEvent) {
         match ev {
+            AgentEvent::ActivityChanged(activity) => self.agent_turn.set_activity(activity),
             AgentEvent::ThinkingToken(token) => self.on_thinking_token(token),
             AgentEvent::Usage(usage) => self.on_usage(usage),
             AgentEvent::TextToken { text, phase } => self.on_text_token(text, phase),

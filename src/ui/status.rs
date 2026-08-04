@@ -1,18 +1,30 @@
 use ratatui::{
     layout::Rect,
+    style::Modifier,
     text::{Line, Span},
     widgets::Paragraph,
 };
 
+use crate::agent::AgentActivity;
 use crate::app::{App, StreamingStatus};
 
-const THROBBER_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+const MODEL_THROBBER_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+const LOCAL_THROBBER_FRAMES: &[char] = &['◐', '◓', '◑', '◒'];
 
 pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let theme = &app.theme.status;
-    let throbber_style = theme.provider.to_ratatui_style();
+    let (frames, throbber_style) = match app.agent_turn.activity {
+        AgentActivity::ModelRequest => (MODEL_THROBBER_FRAMES, theme.provider.to_ratatui_style()),
+        AgentActivity::LocalWork => (
+            LOCAL_THROBBER_FRAMES,
+            theme
+                .model
+                .to_ratatui_style()
+                .remove_modifier(Modifier::ITALIC),
+        ),
+    };
     let hint_style = theme.idle.to_ratatui_style();
-    let frame = THROBBER_FRAMES[(app.agent_turn.tick as usize) % THROBBER_FRAMES.len()];
+    let frame = frames[(app.agent_turn.tick as usize) % frames.len()];
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     if app.throbber_visible() {

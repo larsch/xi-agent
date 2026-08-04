@@ -238,6 +238,7 @@ async fn run_print_mode_loop(
                 }
             }
             AgentEvent::ToolOutputChunk { .. } => {}
+            AgentEvent::ActivityChanged(_) => {}
             AgentEvent::TurnEnd => {}
             AgentEvent::ExternalFileChange { paths, .. } => {
                 for path in &paths {
@@ -400,6 +401,7 @@ async fn run_print_mode_loop_inner(
                 }
             }
             AgentEvent::ToolOutputChunk { .. } => {}
+            AgentEvent::ActivityChanged(_) => {}
             AgentEvent::ExternalFileChange { paths, .. } => {
                 for path in &paths {
                     eprintln!("⚠️  {} was modified externally", path.display());
