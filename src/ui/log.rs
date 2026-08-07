@@ -45,6 +45,239 @@ impl Default for ToolBodyConfig {
     }
 }
 
+// ── Logical layout ────────────────────────────────────────────────────────────
+
+/// Stable classification of a renderable subsection of the conversation log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LogBlockKind {
+    AssistantThinking,
+    AssistantMarkdown,
+    UserContent,
+    ToolIntent,
+    ToolBody,
+    Diff,
+    AskUserContext,
+    AskUserQuestion,
+    AskUserResponse,
+}
+
+/// Direction and limit information retained for a block that may be truncated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TruncationMetadata {
+    pub limit: Option<usize>,
+    pub total: Option<usize>,
+    pub direction: Option<TruncationDirection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TruncationDirection {
+    Head,
+    Tail,
+    Diff,
+}
+
+/// A stable logical subsection and its rendered representation.
+#[derive(Debug, Clone)]
+pub(super) struct LogBlock {
+    /// Identity is based on message and subsection, never on flattened rows.
+    pub identity: String,
+    pub kind: LogBlockKind,
+    pub lines: Vec<Line<'static>>,
+    pub sources: Vec<LineSource>,
+    pub truncation: TruncationMetadata,
+}
+
+/// Ordered logical layout of the log. Flattening is the compatibility boundary
+/// for viewport drawing and text selection.
+#[derive(Debug, Clone, Default)]
+pub(super) struct LogLayout {
+    pub blocks: Vec<LogBlock>,
+}
+
+impl LogLayout {
+    pub fn dim(&mut self) {
+        for block in &mut self.blocks {
+            block.lines = dim_lines(std::mem::take(&mut block.lines));
+        }
+    }
+
+    pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
+        let line_count = self.blocks.iter().map(|b| b.lines.len()).sum();
+        let mut lines = Vec::with_capacity(line_count);
+        let mut sources = Vec::with_capacity(line_count);
+        for block in &self.blocks {
+            // Touch block metadata here deliberately: flattening is the sole
+            // compatibility boundary and must carry the complete block model.
+            let _block_key = (&block.identity, block.kind, block.truncation);
+            lines.extend(block.lines.iter().cloned());
+            sources.extend(block.sources.iter().cloned());
+        }
+        (lines, sources)
+    }
+}
+
+fn tool_block_kind(msg: &Message, body: bool) -> LogBlockKind {
+    let name = msg.tool_name.as_deref().unwrap_or("");
+    if name == "ask_user" {
+        return if body {
+            LogBlockKind::AskUserResponse
+        } else if msg
+            .tool_args
+            .as_ref()
+            .and_then(|args| args.get("context"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|context| !context.trim().is_empty())
+        {
+            LogBlockKind::AskUserContext
+        } else {
+            LogBlockKind::AskUserQuestion
+        };
+    }
+    if body && matches!(name, "edit" | "edit_file") {
+        LogBlockKind::Diff
+    } else if body {
+        LogBlockKind::ToolBody
+    } else {
+        LogBlockKind::ToolIntent
+    }
+}
+
+struct LayoutBuilder {
+    layout: LogLayout,
+}
+
+impl LayoutBuilder {
+    fn new() -> Self {
+        Self {
+            layout: LogLayout::default(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        identity: String,
+        kind: LogBlockKind,
+        lines: Vec<Line<'static>>,
+        decoration_width: u16,
+        streaming: bool,
+        truncation: TruncationMetadata,
+    ) {
+        let sources = (0..lines.len())
+            .map(|_| LineSource {
+                decoration_width,
+                streaming,
+            })
+            .collect();
+        let marker_index = lines.iter().position(|line| {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            text.starts_with("… ") && text.ends_with(" total lines")
+        });
+        let marker_total = marker_index.and_then(|index| {
+            let text = lines[index]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            text.strip_prefix("… ")
+                .and_then(|s| s.strip_suffix(" total lines"))
+                .and_then(|s| s.parse().ok())
+        });
+        let truncation = marker_total.map_or(truncation, |total| TruncationMetadata {
+            limit: Some(lines.len().saturating_sub(1)),
+            total: Some(total),
+            direction: Some(if kind == LogBlockKind::Diff {
+                TruncationDirection::Diff
+            } else if marker_index == Some(0) {
+                TruncationDirection::Tail
+            } else {
+                TruncationDirection::Head
+            }),
+        });
+        self.layout.blocks.push(LogBlock {
+            identity,
+            kind,
+            lines,
+            sources,
+            truncation,
+        });
+    }
+
+    fn finish(self) -> LogLayout {
+        self.layout
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{LogBlock, LogBlockKind, LogLayout, TruncationDirection, TruncationMetadata};
+    use crate::mouse_select::LineSource;
+    use ratatui::text::Line;
+
+    fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {
+        LogBlock {
+            identity: identity.to_string(),
+            kind,
+            lines: vec![Line::raw(text.to_string())],
+            sources: vec![LineSource {
+                decoration_width: 3,
+                streaming,
+            }],
+            truncation: TruncationMetadata {
+                limit: None,
+                total: None,
+                direction: None,
+            },
+        }
+    }
+
+    #[test]
+    fn flatten_preserves_block_order_and_line_metadata() {
+        let layout = LogLayout {
+            blocks: vec![
+                block("message:1:user", LogBlockKind::UserContent, "user", false),
+                block("message:2:tool", LogBlockKind::ToolBody, "tool", true),
+            ],
+        };
+        let (lines, sources) = layout.flatten();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "user");
+        assert_eq!(lines[1].spans[0].content, "tool");
+        assert!(!sources[0].streaming);
+        assert!(sources[1].streaming);
+        assert_eq!(sources[0].decoration_width, 3);
+    }
+
+    #[test]
+    fn truncation_metadata_records_direction_and_totals() {
+        let metadata = TruncationMetadata {
+            limit: Some(8),
+            total: Some(20),
+            direction: Some(TruncationDirection::Tail),
+        };
+        let layout = LogLayout {
+            blocks: vec![LogBlock {
+                identity: "message:3:body".into(),
+                kind: LogBlockKind::ToolBody,
+                lines: vec![Line::raw("… 20 total lines")],
+                sources: vec![LineSource {
+                    decoration_width: 3,
+                    streaming: false,
+                }],
+                truncation: metadata,
+            }],
+        };
+        assert_eq!(layout.blocks[0].truncation.total, Some(20));
+        assert_eq!(
+            layout.blocks[0].truncation.direction,
+            Some(TruncationDirection::Tail)
+        );
+    }
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 /// Apply uniform dim styling to all spans in a set of pre-rendered lines.
@@ -94,33 +327,45 @@ pub(super) fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-pub(super) fn build_log_lines(
+pub(super) fn build_log_layout(
     messages: &[Message],
     streaming: bool,
     width: usize,
     cfg: &ToolBodyConfig,
     theme: &Theme,
     display: &DisplayConfig,
-) -> (Vec<Line<'static>>, Vec<LineSource>) {
+) -> LogLayout {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
+    let mut ranges: Vec<(usize, usize, LogBlockKind, String)> = Vec::new();
 
     /// Push [`LineSource`] entries for all lines added since `prev_len`,
     /// assigning them to `msg_idx` with the given properties.
+    #[allow(clippy::too_many_arguments)]
     fn push_sources(
         sources: &mut Vec<LineSource>,
+        ranges: &mut Vec<(usize, usize, LogBlockKind, String)>,
         lines: &[Line<'static>],
         prev_len: usize,
         msg_idx: usize,
+        kind: LogBlockKind,
+        subsection: &str,
         decoration_width: u16,
         streaming: bool,
     ) {
-        let _ = msg_idx; // keep for caller readability
         for _ in prev_len..lines.len() {
             sources.push(LineSource {
                 decoration_width,
                 streaming,
             });
+        }
+        if prev_len < lines.len() {
+            ranges.push((
+                prev_len,
+                lines.len(),
+                kind,
+                format!("message:{msg_idx}:{subsection}"),
+            ));
         }
     }
 
@@ -141,7 +386,17 @@ pub(super) fn build_log_lines(
                 let user_bg = theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64));
                 let prev = lines.len();
                 append_message_markdown(&mut lines, &msg.content, width, user_bg, &theme.markdown);
-                push_sources(&mut sources, &lines, prev, idx, 0, msg_streaming);
+                push_sources(
+                    &mut sources,
+                    &mut ranges,
+                    &lines,
+                    prev,
+                    idx,
+                    LogBlockKind::UserContent,
+                    "content",
+                    0,
+                    msg_streaming,
+                );
             }
             Role::System => {}
             Role::Assistant => {
@@ -176,7 +431,17 @@ pub(super) fn build_log_lines(
                         false,
                         is_streaming_last && !has_answer,
                     );
-                    push_sources(&mut sources, &lines, prev, idx, 3, msg_streaming);
+                    push_sources(
+                        &mut sources,
+                        &mut ranges,
+                        &lines,
+                        prev,
+                        idx,
+                        LogBlockKind::AssistantThinking,
+                        "thinking",
+                        3,
+                        msg_streaming,
+                    );
                 }
 
                 let effective_phase = match msg.assistant_phase {
@@ -230,7 +495,17 @@ pub(super) fn build_log_lines(
                         crate::markdown::render_with_theme(&content, md_width, "", &theme.markdown);
                     let prev = lines.len();
                     append_markdown_answer(&mut lines, answer_icon, md_lines, is_streaming_last);
-                    push_sources(&mut sources, &lines, prev, idx, deco_width, msg_streaming);
+                    push_sources(
+                        &mut sources,
+                        &mut ranges,
+                        &lines,
+                        prev,
+                        idx,
+                        LogBlockKind::AssistantMarkdown,
+                        "answer",
+                        deco_width,
+                        msg_streaming,
+                    );
                 }
             }
             Role::ToolCall => {
@@ -245,7 +520,17 @@ pub(super) fn build_log_lines(
                     &mut lines,
                     msg_streaming,
                 );
-                push_sources(&mut sources, &lines, prev, idx, 3, msg_streaming);
+                push_sources(
+                    &mut sources,
+                    &mut ranges,
+                    &lines,
+                    prev,
+                    idx,
+                    tool_block_kind(msg, false),
+                    "intent",
+                    3,
+                    msg_streaming,
+                );
             }
             Role::ToolResult => {
                 let prev = lines.len();
@@ -259,12 +544,37 @@ pub(super) fn build_log_lines(
                     &mut lines,
                     msg_streaming,
                 );
-                push_sources(&mut sources, &lines, prev, idx, 3, msg_streaming);
+                push_sources(
+                    &mut sources,
+                    &mut ranges,
+                    &lines,
+                    prev,
+                    idx,
+                    tool_block_kind(msg, true),
+                    "body",
+                    3,
+                    msg_streaming,
+                );
             }
         }
     }
 
-    (lines, sources)
+    let mut builder = LayoutBuilder::new();
+    for (start, end, kind, identity) in ranges {
+        builder.push(
+            identity,
+            kind,
+            lines[start..end].to_vec(),
+            sources[start].decoration_width,
+            sources[start].streaming,
+            TruncationMetadata {
+                limit: None,
+                total: None,
+                direction: None,
+            },
+        );
+    }
+    builder.finish()
 }
 
 // ── Tool call rendering ───────────────────────────────────────────────────────
@@ -1528,7 +1838,7 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolBodyConfig, build_log_lines, dim_lines, trim_assistant_block_edges};
+    use super::{ToolBodyConfig, build_log_layout, dim_lines, trim_assistant_block_edges};
     use crate::llm::{AssistantPhase, DisplayRange, Message, Role};
     use ratatui::{
         style::Color,
@@ -1613,17 +1923,19 @@ mod tests {
     }
 
     #[test]
-    fn build_log_lines_hides_whitespace_only_streaming_assistant() {
+    fn build_log_layout_hides_whitespace_only_streaming_assistant() {
         let mut msg = Message::assistant("\n   \n".to_string());
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[msg],
             true,
             80,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert!(lines.is_empty());
     }
 
@@ -1637,14 +1949,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         // 8 content lines + 1 marker = 9 body lines, plus 1 intent line = 10 total
         assert_eq!(lines.len(), 10);
         let text: Vec<String> = lines
@@ -1664,14 +1978,16 @@ mod tests {
         let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "foo.rs"}));
         let content = "line1\nline2\nline3";
         let result = Message::tool_result("c1", content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1693,14 +2009,16 @@ mod tests {
             last_line: 5,
             total_lines: 100,
         });
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let intent = lines[0]
             .spans
             .iter()
@@ -1722,14 +2040,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1752,14 +2072,16 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "old line", "new_text": "new line"}),
         );
         let result = Message::tool_result("c1", "Successfully edited foo.rs", false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1795,14 +2117,16 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": old, "new_text": new}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1827,14 +2151,16 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "prefix\n", "new_text": "prefix\nnew line\n"}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1864,14 +2190,16 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "prefix\nold line\n", "new_text": "prefix\n"}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1899,14 +2227,16 @@ mod tests {
             serde_json::json!({"path": "foo.rs", "old_text": "x", "new_text": "y"}),
         );
         let result = Message::tool_result("c1", "old_text not found", true);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1930,14 +2260,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1974,14 +2306,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = Message::tool_result("c1", &content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2019,14 +2353,16 @@ mod tests {
             full_output: true,
             ..ToolBodyConfig::default()
         };
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &full_cfg,
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2051,14 +2387,16 @@ mod tests {
             serde_json::json!({"question": "What do you want?"}),
         );
         // Question always renders in the log body.
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2083,14 +2421,16 @@ mod tests {
         );
         let result = Message::tool_result("c1", "Option A", false);
         // Committed turn: question should appear in the log.
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2126,14 +2466,16 @@ mod tests {
             ..Message::default()
         };
         call.role = Role::ToolCall;
-        let (lines, _) = build_log_lines(
+        let lines = build_log_layout(
             &[call],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2167,14 +2509,16 @@ mod tests {
             ..Message::default()
         };
         call.role = Role::ToolCall;
-        let (lines, _) = build_log_lines(
+        let lines = build_log_layout(
             &[call],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -2209,14 +2553,16 @@ mod tests {
             serde_json::json!({"path": "/tmp/out.rs", "content": "fn main() {}"}),
         );
         let result = Message::tool_result("c1", "Written 1 lines to /tmp/out.rs", false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         // The first line is the headline.
         let headline: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
@@ -2254,14 +2600,16 @@ mod tests {
         let content = format!("{}\n{}", long_line, long_line);
         let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
         let result = Message::tool_result("c1", &content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             20, // narrow terminal → forces wrapping
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         // Lines: 1 headline + up to 8 body lines + 1 truncation marker = max 10
         let body_text = lines_text_joined(&lines);
         assert!(
@@ -2285,14 +2633,16 @@ mod tests {
         let content = format!("{}\n{}", long_line, long_line);
         let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "echo"}));
         let result = Message::tool_result("c1", &content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             20,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         assert!(
             body_text.contains("2 total lines"),
@@ -2306,14 +2656,16 @@ mod tests {
         let content = "short line";
         let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
         let result = Message::tool_result("c1", content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         assert!(
             !body_text.contains("total lines"),
@@ -2326,14 +2678,16 @@ mod tests {
         let content = "short output";
         let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "echo"}));
         let result = Message::tool_result("c1", content, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             120,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         assert!(
             !body_text.contains("total lines"),
@@ -2347,14 +2701,16 @@ mod tests {
         let long_line = "x".repeat(500); // ~seven wrapped lines at width 80
         let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
         let result = Message::tool_result("c1", long_line, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             80,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         // Should have truncation marker since head_lines=8 but the line wraps
         // to ~7 chunks (< 8 at width 80), so actually no truncation for 500
@@ -2373,14 +2729,16 @@ mod tests {
         let long_line = "x".repeat(500);
         let call = Message::tool_call("c1", "read_file", serde_json::json!({"path": "f"}));
         let result = Message::tool_result("c1", long_line, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             20, // narrow → ~26 wrapped chunks (500/17 ≈ 30)
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         assert!(
             body_text.contains("1 total lines"),
@@ -2393,14 +2751,16 @@ mod tests {
         let long_line = "x".repeat(500);
         let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "echo"}));
         let result = Message::tool_result("c1", long_line, false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             20,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         assert!(
             body_text.contains("1 total lines"),
@@ -2422,14 +2782,16 @@ mod tests {
             serde_json::json!({"path": "f", "old_text": old_long, "new_text": new}),
         );
         let result = Message::tool_result("c1", "ok", false);
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             20,
             &cfg(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         // Count how many body lines contain the removed marker pattern " │ r".
         // Should be exactly 4 (diff_lines limit), not ~12 (the full wrapped count).
@@ -2454,14 +2816,16 @@ mod tests {
             full_output: true,
             ..ToolBodyConfig::default()
         };
-        let (lines, _sources) = build_log_lines(
+        let lines = build_log_layout(
             &[call, result],
             false,
             20,
             &cfg_full,
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let body_text = lines_text_joined(&lines);
         assert!(
             !body_text.contains("total lines"),
@@ -2547,14 +2911,16 @@ context line 12: jigs vex bud\n\
                 ..Message::default()
             };
             msg.role = Role::ToolCall;
-            let (lines, _) = build_log_lines(
+            let lines = build_log_layout(
                 std::slice::from_ref(&msg),
                 false,
                 120,
                 &cfg(),
                 &crate::theme::Theme::default(),
                 &crate::config::DisplayConfig::default(),
-            );
+            )
+            .flatten()
+            .0;
             if lines.len() <= 1 {
                 return String::new();
             }
