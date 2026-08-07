@@ -203,11 +203,15 @@ pub struct AgentLoopConfig {
 
 ## Key Design Decisions
 
-**Pre-wrapping instead of ratatui Wrap** — ratatui's `Wrap` widget wraps at
-render time and cannot easily pad individual lines to full width. By
-pre-wrapping in `build_log_lines` we know the exact row count before
-rendering, which makes scroll arithmetic exact and lets us apply per-row
-background styles (e.g. the grey user-message highlight).
+**Logical blocks and pre-wrapping instead of ratatui Wrap** — ratatui's `Wrap`
+widget wraps at render time and cannot easily pad individual lines to full
+width. The log renderer first pre-wraps independently renderable content into
+logical blocks, retaining stable block identity and line metadata. The explicit
+`LogLayout::flatten` boundary then produces the flat rows and selection hit map
+needed by viewport rendering. Knowing the exact row count before rendering
+makes scroll arithmetic exact and lets us apply per-row background styles (e.g.
+the grey user-message highlight), while preserving block boundaries for future
+hover, folding, and anchoring interactions.
 
 **Channel-based LLM events** — `tokio::mpsc` decouples the async HTTP
 streaming task from the synchronous draw loop. The draw loop never awaits;

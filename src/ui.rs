@@ -28,7 +28,7 @@ use self::{
     info::build_info_line,
     input::{render_input_panel, split_scrollbar_column, style_textarea},
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
-    log::{ToolBodyConfig, build_log_lines, dim_lines},
+    log::{ToolBodyConfig, build_log_layout},
     login::build_login_content_lines,
     menu::{build_completion_lines, build_selection_lines},
 };
@@ -40,7 +40,7 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
-fn build_log_lines_cached(
+fn build_log_layout_cached(
     app: &mut App,
     width: usize,
     inner_height: usize,
@@ -61,16 +61,18 @@ fn build_log_lines_cached(
         };
         let (lines, sources) = if let Some((kept, discarded)) = app.display_messages_split() {
             let (mut lines, mut sources) =
-                build_log_lines(&kept, false, width, &cfg, &app.theme, display);
-            let (dim_lines_v, dim_sources) =
-                build_log_lines(&discarded, false, width, &cfg, &app.theme, display);
-            lines.extend(dim_lines(dim_lines_v));
+                build_log_layout(&kept, false, width, &cfg, &app.theme, display).flatten();
+            let mut discarded_layout =
+                build_log_layout(&discarded, false, width, &cfg, &app.theme, display);
+            discarded_layout.dim();
+            let (dim_lines_v, dim_sources) = discarded_layout.flatten();
+            lines.extend(dim_lines_v);
             sources.extend(dim_sources);
             (lines, sources)
         } else {
             let combined = app.display_messages_combined();
             let (lines, sources) =
-                build_log_lines(&combined, streaming, width, &cfg, &app.theme, display);
+                build_log_layout(&combined, streaming, width, &cfg, &app.theme, display).flatten();
 
             // Track the maximum total line count for padding during streaming.
             if streaming {
@@ -182,7 +184,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let display = app.display.clone();
 
-    let (cached_lines, hit_map) = build_log_lines_cached(app, log_width, inner_height, &display);
+    let (cached_lines, hit_map) = build_log_layout_cached(app, log_width, inner_height, &display);
     let total_lines = cached_lines.len();
     // Store hit map for mouse selection in the next event loop iteration.
     app.mouse_select.hit_map = hit_map;
@@ -199,7 +201,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     full_output: app.log_view.full_output,
                     ..ToolBodyConfig::default()
                 };
-                build_log_lines(&kept, false, log_width, &cfg, &app.theme, &display)
+                build_log_layout(&kept, false, log_width, &cfg, &app.theme, &display)
+                    .flatten()
                     .0
                     .len()
             })
@@ -1222,41 +1225,47 @@ mod tests {
     fn hidden_user_messages_are_not_rendered() {
         let mut hidden = Message::user("secret");
         hidden.hidden = true;
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[hidden, Message::assistant("shown")],
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "💬 shown");
     }
 
     #[test]
     fn streaming_empty_assistant_message_is_not_rendered() {
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[Message::assistant("")],
             true,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert!(lines.is_empty());
     }
 
     #[test]
     fn stream_suffix_is_only_on_final_visible_chunk() {
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[Message::assistant("abcdefghijklmnopqrstuvwxyz")],
             true,
             8,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let rows_with_cursor: Vec<usize> = lines
             .iter()
             .enumerate()
@@ -1269,14 +1278,16 @@ mod tests {
 
     #[test]
     fn user_message_renders_block_edges() {
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[Message::user("hi")],
             false,
             10,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(line_text(&lines[0]), "▄▄▄▄▄▄▄▄▄▄");
         assert_eq!(line_text(&lines[1]), "hi        ");
         assert_eq!(line_text(&lines[2]), "▀▀▀▀▀▀▀▀▀▀");
@@ -1295,14 +1306,16 @@ mod tests {
             ),
         ];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             120,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert!(line_text(&lines[0]).contains("[10-20/300]"));
     }
 
@@ -1319,14 +1332,16 @@ mod tests {
             ),
         ];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             120,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(!rendered.contains("[lines 10-20 of 300]"));
         assert!(rendered.contains("╭ alpha"));
@@ -1344,14 +1359,16 @@ mod tests {
             Message::tool_result("1", &long_output, false),
         ];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             300,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("20 total lines"), "{rendered}");
     }
@@ -1364,14 +1381,16 @@ mod tests {
             json!({"command": "echo one\necho two\necho three"}),
         )];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             120,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
             rendered.contains("💻 echo one\n │ echo two\n ╰ echo three"),
@@ -1387,14 +1406,16 @@ mod tests {
             json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
         )];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             120,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
             rendered.contains("💻 l1\n │ l2\n │ l3\n │ l4\n │ l5\n ┆ … 6 total lines"),
@@ -1406,14 +1427,16 @@ mod tests {
     #[test]
     fn assistant_lines_are_prefixed_with_speech_bubble() {
         let messages = vec![Message::assistant("hello")];
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(line_text(&lines[0]), "💬 hello");
     }
 
@@ -1421,14 +1444,16 @@ mod tests {
     fn assistant_provisional_phase_uses_thought_bubble() {
         let mut msg = Message::assistant("working");
         msg.assistant_phase = Some(AssistantPhase::Provisional);
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[msg],
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(line_text(&lines[0]), "💭 working");
     }
 
@@ -1436,14 +1461,16 @@ mod tests {
     fn assistant_unknown_phase_streaming_uses_thought_bubble() {
         let mut msg = Message::assistant("streaming");
         msg.assistant_phase = Some(AssistantPhase::Unknown);
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[msg],
             true,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(line_text(&lines[0]), "💭 streaming▋");
     }
 
@@ -1452,14 +1479,16 @@ mod tests {
         let msg = Message::assistant(
             "[Agent is working. Press Ctrl-D again to quit and abort the agent loop]",
         );
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &[msg],
             true,
             120,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(
             line_text(&lines[0]),
             "💬 [Agent is working. Press Ctrl-D again to quit and abort the agent loop]"
@@ -1471,14 +1500,16 @@ mod tests {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some("planning".to_string());
         let messages = vec![msg];
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         assert_eq!(line_text(&lines[0]), "🧠 planning");
         assert_eq!(line_text(&lines[1]), "💬 answer");
     }
@@ -1890,14 +1921,16 @@ mod tests {
             Message::tool_result("1", "\n\n  output line  \n\n", false),
         ];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         // Leading/trailing newlines are stripped; leading spaces (indentation)
         // on the first content line are preserved.
         let result_lines: Vec<_> = lines
@@ -1926,14 +1959,16 @@ mod tests {
             Message::tool_result("1", "    indented output", false),
         ];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let result_lines: Vec<_> = lines
             .iter()
             .map(line_text)
@@ -1960,14 +1995,16 @@ mod tests {
             Message::tool_result("1", "load: 1.0\n", false),
         ];
 
-        let (lines, _) = log::build_log_lines(
+        let lines = log::build_log_layout(
             &messages,
             false,
             80,
             &log::ToolBodyConfig::default(),
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
-        );
+        )
+        .flatten()
+        .0;
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("· load: 1.0"), "{rendered}");
         // No extra blank line after the content.
