@@ -110,6 +110,26 @@ struct Cli {
     #[arg(long, short = 'p', value_name = "PROMPT", num_args = 1..)]
     print: Option<Vec<String>>,
 
+    /// Start the interactive UI and automatically submit PROMPT.
+    /// Accepts multiple words without shell quoting.
+    #[arg(
+        long,
+        value_name = "PROMPT",
+        num_args = 1..,
+        conflicts_with_all = ["prompt_file", "print"]
+    )]
+    prompt: Option<Vec<String>>,
+
+    /// Start the interactive UI and automatically submit the UTF-8 contents
+    /// of PATH as the initial prompt.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "prompt",
+        conflicts_with = "print"
+    )]
+    prompt_file: Option<std::path::PathBuf>,
+
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
     print_dirs: bool,
@@ -135,6 +155,26 @@ fn build_file_tracker() -> FileTracker {
     FileTracker::with_exclusions(excluded_prefixes, &["AGENTS.md", "SKILL.md"])
 }
 
+fn read_initial_prompt(
+    prompt: Option<Vec<String>>,
+    prompt_file: Option<std::path::PathBuf>,
+) -> io::Result<Option<String>> {
+    match (prompt, prompt_file) {
+        (Some(words), None) => Ok(Some(words.join(" "))),
+        (None, Some(path)) => std::fs::read_to_string(&path).map(Some).map_err(|e| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("failed to read initial prompt file {}: {e}", path.display()),
+            )
+        }),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--prompt and --prompt-file cannot be used together",
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     migrate::run();
@@ -146,6 +186,8 @@ async fn main() -> io::Result<()> {
         dirs::print_dirs();
         return Ok(());
     }
+
+    let initial_prompt = read_initial_prompt(cli.prompt, cli.prompt_file)?;
 
     let mut config = XiConfig::load().map_err(|e| {
         eprintln!(
@@ -274,6 +316,8 @@ async fn main() -> io::Result<()> {
     }
     provider_setup::maybe_warn_thinking_unsupported(&mut app);
 
+    let mut initial_prompt = initial_prompt;
+
     loop {
         // Build (or re-build) the provider for the current instance.
         // When no provider has been explicitly selected, skip the build
@@ -325,6 +369,12 @@ async fn main() -> io::Result<()> {
             && app.provider.setup_step == ProviderSetupStep::Idle
         {
             app.enter_login_selection_mode();
+        }
+
+        if initial_prompt.is_some() && app.provider.provider_selected {
+            let prompt = initial_prompt.take().expect("initial prompt was present");
+            app.textarea = ratatui_textarea::TextArea::from(vec![prompt]);
+            app.submit_chat_message(&provider);
         }
 
         match run(&mut terminal, &mut app, &provider, &config).await {
@@ -485,6 +535,9 @@ async fn run(
         if needs_redraw {
             draw_frame(&mut *terminal, app)?;
             needs_redraw = false;
+            if app.runtime.pending_finalize {
+                app.finalize_submission(provider);
+            }
         }
 
         tokio::select! {
@@ -930,6 +983,24 @@ mod tests {
     fn normalize_paste_text_converts_crlf_and_cr_to_lf() {
         let pasted = "a\r\nb\rc\n";
         assert_eq!(normalize_paste_text(pasted), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn read_initial_prompt_joins_inline_words() {
+        assert_eq!(
+            super::read_initial_prompt(Some(vec!["fix".into(), "tests".into()]), None).unwrap(),
+            Some("fix tests".into())
+        );
+    }
+
+    #[test]
+    fn read_initial_prompt_rejects_both_sources() {
+        let err = super::read_initial_prompt(
+            Some(vec!["inline".into()]),
+            Some(std::path::PathBuf::from("prompt.txt")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot be used together"));
     }
 
     #[test]
