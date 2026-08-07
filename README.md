@@ -60,6 +60,8 @@ cargo install --path .
 | `-P` | `--provider <PROVIDER>` | Configured provider instance id to use |
 | `-m` | `--model <MODEL>` | Model name to use (e.g. gpt-4o, llama3.1) |
 | `-p` | `--print <PROMPT>...` | Run in non-interactive mode: send PROMPT, stream the response to stdout, and exit. Accepts multiple words without shell quoting |
+| | `--prompt <PROMPT>...` | Start the interactive UI and automatically submit PROMPT. Accepts multiple words without shell quoting |
+| | `--prompt-file <PATH>` | Start the interactive UI and automatically submit the UTF-8 contents of PATH, preserving multiline prompts |
 | | `--print-dirs` | Print the file-system paths xi uses and exit |
 | `-h` | `--help` | Print help |
 | `-V` | `--version` | Print version |
