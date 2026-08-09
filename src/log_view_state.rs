@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::text::Line;
 
 use crate::mouse_select::LineSource;
@@ -12,31 +14,9 @@ pub(crate) type CachedLogLines = (
 );
 
 /// Tracks the monotonic log revision and its pre-wrapped line cache.
-///
-/// Call `invalidate()` whenever log content changes. Call `ensure_cached()` in
-/// the render path to populate or reuse the wrapped-line cache.
 pub struct LogCache {
-    /// Monotonic counter bumped on every log-content change.
     pub(crate) revision: u64,
-    /// Pre-wrapped lines + hit map: `(revision, width, step_cursor, lines, hit_map)`.
-    /// Invalidated on bump.
     pub(crate) cached_lines: Option<CachedLogLines>,
-}
-
-/// Tracks the maximum rendered line count observed during the current streaming
-/// turn. When the total shrinks (e.g. an edit_file diff recalculates with fewer
-/// lines), this lets us pad the visible output with blank lines so the viewport
-/// doesn't pull old content down.
-///
-/// Cleared on user scroll, resize, and streaming end.
-#[derive(Clone, Copy)]
-pub(crate) struct PaddingState {
-    /// Maximum total rendered line count observed.
-    pub(crate) max_total_lines: usize,
-    /// Log area height (inner_height) at the time `max_total_lines` was last
-    /// set.  Used to compensate when the log area shrinks (e.g. throbber
-    /// appears) so the gap absorbs the shrinkage instead of shifting content.
-    pub(crate) inner_height_when_set: usize,
 }
 
 impl LogCache {
@@ -47,7 +27,6 @@ impl LogCache {
         }
     }
 
-    /// Bump the revision counter and drop the cached lines.
     pub fn invalidate(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         self.cached_lines = None;
@@ -60,22 +39,21 @@ impl Default for LogCache {
     }
 }
 
-/// Scroll and cache state for the log pane.
+#[derive(Clone, Copy)]
+pub(crate) struct PaddingState {
+    pub(crate) max_total_lines: usize,
+    pub(crate) inner_height_when_set: usize,
+}
+
 pub struct LogViewState {
-    /// Tracks log-revision and pre-wrapped line cache; call `log_cache.invalidate()`
-    /// whenever visible log content changes.
     pub(crate) log_cache: LogCache,
     pub(crate) log_scroll: usize,
-    /// When true, the view always follows the bottom (auto-scrolls).
     pub(crate) auto_scroll: bool,
-    /// Height of the log pane from the last draw — used as page-size scrolling.
     pub(crate) last_log_height: usize,
-    /// Width of the log pane from the last draw — used to detect resize.
     pub(crate) last_log_width: usize,
-    /// When true, tool bodies are rendered without truncation.
     pub(crate) full_output: bool,
-    /// Padding state for the last message block during streaming.
-    /// Cleared on user scroll, invalidated on resize (via [`LogViewState::invalidate`]).
+    pub(crate) expanded_blocks: HashSet<String>,
+    pub(crate) pending_anchor: Option<(String, usize)>,
     pub(crate) last_block_padding: Option<PaddingState>,
 }
 
@@ -88,6 +66,8 @@ impl LogViewState {
             last_log_height: 0,
             last_log_width: 0,
             full_output: false,
+            expanded_blocks: HashSet::new(),
+            pending_anchor: None,
             last_block_padding: None,
         }
     }
@@ -96,7 +76,21 @@ impl LogViewState {
         self.log_cache.invalidate();
     }
 
-    /// Clear the block-padding state (on resize, scroll, or streaming end).
+    pub fn toggle_expanded(&mut self, identity: String) {
+        if !self.expanded_blocks.remove(&identity) {
+            self.expanded_blocks.insert(identity);
+        }
+        self.invalidate();
+        self.clear_padding();
+    }
+
+    pub fn clear_expanded(&mut self) {
+        self.expanded_blocks.clear();
+        self.pending_anchor = None;
+        self.invalidate();
+        self.clear_padding();
+    }
+
     pub fn clear_padding(&mut self) {
         self.last_block_padding = None;
     }
@@ -121,7 +115,6 @@ impl LogViewState {
         self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
     }
 
-    /// Toggle untruncated tool body display and invalidate the line cache.
     pub fn toggle_full_output(&mut self) {
         self.full_output = !self.full_output;
         self.log_cache.invalidate();
@@ -132,5 +125,38 @@ impl LogViewState {
 impl Default for LogViewState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogViewState;
+
+    #[test]
+    fn expansion_toggles_and_invalidates() {
+        let mut state = LogViewState::new();
+        let revision = state.log_cache.revision;
+        state.toggle_expanded("block:1".into());
+        assert!(state.expanded_blocks.contains("block:1"));
+        assert!(state.log_cache.revision > revision);
+        state.toggle_expanded("block:1".into());
+        assert!(!state.expanded_blocks.contains("block:1"));
+    }
+
+    #[test]
+    fn clearing_expansion_removes_pending_anchor() {
+        let mut state = LogViewState::new();
+        state.expanded_blocks.insert("block:1".into());
+        state.pending_anchor = Some(("block:1".into(), 4));
+        state.clear_expanded();
+        assert!(state.expanded_blocks.is_empty());
+        assert!(state.pending_anchor.is_none());
+    }
+
+    #[test]
+    fn pending_anchor_stores_screen_relative_top() {
+        let mut state = LogViewState::new();
+        state.pending_anchor = Some(("block:1".into(), 2));
+        assert_eq!(state.pending_anchor, Some(("block:1".into(), 2)));
     }
 }

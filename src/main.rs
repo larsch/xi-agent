@@ -581,6 +581,11 @@ async fn run(
                                     needs_redraw = true;
                                 }
                             }
+                            MouseEventKind::Moved => {
+                                if app.mouse_select.handle_mouse_move(mouse.column, mouse.row) {
+                                    needs_redraw = true;
+                                }
+                            }
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 app.mouse_select.handle_mouse_drag(
                                     mouse.column, mouse.row,
@@ -588,8 +593,30 @@ async fn run(
                                 needs_redraw = true;
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if let Some(text) = app.mouse_select.handle_mouse_up() {
+                                let text = app.mouse_select.handle_mouse_up();
+                                let clicked_block = app.mouse_select.clicked_block();
+                                if let Some(text) = text {
                                     let _ = crate::clipboard::set_clipboard(&text);
+                                } else if let Some(identity) = clicked_block {
+                                    if !app.log_view.auto_scroll {
+                                        let line_idx = app.mouse_select.log_scroll
+                                            + app.mouse_select.drag_start_row
+                                                .saturating_sub(app.mouse_select.log_area_top)
+                                                as usize;
+                                        let block_top = app
+                                            .mouse_select
+                                            .hit_map
+                                            .iter()
+                                            .position(|source| {
+                                                source.block_identity.as_ref() == Some(&identity)
+                                            })
+                                            .unwrap_or(line_idx);
+                                        let block_screen_top =
+                                            block_top.saturating_sub(app.mouse_select.log_scroll);
+                                        app.log_view.pending_anchor =
+                                            Some((identity.clone(), block_screen_top));
+                                    }
+                                    app.log_view.toggle_expanded(identity);
                                 }
                                 if let Some(saved) = app.mouse_select.take_saved_auto_scroll() {
                                     app.log_view.auto_scroll = saved;

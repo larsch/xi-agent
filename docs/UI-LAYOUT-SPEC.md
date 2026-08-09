@@ -76,6 +76,15 @@ When a tool body is truncated, the truncated lines are replaced with a `... (N l
 
 This convention applies consistently to all tool bodies.
 
+Truncated logical blocks are independently unfoldable with the mouse:
+
+- Hovering a foldable block reveals an action chevron at its top-right: `⌄` expands a collapsed block and `⌃` collapses an expanded block.
+- Clicking anywhere in the foldable block toggles that block only.
+- Click-drag remains text selection and does not toggle folding.
+- Folding state is local to the current session view and is not persisted.
+- Folding is independent of viewport scrolling. When not following the bottom, the toggled block's top remains anchored; when following the bottom, the output remains bottom-aligned.
+- Streaming blocks and content that is merely outside the viewport are not foldable.
+
 #### `read_file`
 
 - Intent: `👀 <path>` while tool is pending; `👀 <path> [<first>-<last>/<total>]` once result is available. When the file is not windowed (full file returned), no range suffix is shown.

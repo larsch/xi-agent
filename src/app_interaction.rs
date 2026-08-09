@@ -1111,6 +1111,7 @@ impl App {
         self.latest_usage = None;
         self.reset_textarea();
         self.log_view.auto_scroll = true;
+        self.log_view.clear_expanded();
         self.refresh_resume_availability();
     }
 }
