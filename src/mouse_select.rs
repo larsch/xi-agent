@@ -19,6 +19,10 @@ pub struct LineSource {
     pub decoration_width: u16,
     /// `true` when this line belongs to a streaming / incomplete message.
     pub streaming: bool,
+    /// Stable logical block identity, when this line belongs to a block.
+    pub block_identity: Option<String>,
+    /// Whether the block is currently foldable.
+    pub foldable: bool,
 }
 
 /// Type alias for the hit map: one entry per rendered log line.
@@ -58,6 +62,10 @@ pub struct MouseSelectState {
     pub log_area_width: u16,
     /// Current log scroll offset.
     pub log_scroll: usize,
+    /// Latest pointer position in terminal coordinates, if inside the log.
+    pub hover_col: u16,
+    pub hover_row: u16,
+    pub hover_active: bool,
 }
 
 impl MouseSelectState {
@@ -75,6 +83,9 @@ impl MouseSelectState {
             log_area_top: 0,
             log_area_width: 0,
             log_scroll: 0,
+            hover_col: 0,
+            hover_row: 0,
+            hover_active: false,
         }
     }
 
@@ -220,6 +231,14 @@ impl MouseSelectState {
 
     // ── Mouse event handlers ──────────────────────────────────────────────────
 
+    pub fn handle_mouse_move(&mut self, col: u16, row: u16) -> bool {
+        let changed = self.hover_col != col || self.hover_row != row || !self.hover_active;
+        self.hover_col = col;
+        self.hover_row = row;
+        self.hover_active = true;
+        changed
+    }
+
     /// Handle a mouse-down event.  Returns `true` if a drag has begun.
     pub fn handle_mouse_down(&mut self, col: u16, row: u16, auto_scroll: bool) -> bool {
         if !self.is_in_log_area(col, row) {
@@ -254,6 +273,18 @@ impl MouseSelectState {
         self.drag_active = true;
         self.drag_end_col = col;
         self.drag_end_row = row;
+    }
+
+    /// Return the logical block clicked, if the button was released without a drag.
+    pub fn clicked_block(&self) -> Option<String> {
+        if self.drag_active {
+            return None;
+        }
+        let vis_idx = self.drag_start_row.saturating_sub(self.log_area_top) as usize;
+        self.hit_map
+            .get(self.log_scroll + vis_idx)
+            .filter(|source| source.foldable && !source.streaming)
+            .and_then(|source| source.block_identity.clone())
     }
 
     /// Handle a mouse-up event.  Returns the selected text to copy, if any.
@@ -292,18 +323,26 @@ mod tests {
             LineSource {
                 decoration_width: 0,
                 streaming: false,
+                block_identity: None,
+                foldable: false,
             },
             LineSource {
                 decoration_width: 3, // "💬 "
                 streaming: false,
+                block_identity: None,
+                foldable: false,
             },
             LineSource {
                 decoration_width: 3, // " │ "
                 streaming: false,
+                block_identity: None,
+                foldable: false,
             },
             LineSource {
                 decoration_width: 0,
                 streaming: true,
+                block_identity: None,
+                foldable: false,
             },
         ]
     }

@@ -28,7 +28,7 @@ use self::{
     info::build_info_line,
     input::{render_input_panel, split_scrollbar_column, style_textarea},
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
-    log::{ToolBodyConfig, build_log_layout},
+    log::{ToolBodyConfig, build_log_layout_with_expansion},
     login::build_login_content_lines,
     menu::{build_completion_lines, build_selection_lines},
 };
@@ -60,10 +60,25 @@ fn build_log_layout_cached(
             ..ToolBodyConfig::default()
         };
         let (lines, sources) = if let Some((kept, discarded)) = app.display_messages_split() {
-            let (mut lines, mut sources) =
-                build_log_layout(&kept, false, width, &cfg, &app.theme, display).flatten();
-            let mut discarded_layout =
-                build_log_layout(&discarded, false, width, &cfg, &app.theme, display);
+            let (mut lines, mut sources) = build_log_layout_with_expansion(
+                &kept,
+                false,
+                width,
+                &cfg,
+                &app.theme,
+                display,
+                &app.log_view.expanded_blocks,
+            )
+            .flatten();
+            let mut discarded_layout = build_log_layout_with_expansion(
+                &discarded,
+                false,
+                width,
+                &cfg,
+                &app.theme,
+                display,
+                &app.log_view.expanded_blocks,
+            );
             discarded_layout.dim();
             let (dim_lines_v, dim_sources) = discarded_layout.flatten();
             lines.extend(dim_lines_v);
@@ -71,8 +86,16 @@ fn build_log_layout_cached(
             (lines, sources)
         } else {
             let combined = app.display_messages_combined();
-            let (lines, sources) =
-                build_log_layout(&combined, streaming, width, &cfg, &app.theme, display).flatten();
+            let (lines, sources) = build_log_layout_with_expansion(
+                &combined,
+                streaming,
+                width,
+                &cfg,
+                &app.theme,
+                display,
+                &app.log_view.expanded_blocks,
+            )
+            .flatten();
 
             // Track the maximum total line count for padding during streaming.
             if streaming {
@@ -186,6 +209,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let (cached_lines, hit_map) = build_log_layout_cached(app, log_width, inner_height, &display);
     let total_lines = cached_lines.len();
+    if let Some((identity, block_screen_top)) = app.log_view.pending_anchor.take()
+        && !app.log_view.auto_scroll
+        && let Some(new_top) = hit_map
+            .iter()
+            .position(|source| source.block_identity.as_ref() == Some(&identity))
+    {
+        app.log_view.log_scroll = new_top.saturating_sub(block_screen_top);
+    }
     // Store hit map for mouse selection in the next event loop iteration.
     app.mouse_select.hit_map = hit_map;
     let max_scroll = total_lines.saturating_sub(inner_height);
@@ -201,10 +232,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     full_output: app.log_view.full_output,
                     ..ToolBodyConfig::default()
                 };
-                build_log_layout(&kept, false, log_width, &cfg, &app.theme, &display)
-                    .flatten()
-                    .0
-                    .len()
+                build_log_layout_with_expansion(
+                    &kept,
+                    false,
+                    log_width,
+                    &cfg,
+                    &app.theme,
+                    &display,
+                    &app.log_view.expanded_blocks,
+                )
+                .flatten()
+                .0
+                .len()
             })
             .unwrap_or(0);
         let half_height = inner_height / 2;
@@ -284,11 +323,51 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     app.mouse_select.log_scroll = log_scroll;
     let visible_lines = apply_mouse_highlight(visible_lines, app, log_scroll);
 
+    let hover_source = app
+        .mouse_select
+        .hover_row
+        .saturating_sub(app.mouse_select.log_area_top) as usize;
+    let hover_line_idx = log_scroll.saturating_add(hover_source);
+    let hovered_identity = app
+        .mouse_select
+        .hit_map
+        .get(hover_line_idx)
+        .filter(|source| source.foldable && !source.streaming)
+        .and_then(|source| source.block_identity.clone());
+    let chevron_row = hovered_identity.as_ref().and_then(|identity| {
+        let start = app
+            .mouse_select
+            .hit_map
+            .iter()
+            .position(|source| source.block_identity.as_ref() == Some(identity))?;
+        (start >= log_scroll && start < log_scroll.saturating_add(inner_height))
+            .then_some(start.saturating_sub(log_scroll))
+    });
+
     let log_paragraph =
         Paragraph::new(Text::from(visible_lines)).block(Block::default().borders(Borders::NONE));
 
     f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_content_area);
+    if let (Some(row), Some(identity)) = (chevron_row, hovered_identity) {
+        let glyph = if app.log_view.expanded_blocks.contains(&identity) {
+            "⌃"
+        } else {
+            "⌄"
+        };
+        let chevron_area = ratatui::layout::Rect {
+            x: log_content_area
+                .x
+                .saturating_add(log_content_area.width.saturating_sub(1)),
+            y: log_content_area.y.saturating_add(row as u16),
+            width: 1,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(glyph).style(Style::default().fg(Color::DarkGray)),
+            chevron_area,
+        );
+    }
 
     if has_scrollbar && let Some(scrollbar_area) = log_scrollbar_area {
         let mut scrollbar_state =

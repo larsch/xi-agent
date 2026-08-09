@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -85,6 +87,7 @@ pub(super) struct LogBlock {
     pub lines: Vec<Line<'static>>,
     pub sources: Vec<LineSource>,
     pub truncation: TruncationMetadata,
+    pub foldable: bool,
 }
 
 /// Ordered logical layout of the log. Flattening is the compatibility boundary
@@ -110,7 +113,10 @@ impl LogLayout {
             // compatibility boundary and must carry the complete block model.
             let _block_key = (&block.identity, block.kind, block.truncation);
             lines.extend(block.lines.iter().cloned());
-            sources.extend(block.sources.iter().cloned());
+            sources.extend(block.sources.iter().cloned().map(|mut source| {
+                source.foldable = block.foldable && !source.streaming;
+                source
+            }));
         }
         (lines, sources)
     }
@@ -146,6 +152,16 @@ struct LayoutBuilder {
     layout: LogLayout,
 }
 
+struct LayoutBlockInput {
+    identity: String,
+    kind: LogBlockKind,
+    lines: Vec<Line<'static>>,
+    decoration_width: u16,
+    streaming: bool,
+    truncation: TruncationMetadata,
+    foldable: bool,
+}
+
 impl LayoutBuilder {
     fn new() -> Self {
         Self {
@@ -153,56 +169,34 @@ impl LayoutBuilder {
         }
     }
 
-    fn push(
-        &mut self,
-        identity: String,
-        kind: LogBlockKind,
-        lines: Vec<Line<'static>>,
-        decoration_width: u16,
-        streaming: bool,
-        truncation: TruncationMetadata,
-    ) {
+    fn push(&mut self, input: LayoutBlockInput) {
+        let LayoutBlockInput {
+            identity,
+            kind,
+            lines,
+            decoration_width,
+            streaming,
+            truncation,
+            foldable,
+        } = input;
+        // Truncation metadata is supplied by the renderer. Do not infer
+        // foldability from marker text: expanded variants intentionally omit
+        // the marker, and some renderers use another presentation.
         let sources = (0..lines.len())
             .map(|_| LineSource {
                 decoration_width,
                 streaming,
+                block_identity: Some(identity.clone()),
+                foldable,
             })
             .collect();
-        let marker_index = lines.iter().position(|line| {
-            let text = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            text.starts_with("… ") && text.ends_with(" total lines")
-        });
-        let marker_total = marker_index.and_then(|index| {
-            let text = lines[index]
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            text.strip_prefix("… ")
-                .and_then(|s| s.strip_suffix(" total lines"))
-                .and_then(|s| s.parse().ok())
-        });
-        let truncation = marker_total.map_or(truncation, |total| TruncationMetadata {
-            limit: Some(lines.len().saturating_sub(1)),
-            total: Some(total),
-            direction: Some(if kind == LogBlockKind::Diff {
-                TruncationDirection::Diff
-            } else if marker_index == Some(0) {
-                TruncationDirection::Tail
-            } else {
-                TruncationDirection::Head
-            }),
-        });
         self.layout.blocks.push(LogBlock {
             identity,
             kind,
             lines,
             sources,
             truncation,
+            foldable,
         });
     }
 
@@ -225,12 +219,15 @@ mod layout_tests {
             sources: vec![LineSource {
                 decoration_width: 3,
                 streaming,
+                block_identity: None,
+                foldable: false,
             }],
             truncation: TruncationMetadata {
                 limit: None,
                 total: None,
                 direction: None,
             },
+            foldable: false,
         }
     }
 
@@ -266,8 +263,11 @@ mod layout_tests {
                 sources: vec![LineSource {
                     decoration_width: 3,
                     streaming: false,
+                    block_identity: None,
+                    foldable: false,
                 }],
                 truncation: metadata,
+                foldable: true,
             }],
         };
         assert_eq!(layout.blocks[0].truncation.total, Some(20));
@@ -327,6 +327,7 @@ pub(super) fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn build_log_layout(
     messages: &[Message],
     streaming: bool,
@@ -334,6 +335,26 @@ pub(super) fn build_log_layout(
     cfg: &ToolBodyConfig,
     theme: &Theme,
     display: &DisplayConfig,
+) -> LogLayout {
+    build_log_layout_with_expansion(
+        messages,
+        streaming,
+        width,
+        cfg,
+        theme,
+        display,
+        &HashSet::new(),
+    )
+}
+
+pub(super) fn build_log_layout_with_expansion(
+    messages: &[Message],
+    streaming: bool,
+    width: usize,
+    cfg: &ToolBodyConfig,
+    theme: &Theme,
+    display: &DisplayConfig,
+    expanded_blocks: &HashSet<String>,
 ) -> LogLayout {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
@@ -357,6 +378,8 @@ pub(super) fn build_log_layout(
             sources.push(LineSource {
                 decoration_width,
                 streaming,
+                block_identity: None,
+                foldable: false,
             });
         }
         if prev_len < lines.len() {
@@ -418,7 +441,12 @@ pub(super) fn build_log_layout(
                                 wrapped.extend(wrap_str(logical, wrap_width));
                             }
                         }
-                        let skip = wrapped.len().saturating_sub(5);
+                        let thinking_id = format!("message:{idx}:thinking");
+                        let skip = if expanded_blocks.contains(&thinking_id) {
+                            0
+                        } else {
+                            wrapped.len().saturating_sub(5)
+                        };
                         let shown = trim_empty_edges(&wrapped[skip..], |s| s.is_empty());
                         shown.join("\n")
                     };
@@ -510,11 +538,14 @@ pub(super) fn build_log_layout(
             }
             Role::ToolCall => {
                 let prev = lines.len();
+                let block_id = format!("message:{idx}:intent");
+                let mut block_cfg = cfg.clone();
+                block_cfg.full_output |= expanded_blocks.contains(&block_id);
                 render_tool_call(
                     messages,
                     idx,
                     width,
-                    cfg,
+                    &block_cfg,
                     theme,
                     display,
                     &mut lines,
@@ -534,11 +565,14 @@ pub(super) fn build_log_layout(
             }
             Role::ToolResult => {
                 let prev = lines.len();
+                let block_id = format!("message:{idx}:body");
+                let mut block_cfg = cfg.clone();
+                block_cfg.full_output |= expanded_blocks.contains(&block_id);
                 render_tool_result(
                     messages,
                     idx,
                     width,
-                    cfg,
+                    &block_cfg,
                     theme,
                     display,
                     &mut lines,
@@ -561,18 +595,23 @@ pub(super) fn build_log_layout(
 
     let mut builder = LayoutBuilder::new();
     for (start, end, kind, identity) in ranges {
-        builder.push(
+        builder.push(LayoutBlockInput {
             identity,
             kind,
-            lines[start..end].to_vec(),
-            sources[start].decoration_width,
-            sources[start].streaming,
-            TruncationMetadata {
+            lines: lines[start..end].to_vec(),
+            decoration_width: sources[start].decoration_width,
+            streaming: sources[start].streaming,
+            truncation: TruncationMetadata {
                 limit: None,
                 total: None,
-                direction: None,
+                direction: Some(match kind {
+                    LogBlockKind::Diff => TruncationDirection::Diff,
+                    LogBlockKind::ToolBody => TruncationDirection::Tail,
+                    _ => TruncationDirection::Head,
+                }),
             },
-        );
+            foldable: !sources[start].streaming,
+        });
     }
     builder.finish()
 }
@@ -1838,7 +1877,10 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolBodyConfig, build_log_layout, dim_lines, trim_assistant_block_edges};
+    use super::{
+        ToolBodyConfig, build_log_layout, build_log_layout_with_expansion, dim_lines,
+        trim_assistant_block_edges,
+    };
     use crate::llm::{AssistantPhase, DisplayRange, Message, Role};
     use ratatui::{
         style::Color,
@@ -1937,6 +1979,35 @@ mod tests {
         .flatten()
         .0;
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn expanded_thinking_shows_earlier_lines() {
+        let mut msg = Message::assistant("answer".to_string());
+        msg.thinking = Some(
+            (1..=8)
+                .map(|i| format!("thought{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let mut expanded = std::collections::HashSet::new();
+        expanded.insert("message:0:thinking".to_string());
+        let layout = build_log_layout_with_expansion(
+            &[msg],
+            false,
+            80,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+            &expanded,
+        );
+        let text = layout.blocks[0]
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("thought1"));
     }
 
     // ── read_file ─────────────────────────────────────────────────────────────
