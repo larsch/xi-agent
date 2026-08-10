@@ -512,7 +512,8 @@ async fn run(
     config: &XiConfig,
 ) -> io::Result<RunResult> {
     let mut crossterm_events = EventStream::new();
-    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(320));
+    // The throbber animations are designed for 8 FPS (125 ms per frame).
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(125));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Timestamp of the most recent key Press event other than Enter itself.
