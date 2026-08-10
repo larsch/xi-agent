@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use futures_util::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::Terminal;
 use std::{
     io,
     io::ErrorKind,
@@ -507,7 +507,7 @@ async fn next_signal() -> SignalEvent {
 // ── Inner event loop ──────────────────────────────────────────────────────────
 
 async fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<terminal::Backend>,
     app: &mut App,
     provider: &Arc<dyn LlmProvider + Send + Sync>,
     config: &XiConfig,
