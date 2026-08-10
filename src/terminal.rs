@@ -34,9 +34,9 @@ pub(crate) fn install_termination_guard() {
     }
 }
 
-pub(crate) fn init_terminal(
-    window_title: &str,
-) -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
+pub(crate) type Backend = CrosstermBackend<io::Stdout>;
+
+pub(crate) fn init_terminal(window_title: &str) -> io::Result<(Terminal<Backend>, bool)> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -67,7 +67,7 @@ pub(crate) fn init_terminal(
 }
 
 pub(crate) fn shutdown_terminal(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<Backend>,
     keyboard_enhancements_enabled: bool,
 ) -> io::Result<()> {
     disable_raw_mode()?;
@@ -85,10 +85,10 @@ pub(crate) fn shutdown_terminal(
 }
 
 pub(crate) fn recreate_terminal(
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: Terminal<Backend>,
     keyboard_enhancements_enabled: &mut bool,
     window_title: &str,
-) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+) -> io::Result<Terminal<Backend>> {
     drop(terminal);
     let (new_terminal, new_kbe) = init_terminal(window_title)?;
     *keyboard_enhancements_enabled = new_kbe;
@@ -97,7 +97,7 @@ pub(crate) fn recreate_terminal(
 
 #[cfg(unix)]
 pub(crate) fn suspend_interactive_ui(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<Backend>,
     keyboard_enhancements_enabled: bool,
 ) -> io::Result<()> {
     use crossterm::cursor::Show;
@@ -126,7 +126,7 @@ pub(crate) fn suspend_interactive_ui(
 
 #[cfg(not(unix))]
 pub(crate) fn suspend_interactive_ui(
-    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _terminal: &mut Terminal<Backend>,
     _keyboard_enhancements_enabled: bool,
 ) -> io::Result<()> {
     Ok(())
