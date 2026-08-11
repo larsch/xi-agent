@@ -571,8 +571,11 @@ pub struct AgentLoopConfig {
     pub current_model: String,
     /// When true, allow threshold-based auto-compaction after completed turns.
     pub auto_compaction_enabled: bool,
-    /// Optional manual compaction instructions to apply immediately when the
-    /// loop starts, before any normal assistant turn is requested.
+    /// When true, run a compaction-only pass immediately when the loop starts,
+    /// before any normal assistant turn is requested.
+    pub manual_compaction_requested: bool,
+    /// Optional manual compaction instructions to apply to that immediate
+    /// compaction-only pass.
     pub manual_compaction_instructions: Option<String>,
     /// System prompt prepended to all LLM requests.  When `None`, no system
     /// message is added.

@@ -1432,6 +1432,7 @@ mod tests {
                 session_events: vec![],
                 current_model: "gpt-4o".to_string(),
                 auto_compaction_enabled: true,
+                manual_compaction_requested: false,
                 manual_compaction_instructions: None,
                 executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
                 system_prompt: None,

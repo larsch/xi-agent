@@ -530,7 +530,7 @@ pub async fn run_agent_loop(
     let mut overflow_retry_remaining = 1usize;
 
     // ── Manual compaction shortcut ────────────────────────────────────────────
-    if config.manual_compaction_instructions.is_some() {
+    if config.manual_compaction_requested {
         match emit_compaction(
             Arc::clone(&provider),
             &tx,
