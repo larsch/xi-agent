@@ -418,7 +418,20 @@ impl App {
     }
 
     fn on_turn_end(&mut self) {
-        self.begin_agent_turn();
+        // TurnEnd is emitted both after a final answer and after a tool batch.
+        // The latter is a continuation of the active turn: preserve a
+        // throbber that became visible while the tool was running instead of
+        // restarting the new-turn hold-off.
+        let continuing_after_tool = self
+            .session
+            .pending_turn_events
+            .last()
+            .is_some_and(|event| matches!(event, SessionEvent::ToolResult { .. }));
+        if continuing_after_tool {
+            self.continue_agent_turn_after_tool();
+        } else {
+            self.begin_agent_turn();
+        }
         // Finalise the assistant message in the pending buffer before
         // flushing, using the current in-memory messages state.
         self.finalise_assistant_turn_event();

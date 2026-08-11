@@ -75,6 +75,20 @@ impl AgentTurnState {
         self.holdoff_started_at = Some(Instant::now());
     }
 
+    /// Continue an active turn after a tool batch without resetting activity
+    /// visibility. A tool-result boundary starts another model request, but it
+    /// is not a new user turn and must preserve a throbber that became visible
+    /// while the tool was running.
+    pub(crate) fn continue_turn(&mut self) {
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.activity = AgentActivity::ModelRequest;
+        if !self.is_active() {
+            self.status = Some(StreamingStatus::Waiting);
+            self.activity_visible = false;
+            self.holdoff_started_at = Some(Instant::now());
+        }
+    }
+
     /// End the current turn and hide the activity row.
     pub(crate) fn end(&mut self) {
         self.status = None;
@@ -213,6 +227,19 @@ mod tests {
         state.update_visual_state(None, visible_at);
         state.set_activity(crate::agent::types::AgentActivity::LocalWork);
         state.update_visual_state(Some(VisualUpdate::Delta(0)), visible_at);
+        assert!(state.throbber_visible(false));
+    }
+
+    #[test]
+    fn tool_continuation_preserves_visible_throbber() {
+        let mut state = AgentTurnState::new();
+        state.start();
+        let visible_at = Instant::now() + Duration::from_millis(241);
+        state.update_visual_state(None, visible_at);
+        assert!(state.throbber_visible(false));
+
+        state.continue_turn();
+        assert!(state.is_active());
         assert!(state.throbber_visible(false));
     }
 
