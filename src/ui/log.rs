@@ -113,21 +113,13 @@ impl LogLayout {
         let Some(previous) = previous else {
             return VisualUpdate::NonContentLayoutChange;
         };
-        let mut total_delta = 0isize;
-        for (index, block) in self.blocks.iter().enumerate() {
-            let before = previous
-                .iter()
-                .find(|(identity, _, _)| identity == &block.identity)
-                .map_or(0, |(_, lines, _)| *lines);
-            total_delta += block.lines.len() as isize - before as isize;
-            let _ = index;
-        }
-        for (identity, before, _) in previous {
-            if !self.blocks.iter().any(|block| block.identity == *identity) {
-                total_delta -= *before as isize;
-            }
-        }
-        VisualUpdate::Delta(total_delta)
+        let before_total = previous.iter().map(|(_, lines, _)| *lines).sum::<usize>();
+        let after_total = self
+            .blocks
+            .iter()
+            .map(|block| block.lines.len())
+            .sum::<usize>();
+        VisualUpdate::Delta(after_total as isize - before_total as isize)
     }
 
     pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
