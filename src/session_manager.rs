@@ -40,6 +40,9 @@ pub(crate) struct SessionManager {
     /// Flushed to session state as a batch on `TurnEnd`, `Done`, or `Error`.
     pub pending_turn_events: Vec<SessionEvent>,
 
+    /// Whether the next launched task should perform a compaction-only pass.
+    pub pending_manual_compaction_requested: bool,
+
     /// Optional manual compaction instructions for the next launched
     /// compaction-only task.
     pub pending_manual_compaction_instructions: Option<String>,
@@ -55,6 +58,7 @@ impl SessionManager {
             session_state: None,
             live_turn: LiveTurnState::new(),
             pending_turn_events: Vec::new(),
+            pending_manual_compaction_requested: false,
             pending_manual_compaction_instructions: None,
         }
     }

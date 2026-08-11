@@ -163,6 +163,7 @@ async fn run_and_collect_with_config(
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks,
@@ -357,6 +358,7 @@ async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -440,6 +442,7 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -529,6 +532,7 @@ async fn steering_after_streamed_text_is_consumed_after_turn_end() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -626,6 +630,7 @@ async fn agent_loop_before_hook_blocks_tool() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -902,6 +907,7 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -989,6 +995,7 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -1057,6 +1064,7 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
         session_events: vec![],
         current_model: "gpt-4o".to_string(),
         auto_compaction_enabled: true,
+        manual_compaction_requested: false,
         manual_compaction_instructions: None,
         system_prompt: None,
         hooks: HashMap::new(),
@@ -1086,6 +1094,75 @@ async fn agent_loop_cancel_after_tool_call_stops_before_next_turn() {
             .iter()
             .any(|e| matches!(e, AgentEvent::TextToken { text, .. } if text == "second-turn")),
         "second turn should not have been reached after cancellation"
+    );
+}
+
+#[tokio::test]
+async fn manual_compaction_without_instructions_runs_compaction_only() {
+    let provider = MockProvider::new(vec![vec![
+        LlmEvent::Token {
+            text: "## Goal\nKeep working".to_string(),
+            phase: AssistantPhase::Unknown,
+        },
+        LlmEvent::Done,
+    ]]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let config = AgentLoopConfig {
+        tools: HashMap::new(),
+        file_tracker: make_tracker(),
+        tool_output_log: make_log(),
+        executor: make_executor(),
+        session_events: vec![crate::session_event::SessionEvent::UserMessage {
+            content: "please compact".to_string(),
+            timestamp: 0,
+        }],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: true,
+        manual_compaction_requested: true,
+        manual_compaction_instructions: None,
+        system_prompt: None,
+        hooks: HashMap::new(),
+        hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
+        session_id: String::new(),
+    };
+
+    run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::Agent(agent_ev) = ev {
+            events.push(agent_ev);
+        }
+    }
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Compacting)),
+        "expected manual compaction to start, got: {:?}",
+        events
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionDone(_))),
+        "expected manual compaction to complete, got: {:?}",
+        events
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextToken { .. })),
+        "manual compaction should not stream a normal assistant reply: {:?}",
+        events
+    );
+    assert!(
+        matches!(events.last(), Some(AgentEvent::Done)),
+        "expected Done after compaction-only run, got: {:?}",
+        events.last()
     );
 }
 

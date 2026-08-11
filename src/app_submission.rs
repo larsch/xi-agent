@@ -57,6 +57,9 @@ impl App {
             session_events,
             current_model: self.provider.current_model.clone(),
             auto_compaction_enabled: true,
+            manual_compaction_requested: std::mem::take(
+                &mut self.session.pending_manual_compaction_requested,
+            ),
             manual_compaction_instructions: self
                 .session
                 .pending_manual_compaction_instructions
@@ -136,6 +139,7 @@ impl App {
         }
 
         self.ensure_event_log_for_submit();
+        self.session.pending_manual_compaction_requested = true;
         self.session.pending_manual_compaction_instructions = instructions;
 
         if self.check_token_preflight(RetryTarget::AgentTurn) {

@@ -278,6 +278,7 @@ async fn main() -> io::Result<()> {
             session_events: vec![],
             current_model: initial_model.clone(),
             auto_compaction_enabled: true,
+            manual_compaction_requested: false,
             manual_compaction_instructions: None,
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
             system_prompt: None,
