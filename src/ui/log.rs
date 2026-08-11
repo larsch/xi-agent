@@ -113,57 +113,21 @@ impl LogLayout {
         let Some(previous) = previous else {
             return VisualUpdate::NonContentLayoutChange;
         };
-        let current: Vec<_> = self
-            .blocks
-            .iter()
-            .map(|block| {
-                (
-                    block.identity.as_str(),
-                    block.lines.len(),
-                    block
-                        .lines
-                        .iter()
-                        .map(|line| {
-                            line.spans
-                                .iter()
-                                .map(|span| span.content.as_ref())
-                                .collect::<String>()
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-            })
-            .collect();
-        let first_change = current.iter().zip(previous.iter()).position(
-            |((identity, height, content), (old_identity, old_height, old_content))| {
-                identity != &old_identity.as_str() || height != old_height || content != old_content
-            },
-        );
-        match first_change {
-            None if current.len() == previous.len() => VisualUpdate::Unchanged,
-            None if current.len() > previous.len() => VisualUpdate::OutputGrowth,
-            None => VisualUpdate::ContentReflow,
-            Some(index) => {
-                let prefix_stable = current[..index].iter().zip(previous[..index].iter()).all(
-                    |((identity, height, content), (old_identity, old_height, old_content))| {
-                        identity == &old_identity.as_str()
-                            && height == old_height
-                            && content == old_content
-                    },
-                );
-                if prefix_stable
-                    && ((index < current.len()
-                        && index < previous.len()
-                        && current[index].0 == previous[index].0
-                        && current[index].1 > previous[index].1)
-                        || (index == previous.len() && current.len() > previous.len()))
-                {
-                    VisualUpdate::OutputGrowth
-                } else {
-                    VisualUpdate::ContentReflow
-                }
+        let mut total_delta = 0isize;
+        for (index, block) in self.blocks.iter().enumerate() {
+            let before = previous
+                .iter()
+                .find(|(identity, _, _)| identity == &block.identity)
+                .map_or(0, |(_, lines, _)| *lines);
+            total_delta += block.lines.len() as isize - before as isize;
+            let _ = index;
+        }
+        for (identity, before, _) in previous {
+            if !self.blocks.iter().any(|block| block.identity == *identity) {
+                total_delta -= *before as isize;
             }
         }
+        VisualUpdate::Delta(total_delta)
     }
 
     pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
@@ -296,7 +260,7 @@ mod layout_tests {
                 block("b", LogBlockKind::ToolBody, "b\nb\nb", false),
             ],
         };
-        assert_eq!(grown.visual_update(Some(&old)), VisualUpdate::OutputGrowth);
+        assert_eq!(grown.visual_update(Some(&old)), VisualUpdate::Delta(1));
 
         let replaced = LogLayout {
             blocks: vec![
@@ -304,10 +268,7 @@ mod layout_tests {
                 block("b", LogBlockKind::ToolBody, "z\nz", false),
             ],
         };
-        assert_eq!(
-            replaced.visual_update(Some(&old)),
-            VisualUpdate::ContentReflow
-        );
+        assert_eq!(replaced.visual_update(Some(&old)), VisualUpdate::Delta(0));
     }
 
     fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {

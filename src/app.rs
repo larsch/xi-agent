@@ -3010,7 +3010,7 @@ mod tests {
         app.begin_agent_turn();
         app.agent_turn.set_activity(AgentActivity::LocalWork);
         app.agent_turn.update_visual_state(
-            Some(crate::agent_turn_state::VisualUpdate::OutputGrowth),
+            Some(crate::agent_turn_state::VisualUpdate::Delta(1)),
             std::time::Instant::now(),
         );
 

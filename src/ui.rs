@@ -134,28 +134,31 @@ fn build_log_layout_cached(
             app.log_view.log_cache.revision,
             width,
         );
+        let previous_total = previous
+            .as_ref()
+            .map_or(0, |blocks| blocks.iter().map(|(_, lines, _)| *lines).sum());
+        let anchor_padding = app
+            .log_view
+            .last_block_padding
+            .as_ref()
+            .map_or(0, |padding| {
+                padding.max_total_lines.saturating_sub(previous_total)
+            });
         app.log_view.set_visual_baseline(baseline);
-        app.agent_turn
-            .update_visual_state(Some(update), std::time::Instant::now());
+        app.agent_turn.update_visual_state_with_padding(
+            Some(update),
+            anchor_padding,
+            std::time::Instant::now(),
+        );
         let (lines, sources) = layout.flatten();
 
-        // Track the maximum total line count for padding during streaming.
-        if streaming {
-            let total = lines.len();
-            match &mut app.log_view.last_block_padding {
-                Some(ps) => {
-                    if total > ps.max_total_lines {
-                        ps.max_total_lines = total;
-                        ps.inner_height_when_set = inner_height;
-                    }
-                }
-                None => {
-                    app.log_view.last_block_padding = Some(PaddingState {
-                        max_total_lines: total,
-                        inner_height_when_set: inner_height,
-                    });
-                }
-            }
+        // The initial total is the anchor. Subsequent positive visual deltas
+        // consume this padding; do not raise the anchor after each update.
+        if streaming && app.log_view.last_block_padding.is_none() {
+            app.log_view.last_block_padding = Some(PaddingState {
+                max_total_lines: lines.len(),
+                inner_height_when_set: inner_height,
+            });
         }
 
         let rev = app.log_view.log_cache.revision;
