@@ -94,7 +94,7 @@ fn build_log_layout_cached(
                 &app.log_view.expanded_blocks,
             )
         };
-        let baseline = layout
+        let baseline: Vec<(String, usize, String)> = layout
             .blocks
             .iter()
             .map(|block| {
@@ -126,6 +126,14 @@ fn build_log_layout_cached(
         } else {
             layout.visual_update(previous.as_deref())
         };
+        let baseline_blocks = baseline.len();
+        let previous_blocks = previous.as_ref().map_or(0, Vec::len);
+        ::log::debug!(
+            target: "throbber.trace",
+            "layout update: revision={} width={} step_cursor={step_cursor:?} streaming={streaming} previous_blocks={previous_blocks} new_blocks={baseline_blocks} update={update:?}",
+            app.log_view.log_cache.revision,
+            width,
+        );
         app.log_view.set_visual_baseline(baseline);
         app.agent_turn
             .update_visual_state(Some(update), std::time::Instant::now());
@@ -174,16 +182,19 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     };
 
     let input_line_count = input_visual_line_count(active_lines, width);
-
-    // Build and classify the logical log before deciding activity-row height.
-    // The one-column scrollbar is accounted for in the provisional width; the
-    // later viewport pass reuses this cache when the width is unchanged.
-    let provisional_log_width = width.saturating_sub(1).max(1);
     let display = app.display.clone();
-    let _ = build_log_layout_cached(app, provisional_log_width, 0, &display);
 
     let ask_user_header_lines = if app.selection.active { 1 } else { 0 };
 
+    ::log::debug!(
+        target: "throbber.trace",
+        "panel decision: active={} visible={} full_output={} activity_row_before={} width={} terminal_height={terminal_height}",
+        app.streaming(),
+        app.throbber_visible(),
+        app.log_view.full_output,
+        app.throbber_visible() || app.log_view.full_output,
+        width,
+    );
     let layout = compute_panel_heights(PanelInputs {
         terminal_height,
         width,
@@ -239,6 +250,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let inner_height = log_area.height as usize;
     let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
     let log_width = log_content_area.width as usize;
+    let previous_log_height = app.log_view.last_log_height;
     app.log_view.last_log_height = inner_height;
 
     // Reset block padding on terminal resize.
@@ -246,6 +258,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.clear_padding();
     }
     app.log_view.last_log_width = log_width;
+
+    ::log::debug!(
+        target: "throbber.trace",
+        "viewport: activity_height={} log_height={} log_width={} previous_log_height={} auto_scroll={} scroll={} padding={:?}",
+        layout.activity_height,
+        inner_height,
+        log_width,
+        previous_log_height,
+        app.log_view.auto_scroll,
+        app.log_view.log_scroll,
+        app.log_view.last_block_padding.as_ref().map(|p| (p.max_total_lines, p.inner_height_when_set)),
+    );
 
     let (cached_lines, hit_map) = build_log_layout_cached(app, log_width, inner_height, &display);
     let total_lines = cached_lines.len();
@@ -326,6 +350,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     } else {
         0
     };
+
+    ::log::debug!(
+        target: "throbber.trace",
+        "render geometry: total_lines={} inner_height={} stored_height={} max_total={} height_decrease={} block_padding={} throbber_visible={}",
+        total_lines,
+        inner_height,
+        stored_height,
+        max_total,
+        height_decrease,
+        block_padding,
+        app.throbber_visible(),
+    );
 
     let visible_lines: Vec<Line<'static>> = {
         let all = cached_lines;
