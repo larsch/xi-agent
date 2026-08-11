@@ -7,6 +7,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    agent_turn_state::VisualUpdate,
     llm::{AssistantPhase, Message, Role},
     mouse_select::LineSource,
     theme::Theme,
@@ -101,6 +102,69 @@ impl LogLayout {
     pub fn dim(&mut self) {
         for block in &mut self.blocks {
             block.lines = dim_lines(std::mem::take(&mut block.lines));
+        }
+    }
+
+    /// Compare this rendered logical layout with the previous eligible layout.
+    pub(crate) fn visual_update(
+        &self,
+        previous: Option<&[(String, usize, String)]>,
+    ) -> VisualUpdate {
+        let Some(previous) = previous else {
+            return VisualUpdate::NonContentLayoutChange;
+        };
+        let current: Vec<_> = self
+            .blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.identity.as_str(),
+                    block.lines.len(),
+                    block
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            })
+            .collect();
+        let first_change = current.iter().zip(previous.iter()).position(
+            |((identity, height, content), (old_identity, old_height, old_content))| {
+                identity != &old_identity.as_str() || height != old_height || content != old_content
+            },
+        );
+        match first_change {
+            None if current.len() == previous.len() => VisualUpdate::Unchanged,
+            None if current.len() > previous.len() => VisualUpdate::OutputGrowth,
+            None => VisualUpdate::ContentReflow,
+            Some(index) => {
+                let prefix_stable = current[..index].iter().zip(previous[..index].iter()).all(
+                    |((identity, height, content), (old_identity, old_height, old_content))| {
+                        identity == &old_identity.as_str()
+                            && height == old_height
+                            && content == old_content
+                    },
+                );
+                if prefix_stable
+                    && index < current.len()
+                    && index < previous.len()
+                    && current[index].0 == previous[index].0
+                    && current[index].1 > previous[index].1
+                {
+                    VisualUpdate::OutputGrowth
+                } else if prefix_stable && index == previous.len() && current.len() > previous.len()
+                {
+                    VisualUpdate::OutputGrowth
+                } else {
+                    VisualUpdate::ContentReflow
+                }
+            }
         }
     }
 
@@ -208,20 +272,53 @@ impl LayoutBuilder {
 #[cfg(test)]
 mod layout_tests {
     use super::{LogBlock, LogBlockKind, LogLayout, TruncationDirection, TruncationMetadata};
+    use crate::agent_turn_state::VisualUpdate;
     use crate::mouse_select::LineSource;
     use ratatui::text::Line;
+
+    #[test]
+    fn visual_update_classifies_bottom_growth_and_reflow() {
+        let old = vec![
+            ("a".to_string(), 1, "a".to_string()),
+            ("b".to_string(), 2, "b\nb".to_string()),
+        ];
+        let grown = LogLayout {
+            blocks: vec![
+                block("a", LogBlockKind::UserContent, "a", false),
+                block("b", LogBlockKind::ToolBody, "b\nb\nb", false),
+            ],
+        };
+        assert_eq!(grown.visual_update(Some(&old)), VisualUpdate::OutputGrowth);
+
+        let replaced = LogLayout {
+            blocks: vec![
+                block("a", LogBlockKind::UserContent, "a", false),
+                block("b", LogBlockKind::ToolBody, "z\nz", false),
+            ],
+        };
+        assert_eq!(
+            replaced.visual_update(Some(&old)),
+            VisualUpdate::ContentReflow
+        );
+    }
 
     fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {
         LogBlock {
             identity: identity.to_string(),
             kind,
-            lines: vec![Line::raw(text.to_string())],
-            sources: vec![LineSource {
-                decoration_width: 3,
-                streaming,
-                block_identity: None,
-                foldable: false,
-            }],
+            lines: text
+                .lines()
+                .map(|line| Line::raw(line.to_string()))
+                .collect(),
+            sources: text
+                .lines()
+                .map(|_| LineSource {
+                    decoration_width: 3,
+                    streaming,
+                    block_identity: None,
+                    foldable: false,
+                })
+                .collect(),
             truncation: TruncationMetadata {
                 limit: None,
                 total: None,

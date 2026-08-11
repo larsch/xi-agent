@@ -101,7 +101,7 @@ impl App {
             self.session.session_state.is_some(),
             "launch_turn called before session_state was initialised"
         );
-        self.agent_turn.start();
+        self.begin_agent_turn();
         self.login.auth_retry_budget = 1;
         self.log_view.auto_scroll = true;
         self.runtime.reset_abort_stages();
@@ -146,7 +146,7 @@ impl App {
             return;
         }
 
-        self.agent_turn.start();
+        self.begin_agent_turn();
         self.login.auth_retry_budget = 1;
         self.log_view.auto_scroll = true;
         self.start_agent_task(provider);
@@ -412,7 +412,7 @@ impl App {
                 .set_status(Some(StreamingStatus::CompletedMessage(
                     "[agent loop aborted]".to_string(),
                 )));
-            self.agent_turn.last_output_at = None;
+            self.agent_turn.holdoff_started_at = None;
             self.runtime.steering_tx = None;
             self.runtime.queued_steering.clear();
             self.append_abort_results_for_pending_tool_calls();

@@ -207,6 +207,16 @@ impl App {
         self.agent_turn.is_active()
     }
 
+    pub(crate) fn begin_agent_turn(&mut self) {
+        self.agent_turn.start();
+        self.log_view.begin_turn(self.agent_turn.turn_generation());
+    }
+
+    pub(crate) fn end_agent_turn(&mut self) {
+        self.agent_turn.end();
+        self.log_view.clear_turn_baseline();
+    }
+
     /// Advance the throbber animation frame.  Called on every UI tick.
     pub fn tick(&mut self) {
         if self.login.refresh_in_progress {
@@ -1492,7 +1502,7 @@ mod tests {
         assert!(!app.streaming());
         assert!(app.should_show_resume_hint());
 
-        app.agent_turn.start();
+        app.begin_agent_turn();
         assert!(app.streaming());
         assert!(!app.should_show_resume_hint());
     }
@@ -2109,7 +2119,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             app.textarea.insert_str("/model gpt");
 
@@ -2150,7 +2160,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             app.textarea.insert_str("hello");
 
@@ -2270,7 +2280,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             app.textarea = ratatui_textarea::TextArea::new(vec!["draft".to_string()]);
             app.enter_keybinding_help_mode();
@@ -2324,7 +2334,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             // Simulate an in-flight tool call via pending_turn_events.
             app.session
@@ -2379,7 +2389,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             app.session
                 .pending_turn_events
@@ -2451,7 +2461,7 @@ mod tests {
             app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             // Simulate a ToolCall with its result already in pending_turn_events.
             app.session
@@ -2507,7 +2517,7 @@ mod tests {
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
             app.session.live_turn.assistant_content = "partial".to_string();
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
 
             app.abort_agent_loop();
@@ -2544,7 +2554,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(crate::agent::CancelLevel::None);
             app.runtime.cancel_tx = Some(cancel_tx);
@@ -2589,7 +2599,7 @@ mod tests {
                 crate::event_log::EventLog::load(&path).expect("load event log"),
             ));
             app.session.live_turn.assistant_content = "partial".to_string();
-            app.agent_turn.start();
+            app.begin_agent_turn();
             install_test_agent_task(&mut app);
             let (cancel_tx, _cancel_rx) =
                 tokio::sync::watch::channel(crate::agent::CancelLevel::None);
@@ -2877,7 +2887,7 @@ mod tests {
         app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
             crate::event_log::EventLog::load(&path).expect("load event log"),
         ));
-        app.agent_turn.start();
+        app.begin_agent_turn();
         app.session.live_turn.assistant_content = "partial".to_string();
         app.session
             .pending_turn_events
@@ -2923,7 +2933,10 @@ mod tests {
     #[test]
     fn empty_status_update_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.agent_turn.start();
+        app.begin_agent_turn();
+        let now = std::time::Instant::now();
+        app.agent_turn
+            .update_visual_state(None, now + std::time::Duration::from_millis(241));
 
         assert!(app.throbber_visible());
 
@@ -2933,9 +2946,12 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_status_update_temporarily_hides_throbber() {
+    fn non_empty_status_update_does_not_remove_visible_throbber() {
         let mut app = make_app();
-        app.agent_turn.start();
+        app.begin_agent_turn();
+        let now = std::time::Instant::now();
+        app.agent_turn
+            .update_visual_state(None, now + std::time::Duration::from_millis(241));
 
         assert!(app.throbber_visible());
 
@@ -2943,13 +2959,16 @@ mod tests {
             "retrying in 1s…".to_string(),
         ));
 
-        assert!(!app.throbber_visible());
+        assert!(app.throbber_visible());
     }
 
     #[test]
     fn whitespace_text_token_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.agent_turn.start();
+        app.begin_agent_turn();
+        let now = std::time::Instant::now();
+        app.agent_turn
+            .update_visual_state(None, now + std::time::Duration::from_millis(241));
 
         app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
             text: "   \n".to_string(),
@@ -2962,7 +2981,10 @@ mod tests {
     #[test]
     fn whitespace_thinking_token_keeps_throbber_visible_while_waiting() {
         let mut app = make_app();
-        app.agent_turn.start();
+        app.begin_agent_turn();
+        let now = std::time::Instant::now();
+        app.agent_turn
+            .update_visual_state(None, now + std::time::Duration::from_millis(241));
 
         app.apply_agent_event(crate::agent::types::AgentEvent::ThinkingToken(
             "\n\n".to_string(),
@@ -2974,26 +2996,29 @@ mod tests {
     #[test]
     fn end_resets_activity_to_model_request() {
         let mut app = make_app();
-        app.agent_turn.start();
+        app.begin_agent_turn();
         app.agent_turn.set_activity(AgentActivity::LocalWork);
 
-        app.agent_turn.end();
+        app.end_agent_turn();
 
         assert_eq!(app.agent_turn.activity, AgentActivity::ModelRequest);
     }
 
     #[test]
-    fn model_request_activity_keeps_throbber_visible_after_tool_output() {
+    fn model_request_activity_preserves_throbber_holdoff_after_tool_output() {
         let mut app = make_app();
-        app.agent_turn.start();
+        app.begin_agent_turn();
         app.agent_turn.set_activity(AgentActivity::LocalWork);
-        app.agent_turn.record_output("tool_result");
+        app.agent_turn.update_visual_state(
+            Some(crate::agent_turn_state::VisualUpdate::OutputGrowth),
+            std::time::Instant::now(),
+        );
 
         assert!(!app.throbber_visible());
 
         app.agent_turn.set_activity(AgentActivity::ModelRequest);
 
-        assert!(app.throbber_visible());
+        assert!(!app.throbber_visible());
     }
 
     #[test]

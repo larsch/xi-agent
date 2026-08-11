@@ -55,6 +55,9 @@ pub struct LogViewState {
     pub(crate) expanded_blocks: HashSet<String>,
     pub(crate) pending_anchor: Option<(String, usize)>,
     pub(crate) last_block_padding: Option<PaddingState>,
+    pub(crate) turn_generation: Option<u64>,
+    pub(crate) visual_baseline: Option<Vec<(String, usize, String)>>,
+    pub(crate) visual_baseline_width: Option<usize>,
 }
 
 impl LogViewState {
@@ -69,11 +72,38 @@ impl LogViewState {
             expanded_blocks: HashSet::new(),
             pending_anchor: None,
             last_block_padding: None,
+            turn_generation: None,
+            visual_baseline: None,
+            visual_baseline_width: None,
         }
     }
 
     pub fn invalidate(&mut self) {
         self.log_cache.invalidate();
+    }
+
+    pub fn begin_turn(&mut self, generation: u64) {
+        self.turn_generation = Some(generation);
+        self.visual_baseline = None;
+        self.visual_baseline_width = None;
+        self.log_cache.invalidate();
+        self.clear_padding();
+    }
+
+    pub fn clear_turn_baseline(&mut self) {
+        self.turn_generation = None;
+        self.visual_baseline = None;
+        self.visual_baseline_width = None;
+        self.log_cache.invalidate();
+        self.clear_padding();
+    }
+
+    pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(String, usize, String)>> {
+        self.visual_baseline.take()
+    }
+
+    pub(crate) fn set_visual_baseline(&mut self, baseline: Vec<(String, usize, String)>) {
+        self.visual_baseline = Some(baseline);
     }
 
     pub fn toggle_expanded(&mut self, identity: String) {
