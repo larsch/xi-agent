@@ -8,7 +8,7 @@ mod pending;
 mod status;
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
@@ -39,6 +39,28 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
         ch.to_string().repeat(width),
         Style::default().fg(color),
     ))
+}
+
+fn split_panel(area: Rect, heights: layout::PanelHeights) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(heights.activity_height),
+            Constraint::Length(heights.pending_messages_height),
+            Constraint::Length(heights.provider_status_height),
+            Constraint::Length(heights.completion_height),
+            Constraint::Length(heights.selection_header_height),
+            Constraint::Length(heights.selection_items_height),
+            Constraint::Length(heights.login_header_height),
+            Constraint::Length(heights.login_content_height),
+            Constraint::Length(heights.halfblock_height),
+            Constraint::Length(heights.input_height),
+            Constraint::Length(heights.halfblock_height),
+            Constraint::Length(heights.info_height),
+        ])
+        .split(area)
+        .to_vec()
 }
 
 fn build_log_layout_cached(
@@ -221,24 +243,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         queued_steering_len: app.queued_steering().len(),
     });
 
-    let mut chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(layout.activity_height),
-            Constraint::Length(layout.pending_messages_height),
-            Constraint::Length(layout.provider_status_height),
-            Constraint::Length(layout.completion_height),
-            Constraint::Length(layout.selection_header_height),
-            Constraint::Length(layout.selection_items_height),
-            Constraint::Length(layout.login_header_height),
-            Constraint::Length(layout.login_content_height),
-            Constraint::Length(layout.halfblock_height),
-            Constraint::Length(layout.input_height),
-            Constraint::Length(layout.halfblock_height),
-            Constraint::Length(layout.info_height),
-        ])
-        .split(f.area());
+    let mut chunks = split_panel(f.area(), layout);
 
     let mut log_area = chunks[0];
     let mut activity_area = chunks[1];
@@ -305,24 +310,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     });
     if final_layout != layout {
         layout = final_layout;
-        chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(layout.activity_height),
-                Constraint::Length(layout.pending_messages_height),
-                Constraint::Length(layout.provider_status_height),
-                Constraint::Length(layout.completion_height),
-                Constraint::Length(layout.selection_header_height),
-                Constraint::Length(layout.selection_items_height),
-                Constraint::Length(layout.login_header_height),
-                Constraint::Length(layout.login_content_height),
-                Constraint::Length(layout.halfblock_height),
-                Constraint::Length(layout.input_height),
-                Constraint::Length(layout.halfblock_height),
-                Constraint::Length(layout.info_height),
-            ])
-            .split(f.area());
+        chunks = split_panel(f.area(), layout);
         log_area = chunks[0];
         activity_area = chunks[1];
         pending_messages_area = chunks[2];

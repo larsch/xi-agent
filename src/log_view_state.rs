@@ -100,6 +100,15 @@ impl LogViewState {
         self.clear_padding();
     }
 
+    /// Reset visual comparison state after a tool batch is committed while
+    /// preserving the active turn's activity-row state.
+    pub(crate) fn begin_tool_continuation(&mut self) {
+        self.visual_baseline = None;
+        self.visual_baseline_width = None;
+        self.invalidate();
+        self.clear_padding();
+    }
+
     pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(String, usize, String)>> {
         self.visual_baseline.take()
     }
