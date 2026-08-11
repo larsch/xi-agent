@@ -202,7 +202,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.throbber_visible() || app.log_view.full_output,
         width,
     );
-    let layout = compute_panel_heights(PanelInputs {
+    let mut layout = compute_panel_heights(PanelInputs {
         terminal_height,
         width,
         input_line_count,
@@ -221,7 +221,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         queued_steering_len: app.queued_steering().len(),
     });
 
-    let chunks = Layout::default()
+    let mut chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
@@ -240,23 +240,23 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    let log_area = chunks[0];
-    let activity_area = chunks[1];
-    let pending_messages_area = chunks[2];
-    let provider_status_area = chunks[3];
-    let completion_area = chunks[4];
-    let sel_header_area = chunks[5];
-    let sel_items_area = chunks[6];
-    let login_hdr_area = chunks[7];
-    let login_body_area = chunks[8];
-    let top_hb_area = chunks[9];
-    let input_area = chunks[10];
-    let bot_hb_area = chunks[11];
-    let info_area = chunks[12];
+    let mut log_area = chunks[0];
+    let mut activity_area = chunks[1];
+    let mut pending_messages_area = chunks[2];
+    let mut provider_status_area = chunks[3];
+    let mut completion_area = chunks[4];
+    let mut sel_header_area = chunks[5];
+    let mut sel_items_area = chunks[6];
+    let mut login_hdr_area = chunks[7];
+    let mut login_body_area = chunks[8];
+    let mut top_hb_area = chunks[9];
+    let mut input_area = chunks[10];
+    let mut bot_hb_area = chunks[11];
+    let mut info_area = chunks[12];
 
-    let inner_height = log_area.height as usize;
-    let (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
-    let log_width = log_content_area.width as usize;
+    let mut inner_height = log_area.height as usize;
+    let (mut log_content_area, mut log_scrollbar_area) = split_scrollbar_column(log_area);
+    let mut log_width = log_content_area.width as usize;
     let previous_log_height = app.log_view.last_log_height;
     app.log_view.last_log_height = inner_height;
 
@@ -279,6 +279,69 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     );
 
     let (cached_lines, hit_map) = build_log_layout_cached(app, log_width, inner_height, &display);
+
+    // The logical layout update above may change activity-row visibility. Recompute
+    // panel geometry before rendering so the same frame uses the new row height;
+    // otherwise the log is drawn once with stale geometry and visibly jumps on
+    // the following frame.
+    let final_has_activity = app.throbber_visible() || app.log_view.full_output;
+    let final_layout = compute_panel_heights(PanelInputs {
+        terminal_height,
+        width,
+        input_line_count,
+        show_info: app.show_info,
+        login_active: app.login.active,
+        selection_mode: app.selection.active,
+        selection_items_len: app.selection.items.len(),
+        completions_len: app.completion.completions.len(),
+        resume_hint_visible,
+        ask_user_selection_no_freeform: app.ask_user_selection_no_freeform(),
+        ask_user_header_lines,
+        login_url: app.login.url.as_deref(),
+        has_login_code: app.login.code.is_some(),
+        has_activity: final_has_activity,
+        has_provider_status: app.provider_status_visible(),
+        queued_steering_len: app.queued_steering().len(),
+    });
+    if final_layout != layout {
+        layout = final_layout;
+        chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(layout.activity_height),
+                Constraint::Length(layout.pending_messages_height),
+                Constraint::Length(layout.provider_status_height),
+                Constraint::Length(layout.completion_height),
+                Constraint::Length(layout.selection_header_height),
+                Constraint::Length(layout.selection_items_height),
+                Constraint::Length(layout.login_header_height),
+                Constraint::Length(layout.login_content_height),
+                Constraint::Length(layout.halfblock_height),
+                Constraint::Length(layout.input_height),
+                Constraint::Length(layout.halfblock_height),
+                Constraint::Length(layout.info_height),
+            ])
+            .split(f.area());
+        log_area = chunks[0];
+        activity_area = chunks[1];
+        pending_messages_area = chunks[2];
+        provider_status_area = chunks[3];
+        completion_area = chunks[4];
+        sel_header_area = chunks[5];
+        sel_items_area = chunks[6];
+        login_hdr_area = chunks[7];
+        login_body_area = chunks[8];
+        top_hb_area = chunks[9];
+        input_area = chunks[10];
+        bot_hb_area = chunks[11];
+        info_area = chunks[12];
+        inner_height = log_area.height as usize;
+        (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
+        log_width = log_content_area.width as usize;
+        app.log_view.last_log_height = inner_height;
+    }
+
     let total_lines = cached_lines.len();
     if let Some((identity, block_screen_top)) = app.log_view.pending_anchor.take()
         && !app.log_view.auto_scroll
