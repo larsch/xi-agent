@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 /// How the rendered log changed during one draw preparation pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VisualUpdate {
-    Unchanged,
-    OutputGrowth,
-    ContentReflow,
+    /// Net change in rendered visual lines across all affected blocks.
+    Delta(isize),
+    /// The layout changed without a content-line delta.
     NonContentLayoutChange,
 }
 
@@ -99,6 +99,17 @@ impl AgentTurnState {
 
     /// Apply one renderer-confirmed visual update and poll the hidden hold-off.
     pub(crate) fn update_visual_state(&mut self, update: Option<VisualUpdate>, now: Instant) {
+        self.update_visual_state_with_padding(update, usize::MAX, now);
+    }
+
+    /// Apply a visual delta after accounting for anchor padding. The activity
+    /// row is consumed only by growth that exceeds the available padding.
+    pub(crate) fn update_visual_state_with_padding(
+        &mut self,
+        update: Option<VisualUpdate>,
+        anchor_padding: usize,
+        now: Instant,
+    ) {
         let before_visible = self.activity_visible;
         let before_holdoff = self.holdoff_started_at;
         if !self.is_active() {
@@ -110,17 +121,17 @@ impl AgentTurnState {
         }
         if let Some(update) = update {
             match update {
-                VisualUpdate::OutputGrowth => {
+                VisualUpdate::Delta(delta)
+                    if anchor_padding != usize::MAX
+                        && delta > anchor_padding as isize
+                        && self.activity_visible =>
+                {
                     self.activity_visible = false;
                     self.holdoff_started_at = Some(now);
                 }
-                VisualUpdate::Unchanged
-                | VisualUpdate::ContentReflow
-                | VisualUpdate::NonContentLayoutChange => {
+                VisualUpdate::Delta(_) | VisualUpdate::NonContentLayoutChange => {
                     if !self.activity_visible {
-                        self.holdoff_started_at = Some(now);
-                    } else {
-                        self.holdoff_started_at = None;
+                        self.holdoff_started_at.get_or_insert(now);
                     }
                 }
             }
@@ -198,10 +209,10 @@ mod tests {
     fn visible_throbber_survives_non_growth_and_activity_changes() {
         let mut state = AgentTurnState::new();
         state.start();
-        let now = Instant::now();
-        state.update_visual_state(None, now + Duration::from_millis(241));
+        let visible_at = Instant::now() + Duration::from_secs(1);
+        state.update_visual_state(None, visible_at);
         state.set_activity(crate::agent::types::AgentActivity::LocalWork);
-        state.update_visual_state(Some(VisualUpdate::ContentReflow), now);
+        state.update_visual_state(Some(VisualUpdate::Delta(0)), visible_at);
         assert!(state.throbber_visible(false));
     }
 
@@ -213,7 +224,7 @@ mod tests {
         state.update_visual_state(None, now + Duration::from_millis(241));
         assert!(state.throbber_visible(false));
 
-        state.update_visual_state(Some(VisualUpdate::OutputGrowth), now);
+        state.update_visual_state_with_padding(Some(VisualUpdate::Delta(1)), 0, now);
         assert!(!state.throbber_visible(false));
         state.update_visual_state(None, now + Duration::from_millis(239));
         assert!(!state.throbber_visible(false));
