@@ -152,13 +152,11 @@ impl LogLayout {
                     },
                 );
                 if prefix_stable
-                    && index < current.len()
-                    && index < previous.len()
-                    && current[index].0 == previous[index].0
-                    && current[index].1 > previous[index].1
-                {
-                    VisualUpdate::OutputGrowth
-                } else if prefix_stable && index == previous.len() && current.len() > previous.len()
+                    && ((index < current.len()
+                        && index < previous.len()
+                        && current[index].0 == previous[index].0
+                        && current[index].1 > previous[index].1)
+                        || (index == previous.len() && current.len() > previous.len()))
                 {
                     VisualUpdate::OutputGrowth
                 } else {
