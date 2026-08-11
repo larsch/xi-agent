@@ -83,7 +83,7 @@ impl AgentTurnState {
         self.holdoff_started_at = None;
     }
 
-    /// Update the mid-turn status message without touching last_output_at.
+    /// Update the mid-turn status message without touching visual timing.
     pub(crate) fn set_status(&mut self, status: Option<StreamingStatus>) {
         log::debug!(
             "[THROB] set_status({:?}) | was_active={}",
@@ -159,5 +159,52 @@ impl AgentTurnState {
             self.last_reported_visible.set(Some(visible));
         }
         visible
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentTurnState, VisualUpdate};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn holdoff_expires_only_during_visual_state_update() {
+        let mut state = AgentTurnState::new();
+        state.start();
+        assert!(!state.throbber_visible(false));
+
+        let now = Instant::now();
+        assert!(!state.throbber_visible(false));
+        state.update_visual_state(None, now + Duration::from_millis(239));
+        assert!(!state.throbber_visible(false));
+        state.update_visual_state(None, now + Duration::from_millis(241));
+        assert!(state.throbber_visible(false));
+    }
+
+    #[test]
+    fn visible_throbber_survives_non_growth_and_activity_changes() {
+        let mut state = AgentTurnState::new();
+        state.start();
+        let now = Instant::now();
+        state.update_visual_state(None, now + Duration::from_millis(241));
+        state.set_activity(crate::agent::types::AgentActivity::LocalWork);
+        state.update_visual_state(Some(VisualUpdate::ContentReflow), now);
+        assert!(state.throbber_visible(false));
+    }
+
+    #[test]
+    fn output_growth_hides_visible_throbber_and_restarts_holdoff() {
+        let mut state = AgentTurnState::new();
+        state.start();
+        let now = Instant::now();
+        state.update_visual_state(None, now + Duration::from_millis(241));
+        assert!(state.throbber_visible(false));
+
+        state.update_visual_state(Some(VisualUpdate::OutputGrowth), now);
+        assert!(!state.throbber_visible(false));
+        state.update_visual_state(None, now + Duration::from_millis(239));
+        assert!(!state.throbber_visible(false));
+        state.update_visual_state(None, now + Duration::from_millis(241));
+        assert!(state.throbber_visible(false));
     }
 }
