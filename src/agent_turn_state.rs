@@ -99,7 +99,13 @@ impl AgentTurnState {
 
     /// Apply one renderer-confirmed visual update and poll the hidden hold-off.
     pub(crate) fn update_visual_state(&mut self, update: Option<VisualUpdate>, now: Instant) {
+        let before_visible = self.activity_visible;
+        let before_holdoff = self.holdoff_started_at;
         if !self.is_active() {
+            log::debug!(
+                target: "throbber.trace",
+                "visual update ignored: inactive update={update:?} visible={before_visible}"
+            );
             return;
         }
         if let Some(update) = update {
@@ -127,6 +133,13 @@ impl AgentTurnState {
             self.activity_visible = true;
             self.holdoff_started_at = None;
         }
+        log::debug!(
+            target: "throbber.trace",
+            "visual update: update={update:?} visible={before_visible}->{:?} holdoff={before_holdoff:?}->{:?} active={} now={now:?}",
+            self.activity_visible,
+            self.holdoff_started_at,
+            self.is_active()
+        );
     }
 
     /// Advance the throbber animation frame.  Called on every UI tick while active.
