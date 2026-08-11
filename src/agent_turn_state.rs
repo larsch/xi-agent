@@ -1,12 +1,23 @@
 use crate::agent::types::AgentActivity;
 use crate::app::StreamingStatus;
 use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+/// How the rendered log changed during one draw preparation pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VisualUpdate {
+    Unchanged,
+    OutputGrowth,
+    ContentReflow,
+    NonContentLayoutChange,
+}
 
 /// Groups the three fields that track the progress of a live agent turn.
 ///
 /// Writes go through methods to keep the invariants clear:
-/// `start()` / `end()` for turn lifecycle, `record_output()` for visible
-/// output arriving, `set_status()` for mid-turn status updates.
+/// `start()` / `end()` for turn lifecycle, `update_visual_state()` for
+/// renderer-confirmed visual changes, and `set_status()` for mid-turn status
+/// updates.
 /// Fields remain readable (`pub(crate)`) for pattern matches in UI/tests.
 pub(crate) struct AgentTurnState {
     /// Current streaming state; `None` when no turn is active.
@@ -15,10 +26,12 @@ pub(crate) struct AgentTurnState {
     pub(crate) tick: u8,
     /// Current agent-loop activity, used only to select throbber visuals.
     pub(crate) activity: AgentActivity,
-    /// Instant of the last visible agent output (text/thinking tokens, tool
-    /// calls, tool results, etc.); used to suppress the throbber while output
-    /// is actively arriving and re-show it after a short idle time.
-    pub(crate) last_output_at: Option<std::time::Instant>,
+    /// Current throbber visibility, independent of the hold-off timer.
+    pub(crate) activity_visible: bool,
+    /// Start of the current hidden-state hold-off.
+    pub(crate) holdoff_started_at: Option<Instant>,
+    /// Generation of the current agent turn.
+    turn_generation: u64,
     /// Track the last reported visible state so we only log transitions.
     last_reported_visible: Cell<Option<bool>>,
 }
@@ -29,7 +42,9 @@ impl AgentTurnState {
             status: None,
             tick: 0,
             activity: AgentActivity::ModelRequest,
-            last_output_at: None,
+            activity_visible: false,
+            holdoff_started_at: None,
+            turn_generation: 0,
             last_reported_visible: Cell::new(None),
         }
     }
@@ -45,34 +60,27 @@ impl AgentTurnState {
     /// Set the agent-loop activity used to select throbber visuals.
     pub(crate) fn set_activity(&mut self, activity: AgentActivity) {
         self.activity = activity;
-        if activity == AgentActivity::ModelRequest {
-            // A tool result may have just suppressed the activity row. Keep
-            // the row present while switching to the next model request.
-            self.last_output_at = None;
-        }
     }
 
-    /// Begin a new agent turn: set status to Waiting and clear last_output_at.
+    pub(crate) fn turn_generation(&self) -> u64 {
+        self.turn_generation
+    }
+
+    /// Begin a new agent turn: set status to Waiting and reset visual state.
     pub(crate) fn start(&mut self) {
+        self.turn_generation = self.turn_generation.wrapping_add(1);
         self.activity = AgentActivity::ModelRequest;
-        log::debug!(
-            "[THROB] start() — status → Waiting, last_output_at cleared | was_active={}",
-            self.is_active()
-        );
         self.status = Some(StreamingStatus::Waiting);
-        self.last_output_at = None;
+        self.activity_visible = false;
+        self.holdoff_started_at = Some(Instant::now());
     }
 
-    /// End the current turn: clear status and last_output_at.
+    /// End the current turn and hide the activity row.
     pub(crate) fn end(&mut self) {
-        log::debug!(
-            "[THROB] end() — status → None, last_output_at cleared | was_active={} last_output_age={:?}",
-            self.is_active(),
-            self.last_output_at.map(|t| t.elapsed()),
-        );
         self.status = None;
         self.activity = AgentActivity::ModelRequest;
-        self.last_output_at = None;
+        self.activity_visible = false;
+        self.holdoff_started_at = None;
     }
 
     /// Update the mid-turn status message without touching last_output_at.
@@ -89,11 +97,36 @@ impl AgentTurnState {
         self.status = status;
     }
 
-    /// Record that visible output has just arrived.
-    pub(crate) fn record_output(&mut self, caller: &str) {
-        let prev_age = self.last_output_at.map(|t| t.elapsed());
-        log::debug!("[THROB] record_output({caller}) last_output_age={prev_age:?}");
-        self.last_output_at = Some(std::time::Instant::now());
+    /// Apply one renderer-confirmed visual update and poll the hidden hold-off.
+    pub(crate) fn update_visual_state(&mut self, update: Option<VisualUpdate>, now: Instant) {
+        if !self.is_active() {
+            return;
+        }
+        if let Some(update) = update {
+            match update {
+                VisualUpdate::OutputGrowth => {
+                    self.activity_visible = false;
+                    self.holdoff_started_at = Some(now);
+                }
+                VisualUpdate::Unchanged
+                | VisualUpdate::ContentReflow
+                | VisualUpdate::NonContentLayoutChange => {
+                    if !self.activity_visible {
+                        self.holdoff_started_at = Some(now);
+                    } else {
+                        self.holdoff_started_at = None;
+                    }
+                }
+            }
+        }
+        if !self.activity_visible
+            && self
+                .holdoff_started_at
+                .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(240))
+        {
+            self.activity_visible = true;
+            self.holdoff_started_at = None;
+        }
     }
 
     /// Advance the throbber animation frame.  Called on every UI tick while active.
@@ -114,17 +147,7 @@ impl AgentTurnState {
         if has_pending_ask {
             return self.report_visible(false, "has_pending_ask");
         }
-        match self.last_output_at {
-            None => self.report_visible(true, "last_output_at=None"),
-            Some(t) => {
-                let elapsed = t.elapsed();
-                let visible = elapsed >= std::time::Duration::from_millis(240);
-                if !visible {
-                    return self.report_visible(false, &format!("recent_output({elapsed:?})"));
-                }
-                self.report_visible(true, &format!("idle_since_output({elapsed:?})"))
-            }
-        }
+        self.report_visible(self.activity_visible, "activity_state")
     }
 
     /// Log state transitions in throbber visibility so we can trace

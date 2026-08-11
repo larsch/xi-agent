@@ -16,6 +16,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    agent_turn_state::VisualUpdate,
     app::{App, InputMode},
     config::DisplayConfig,
     context_window::context_window_for_model,
@@ -59,8 +60,8 @@ fn build_log_layout_cached(
             full_output: app.log_view.full_output,
             ..ToolBodyConfig::default()
         };
-        let (lines, sources) = if let Some((kept, discarded)) = app.display_messages_split() {
-            let (mut lines, mut sources) = build_log_layout_with_expansion(
+        let layout = if let Some((kept, discarded)) = app.display_messages_split() {
+            let mut layout = build_log_layout_with_expansion(
                 &kept,
                 false,
                 width,
@@ -68,8 +69,7 @@ fn build_log_layout_cached(
                 &app.theme,
                 display,
                 &app.log_view.expanded_blocks,
-            )
-            .flatten();
+            );
             let mut discarded_layout = build_log_layout_with_expansion(
                 &discarded,
                 false,
@@ -80,13 +80,11 @@ fn build_log_layout_cached(
                 &app.log_view.expanded_blocks,
             );
             discarded_layout.dim();
-            let (dim_lines_v, dim_sources) = discarded_layout.flatten();
-            lines.extend(dim_lines_v);
-            sources.extend(dim_sources);
-            (lines, sources)
+            layout.blocks.extend(discarded_layout.blocks);
+            layout
         } else {
             let combined = app.display_messages_combined();
-            let (lines, sources) = build_log_layout_with_expansion(
+            build_log_layout_with_expansion(
                 &combined,
                 streaming,
                 width,
@@ -95,31 +93,68 @@ fn build_log_layout_cached(
                 display,
                 &app.log_view.expanded_blocks,
             )
-            .flatten();
+        };
+        let baseline = layout
+            .blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.identity.clone(),
+                    block.lines.len(),
+                    block
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            })
+            .collect();
+        let previous = if app.log_view.visual_baseline_width == Some(width) {
+            app.log_view.take_visual_baseline()
+        } else {
+            app.log_view.visual_baseline_width = Some(width);
+            None
+        };
+        let update = if previous.is_none() {
+            VisualUpdate::NonContentLayoutChange
+        } else {
+            layout.visual_update(previous.as_deref())
+        };
+        app.log_view.set_visual_baseline(baseline);
+        app.agent_turn
+            .update_visual_state(Some(update), std::time::Instant::now());
+        let (lines, sources) = layout.flatten();
 
-            // Track the maximum total line count for padding during streaming.
-            if streaming {
-                let total = lines.len();
-                match &mut app.log_view.last_block_padding {
-                    Some(ps) => {
-                        if total > ps.max_total_lines {
-                            ps.max_total_lines = total;
-                            ps.inner_height_when_set = inner_height;
-                        }
-                    }
-                    None => {
-                        app.log_view.last_block_padding = Some(PaddingState {
-                            max_total_lines: total,
-                            inner_height_when_set: inner_height,
-                        });
+        // Track the maximum total line count for padding during streaming.
+        if streaming {
+            let total = lines.len();
+            match &mut app.log_view.last_block_padding {
+                Some(ps) => {
+                    if total > ps.max_total_lines {
+                        ps.max_total_lines = total;
+                        ps.inner_height_when_set = inner_height;
                     }
                 }
+                None => {
+                    app.log_view.last_block_padding = Some(PaddingState {
+                        max_total_lines: total,
+                        inner_height_when_set: inner_height,
+                    });
+                }
             }
+        }
 
-            (lines, sources)
-        };
         let rev = app.log_view.log_cache.revision;
         app.log_view.log_cache.cached_lines = Some((rev, width, step_cursor, lines, sources));
+    } else {
+        app.agent_turn
+            .update_visual_state(None, std::time::Instant::now());
     }
     let cached = app.log_view.log_cache.cached_lines.as_ref().unwrap();
     (cached.3.clone(), cached.4.clone())
@@ -139,6 +174,13 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     };
 
     let input_line_count = input_visual_line_count(active_lines, width);
+
+    // Build and classify the logical log before deciding activity-row height.
+    // The one-column scrollbar is accounted for in the provisional width; the
+    // later viewport pass reuses this cache when the width is unchanged.
+    let provisional_log_width = width.saturating_sub(1).max(1);
+    let display = app.display.clone();
+    let _ = build_log_layout_cached(app, provisional_log_width, 0, &display);
 
     let ask_user_header_lines = if app.selection.active { 1 } else { 0 };
 
@@ -204,8 +246,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.clear_padding();
     }
     app.log_view.last_log_width = log_width;
-
-    let display = app.display.clone();
 
     let (cached_lines, hit_map) = build_log_layout_cached(app, log_width, inner_height, &display);
     let total_lines = cached_lines.len();

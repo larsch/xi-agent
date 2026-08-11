@@ -90,9 +90,6 @@ impl App {
     }
 
     fn on_thinking_token(&mut self, token: String) {
-        if !token.trim().is_empty() {
-            self.agent_turn.record_output("thinking_token");
-        }
         self.session
             .live_turn
             .assistant_thinking
@@ -145,9 +142,6 @@ impl App {
     }
 
     fn on_text_token(&mut self, text: String, phase: AssistantPhase) {
-        if !text.trim().is_empty() {
-            self.agent_turn.record_output("text_token");
-        }
         self.session.live_turn.assistant_content.push_str(&text);
         if phase != AssistantPhase::Unknown {
             self.session.live_turn.assistant_phase = phase;
@@ -155,7 +149,6 @@ impl App {
     }
 
     fn on_tool_call_intent(&mut self, id: String, name: String, streaming_field: Option<String>) {
-        self.agent_turn.record_output("tool_call_intent");
         self.session.live_turn.assistant_phase = AssistantPhase::Provisional;
         // Create a live entry with no args yet — partial args will stream in.
         self.session.live_turn.tool_entries.push(LiveToolEntry {
@@ -173,9 +166,6 @@ impl App {
     }
 
     fn on_tool_call_args_delta(&mut self, id: String, partial_json: String) {
-        if !partial_json.trim().is_empty() {
-            self.agent_turn.record_output("tool_call_args_delta");
-        }
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
             entry.partial_args.push_str(&partial_json);
             if let Ok(completed) = jawohl::complete_json(&entry.partial_args)
@@ -187,7 +177,6 @@ impl App {
     }
 
     fn on_steering_consumed(&mut self, text: String) {
-        self.agent_turn.record_output("steering_consumed");
         if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
             self.runtime.queued_steering.remove(pos);
         }
@@ -204,9 +193,6 @@ impl App {
     }
 
     fn on_status_update(&mut self, msg: String) {
-        if !msg.is_empty() {
-            self.agent_turn.record_output("status_update");
-        }
         self.agent_turn.set_status(Some(if msg.is_empty() {
             StreamingStatus::Waiting
         } else {
@@ -215,7 +201,6 @@ impl App {
     }
 
     fn on_compacting(&mut self) {
-        self.agent_turn.record_output("compacting");
         self.agent_turn
             .set_status(Some(StreamingStatus::Message("compacting…".to_string())));
     }
@@ -249,7 +234,6 @@ impl App {
     }
 
     fn on_tool_call_start(&mut self, id: String, name: String, args: serde_json::Value) {
-        self.agent_turn.record_output("tool_call_start");
         // The live entry was already created by on_tool_call_intent when the
         // LLM started the tool block. Update it with the complete args.
         // If for some reason no intent entry exists (e.g. provider that skips
@@ -292,8 +276,6 @@ impl App {
             // the accumulated output) instead of re-scanning the entire
             // running_output string every time.
             let chunk_newlines = chunk.chars().filter(|&c| c == '\n').count();
-            let prev_visual = entry.last_output_line_count.min(8);
-
             entry.running_output.push_str(&chunk);
             entry.running_output_line_count += chunk_newlines;
 
@@ -321,16 +303,11 @@ impl App {
             // Once the visual block stops growing, new chunks merely scroll
             // within the same window — keep the throbber visible so it
             // doesn't flicker and shift the text.
-            let new_visual = entry.running_output_line_count.min(8);
-            if new_visual > prev_visual && !chunk.trim().is_empty() {
-                self.agent_turn.record_output("tool_output_chunk");
-            }
             entry.last_output_line_count = entry.running_output_line_count;
         }
     }
 
     fn on_tool_call_end(&mut self, id: String, result: crate::agent::types::ToolResult) {
-        self.agent_turn.record_output("tool_call_end");
         let display_range = result.truncation.as_ref().map(|tr| DisplayRange {
             first_line: tr.first_kept_line,
             last_line: tr.first_kept_line + tr.output_lines - 1,
@@ -435,14 +412,13 @@ impl App {
     }
 
     fn on_external_file_change(&mut self, notification: String) {
-        self.agent_turn.record_output("external_file_change");
         // External file change notifications are user-visible context
         // injected into the conversation — treat as UserMessage.
         self.append_user_message(notification);
     }
 
     fn on_turn_end(&mut self) {
-        self.agent_turn.start();
+        self.begin_agent_turn();
         // Finalise the assistant message in the pending buffer before
         // flushing, using the current in-memory messages state.
         self.finalise_assistant_turn_event();
@@ -480,7 +456,7 @@ impl App {
     }
 
     fn on_agent_done(&mut self) {
-        self.agent_turn.end();
+        self.end_agent_turn();
         self.log_view.clear_padding();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
@@ -492,7 +468,7 @@ impl App {
     }
 
     fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
-        self.agent_turn.end();
+        self.end_agent_turn();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
         self.runtime.steering_tx = None;
