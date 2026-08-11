@@ -134,22 +134,25 @@ fn build_log_layout_cached(
             app.log_view.log_cache.revision,
             width,
         );
-        let previous_total = previous
-            .as_ref()
-            .map_or(0, |blocks| blocks.iter().map(|(_, lines, _)| *lines).sum());
         let anchor_padding = app
             .log_view
             .last_block_padding
             .as_ref()
-            .map_or(0, |padding| {
-                padding.max_total_lines.saturating_sub(previous_total)
-            });
+            .map_or(0, |padding| padding.remaining.max(0) as usize);
         app.log_view.set_visual_baseline(baseline);
         app.agent_turn.update_visual_state_with_padding(
             Some(update),
             anchor_padding,
             std::time::Instant::now(),
         );
+        if let VisualUpdate::Delta(delta) = update
+            && let Some(padding) = &mut app.log_view.last_block_padding
+        {
+            padding.remaining -= delta;
+            if padding.remaining < 0 {
+                padding.remaining = 0;
+            }
+        }
         let (lines, sources) = layout.flatten();
 
         // The initial total is the anchor. Subsequent positive visual deltas
@@ -158,6 +161,7 @@ fn build_log_layout_cached(
             app.log_view.last_block_padding = Some(PaddingState {
                 max_total_lines: lines.len(),
                 inner_height_when_set: inner_height,
+                remaining: 0,
             });
         }
 
@@ -349,7 +353,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .unwrap_or(0);
 
     let block_padding = if app.log_view.auto_scroll {
-        max_total.saturating_sub(total_lines)
+        app.log_view
+            .last_block_padding
+            .as_ref()
+            .map_or(0, |padding| padding.remaining.max(0) as usize)
     } else {
         0
     };
