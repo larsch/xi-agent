@@ -119,7 +119,26 @@ impl LogLayout {
             .iter()
             .map(|block| block.lines.len())
             .sum::<usize>();
-        VisualUpdate::Delta(after_total as isize - before_total as isize)
+        let delta = after_total as isize - before_total as isize;
+        if delta != 0 {
+            let changes: Vec<_> = self
+                .blocks
+                .iter()
+                .filter_map(|block| {
+                    let before = previous
+                        .iter()
+                        .find(|(identity, _, _)| identity == &block.identity)
+                        .map_or(0, |(_, lines, _)| *lines);
+                    (before != block.lines.len())
+                        .then(|| format!("{}:{}->{}", block.identity, before, block.lines.len()))
+                })
+                .collect();
+            log::debug!(
+                target: "throbber.trace",
+                "visual line delta: before={before_total} after={after_total} delta={delta} changes={changes:?}"
+            );
+        }
+        VisualUpdate::Delta(delta)
     }
 
     pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
