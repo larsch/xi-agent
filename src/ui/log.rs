@@ -244,7 +244,7 @@ impl LayoutBuilder {
         // Truncation metadata is supplied by the renderer. Do not infer
         // foldability from marker text: expanded variants intentionally omit
         // the marker, and some renderers use another presentation.
-        let sources = (0..lines.len())
+        let sources: Vec<_> = (0..lines.len())
             .map(|_| LineSource {
                 decoration_width,
                 streaming,
@@ -252,14 +252,24 @@ impl LayoutBuilder {
                 foldable,
             })
             .collect();
-        self.layout.blocks.push(LogBlock {
-            identity,
-            kind,
-            lines,
-            sources,
-            truncation,
-            foldable,
-        });
+        if let Some(previous) = self.layout.blocks.last_mut()
+            && previous.identity == identity
+        {
+            previous.lines.extend(lines);
+            previous.sources.extend(sources);
+            previous.kind = kind;
+            previous.truncation = truncation;
+            previous.foldable |= foldable;
+        } else {
+            self.layout.blocks.push(LogBlock {
+                identity,
+                kind,
+                lines,
+                sources,
+                truncation,
+                foldable,
+            });
+        }
     }
 
     fn finish(self) -> LogLayout {
@@ -657,6 +667,9 @@ pub(super) fn build_log_layout_with_expansion(
                     3,
                     msg_streaming,
                 );
+                if let Some((_, _, _, identity)) = ranges.last_mut() {
+                    *identity = format!("message:{idx}:tool");
+                }
             }
             Role::ToolResult => {
                 let prev = lines.len();
@@ -684,6 +697,14 @@ pub(super) fn build_log_layout_with_expansion(
                     3,
                     msg_streaming,
                 );
+                if let Some((_, _, _, identity)) = ranges.last_mut()
+                    && let Some(call_idx) = idx.checked_sub(1)
+                    && messages
+                        .get(call_idx)
+                        .is_some_and(|m| m.role == Role::ToolCall)
+                {
+                    *identity = format!("message:{call_idx}:tool");
+                }
             }
         }
     }
@@ -1976,7 +1997,11 @@ mod tests {
         ToolBodyConfig, build_log_layout, build_log_layout_with_expansion, dim_lines,
         trim_assistant_block_edges,
     };
-    use crate::llm::{AssistantPhase, DisplayRange, Message, Role};
+    use crate::{
+        config::DisplayConfig,
+        llm::{AssistantPhase, DisplayRange, Message, Role},
+        theme::Theme,
+    };
     use ratatui::{
         style::Color,
         text::{Line, Span},
@@ -2057,6 +2082,24 @@ mod tests {
     fn trim_assistant_block_edges_preserves_interior_whitespace() {
         let rendered = trim_assistant_block_edges("\n\nfirst\n\n\nlast\n\n");
         assert_eq!(rendered, "first\n\n\nlast");
+    }
+
+    #[test]
+    fn tool_intent_and_result_share_one_visual_block() {
+        let messages = vec![
+            Message::tool_call("call-1", "bash", serde_json::json!({"command": "sleep 5"})),
+            Message::tool_result("call-1", "", false),
+        ];
+        let layout = build_log_layout(
+            &messages,
+            true,
+            80,
+            &ToolBodyConfig::default(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+        );
+        assert_eq!(layout.blocks.len(), 1);
+        assert_eq!(layout.blocks[0].identity, "message:0:tool");
     }
 
     #[test]
