@@ -217,6 +217,11 @@ impl App {
         self.log_view.clear_turn_baseline();
     }
 
+    pub(crate) fn continue_agent_turn_after_tool(&mut self) {
+        self.agent_turn.continue_turn();
+        self.log_view.begin_tool_continuation();
+    }
+
     /// Advance the throbber animation frame.  Called on every UI tick.
     pub fn tick(&mut self) {
         if self.login.refresh_in_progress {
