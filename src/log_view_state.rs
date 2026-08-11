@@ -43,6 +43,8 @@ impl Default for LogCache {
 pub(crate) struct PaddingState {
     pub(crate) max_total_lines: usize,
     pub(crate) inner_height_when_set: usize,
+    /// Remaining anchor padding after applying visual line deltas.
+    pub(crate) remaining: isize,
 }
 
 pub struct LogViewState {
