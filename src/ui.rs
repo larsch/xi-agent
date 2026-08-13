@@ -82,7 +82,7 @@ fn build_log_layout_cached(
             full_output: app.log_view.full_output,
             ..ToolBodyConfig::default()
         };
-        let layout = if let Some((kept, discarded)) = app.display_messages_split() {
+        let mut layout = if let Some((kept, discarded)) = app.display_messages_split() {
             let mut layout = build_log_layout_with_expansion(
                 &kept,
                 false,
@@ -116,6 +116,17 @@ fn build_log_layout_cached(
                 &app.log_view.expanded_blocks,
             )
         };
+        let previous = if app.log_view.visual_baseline_width == Some(width) {
+            app.log_view.take_visual_baseline()
+        } else {
+            app.log_view.visual_baseline_width = Some(width);
+            None
+        };
+        if let Some(previous) = previous.as_deref()
+            && streaming
+        {
+            layout.pad_shrink(previous);
+        }
         let baseline: Vec<(String, usize, String)> = layout
             .blocks
             .iter()
@@ -137,12 +148,6 @@ fn build_log_layout_cached(
                 )
             })
             .collect();
-        let previous = if app.log_view.visual_baseline_width == Some(width) {
-            app.log_view.take_visual_baseline()
-        } else {
-            app.log_view.visual_baseline_width = Some(width);
-            None
-        };
         let update = if previous.is_none() {
             VisualUpdate::NonContentLayoutChange
         } else {
@@ -1236,6 +1241,63 @@ mod tests {
         assert!(joined.contains("provider copilot"), "{joined}");
         assert!(joined.contains("model gpt-4o"), "{joined}");
         assert!(joined.contains("context"), "{joined}");
+    }
+
+    #[test]
+    fn thinking_shrink_keeps_viewport_anchored() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        for i in 0..20 {
+            app.session
+                .append_user_message(format!("user message {i:02}"), 0);
+        }
+        app.begin_agent_turn();
+
+        // First streaming frame: no thinking yet. This freezes the anchor
+        // total at the committed-history height.
+        app.session.live_turn.assistant_thinking = Some(String::new());
+        let _first = render_to_plain_lines(&mut app, 80, 20);
+
+        // Thinking grows to fill the five-line tail window.
+        app.session.live_turn.assistant_thinking = Some("c0\nc1\n\nc2\nc3\nc4".to_string());
+        let grown = render_to_plain_lines(&mut app, 80, 20);
+        let grown_think = grown.iter().position(|l| l.contains("c1")).unwrap();
+
+        // Appending one more line makes the leading empty line enter the tail
+        // window and get trimmed, shrinking the thinking block by one row.
+        app.session.live_turn.assistant_thinking = Some("c0\nc1\n\nc2\nc3\nc4\nc5".to_string());
+        let shrunk = render_to_plain_lines(&mut app, 80, 20);
+        let shrunk_think = shrunk.iter().position(|l| l.contains("c2")).unwrap();
+
+        // Everything above the thinking block must stay put.
+        let grown_user = grown
+            .iter()
+            .position(|l| l.contains("user message 19"))
+            .unwrap();
+        let shrunk_user = shrunk
+            .iter()
+            .position(|l| l.contains("user message 19"))
+            .unwrap();
+        assert_eq!(
+            grown_user, shrunk_user,
+            "content above the block must stay static"
+        );
+
+        // The first visible thinking line must stay on the same screen row.
+        assert_eq!(
+            grown_think, shrunk_think,
+            "thinking block top should stay anchored"
+        );
+
+        // The shrunk line is absorbed as a blank row at the bottom of the log.
+        let shrunk_last = shrunk.iter().position(|l| l.contains("c5")).unwrap();
+        assert!(
+            shrunk
+                .get(shrunk_last + 1)
+                .is_some_and(|l| l.trim().is_empty()),
+            "bottom padding should fill the shrunk row, got {:?}",
+            shrunk.get(shrunk_last + 1)
+        );
     }
 
     #[test]
