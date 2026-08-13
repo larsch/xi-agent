@@ -713,7 +713,7 @@ pub(super) fn build_log_layout_with_expansion(
             }
             Role::ToolCall => {
                 let prev = lines.len();
-                let block_id = format!("message:{idx}:intent");
+                let block_id = format!("message:{idx}:tool");
                 let mut block_cfg = cfg.clone();
                 block_cfg.full_output |= expanded_blocks.contains(&block_id);
                 render_tool_call(
@@ -738,12 +738,19 @@ pub(super) fn build_log_layout_with_expansion(
                     msg_streaming,
                 );
                 if let Some((_, _, _, identity)) = ranges.last_mut() {
-                    *identity = format!("message:{idx}:tool");
+                    *identity = block_id;
                 }
             }
             Role::ToolResult => {
                 let prev = lines.len();
-                let block_id = format!("message:{idx}:body");
+                // The result merges into the preceding tool call's visual
+                // block when there is one; otherwise it stands alone.
+                let call_idx = idx
+                    .checked_sub(1)
+                    .filter(|&c| messages.get(c).is_some_and(|m| m.role == Role::ToolCall));
+                let block_id = call_idx
+                    .map(|c| format!("message:{c}:tool"))
+                    .unwrap_or_else(|| format!("message:{idx}:body"));
                 let mut block_cfg = cfg.clone();
                 block_cfg.full_output |= expanded_blocks.contains(&block_id);
                 render_tool_result(
@@ -767,13 +774,8 @@ pub(super) fn build_log_layout_with_expansion(
                     3,
                     msg_streaming,
                 );
-                if let Some((_, _, _, identity)) = ranges.last_mut()
-                    && let Some(call_idx) = idx.checked_sub(1)
-                    && messages
-                        .get(call_idx)
-                        .is_some_and(|m| m.role == Role::ToolCall)
-                {
-                    *identity = format!("message:{call_idx}:tool");
+                if let Some((_, _, _, identity)) = ranges.last_mut() {
+                    *identity = block_id;
                 }
             }
         }
@@ -2170,6 +2172,42 @@ mod tests {
         );
         assert_eq!(layout.blocks.len(), 1);
         assert_eq!(layout.blocks[0].identity, "message:0:tool");
+    }
+
+    #[test]
+    fn expanded_tool_block_shows_full_body() {
+        let call = Message::tool_call("c1", "bash", serde_json::json!({"command": "seq 20"}));
+        let content = (1..=20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let mut expanded = std::collections::HashSet::new();
+        expanded.insert("message:0:tool".to_string());
+        let layout = build_log_layout_with_expansion(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+            &expanded,
+        );
+        let text = layout
+            .flatten()
+            .0
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !text.iter().any(|t| t.contains("total lines")),
+            "expanded tool block must not show a truncation marker"
+        );
     }
 
     #[test]
