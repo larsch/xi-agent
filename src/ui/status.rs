@@ -96,7 +96,9 @@ fn throbber_frame(activity: AgentActivity, tick: usize) -> String {
     }
 }
 
-pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
+/// Build the throbber frame as a standalone styled line, for embedding in the
+/// scrollable log content (so it scrolls out of view like any other line).
+pub(super) fn throbber_line(app: &App) -> Line<'static> {
     let theme = &app.theme.status;
     let throbber_style = match app.agent_turn.activity {
         AgentActivity::ModelRequest => theme.idle.to_ratatui_style(),
@@ -106,13 +108,15 @@ pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .remove_modifier(Modifier::ITALIC)
             .add_modifier(Modifier::DIM),
     };
-    let hint_style = theme.idle.to_ratatui_style();
     let frame = throbber_frame(app.agent_turn.activity, app.agent_turn.tick as usize);
+    Line::from(Span::styled(frame, throbber_style))
+}
+
+pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let theme = &app.theme.status;
+    let hint_style = theme.idle.to_ratatui_style();
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    if app.throbber_visible() {
-        spans.push(Span::styled(frame, throbber_style));
-    }
     if let Some(cursor_idx) = app.step_back.cursor {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));

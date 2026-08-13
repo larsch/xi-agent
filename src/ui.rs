@@ -226,7 +226,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.streaming(),
         app.throbber_visible(),
         app.log_view.full_output,
-        app.throbber_visible() || app.log_view.full_output,
+        app.log_view.full_output,
         width,
     );
     let mut layout = compute_panel_heights(PanelInputs {
@@ -243,7 +243,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ask_user_header_lines,
         login_url: app.login.url.as_deref(),
         has_login_code: app.login.code.is_some(),
-        has_activity: app.throbber_visible() || app.log_view.full_output,
+        has_activity: app.log_view.full_output,
         has_provider_status: app.provider_status_visible(),
         queued_steering_len: app.queued_steering().len(),
     });
@@ -294,7 +294,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // panel geometry before rendering so the same frame uses the new row height;
     // otherwise the log is drawn once with stale geometry and visibly jumps on
     // the following frame.
-    let final_has_activity = app.throbber_visible() || app.log_view.full_output;
+    let final_has_activity = app.log_view.full_output;
     let final_layout = compute_panel_heights(PanelInputs {
         terminal_height,
         width,
@@ -335,7 +335,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.last_log_height = inner_height;
     }
 
-    let total_lines = cached_lines.len();
+    let content_len = cached_lines.len();
+    // The throbber is rendered as a virtual line appended after the last
+    // content line, so it scrolls out of view with the rest of the log.
+    let throbber_visible = app.throbber_visible();
+    let throbber = throbber_visible.then(|| status::throbber_line(app));
+    let total_lines = content_len + usize::from(throbber_visible);
     if let Some((identity, block_screen_top)) = app.log_view.pending_anchor.take()
         && !app.log_view.auto_scroll
         && let Some(new_top) = hit_map
@@ -449,11 +454,24 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             let padding = inner_height - total_lines;
             let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
             v.extend(all.iter().cloned());
+            if let Some(throbber) = &throbber {
+                v.push(throbber.clone());
+            }
             v
         } else {
             let start = log_scroll;
             let end = (start + inner_height).min(total_lines);
-            all[start..end].to_vec()
+            let content_end = end.min(content_len);
+            let mut v = all[start..content_end].to_vec();
+            // The throbber occupies the virtual line at index `content_len`,
+            // only included when the visible window reaches the bottom.
+            if let Some(throbber) = &throbber
+                && content_len >= start
+                && content_len < end
+            {
+                v.push(throbber.clone());
+            }
+            v
         }
     };
 
@@ -1297,6 +1315,42 @@ mod tests {
                 .is_some_and(|l| l.trim().is_empty()),
             "bottom padding should fill the shrunk row, got {:?}",
             shrunk.get(shrunk_last + 1)
+        );
+    }
+
+    #[test]
+    fn throbber_scrolls_out_of_view_when_scrolling_up() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        for i in 0..20 {
+            app.session
+                .append_user_message(format!("user message {i:02}"), 0);
+        }
+        app.begin_agent_turn();
+        // Force the throbber visible immediately (skip the 240 ms hold-off).
+        app.agent_turn.activity_visible = true;
+
+        let is_braille_line = |l: &str| {
+            !l.trim().is_empty()
+                && l.trim()
+                    .chars()
+                    .all(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
+        };
+
+        // Auto-scrolled to the bottom: the throbber is rendered within the log.
+        let bottom = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            bottom.iter().any(|l| is_braille_line(l)),
+            "expected the throbber braille line when auto-scrolled, got {bottom:?}"
+        );
+
+        // Scrolling up a page moves the throbber out of the viewport like the
+        // rest of the content instead of leaving it pinned at the bottom.
+        app.log_view.scroll_up();
+        let scrolled = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            !scrolled.iter().any(|l| is_braille_line(l)),
+            "throbber should scroll out of view, got {scrolled:?}"
         );
     }
 
