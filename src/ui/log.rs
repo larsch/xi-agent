@@ -141,6 +141,55 @@ impl LogLayout {
         VisualUpdate::Delta(delta)
     }
 
+    /// Absorb a streaming shrink by appending blank lines at the bottom of
+    /// the log.
+    ///
+    /// When a streaming block (for example the tail-windowed thinking block)
+    /// loses rendered lines to edge trimming, the total log height would
+    /// otherwise drop by the same amount. With auto-scroll that drop
+    /// re-anchors the viewport one line higher and makes everything on screen
+    /// appear to jump down. Appending the missing lines as bottom padding
+    /// keeps the previous total height, so the viewport stays put and the
+    /// removed lines are replaced by blanks at the bottom of the output log.
+    pub(crate) fn pad_shrink(&mut self, previous: &[(String, usize, String)]) {
+        let before_total = previous.iter().map(|(_, lines, _)| *lines).sum::<usize>();
+        let after_total = self
+            .blocks
+            .iter()
+            .map(|block| block.lines.len())
+            .sum::<usize>();
+        if after_total >= before_total {
+            return;
+        }
+        let pad = before_total - after_total;
+        log::debug!(
+            target: "throbber.trace",
+            "bottom padding: before={before_total} after={after_total} pad={pad}"
+        );
+        self.append_bottom_padding(pad);
+    }
+
+    fn append_bottom_padding(&mut self, pad: usize) {
+        if pad == 0 {
+            return;
+        }
+        let Some(last) = self.blocks.last_mut() else {
+            return;
+        };
+        last.lines.extend(std::iter::repeat_n(Line::default(), pad));
+        let identity = last.identity.clone();
+        let foldable = last.foldable;
+        last.sources.extend(std::iter::repeat_n(
+            LineSource {
+                decoration_width: 0,
+                streaming: false,
+                block_identity: Some(identity),
+                foldable,
+            },
+            pad,
+        ));
+    }
+
     pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
         let line_count = self.blocks.iter().map(|b| b.lines.len()).sum();
         let mut lines = Vec::with_capacity(line_count);
@@ -280,6 +329,55 @@ mod layout_tests {
             ],
         };
         assert_eq!(replaced.visual_update(Some(&old)), VisualUpdate::Delta(0));
+    }
+
+    #[test]
+    fn pad_shrink_appends_bottom_padding() {
+        let mut layout = LogLayout {
+            blocks: vec![
+                block("message:0:user", LogBlockKind::UserContent, "a", false),
+                block(
+                    "message:1:thinking",
+                    LogBlockKind::AssistantThinking,
+                    "b",
+                    true,
+                ),
+            ],
+        };
+        let previous = vec![
+            ("message:0:user".to_string(), 1, "a".to_string()),
+            ("message:1:thinking".to_string(), 3, "x".to_string()),
+        ];
+        layout.pad_shrink(&previous);
+
+        assert_eq!(layout.blocks.len(), 2, "padding extends the last block");
+        let last = &layout.blocks[1];
+        assert_eq!(last.lines.len(), 3);
+        assert_eq!(last.sources.len(), 3);
+        assert_eq!(last.lines[0].spans[0].content, "b");
+        assert!(
+            last.lines[1].spans.is_empty(),
+            "bottom row is blank padding"
+        );
+        assert!(
+            last.lines[2].spans.is_empty(),
+            "bottom row is blank padding"
+        );
+    }
+
+    #[test]
+    fn pad_shrink_ignores_growth() {
+        let mut layout = LogLayout {
+            blocks: vec![block(
+                "message:0:thinking",
+                LogBlockKind::AssistantThinking,
+                "a\nb\nc",
+                true,
+            )],
+        };
+        let previous = vec![("message:0:thinking".to_string(), 2, "x".to_string())];
+        layout.pad_shrink(&previous);
+        assert_eq!(layout.blocks[0].lines.len(), 3);
     }
 
     fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {
