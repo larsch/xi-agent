@@ -63,6 +63,7 @@ cargo install --path .
 | | `--prompt <PROMPT>...` | Start the interactive UI and automatically submit PROMPT. Accepts multiple words without shell quoting |
 | | `--prompt-file <PATH>` | Start the interactive UI and automatically submit the UTF-8 contents of PATH, preserving multiline prompts |
 | | `--print-dirs` | Print the file-system paths xi uses and exit |
+| | `--theme-demo` | Start with a representative log using the local test provider |
 | `-h` | `--help` | Print help |
 | `-V` | `--version` | Print version |
 
