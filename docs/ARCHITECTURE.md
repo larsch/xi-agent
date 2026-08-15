@@ -213,6 +213,15 @@ makes scroll arithmetic exact and lets us apply per-row background styles (e.g.
 the grey user-message highlight), while preserving block boundaries for future
 hover, folding, and anchoring interactions.
 
+Block rendering is memoized in a per-message cache (`LogBlockCache`), keyed by
+message index with a content fingerprint (message fields plus immediate tool
+call/result neighbors) and render context (width, streaming flag). During
+streaming only the changed message re-renders; unchanged messages reuse their
+cached blocks, so a growing response does not re-run markdown/wrapping over the
+whole log. The cache is cleared on turn boundaries and on `full_output` /
+fold/unfold toggles, whose effect on rendering is not captured by the
+fingerprint key.
+
 **Channel-based LLM events** — `tokio::mpsc` decouples the async HTTP
 streaming task from the synchronous draw loop. The draw loop never awaits;
 it drains the channel non-blockingly on each tick, keeping the TUI

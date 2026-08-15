@@ -70,7 +70,7 @@ mod theme_demo;
 mod thinking;
 mod tool_presentation;
 mod tracked;
-mod ui;
+pub(crate) mod ui;
 
 use agent::tools::custom::custom_tool_dirs;
 use agent::{
