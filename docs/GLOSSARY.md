@@ -51,7 +51,7 @@ Each tool call emits `AgentEvent::ToolCallStart` before execution and
 ## Steering message
 
 User input typed while the agent loop is running. Queued in a channel and
-rendered with a 🕹️ icon until the loop consumes it at the next turn boundary.
+rendered with a 📣 icon until the loop consumes it at the next turn boundary.
 Consumed steering is inserted into the conversation history after the completed
 assistant turn and before the next turn begins.
 

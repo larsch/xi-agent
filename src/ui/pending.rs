@@ -19,7 +19,7 @@ pub(super) fn render(f: &mut ratatui::Frame, area: Rect, app: &App) {
         msg_style = msg_style.add_modifier(ratatui::style::Modifier::ITALIC);
     }
 
-    let prefix = steering.prefix.text.as_deref().unwrap_or("🕹️ ");
+    let prefix = steering.prefix.text.as_deref().unwrap_or("📣 ");
 
     let steering_lines: Vec<Line<'static>> = app
         .queued_steering()

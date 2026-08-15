@@ -94,7 +94,7 @@ User keystroke → App::submit
                                      TurnEnd, Done, Error} on tx
 
 User keystroke (while streaming) → App::enqueue_steering_from_input
-  └─ pushes text onto queued_steering (for 🕹️ UI) + sends on steering_tx
+  └─ pushes text onto queued_steering (for 📣 UI) + sends on steering_tx
 
 App::apply_event drains tx on each draw tick
   ├─ committed events → SessionState ingestion
@@ -229,7 +229,7 @@ responsive during long model responses.
 
 **Steering queue during streaming** — while a loop is active, Enter enqueues
 user steering text into a dedicated channel. The UI renders queued entries at
-the bottom with `🕹️` until the loop consumes them at the next turn boundary.
+the bottom with `📣` until the loop consumes them at the next turn boundary.
 On consumption, a `SteeringConsumed` event removes the pinned row and inserts
 the message into normal transcript order after the completed assistant turn and
 before the next assistant turn. Tool calls in the current turn run concurrently

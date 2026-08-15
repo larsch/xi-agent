@@ -621,7 +621,7 @@ impl Default for LogSteeringStyle {
             dim: None,
             italic: Some(true),
             prefix: PrefixStyle {
-                text: Some("🕹️ ".to_string()),
+                text: Some("📣 ".to_string()),
                 fg: Some(Color::Rgb(200, 200, 120)),
                 ..Default::default()
             },
