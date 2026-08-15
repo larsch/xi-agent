@@ -366,6 +366,7 @@ async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
         session_id: String::new(),
     };
 
+    let started = std::time::Instant::now();
     let handle = tokio::spawn(async move {
         run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
     });
@@ -376,6 +377,11 @@ async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
         .expect("queue steering");
 
     handle.await.expect("agent loop join");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(110),
+        "parallel batch took too long: {:?}",
+        started.elapsed()
+    );
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -383,6 +389,15 @@ async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
             events.push(agent_ev);
         }
     }
+
+    let tool_end_ids: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallEnd { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_end_ids, vec!["call_1", "call_2"]);
 
     let second_tool_ok = events.iter().any(|e| {
         matches!(
@@ -471,17 +486,17 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         }
     }
 
-    let interrupted_second = events.iter().any(|e| {
-        matches!(
-            e,
-            AgentEvent::ToolCallEnd { id, result, .. }
-            if id == "call_2" && result.is_error && result.content.as_text().contains("Interrupted by user")
-        )
-    });
-    assert!(
-        interrupted_second,
-        "expected second tool call to be interrupted"
-    );
+    let completed_calls = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolCallEnd { id, result, .. }
+                if (id == "call_1" || id == "call_2") && !result.is_error
+            )
+        })
+        .count();
+    assert_eq!(completed_calls, 2, "expected all parallel calls to finish");
 
     assert!(
         !events.iter().any(|e| matches!(
