@@ -2450,4 +2450,111 @@ mod tests {
             "input bg should change when freeform typing begins (before={bg_before:?}, after={bg_after:?})"
         );
     }
+
+    // ── Rendering benchmark harness ───────────────────────────────────────────
+    //
+    // These tests are not part of the correctness suite: they measure how long
+    // a full frame takes to render with the ratatui `TestBackend`. They are
+    // gated behind `#[ignore]` so the normal `cargo test` run stays fast.
+    //
+    // Run with:
+    //   cargo test --release -- --ignored --nocapture bench_render
+    //
+    // The goal is a cheap, dependency-free way to (a) get a baseline, (b) spot
+    // a hot path, and (c) compare two git revisions to locate a regression.
+    // For continuous regression tracking, a `criterion` bench that drives the
+    // same `draw` entry point is preferable (see notes in the report).
+
+    /// A single markdown-heavy assistant message: prose, a fenced code block,
+    /// a table, and a nested list. These are the expensive paths in
+    /// `markdown::render_with_theme`.
+    fn bench_assistant_body() -> &'static str {
+        r#"Here's how to solve that problem.
+
+```rust
+fn main() {
+    let xs: Vec<u32> = (0..100).collect();
+    let total: u32 = xs.iter().sum();
+    println!("total = {total}");
+}
+```
+
+Some prose with **bold**, *italic*, and `inline code`. Here is a table:
+
+| Name | Value | Notes |
+|------|-------|-------|
+| alpha | 1 | first item in the table |
+| beta  | 2 | second item in the table |
+| gamma | 3 | third item in the table |
+
+- first bullet point with some text
+- second bullet point
+  - nested bullet that should indent correctly
+  - another nested bullet
+- third bullet point wrapping onto multiple lines to exercise the wrapping path
+"#
+    }
+
+    /// Build an app whose log contains `turns` user/assistant pairs.
+    fn bench_app(turns: usize) -> App {
+        let mut app = make_app();
+        let body = bench_assistant_body();
+        for i in 0..turns {
+            app.push_notice(Message::user(format!(
+                "Question number {i}: please explain the following code and give me a table."
+            )));
+            app.push_notice(Message::assistant(body));
+        }
+        app
+    }
+
+    /// Measure cold (cache-missed full rebuild) vs warm (cache-hit) frame times
+    /// across a sweep of terminal sizes and message counts. Prints a table of
+    /// per-frame timings; asserts nothing.
+    #[test]
+    #[ignore]
+    fn bench_render() {
+        use std::time::Instant;
+
+        const ITERS: usize = 20;
+        let sizes: [(u16, u16); 3] = [(80, 24), (120, 40), (200, 60)];
+
+        println!("\n=== xi-agent render benchmark (TestBackend) ===");
+        println!("turns | size        | cold (us) | warm (us)");
+        println!("------+-------------+-----------+-----------");
+
+        for &turns in &[20usize, 50, 200] {
+            let mut app = bench_app(turns);
+            for &(w, h) in &sizes {
+                let mut cold = std::time::Duration::ZERO;
+                let mut warm = std::time::Duration::ZERO;
+
+                let backend = ratatui::backend::TestBackend::new(w, h);
+                let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+                for _ in 0..ITERS {
+                    // Cold: invalidate the log cache, forcing a full rebuild
+                    // of every message's markdown + wrapping on the next draw.
+                    app.log_view.invalidate();
+                    let t = Instant::now();
+                    terminal.draw(|f| draw(f, &mut app)).unwrap();
+                    cold += t.elapsed();
+
+                    // Warm: same revision + width, so the cached lines are
+                    // reused and the markdown path is skipped entirely.
+                    let t = Instant::now();
+                    terminal.draw(|f| draw(f, &mut app)).unwrap();
+                    warm += t.elapsed();
+                }
+
+                let cold_us = cold.as_micros() as f64 / ITERS as f64;
+                let warm_us = warm.as_micros() as f64 / ITERS as f64;
+                println!(
+                    "{:>5} | {:>3}x{:<3}     | {:>9.1} | {:>9.1}",
+                    turns, w, h, cold_us, warm_us
+                );
+            }
+        }
+        println!();
+    }
 }
