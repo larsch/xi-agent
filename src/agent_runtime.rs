@@ -24,7 +24,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) app_event_tx: AppEventTx,
     pub(crate) steering_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// User steering messages queued while a loop is running; rendered pinned
-    /// at the bottom of the log with a 🕹️ icon until consumed.
+    /// at the bottom of the log with a 📣 icon until consumed.
     pub(crate) queued_steering: Vec<String>,
     /// JoinHandle for the currently running agent loop task (if any).
     pub(crate) agent_task: Option<JoinHandle<()>>,

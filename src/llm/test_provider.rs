@@ -192,7 +192,7 @@ Alignment may vary by terminal, font, and render state.\n\
 🔍 | find_files (U+1F50D, wide)\n\
 ❓ | ask_user   (U+2753, wide)\n\
 ⚙️ | exec/other (U+2699+VS16)\n\
-🕹️ | steering   (U+1F579+VS16)\n\
+📣 | steering   (U+1F4E3, wide)\n\
 ⚠️ | warning    (U+26A0+VS16)\n\
 ✅ | checkmark  (U+2705, wide)\n\
 ❌ | red cross  (U+274C, wide)\n\

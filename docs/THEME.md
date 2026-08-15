@@ -200,7 +200,7 @@ assistant.thinking.dim = true
 # rendered with a prefix — the prefix.text is prepended to every line.
 steering.fg = "#c8c878"
 steering.italic = true
-steering.prefix.text = "🕹️ "
+steering.prefix.text = "📣 "
 steering.prefix.fg = "#c8c878"
 
 # Diff rendering inside tool results
