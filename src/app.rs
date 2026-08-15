@@ -2712,6 +2712,59 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_batch_keeps_results_next_to_their_intents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+
+        let mut app = make_app();
+        app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load event log"),
+        ));
+
+        // Parallel execution emits every intent (ToolCallStart) before any
+        // result (ToolCallEnd).
+        for id in ["call_1", "call_2"] {
+            app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallStart {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "src/main.rs"}),
+            });
+        }
+        for id in ["call_1", "call_2"] {
+            app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallEnd {
+                id: id.to_string(),
+                result: crate::agent::types::ToolResult::ok_str(id),
+            });
+        }
+
+        let order: Vec<(&str, &str)> = app
+            .session
+            .pending_turn_events
+            .iter()
+            .filter_map(|e| match e {
+                crate::session_event::SessionEvent::ToolCall { id, .. } => {
+                    Some(("call", id.as_str()))
+                }
+                crate::session_event::SessionEvent::ToolResult { id, .. } => {
+                    Some(("result", id.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            order,
+            vec![
+                ("call", "call_1"),
+                ("result", "call_1"),
+                ("call", "call_2"),
+                ("result", "call_2"),
+            ],
+            "each result must follow its own intent, not be batched after all intents"
+        );
+    }
+
+    #[test]
     fn done_does_not_duplicate_assistant_turn_after_turn_end() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("session.jsonl");

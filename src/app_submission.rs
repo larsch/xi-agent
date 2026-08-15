@@ -364,23 +364,26 @@ impl App {
                 });
             }
 
-            let name = self
-                .session
-                .pending_turn_events
-                .iter()
-                .rev()
-                .find_map(|e| {
-                    if let SessionEvent::ToolCall { id: cid, name, .. } = e {
-                        if cid == &id { Some(name.clone()) } else { None }
-                    } else {
-                        None
-                    }
+            // Insert the abort result immediately after its own intent so the
+            // ToolCall/ToolResult pairing stays intact (parallel batches emit
+            // all intents before any result).
+            let call_pos =
+                self.session.pending_turn_events.iter().rposition(
+                    |e| matches!(e, SessionEvent::ToolCall { id: cid, .. } if cid == &id),
+                );
+            let name = call_pos
+                .and_then(|pos| match &self.session.pending_turn_events[pos] {
+                    SessionEvent::ToolCall { name, .. } => Some(name.clone()),
+                    _ => None,
                 })
                 .unwrap_or_default();
+            let insert_at = call_pos
+                .map(|pos| pos + 1)
+                .unwrap_or(self.session.pending_turn_events.len());
 
-            self.session
-                .pending_turn_events
-                .push(SessionEvent::ToolResult {
+            self.session.pending_turn_events.insert(
+                insert_at,
+                SessionEvent::ToolResult {
                     id,
                     name,
                     content: "Interrupted by user".to_string(),
@@ -388,7 +391,8 @@ impl App {
                     display_range: None,
                     include_in_llm: true,
                     timestamp: Self::now_ts(),
-                });
+                },
+            );
         }
     }
 

@@ -225,7 +225,9 @@ On consumption, a `SteeringConsumed` event removes the pinned row and inserts
 the message into normal transcript order after the completed assistant turn and
 before the next assistant turn. Tool calls in the current turn run concurrently
 and are all allowed to finish; steering does not cancel them. Their completion
-events and committed results are emitted in model order.
+events and committed results are emitted in model order, with each `ToolCall`
+(intent) immediately followed by its own `ToolResult` so the log and LLM
+projection keep the pairs adjacent.
 
 **`LlmProvider` trait** — all provider-specific wire formats are contained
 in `llm/*.rs`. Message serialization is centralized in

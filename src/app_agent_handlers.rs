@@ -328,23 +328,28 @@ impl App {
                 }),
             });
         }
-        // Resolve tool name from the matching pending ToolCall.
-        let name = self
+        // Resolve the matching pending ToolCall so the result can be inserted
+        // immediately after its own intent. Parallel batches emit every
+        // `ToolCallStart` (intent) before any `ToolCallEnd` (result), so
+        // appending would batch all results after all intents and break the
+        // ToolCall/ToolResult pairing the renderer and LLM projection rely on.
+        let call_pos = self
             .session
             .pending_turn_events
             .iter()
-            .rev()
-            .find_map(|e| {
-                if let SessionEvent::ToolCall { id: cid, name, .. } = e {
-                    if cid == &id { Some(name.clone()) } else { None }
-                } else {
-                    None
-                }
+            .rposition(|e| matches!(e, SessionEvent::ToolCall { id: cid, .. } if cid == &id));
+        let name = call_pos
+            .and_then(|pos| match &self.session.pending_turn_events[pos] {
+                SessionEvent::ToolCall { name, .. } => Some(name.clone()),
+                _ => None,
             })
             .unwrap_or_default();
-        self.session
-            .pending_turn_events
-            .push(SessionEvent::ToolResult {
+        let insert_at = call_pos
+            .map(|pos| pos + 1)
+            .unwrap_or(self.session.pending_turn_events.len());
+        self.session.pending_turn_events.insert(
+            insert_at,
+            SessionEvent::ToolResult {
                 id,
                 name,
                 content: result.content.as_text().to_string(),
@@ -352,7 +357,8 @@ impl App {
                 display_range,
                 include_in_llm: true,
                 timestamp: Self::now_ts(),
-            });
+            },
+        );
     }
 
     fn on_shell_complete(&mut self, call_id: String, result: crate::agent::types::ToolResult) {
