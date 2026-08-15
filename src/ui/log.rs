@@ -106,14 +106,11 @@ impl LogLayout {
     }
 
     /// Compare this rendered logical layout with the previous eligible layout.
-    pub(crate) fn visual_update(
-        &self,
-        previous: Option<&[(String, usize, String)]>,
-    ) -> VisualUpdate {
+    pub(crate) fn visual_update(&self, previous: Option<&[(String, usize)]>) -> VisualUpdate {
         let Some(previous) = previous else {
             return VisualUpdate::NonContentLayoutChange;
         };
-        let before_total = previous.iter().map(|(_, lines, _)| *lines).sum::<usize>();
+        let before_total = previous.iter().map(|(_, lines)| *lines).sum::<usize>();
         let after_total = self
             .blocks
             .iter()
@@ -127,8 +124,8 @@ impl LogLayout {
                 .filter_map(|block| {
                     let before = previous
                         .iter()
-                        .find(|(identity, _, _)| identity == &block.identity)
-                        .map_or(0, |(_, lines, _)| *lines);
+                        .find(|(identity, _)| identity == &block.identity)
+                        .map_or(0, |(_, lines)| *lines);
                     (before != block.lines.len())
                         .then(|| format!("{}:{}->{}", block.identity, before, block.lines.len()))
                 })
@@ -151,8 +148,8 @@ impl LogLayout {
     /// appear to jump down. Appending the missing lines as bottom padding
     /// keeps the previous total height, so the viewport stays put and the
     /// removed lines are replaced by blanks at the bottom of the output log.
-    pub(crate) fn pad_shrink(&mut self, previous: &[(String, usize, String)]) {
-        let before_total = previous.iter().map(|(_, lines, _)| *lines).sum::<usize>();
+    pub(crate) fn pad_shrink(&mut self, previous: &[(String, usize)]) {
+        let before_total = previous.iter().map(|(_, lines)| *lines).sum::<usize>();
         let after_total = self
             .blocks
             .iter()
@@ -238,6 +235,7 @@ struct LayoutBuilder {
     layout: LogLayout,
 }
 
+#[derive(Clone)]
 struct LayoutBlockInput {
     identity: String,
     kind: LogBlockKind,
@@ -310,10 +308,7 @@ mod layout_tests {
 
     #[test]
     fn visual_update_classifies_bottom_growth_and_reflow() {
-        let old = vec![
-            ("a".to_string(), 1, "a".to_string()),
-            ("b".to_string(), 2, "b\nb".to_string()),
-        ];
+        let old = vec![("a".to_string(), 1), ("b".to_string(), 2)];
         let grown = LogLayout {
             blocks: vec![
                 block("a", LogBlockKind::UserContent, "a", false),
@@ -345,8 +340,8 @@ mod layout_tests {
             ],
         };
         let previous = vec![
-            ("message:0:user".to_string(), 1, "a".to_string()),
-            ("message:1:thinking".to_string(), 3, "x".to_string()),
+            ("message:0:user".to_string(), 1),
+            ("message:1:thinking".to_string(), 3),
         ];
         layout.pad_shrink(&previous);
 
@@ -375,7 +370,7 @@ mod layout_tests {
                 true,
             )],
         };
-        let previous = vec![("message:0:thinking".to_string(), 2, "x".to_string())];
+        let previous = vec![("message:0:thinking".to_string(), 2)];
         layout.pad_shrink(&previous);
         assert_eq!(layout.blocks[0].lines.len(), 3);
     }
@@ -511,6 +506,7 @@ pub(super) fn build_log_layout(
     theme: &Theme,
     display: &DisplayConfig,
 ) -> LogLayout {
+    let mut cache = LogBlockCache::default();
     build_log_layout_with_expansion(
         messages,
         streaming,
@@ -519,212 +515,267 @@ pub(super) fn build_log_layout(
         theme,
         display,
         &HashSet::new(),
+        &mut cache,
     )
 }
 
-pub(super) fn build_log_layout_with_expansion(
-    messages: &[Message],
+// ── Render cache ──────────────────────────────────────────────────────────────
+
+/// Cached rendered blocks for one message, keyed by its index in the display
+/// message list. The fingerprint/width/streaming fields detect staleness: any
+/// change re-renders and overwrites this entry, so the cache never grows past
+/// one entry per message index.
+#[derive(Clone)]
+struct CachedBlocks {
+    fingerprint: u64,
+    width: usize,
     streaming: bool,
+    blocks: Vec<LayoutBlockInput>,
+}
+
+/// Per-message render cache. Unchanged messages reuse their previously rendered
+/// blocks instead of re-running markdown + wrapping on every frame.
+///
+/// Stores pre-merge [`LayoutBlockInput`]s so the final [`LayoutBuilder`] pass
+/// can still merge a tool result into its paired tool call block. Keyed by
+/// message index so a streaming message overwrites its own entry on each token
+/// instead of accumulating one entry per token.
+#[derive(Default)]
+pub(crate) struct LogBlockCache {
+    entries: std::collections::HashMap<usize, CachedBlocks>,
+}
+
+impl LogBlockCache {
+    fn get(
+        &self,
+        idx: usize,
+        fingerprint: u64,
+        width: usize,
+        streaming: bool,
+    ) -> Option<&Vec<LayoutBlockInput>> {
+        self.entries.get(&idx).and_then(|e| {
+            (e.fingerprint == fingerprint && e.width == width && e.streaming == streaming)
+                .then_some(&e.blocks)
+        })
+    }
+
+    fn insert(
+        &mut self,
+        idx: usize,
+        fingerprint: u64,
+        width: usize,
+        streaming: bool,
+        blocks: Vec<LayoutBlockInput>,
+    ) {
+        self.entries.insert(
+            idx,
+            CachedBlocks {
+                fingerprint,
+                width,
+                streaming,
+                blocks,
+            },
+        );
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Hash a `serde_json::Value` (which does not implement `Hash`) via its
+/// canonical string form.
+fn hash_json<H: std::hash::Hasher>(h: &mut H, value: &serde_json::Value) {
+    use std::hash::Hash;
+    value.to_string().hash(h);
+}
+
+/// Fingerprint of a single message's render-relevant fields.
+fn message_render_fingerprint(msg: &Message) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&msg.role)
+        .unwrap_or_default()
+        .hash(&mut h);
+    msg.content.hash(&mut h);
+    msg.thinking.hash(&mut h);
+    serde_json::to_string(&msg.assistant_phase)
+        .unwrap_or_default()
+        .hash(&mut h);
+    msg.tool_name.hash(&mut h);
+    if let Some(args) = &msg.tool_args {
+        hash_json(&mut h, args);
+    }
+    msg.tool_partial_args.hash(&mut h);
+    if let Some(snapshot) = &msg.tool_partial_snapshot {
+        hash_json(&mut h, snapshot);
+    }
+    msg.tool_streaming_field.hash(&mut h);
+    msg.tool_running_output.hash(&mut h);
+    msg.is_error.hash(&mut h);
+    if let Some(dr) = &msg.display_range {
+        dr.first_line.hash(&mut h);
+        dr.last_line.hash(&mut h);
+        dr.total_lines.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Fingerprint of everything that affects rendering of `messages[idx]`,
+/// including immediate neighbor context for tool call/result pairing.
+fn render_fingerprint(messages: &[Message], idx: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let msg = &messages[idx];
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    message_render_fingerprint(msg).hash(&mut h);
+    if msg.role == Role::ToolCall
+        && let Some(next) = messages.get(idx + 1)
+        && next.role == Role::ToolResult
+    {
+        // A following result suppresses the streamed intent body (write/edit)
+        // and contributes a read_file range suffix to the intent label.
+        true.hash(&mut h);
+        if let Some(dr) = &next.display_range {
+            dr.first_line.hash(&mut h);
+            dr.last_line.hash(&mut h);
+            dr.total_lines.hash(&mut h);
+        }
+    }
+    if msg.role == Role::ToolResult
+        && let Some(prev) = messages.get(idx.saturating_sub(1))
+        && prev.role == Role::ToolCall
+    {
+        // The body renders from the preceding call's name and args (edit diff,
+        // write content, per-tool colors).
+        prev.tool_name.hash(&mut h);
+        if let Some(args) = &prev.tool_args {
+            hash_json(&mut h, args);
+        }
+    }
+    h.finish()
+}
+
+fn is_static_assistant_notice(msg: &Message) -> bool {
+    matches!(msg.role, Role::Assistant)
+        && msg.thinking.as_deref().unwrap_or("").is_empty()
+        && msg.assistant_phase.is_none()
+        && msg.content.starts_with('[')
+        && msg.content.ends_with(']')
+}
+
+/// Push [`LineSource`] entries for all lines added since `prev_len`,
+/// assigning them to `msg_idx` with the given properties.
+#[allow(clippy::too_many_arguments)]
+fn push_sources(
+    sources: &mut Vec<LineSource>,
+    ranges: &mut Vec<(usize, usize, LogBlockKind, String)>,
+    lines: &[Line<'static>],
+    prev_len: usize,
+    msg_idx: usize,
+    kind: LogBlockKind,
+    subsection: &str,
+    decoration_width: u16,
+    streaming: bool,
+) {
+    for _ in prev_len..lines.len() {
+        sources.push(LineSource {
+            decoration_width,
+            streaming,
+            block_identity: None,
+            foldable: false,
+        });
+    }
+    if prev_len < lines.len() {
+        ranges.push((
+            prev_len,
+            lines.len(),
+            kind,
+            format!("message:{msg_idx}:{subsection}"),
+        ));
+    }
+}
+
+/// Render a single message (and, for a tool call, its paired result) into
+/// pre-merge blocks. Does not consult the cache.
+#[allow(clippy::too_many_arguments)]
+fn render_message_blocks(
+    messages: &[Message],
+    idx: usize,
     width: usize,
     cfg: &ToolBodyConfig,
     theme: &Theme,
     display: &DisplayConfig,
     expanded_blocks: &HashSet<String>,
-) -> LogLayout {
+    msg_streaming: bool,
+) -> Vec<LayoutBlockInput> {
+    let msg = &messages[idx];
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
     let mut ranges: Vec<(usize, usize, LogBlockKind, String)> = Vec::new();
 
-    /// Push [`LineSource`] entries for all lines added since `prev_len`,
-    /// assigning them to `msg_idx` with the given properties.
-    #[allow(clippy::too_many_arguments)]
-    fn push_sources(
-        sources: &mut Vec<LineSource>,
-        ranges: &mut Vec<(usize, usize, LogBlockKind, String)>,
-        lines: &[Line<'static>],
-        prev_len: usize,
-        msg_idx: usize,
-        kind: LogBlockKind,
-        subsection: &str,
-        decoration_width: u16,
-        streaming: bool,
-    ) {
-        for _ in prev_len..lines.len() {
-            sources.push(LineSource {
-                decoration_width,
-                streaming,
-                block_identity: None,
-                foldable: false,
-            });
-        }
-        if prev_len < lines.len() {
-            ranges.push((
-                prev_len,
-                lines.len(),
-                kind,
-                format!("message:{msg_idx}:{subsection}"),
-            ));
-        }
-    }
-
-    for (idx, msg) in messages.iter().enumerate() {
-        let is_last = idx == messages.len() - 1;
-        let is_static_assistant_notice = matches!(msg.role, Role::Assistant)
-            && msg.thinking.as_deref().unwrap_or("").is_empty()
-            && msg.assistant_phase.is_none()
-            && msg.content.starts_with('[')
-            && msg.content.ends_with(']');
-        let msg_streaming = streaming && is_last && !is_static_assistant_notice;
-
-        match msg.role {
-            Role::User => {
-                if msg.hidden {
-                    continue;
-                }
-                let user_bg = theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64));
-                let prev = lines.len();
-                append_message_markdown(&mut lines, &msg.content, width, user_bg, &theme.markdown);
-                push_sources(
-                    &mut sources,
-                    &mut ranges,
-                    &lines,
-                    prev,
-                    idx,
-                    LogBlockKind::UserContent,
-                    "content",
-                    0,
-                    msg_streaming,
-                );
+    match msg.role {
+        Role::User => {
+            if msg.hidden {
+                return Vec::new();
             }
-            Role::System => {}
-            Role::Assistant => {
-                let thinking = msg.thinking.as_deref().unwrap_or("");
-                let is_streaming_last = msg_streaming;
-                let content = trim_assistant_block_edges(&msg.content);
-                let has_answer = !content.is_empty();
+            let user_bg = theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64));
+            let prev = lines.len();
+            append_message_markdown(&mut lines, &msg.content, width, user_bg, &theme.markdown);
+            push_sources(
+                &mut sources,
+                &mut ranges,
+                &lines,
+                prev,
+                idx,
+                LogBlockKind::UserContent,
+                "content",
+                0,
+                msg_streaming,
+            );
+        }
+        Role::System => {}
+        Role::Assistant => {
+            let thinking = msg.thinking.as_deref().unwrap_or("");
+            let is_streaming_last = msg_streaming;
+            let content = trim_assistant_block_edges(&msg.content);
+            let has_answer = !content.is_empty();
 
-                if !thinking.is_empty() {
-                    let thinking_display = {
-                        let sanitized = sanitize_for_display(thinking);
-                        let all_lines: Vec<&str> = sanitized.lines().collect();
-                        let wrap_width = width.saturating_sub(3).max(1);
-                        let mut wrapped: Vec<String> = Vec::new();
-                        for logical in all_lines {
-                            if logical.is_empty() {
-                                wrapped.push(String::new());
-                            } else {
-                                wrapped.extend(wrap_str(logical, wrap_width));
-                            }
-                        }
-                        let thinking_id = format!("message:{idx}:thinking");
-                        let skip = if expanded_blocks.contains(&thinking_id) {
-                            0
+            if !thinking.is_empty() {
+                let thinking_display = {
+                    let sanitized = sanitize_for_display(thinking);
+                    let all_lines: Vec<&str> = sanitized.lines().collect();
+                    let wrap_width = width.saturating_sub(3).max(1);
+                    let mut wrapped: Vec<String> = Vec::new();
+                    for logical in all_lines {
+                        if logical.is_empty() {
+                            wrapped.push(String::new());
                         } else {
-                            wrapped.len().saturating_sub(5)
-                        };
-                        let shown = trim_empty_edges(&wrapped[skip..], |s| s.is_empty());
-                        shown.join("\n")
+                            wrapped.extend(wrap_str(logical, wrap_width));
+                        }
+                    }
+                    let thinking_id = format!("message:{idx}:thinking");
+                    let skip = if expanded_blocks.contains(&thinking_id) {
+                        0
+                    } else {
+                        wrapped.len().saturating_sub(5)
                     };
-                    let prev = lines.len();
-                    append_message_colored(
-                        &mut lines,
-                        &format!("🧠 {}", thinking_display),
-                        width,
-                        Color::DarkGray,
-                        false,
-                        is_streaming_last && !has_answer,
-                    );
-                    push_sources(
-                        &mut sources,
-                        &mut ranges,
-                        &lines,
-                        prev,
-                        idx,
-                        LogBlockKind::AssistantThinking,
-                        "thinking",
-                        3,
-                        msg_streaming,
-                    );
-                }
-
-                let effective_phase = match msg.assistant_phase {
-                    Some(p) => p,
-                    None if is_streaming_last => AssistantPhase::Unknown,
-                    None => AssistantPhase::Final,
+                    let shown = trim_empty_edges(&wrapped[skip..], |s| s.is_empty());
+                    shown.join("\n")
                 };
-                let answer_icon = match effective_phase {
-                    AssistantPhase::Provisional => theme
-                        .log
-                        .assistant
-                        .provisional
-                        .prefix
-                        .text
-                        .as_deref()
-                        .unwrap_or("💭 ")
-                        .trim_end(),
-                    AssistantPhase::Final => theme
-                        .log
-                        .assistant
-                        .r#final
-                        .prefix
-                        .text
-                        .as_deref()
-                        .unwrap_or("💬 ")
-                        .trim_end(),
-                    AssistantPhase::Unknown if is_streaming_last => theme
-                        .log
-                        .assistant
-                        .provisional
-                        .prefix
-                        .text
-                        .as_deref()
-                        .unwrap_or("💭 ")
-                        .trim_end(),
-                    AssistantPhase::Unknown => theme
-                        .log
-                        .assistant
-                        .r#final
-                        .prefix
-                        .text
-                        .as_deref()
-                        .unwrap_or("💬 ")
-                        .trim_end(),
-                };
-                let deco_width = unicode_width::UnicodeWidthStr::width(answer_icon) as u16 + 1;
-
-                if has_answer {
-                    let md_width = width.saturating_sub(3).max(1);
-                    let md_lines =
-                        crate::markdown::render_with_theme(&content, md_width, "", &theme.markdown);
-                    let prev = lines.len();
-                    append_markdown_answer(&mut lines, answer_icon, md_lines, is_streaming_last);
-                    push_sources(
-                        &mut sources,
-                        &mut ranges,
-                        &lines,
-                        prev,
-                        idx,
-                        LogBlockKind::AssistantMarkdown,
-                        "answer",
-                        deco_width,
-                        msg_streaming,
-                    );
-                }
-            }
-            Role::ToolCall => {
                 let prev = lines.len();
-                let block_id = format!("message:{idx}:tool");
-                let mut block_cfg = cfg.clone();
-                block_cfg.full_output |= expanded_blocks.contains(&block_id);
-                render_tool_call(
-                    messages,
-                    idx,
-                    width,
-                    &block_cfg,
-                    theme,
-                    display,
+                append_message_colored(
                     &mut lines,
-                    msg_streaming,
+                    &format!("🧠 {}", thinking_display),
+                    width,
+                    Color::DarkGray,
+                    false,
+                    is_streaming_last && !has_answer,
                 );
                 push_sources(
                     &mut sources,
@@ -732,58 +783,149 @@ pub(super) fn build_log_layout_with_expansion(
                     &lines,
                     prev,
                     idx,
-                    tool_block_kind(msg, false),
-                    "intent",
+                    LogBlockKind::AssistantThinking,
+                    "thinking",
                     3,
                     msg_streaming,
                 );
-                if let Some((_, _, _, identity)) = ranges.last_mut() {
-                    *identity = block_id;
-                }
             }
-            Role::ToolResult => {
+
+            let effective_phase = match msg.assistant_phase {
+                Some(p) => p,
+                None if is_streaming_last => AssistantPhase::Unknown,
+                None => AssistantPhase::Final,
+            };
+            let answer_icon = match effective_phase {
+                AssistantPhase::Provisional => theme
+                    .log
+                    .assistant
+                    .provisional
+                    .prefix
+                    .text
+                    .as_deref()
+                    .unwrap_or("💭 ")
+                    .trim_end(),
+                AssistantPhase::Final => theme
+                    .log
+                    .assistant
+                    .r#final
+                    .prefix
+                    .text
+                    .as_deref()
+                    .unwrap_or("💬 ")
+                    .trim_end(),
+                AssistantPhase::Unknown if is_streaming_last => theme
+                    .log
+                    .assistant
+                    .provisional
+                    .prefix
+                    .text
+                    .as_deref()
+                    .unwrap_or("💭 ")
+                    .trim_end(),
+                AssistantPhase::Unknown => theme
+                    .log
+                    .assistant
+                    .r#final
+                    .prefix
+                    .text
+                    .as_deref()
+                    .unwrap_or("💬 ")
+                    .trim_end(),
+            };
+            let deco_width = unicode_width::UnicodeWidthStr::width(answer_icon) as u16 + 1;
+
+            if has_answer {
+                let md_width = width.saturating_sub(3).max(1);
+                let md_lines =
+                    crate::markdown::render_with_theme(&content, md_width, "", &theme.markdown);
                 let prev = lines.len();
-                // The result merges into the preceding tool call's visual
-                // block when there is one; otherwise it stands alone.
-                let call_idx = idx
-                    .checked_sub(1)
-                    .filter(|&c| messages.get(c).is_some_and(|m| m.role == Role::ToolCall));
-                let block_id = call_idx
-                    .map(|c| format!("message:{c}:tool"))
-                    .unwrap_or_else(|| format!("message:{idx}:body"));
-                let mut block_cfg = cfg.clone();
-                block_cfg.full_output |= expanded_blocks.contains(&block_id);
-                render_tool_result(
-                    messages,
-                    idx,
-                    width,
-                    &block_cfg,
-                    theme,
-                    display,
-                    &mut lines,
-                    msg_streaming,
-                );
+                append_markdown_answer(&mut lines, answer_icon, md_lines, is_streaming_last);
                 push_sources(
                     &mut sources,
                     &mut ranges,
                     &lines,
                     prev,
                     idx,
-                    tool_block_kind(msg, true),
-                    "body",
-                    3,
+                    LogBlockKind::AssistantMarkdown,
+                    "answer",
+                    deco_width,
                     msg_streaming,
                 );
-                if let Some((_, _, _, identity)) = ranges.last_mut() {
-                    *identity = block_id;
-                }
+            }
+        }
+        Role::ToolCall => {
+            let prev = lines.len();
+            let block_id = format!("message:{idx}:tool");
+            let mut block_cfg = cfg.clone();
+            block_cfg.full_output |= expanded_blocks.contains(&block_id);
+            render_tool_call(
+                messages,
+                idx,
+                width,
+                &block_cfg,
+                theme,
+                display,
+                &mut lines,
+                msg_streaming,
+            );
+            push_sources(
+                &mut sources,
+                &mut ranges,
+                &lines,
+                prev,
+                idx,
+                tool_block_kind(msg, false),
+                "intent",
+                3,
+                msg_streaming,
+            );
+            if let Some((_, _, _, identity)) = ranges.last_mut() {
+                *identity = block_id;
+            }
+        }
+        Role::ToolResult => {
+            let prev = lines.len();
+            // The result merges into the preceding tool call's visual block
+            // when there is one; otherwise it stands alone.
+            let call_idx = idx
+                .checked_sub(1)
+                .filter(|&c| messages.get(c).is_some_and(|m| m.role == Role::ToolCall));
+            let block_id = call_idx
+                .map(|c| format!("message:{c}:tool"))
+                .unwrap_or_else(|| format!("message:{idx}:body"));
+            let mut block_cfg = cfg.clone();
+            block_cfg.full_output |= expanded_blocks.contains(&block_id);
+            render_tool_result(
+                messages,
+                idx,
+                width,
+                &block_cfg,
+                theme,
+                display,
+                &mut lines,
+                msg_streaming,
+            );
+            push_sources(
+                &mut sources,
+                &mut ranges,
+                &lines,
+                prev,
+                idx,
+                tool_block_kind(msg, true),
+                "body",
+                3,
+                msg_streaming,
+            );
+            if let Some((_, _, _, identity)) = ranges.last_mut() {
+                *identity = block_id;
             }
         }
     }
 
-    let mut builder = LayoutBuilder::new();
+    let mut blocks = Vec::new();
     for (start, end, kind, identity) in ranges {
-        builder.push(LayoutBlockInput {
+        blocks.push(LayoutBlockInput {
             identity,
             kind,
             lines: lines[start..end].to_vec(),
@@ -800,6 +942,47 @@ pub(super) fn build_log_layout_with_expansion(
             },
             foldable: !sources[start].streaming,
         });
+    }
+    blocks
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_log_layout_with_expansion(
+    messages: &[Message],
+    streaming: bool,
+    width: usize,
+    cfg: &ToolBodyConfig,
+    theme: &Theme,
+    display: &DisplayConfig,
+    expanded_blocks: &HashSet<String>,
+    cache: &mut LogBlockCache,
+) -> LogLayout {
+    let mut builder = LayoutBuilder::new();
+    for idx in 0..messages.len() {
+        let msg = &messages[idx];
+        let is_last = idx == messages.len() - 1;
+        let msg_streaming = streaming && is_last && !is_static_assistant_notice(msg);
+        let fingerprint = render_fingerprint(messages, idx);
+        let blocks = match cache.get(idx, fingerprint, width, msg_streaming) {
+            Some(cached) => cached.to_vec(),
+            None => {
+                let rendered = render_message_blocks(
+                    messages,
+                    idx,
+                    width,
+                    cfg,
+                    theme,
+                    display,
+                    expanded_blocks,
+                    msg_streaming,
+                );
+                cache.insert(idx, fingerprint, width, msg_streaming, rendered.clone());
+                rendered
+            }
+        };
+        for block in blocks {
+            builder.push(block);
+        }
     }
     builder.finish()
 }
@@ -2080,7 +2263,8 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ToolBodyConfig, build_log_layout, build_log_layout_with_expansion, dim_lines,
+        LogBlockCache, LogLayout, ToolBodyConfig, build_log_layout,
+        build_log_layout_with_expansion, dim_lines, message_render_fingerprint,
         trim_assistant_block_edges,
     };
     use crate::{
@@ -2159,6 +2343,153 @@ mod tests {
     }
 
     #[test]
+    fn message_render_fingerprint_is_field_sensitive() {
+        let base = Message::assistant("hello");
+        let fp = message_render_fingerprint(&base);
+        assert_ne!(fp, 0);
+
+        let mut m = base.clone();
+        m.content = "world".into();
+        assert_ne!(message_render_fingerprint(&m), fp, "content");
+
+        let mut m = base.clone();
+        m.thinking = Some("thinking".into());
+        assert_ne!(message_render_fingerprint(&m), fp, "thinking");
+
+        let mut m = base.clone();
+        m.tool_name = Some("bash".into());
+        assert_ne!(message_render_fingerprint(&m), fp, "tool_name");
+
+        let mut m = base.clone();
+        m.tool_args = Some(serde_json::json!({"command": "ls"}));
+        assert_ne!(message_render_fingerprint(&m), fp, "tool_args");
+
+        let mut m = base.clone();
+        m.tool_running_output = Some("output".into());
+        assert_ne!(message_render_fingerprint(&m), fp, "tool_running_output");
+
+        let mut m = base.clone();
+        m.is_error = true;
+        assert_ne!(message_render_fingerprint(&m), fp, "is_error");
+
+        let mut m = base.clone();
+        m.display_range = Some(DisplayRange {
+            first_line: 1,
+            last_line: 10,
+            total_lines: 100,
+        });
+        assert_ne!(message_render_fingerprint(&m), fp, "display_range");
+
+        assert_ne!(
+            message_render_fingerprint(&Message::user("hello")),
+            fp,
+            "role"
+        );
+    }
+
+    #[test]
+    fn cache_reuses_unchanged_blocks_during_streaming() {
+        let user = Message::user("first question");
+        let assistant = Message::assistant("partial");
+        let theme = crate::theme::Theme::default();
+        let display = crate::config::DisplayConfig::default();
+        let mut cache = LogBlockCache::default();
+
+        let layout1 = build_log_layout_with_expansion(
+            &[user.clone(), assistant],
+            true,
+            80,
+            &cfg(),
+            &theme,
+            &display,
+            &std::collections::HashSet::new(),
+            &mut cache,
+        );
+        let entries_after_first = cache.len();
+        assert_eq!(entries_after_first, 2, "user + assistant cached");
+
+        // Streaming growth: only the tail assistant changes, so only it should
+        // re-render; the user block must be a cache hit.
+        let layout2 = build_log_layout_with_expansion(
+            &[user, Message::assistant("partial answer grows longer")],
+            true,
+            80,
+            &cfg(),
+            &theme,
+            &display,
+            &std::collections::HashSet::new(),
+            &mut cache,
+        );
+        assert_eq!(
+            cache.len(),
+            entries_after_first,
+            "cache stays bounded (streaming tail overwrites its own entry)"
+        );
+
+        let text = |layout: &LogLayout, i: usize| -> Vec<String> {
+            layout.blocks[i]
+                .lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        assert_eq!(text(&layout1, 0), text(&layout2, 0), "user block unchanged");
+        assert_ne!(
+            text(&layout1, 1),
+            text(&layout2, 1),
+            "assistant content changed"
+        );
+    }
+
+    #[test]
+    fn non_tail_tool_running_output_update_reuses_other_blocks() {
+        let user = Message::user("run this");
+        let mut tool = Message::tool_call("c1", "bash", serde_json::json!({"command": "seq 5"}));
+        tool.tool_running_output = Some("1\n2".to_string());
+        let assistant = Message::assistant("done eventually");
+        let theme = crate::theme::Theme::default();
+        let display = crate::config::DisplayConfig::default();
+        let mut cache = LogBlockCache::default();
+
+        let layout1 = build_log_layout_with_expansion(
+            &[user.clone(), tool, assistant.clone()],
+            false,
+            80,
+            &cfg(),
+            &theme,
+            &display,
+            &std::collections::HashSet::new(),
+            &mut cache,
+        );
+        let entries_after_first = cache.len();
+
+        // Update the non-tail tool's live output; user and assistant blocks
+        // must be reused, only the tool re-renders.
+        let mut tool2 = Message::tool_call("c1", "bash", serde_json::json!({"command": "seq 5"}));
+        tool2.tool_running_output = Some("1\n2\n3".to_string());
+        let layout2 = build_log_layout_with_expansion(
+            &[user, tool2, assistant],
+            false,
+            80,
+            &cfg(),
+            &theme,
+            &display,
+            &std::collections::HashSet::new(),
+            &mut cache,
+        );
+        assert_eq!(
+            cache.len(),
+            entries_after_first,
+            "cache stays bounded (changed tool overwrites its own entry)"
+        );
+        assert_eq!(
+            layout1.blocks.len(),
+            layout2.blocks.len(),
+            "block count stable"
+        );
+    }
+
+    #[test]
     fn trim_assistant_block_edges_hides_outer_whitespace() {
         let rendered = trim_assistant_block_edges("\n  hello\n\n");
         assert_eq!(rendered, "hello");
@@ -2206,6 +2537,7 @@ mod tests {
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
             &expanded,
+            &mut LogBlockCache::default(),
         );
         let text = layout
             .flatten()
@@ -2260,6 +2592,7 @@ mod tests {
             &crate::theme::Theme::default(),
             &crate::config::DisplayConfig::default(),
             &expanded,
+            &mut LogBlockCache::default(),
         );
         let text = layout.blocks[0]
             .lines

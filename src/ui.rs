@@ -1,7 +1,7 @@
 mod info;
 mod input;
 mod layout;
-mod log;
+pub(crate) mod log;
 mod login;
 mod menu;
 mod pending;
@@ -91,6 +91,7 @@ fn build_log_layout_cached(
                 &app.theme,
                 display,
                 &app.log_view.expanded_blocks,
+                &mut app.log_view.block_cache,
             );
             let mut discarded_layout = build_log_layout_with_expansion(
                 &discarded,
@@ -100,6 +101,7 @@ fn build_log_layout_cached(
                 &app.theme,
                 display,
                 &app.log_view.expanded_blocks,
+                &mut app.log_view.block_cache,
             );
             discarded_layout.dim();
             layout.blocks.extend(discarded_layout.blocks);
@@ -114,6 +116,7 @@ fn build_log_layout_cached(
                 &app.theme,
                 display,
                 &app.log_view.expanded_blocks,
+                &mut app.log_view.block_cache,
             )
         };
         let previous = if app.log_view.visual_baseline_width == Some(width) {
@@ -127,26 +130,10 @@ fn build_log_layout_cached(
         {
             layout.pad_shrink(previous);
         }
-        let baseline: Vec<(String, usize, String)> = layout
+        let baseline: Vec<(String, usize)> = layout
             .blocks
             .iter()
-            .map(|block| {
-                (
-                    block.identity.clone(),
-                    block.lines.len(),
-                    block
-                        .lines
-                        .iter()
-                        .map(|line| {
-                            line.spans
-                                .iter()
-                                .map(|span| span.content.as_ref())
-                                .collect::<String>()
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-            })
+            .map(|block| (block.identity.clone(), block.lines.len()))
             .collect();
         let update = if previous.is_none() {
             VisualUpdate::NonContentLayoutChange
@@ -372,6 +359,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     &app.theme,
                     &display,
                     &app.log_view.expanded_blocks,
+                    &mut app.log_view.block_cache,
                 )
                 .flatten()
                 .0
@@ -2508,9 +2496,18 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
         app
     }
 
-    /// Measure cold (cache-missed full rebuild) vs warm (cache-hit) frame times
-    /// across a sweep of terminal sizes and message counts. Prints a table of
-    /// per-frame timings; asserts nothing.
+    /// Measure three frame-cost scenarios across a sweep of terminal sizes and
+    /// message counts:
+    ///
+    /// - `full`: a true cold rebuild (block cache emptied) — every message's
+    ///   markdown + wrapping re-runs.
+    /// - `stream`: the streaming path — each frame bumps the revision and
+    ///   grows the tail message, so prior messages are cache hits and only the
+    ///   tail re-renders.
+    /// - `warm`: idle redraw with no change — the whole-log cache hits and the
+    ///   markdown path is skipped entirely.
+    ///
+    /// Prints a table of per-frame timings; asserts nothing.
     #[test]
     #[ignore]
     fn bench_render() {
@@ -2520,38 +2517,63 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
         let sizes: [(u16, u16); 3] = [(80, 24), (120, 40), (200, 60)];
 
         println!("\n=== xi-agent render benchmark (TestBackend) ===");
-        println!("turns | size        | cold (us) | warm (us)");
-        println!("------+-------------+-----------+-----------");
+        println!("turns | size        | full (us) | stream (us) | warm (us)");
+        println!("------+-------------+-----------+-------------+----------");
 
         for &turns in &[20usize, 50, 200] {
-            let mut app = bench_app(turns);
             for &(w, h) in &sizes {
-                let mut cold = std::time::Duration::ZERO;
-                let mut warm = std::time::Duration::ZERO;
-
+                // Full rebuild: clear the block cache so every message re-renders.
+                let mut app = bench_app(turns);
                 let backend = ratatui::backend::TestBackend::new(w, h);
                 let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
-
+                let mut full = std::time::Duration::ZERO;
                 for _ in 0..ITERS {
-                    // Cold: invalidate the log cache, forcing a full rebuild
-                    // of every message's markdown + wrapping on the next draw.
                     app.log_view.invalidate();
+                    app.log_view.block_cache.clear();
                     let t = Instant::now();
                     terminal.draw(|f| draw(f, &mut app)).unwrap();
-                    cold += t.elapsed();
+                    full += t.elapsed();
+                }
 
-                    // Warm: same revision + width, so the cached lines are
-                    // reused and the markdown path is skipped entirely.
+                // Streaming: grow the tail message each frame; prior messages
+                // must be cache hits.
+                let mut app = bench_app(turns);
+                app.push_notice(Message::assistant("initial streaming response"));
+                let backend = ratatui::backend::TestBackend::new(w, h);
+                let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+                terminal.draw(|f| draw(f, &mut app)).unwrap(); // warm the caches
+                let mut stream = std::time::Duration::ZERO;
+                for _ in 0..ITERS {
+                    app.session
+                        .live_turn
+                        .notices
+                        .last_mut()
+                        .unwrap()
+                        .content
+                        .push_str(" streaming word ");
+                    let t = Instant::now();
+                    terminal.draw(|f| draw(f, &mut app)).unwrap();
+                    stream += t.elapsed();
+                }
+
+                // Warm: idle redraw, no change.
+                let mut app = bench_app(turns);
+                let backend = ratatui::backend::TestBackend::new(w, h);
+                let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+                terminal.draw(|f| draw(f, &mut app)).unwrap(); // warm the caches
+                let mut warm = std::time::Duration::ZERO;
+                for _ in 0..ITERS {
                     let t = Instant::now();
                     terminal.draw(|f| draw(f, &mut app)).unwrap();
                     warm += t.elapsed();
                 }
 
-                let cold_us = cold.as_micros() as f64 / ITERS as f64;
+                let full_us = full.as_micros() as f64 / ITERS as f64;
+                let stream_us = stream.as_micros() as f64 / ITERS as f64;
                 let warm_us = warm.as_micros() as f64 / ITERS as f64;
                 println!(
-                    "{:>5} | {:>3}x{:<3}     | {:>9.1} | {:>9.1}",
-                    turns, w, h, cold_us, warm_us
+                    "{:>5} | {:>3}x{:<3}     | {:>9.1} | {:>11.1} | {:>8.1}",
+                    turns, w, h, full_us, stream_us, warm_us
                 );
             }
         }

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use ratatui::text::Line;
 
 use crate::mouse_select::LineSource;
+use crate::ui::log::LogBlockCache;
 
 /// Type alias for the cached log lines + hit map tuple.
 pub(crate) type CachedLogLines = (
@@ -49,6 +50,7 @@ pub(crate) struct PaddingState {
 
 pub struct LogViewState {
     pub(crate) log_cache: LogCache,
+    pub(crate) block_cache: LogBlockCache,
     pub(crate) log_scroll: usize,
     pub(crate) auto_scroll: bool,
     pub(crate) last_log_height: usize,
@@ -58,7 +60,7 @@ pub struct LogViewState {
     pub(crate) pending_anchor: Option<(String, usize)>,
     pub(crate) last_block_padding: Option<PaddingState>,
     pub(crate) turn_generation: Option<u64>,
-    pub(crate) visual_baseline: Option<Vec<(String, usize, String)>>,
+    pub(crate) visual_baseline: Option<Vec<(String, usize)>>,
     pub(crate) visual_baseline_width: Option<usize>,
 }
 
@@ -66,6 +68,7 @@ impl LogViewState {
     pub fn new() -> Self {
         Self {
             log_cache: LogCache::new(),
+            block_cache: LogBlockCache::default(),
             log_scroll: 0,
             auto_scroll: true,
             last_log_height: 0,
@@ -81,6 +84,9 @@ impl LogViewState {
     }
 
     pub fn invalidate(&mut self) {
+        // NOTE: this runs on every streaming token (via `take_dirty`). It must
+        // NOT clear `block_cache`, which is fingerprint-keyed and handles
+        // content growth itself; clearing it here would defeat the cache.
         self.log_cache.invalidate();
     }
 
@@ -89,6 +95,7 @@ impl LogViewState {
         self.visual_baseline = None;
         self.visual_baseline_width = None;
         self.log_cache.invalidate();
+        self.block_cache.clear();
         self.clear_padding();
     }
 
@@ -97,6 +104,7 @@ impl LogViewState {
         self.visual_baseline = None;
         self.visual_baseline_width = None;
         self.log_cache.invalidate();
+        self.block_cache.clear();
         self.clear_padding();
     }
 
@@ -115,14 +123,17 @@ impl LogViewState {
         self.visual_baseline = None;
         self.visual_baseline_width = None;
         self.invalidate();
+        // `full_output` / `expanded_blocks` affect rendering but are not part
+        // of the block cache key, so clear it on any toggle that changes them.
+        self.block_cache.clear();
         self.clear_padding();
     }
 
-    pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(String, usize, String)>> {
+    pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(String, usize)>> {
         self.visual_baseline.take()
     }
 
-    pub(crate) fn set_visual_baseline(&mut self, baseline: Vec<(String, usize, String)>) {
+    pub(crate) fn set_visual_baseline(&mut self, baseline: Vec<(String, usize)>) {
         self.visual_baseline = Some(baseline);
     }
 
@@ -193,7 +204,7 @@ mod tests {
     #[test]
     fn expansion_toggle_clears_visual_baseline() {
         let mut state = LogViewState::new();
-        state.set_visual_baseline(vec![("message:0:tool".into(), 40, "body".into())]);
+        state.set_visual_baseline(vec![("message:0:tool".into(), 40)]);
         state.visual_baseline_width = Some(80);
         state.toggle_expanded("message:0:tool".into());
         assert!(state.visual_baseline.is_none());
@@ -203,7 +214,7 @@ mod tests {
     #[test]
     fn full_output_toggle_clears_visual_baseline() {
         let mut state = LogViewState::new();
-        state.set_visual_baseline(vec![("message:0:tool".into(), 40, "body".into())]);
+        state.set_visual_baseline(vec![("message:0:tool".into(), 40)]);
         state.visual_baseline_width = Some(80);
         state.toggle_full_output();
         assert!(state.visual_baseline.is_none());
@@ -213,7 +224,7 @@ mod tests {
     #[test]
     fn clear_expanded_clears_visual_baseline() {
         let mut state = LogViewState::new();
-        state.set_visual_baseline(vec![("message:0:tool".into(), 40, "body".into())]);
+        state.set_visual_baseline(vec![("message:0:tool".into(), 40)]);
         state.visual_baseline_width = Some(80);
         state.clear_expanded();
         assert!(state.visual_baseline.is_none());
