@@ -66,6 +66,7 @@ mod skills;
 mod step_back_state;
 mod terminal;
 mod theme;
+mod theme_demo;
 mod thinking;
 mod tool_presentation;
 mod tracked;
@@ -107,7 +108,7 @@ struct Cli {
 
     /// Run in non-interactive mode: send PROMPT, stream the response to
     /// stdout, and exit.  Accepts multiple words without shell quoting.
-    #[arg(long, short = 'p', value_name = "PROMPT", num_args = 1..)]
+    #[arg(long, short = 'p', value_name = "PROMPT", num_args = 1.., conflicts_with = "theme_demo")]
     print: Option<Vec<String>>,
 
     /// Start the interactive UI and automatically submit PROMPT.
@@ -137,6 +138,10 @@ struct Cli {
     /// Path to a theme.toml file. Overrides the `theme` key in config.toml.
     #[arg(long, value_name = "PATH")]
     theme: Option<std::path::PathBuf>,
+
+    /// Start with a representative transcript using the local test provider.
+    #[arg(long)]
+    theme_demo: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -239,15 +244,20 @@ async fn main() -> io::Result<()> {
     }
 
     // Priority: --provider flag > config.toml > default.
-    let initial_instance =
+    let initial_instance = if cli.theme_demo {
+        provider_instance::ProviderInstance::new("test", BackendPreset::Test)
+    } else {
         provider_setup::resolve_provider_instance(cli.provider.as_deref(), &config)
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
+            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?
+    };
 
-    // Priority: --model flag > config.toml > provider default.
-    // Apply the CLI model override to the instance so that
-    // build_provider_for_instance sees the correct effective_model().
-    let initial_instance =
-        provider_setup::with_resolved_model(cli.model.as_deref(), &initial_instance);
+    // Priority: --model flag > config.toml > provider default. Theme demo
+    // deliberately overrides both configured provider and model.
+    let initial_instance = if cli.theme_demo {
+        provider_setup::with_resolved_model(Some("test"), &initial_instance)
+    } else {
+        provider_setup::with_resolved_model(cli.model.as_deref(), &initial_instance)
+    };
     let initial_model = initial_instance.effective_model().to_string();
     let initial_thinking =
         provider_setup::resolve_thinking_level_for_model(&config, &initial_model);
@@ -256,6 +266,11 @@ async fn main() -> io::Result<()> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| ".".to_string());
     let window_title = format!("ξ - {window_folder}");
+    let initial_session_events = if cli.theme_demo {
+        theme_demo::demo_events()
+    } else {
+        Vec::new()
+    };
 
     let (mut terminal, mut keyboard_enhancements_enabled) = terminal::init_terminal(&window_title)?;
 
@@ -275,7 +290,7 @@ async fn main() -> io::Result<()> {
             tools: std::collections::HashMap::new(),
             file_tracker: Arc::clone(&file_tracker),
             tool_output_log: Arc::clone(&tool_output_log),
-            session_events: vec![],
+            session_events: initial_session_events.clone(),
             current_model: initial_model.clone(),
             auto_compaction_enabled: true,
             manual_compaction_requested: false,
@@ -301,6 +316,17 @@ async fn main() -> io::Result<()> {
     )
     .await;
     app.init_session_persistence(cwd.clone());
+    if !initial_session_events.is_empty() {
+        let session_id = app.session.ensure_session_id();
+        if let Some(store) = app.session.session_store.as_ref()
+            && let Ok(path) = store.resolve_event_log_path(&session_id)
+            && let Ok(log) =
+                crate::event_log::EventLog::new_from_events(path, &initial_session_events)
+        {
+            app.session.session_state =
+                Some(crate::session_state::SessionState::from_event_log(log));
+        }
+    }
     let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
     app.agent_config.tools = tools;
     app.agent_config.system_prompt = Some(system_prompt);
@@ -312,7 +338,7 @@ async fn main() -> io::Result<()> {
     app.provider.instances = config.resolve_effective_providers();
     // Mark provider as explicitly selected when a provider was configured
     // (from config.toml or --provider flag), as opposed to the fallback.
-    if config.provider.is_some() || cli.provider.is_some() {
+    if config.provider.is_some() || cli.provider.is_some() || cli.theme_demo {
         app.provider.provider_selected = true;
     }
     provider_setup::maybe_warn_thinking_unsupported(&mut app);

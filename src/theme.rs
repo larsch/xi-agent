@@ -533,15 +533,15 @@ impl Default for LogDiffStyle {
     fn default() -> Self {
         Self {
             added: StyleSpec {
-                fg: Some(Color::LightGreen),
+                fg: Some(Color::Rgb(70, 215, 95)),
                 ..Default::default()
             },
             removed: StyleSpec {
-                fg: Some(Color::LightRed),
+                fg: Some(Color::Rgb(235, 85, 100)),
                 ..Default::default()
             },
             unchanged: StyleSpec {
-                fg: Some(Color::DarkGray),
+                fg: Some(Color::Rgb(92, 102, 120)),
                 ..Default::default()
             },
         }
@@ -580,6 +580,7 @@ impl Default for LogAssistantStyle {
                 },
             },
             thinking: StyleSpec {
+                fg: Some(Color::Rgb(120, 112, 145)),
                 dim: Some(true),
                 ..Default::default()
             },
@@ -651,7 +652,8 @@ impl Default for LogTheme {
             ask_user: LogAskUserStyle::default(),
             edge_marker: PrefixStyle {
                 text: Some("│".to_string()),
-                fg: Some(Color::Rgb(100, 100, 120)),
+                fg: Some(Color::Rgb(64, 76, 96)),
+                dim: Some(true),
                 ..Default::default()
             },
             assistant: LogAssistantStyle::default(),
@@ -1048,23 +1050,23 @@ fn default_tool_executing() -> ToolTheme {
     ToolTheme {
         prefix: PrefixStyle {
             text: Some("💻 ".to_string()),
-            fg: Some(Color::Cyan),
+            fg: Some(Color::Rgb(132, 190, 204)),
             ..Default::default()
         },
         headline: StyleSpec {
-            fg: Some(Color::Cyan),
+            fg: Some(Color::Rgb(132, 190, 204)),
             bold: Some(true),
             ..Default::default()
         },
         body: StyleSpec {
-            fg: Some(Color::Rgb(80, 210, 210)),
+            fg: Some(Color::Rgb(96, 157, 174)),
             ..Default::default()
         },
         placeholder: PlaceholderStyle {
-            fg: Some(Color::Rgb(100, 100, 120)),
+            fg: Some(Color::Rgb(124, 157, 168)),
             italic: Some(true),
             lines: PlaceholderCounterStyle {
-                fg: Some(Color::Rgb(80, 80, 100)),
+                fg: Some(Color::Rgb(68, 108, 121)),
                 ..Default::default()
             },
             ..Default::default()
@@ -1075,19 +1077,19 @@ fn default_tool_executing() -> ToolTheme {
 fn default_tool_file() -> ToolTheme {
     ToolTheme {
         headline: StyleSpec {
-            fg: Some(Color::LightBlue),
+            fg: Some(Color::Rgb(105, 178, 255)),
             bold: Some(true),
             ..Default::default()
         },
         body: StyleSpec {
-            fg: Some(Color::Rgb(100, 140, 180)),
+            fg: Some(Color::Rgb(75, 148, 225)),
             ..Default::default()
         },
         placeholder: PlaceholderStyle {
-            fg: Some(Color::Rgb(100, 100, 120)),
+            fg: Some(Color::Rgb(100, 139, 180)),
             italic: Some(true),
             lines: PlaceholderCounterStyle {
-                fg: Some(Color::Rgb(80, 80, 100)),
+                fg: Some(Color::Rgb(48, 92, 135)),
                 ..Default::default()
             },
             ..Default::default()
@@ -1105,33 +1107,60 @@ fn default_tools_map() -> HashMap<String, ToolTheme> {
         ToolTheme {
             prefix: PrefixStyle {
                 text: Some("⚙️ ".to_string()),
-                fg: Some(Color::Rgb(170, 170, 170)),
+                fg: Some(Color::Rgb(255, 164, 185)),
+                ..Default::default()
+            },
+            headline: StyleSpec {
+                fg: Some(Color::Rgb(255, 164, 185)),
+                bold: Some(true),
                 ..Default::default()
             },
             body: StyleSpec {
-                fg: Some(Color::Rgb(170, 170, 170)),
+                fg: Some(Color::Rgb(222, 116, 149)),
                 ..Default::default()
             },
             placeholder: PlaceholderStyle {
-                fg: Some(Color::Rgb(100, 100, 120)),
+                fg: Some(Color::Rgb(190, 129, 151)),
                 italic: Some(true),
+                lines: PlaceholderCounterStyle {
+                    fg: Some(Color::Rgb(126, 79, 99)),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
         },
     );
 
     // executing group
     map.insert("executing".to_string(), default_tool_executing());
 
-    // python — unique headline color to distinguish source code from shell commands
-    let mut python = default_tool_executing();
-    python.headline = StyleSpec {
-        fg: Some(Color::Rgb(130, 150, 210)),
-        bold: Some(true),
-        ..Default::default()
+    // Python gets its own magenta-violet family so source execution is distinct
+    // from shell/process output while retaining the same hierarchy.
+    let python = ToolTheme {
+        prefix: PrefixStyle {
+            text: Some("🐍 ".to_string()),
+            fg: Some(Color::Rgb(220, 145, 255)),
+            ..Default::default()
+        },
+        headline: StyleSpec {
+            fg: Some(Color::Rgb(220, 145, 255)),
+            bold: Some(true),
+            ..Default::default()
+        },
+        body: StyleSpec {
+            fg: Some(Color::Rgb(181, 105, 222)),
+            ..Default::default()
+        },
+        placeholder: PlaceholderStyle {
+            fg: Some(Color::Rgb(158, 111, 185)),
+            italic: Some(true),
+            lines: PlaceholderCounterStyle {
+                fg: Some(Color::Rgb(103, 67, 128)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     };
-    // body inherits from executing group (same as bash/exec program output)
     map.insert("run_python".to_string(), python);
 
     // individual file tools
@@ -1180,19 +1209,23 @@ fn default_tools_map() -> HashMap<String, ToolTheme> {
         ToolTheme {
             prefix: PrefixStyle {
                 text: Some("❓ ".to_string()),
-                fg: Some(Color::Rgb(255, 220, 80)),
+                fg: Some(Color::Rgb(240, 197, 106)),
+                ..Default::default()
+            },
+            headline: StyleSpec {
+                fg: Some(Color::Rgb(240, 197, 106)),
+                bold: Some(true),
                 ..Default::default()
             },
             body: StyleSpec {
-                fg: Some(Color::Rgb(255, 220, 80)),
+                fg: Some(Color::Rgb(205, 169, 87)),
                 ..Default::default()
             },
             placeholder: PlaceholderStyle {
-                fg: Some(Color::Rgb(100, 100, 120)),
+                fg: Some(Color::Rgb(154, 133, 85)),
                 italic: Some(true),
                 ..Default::default()
             },
-            ..Default::default()
         },
     );
 
@@ -1554,15 +1587,20 @@ mod tests {
     fn test_tool_resolution_named() {
         let theme = Theme::default();
         let resolved = theme.tools.get("bash");
-        // bash is an executing tool — headline is bold Cyan, body is dimmer
-        assert_eq!(resolved.headline_color(), Some(Color::Cyan));
-        assert!(resolved.body_color().is_some());
+        // Executing tools use a shared teal family with a brighter headline.
+        assert_eq!(resolved.headline_color(), Some(Color::Rgb(132, 190, 204)));
+        assert_eq!(resolved.body_color(), Some(Color::Rgb(96, 157, 174)));
+        assert!(resolved.headline_style().add_modifier == Modifier::BOLD);
+
+        let python = theme.tools.get("run_python");
+        assert_eq!(python.headline_color(), Some(Color::Rgb(220, 145, 255)));
+        assert_eq!(python.body_color(), Some(Color::Rgb(181, 105, 222)));
     }
 
     #[test]
     fn test_tool_resolution_default_fallback() {
         let theme = Theme::default();
         let resolved = theme.tools.get("unknown_tool");
-        assert_eq!(resolved.body_color(), Some(Color::Rgb(170, 170, 170)));
+        assert_eq!(resolved.body_color(), Some(Color::Rgb(222, 116, 149)));
     }
 }

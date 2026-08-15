@@ -1392,7 +1392,7 @@ fn render_head_truncated_body(
             '│'
         };
 
-        out.push(tool_result_line(marker, &wl.text, color));
+        out.push(tool_result_line_subdued(marker, &wl.text, color));
     }
 
     if truncated {
@@ -1675,6 +1675,20 @@ fn tool_result_line(marker: char, content: impl Into<String>, color: Color) -> L
     Line::from(vec![
         Span::styled(format!(" {} ", marker), style),
         Span::styled(content.into(), style),
+    ])
+}
+
+fn tool_result_line_subdued(
+    marker: char,
+    content: impl Into<String>,
+    color: Color,
+) -> Line<'static> {
+    let content_style = Style::default().fg(color);
+    // Keep ordinary output rails visible without competing with the output.
+    let marker_style = content_style.add_modifier(Modifier::DIM);
+    Line::from(vec![
+        Span::styled(format!(" {} ", marker), marker_style),
+        Span::styled(content.into(), content_style),
     ])
 }
 
