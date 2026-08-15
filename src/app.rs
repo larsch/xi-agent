@@ -362,7 +362,14 @@ impl App {
 
     pub fn init_session_persistence(&mut self, cwd: String) {
         self.session.current_cwd = cwd;
-        match SessionStore::open() {
+        let store = if self.provider.current_instance.api_type == ApiType::Test {
+            let path =
+                std::env::temp_dir().join(format!("xi-test-sessions-{}", std::process::id()));
+            SessionStore::open_at(path)
+        } else {
+            SessionStore::open()
+        };
+        match store {
             Ok(store) => {
                 self.session.session_store = Some(store);
                 self.refresh_resume_availability();
