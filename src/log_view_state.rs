@@ -103,6 +103,15 @@ impl LogViewState {
     /// Reset visual comparison state after a tool batch is committed while
     /// preserving the active turn's activity-row state.
     pub(crate) fn begin_tool_continuation(&mut self) {
+        self.reset_visual_comparison();
+    }
+
+    /// Invalidate the rendered log and drop any pending visual comparison
+    /// state. The baseline is always reset together with the cache so the
+    /// next draw cannot compare a user-initiated layout change (fold/unfold,
+    /// full-output toggle) against the pre-change frame and misreport it as
+    /// a streaming shrink that needs bottom anchor padding.
+    fn reset_visual_comparison(&mut self) {
         self.visual_baseline = None;
         self.visual_baseline_width = None;
         self.invalidate();
@@ -121,15 +130,13 @@ impl LogViewState {
         if !self.expanded_blocks.remove(&identity) {
             self.expanded_blocks.insert(identity);
         }
-        self.invalidate();
-        self.clear_padding();
+        self.reset_visual_comparison();
     }
 
     pub fn clear_expanded(&mut self) {
         self.expanded_blocks.clear();
         self.pending_anchor = None;
-        self.invalidate();
-        self.clear_padding();
+        self.reset_visual_comparison();
     }
 
     pub fn clear_padding(&mut self) {
@@ -158,8 +165,7 @@ impl LogViewState {
 
     pub fn toggle_full_output(&mut self) {
         self.full_output = !self.full_output;
-        self.log_cache.invalidate();
-        self.clear_padding();
+        self.reset_visual_comparison();
     }
 }
 
@@ -182,6 +188,36 @@ mod tests {
         assert!(state.log_cache.revision > revision);
         state.toggle_expanded("block:1".into());
         assert!(!state.expanded_blocks.contains("block:1"));
+    }
+
+    #[test]
+    fn expansion_toggle_clears_visual_baseline() {
+        let mut state = LogViewState::new();
+        state.set_visual_baseline(vec![("message:0:tool".into(), 40, "body".into())]);
+        state.visual_baseline_width = Some(80);
+        state.toggle_expanded("message:0:tool".into());
+        assert!(state.visual_baseline.is_none());
+        assert!(state.visual_baseline_width.is_none());
+    }
+
+    #[test]
+    fn full_output_toggle_clears_visual_baseline() {
+        let mut state = LogViewState::new();
+        state.set_visual_baseline(vec![("message:0:tool".into(), 40, "body".into())]);
+        state.visual_baseline_width = Some(80);
+        state.toggle_full_output();
+        assert!(state.visual_baseline.is_none());
+        assert!(state.visual_baseline_width.is_none());
+    }
+
+    #[test]
+    fn clear_expanded_clears_visual_baseline() {
+        let mut state = LogViewState::new();
+        state.set_visual_baseline(vec![("message:0:tool".into(), 40, "body".into())]);
+        state.visual_baseline_width = Some(80);
+        state.clear_expanded();
+        assert!(state.visual_baseline.is_none());
+        assert!(state.visual_baseline_width.is_none());
     }
 
     #[test]
