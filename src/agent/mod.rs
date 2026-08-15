@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::join_all};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::app_event::{AppEvent, SendIgnore};
@@ -391,12 +391,11 @@ async fn stream_assistant_turn(
 
 // ── execute_tool_batch ────────────────────────────────────────────────────────
 
-/// Execute a batch of tool calls sequentially and return a [`BatchOutcome`].
+/// Execute a batch of tool calls concurrently and return a [`BatchOutcome`].
 ///
-/// Sends `ToolCallStart`/`ToolCallEnd` events and appends `ToolCall`/`ToolResult`
-/// entries to `session_events` for each call. Checks for cancellation between
-/// calls, but queued steering is deferred until the current turn boundary so
-/// already-emitted tool calls complete in order.
+/// Each call runs its pre-tool hook, execution, and post-tool hook in one
+/// future. The futures are joined concurrently, but their results are emitted
+/// and recorded in the model's original order.
 async fn execute_tool_batch(
     config: &AgentLoopConfig,
     pending_tool_calls: &[(String, String, serde_json::Value)],
@@ -404,89 +403,76 @@ async fn execute_tool_batch(
     cancel_rx: &tokio::sync::watch::Receiver<CancelLevel>,
     session_events: &mut Vec<SessionEvent>,
 ) -> BatchOutcome {
-    for (idx, (id, name, args)) in pending_tool_calls.iter().cloned().enumerate() {
-        // ── Pre-tool hook ────────────────────────────────────────────────────
-        config.hook_ipc.publish(
-            &config.session_id,
-            HookPoint::PreTool,
-            Some(&name),
-            ipc_pre_tool_payload(&name, &args),
-        );
-        crate::hooks::maybe_run_hook(
-            &config.hooks,
-            HookPoint::PreTool,
-            &config.session_id,
-            Some(tool_json(&name, &args)),
-            Some(&name),
-        )
-        .await;
-
-        tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
-            id: id.clone(),
-            name: name.clone(),
-            args: args.clone(),
-        }));
-
-        let result = config
-            .executor
-            .execute_tool(
-                &id,
-                &name,
-                args.clone(),
-                &config.tools,
-                &config.tool_output_log,
-                Some(tx.clone()),
+    let calls = pending_tool_calls
+        .iter()
+        .cloned()
+        .map(|(id, name, args)| async move {
+            config.hook_ipc.publish(
+                &config.session_id,
+                HookPoint::PreTool,
+                Some(&name),
+                ipc_pre_tool_payload(&name, &args),
+            );
+            crate::hooks::maybe_run_hook(
+                &config.hooks,
+                HookPoint::PreTool,
+                &config.session_id,
+                Some(tool_json(&name, &args)),
+                Some(&name),
             )
             .await;
 
-        // ── Post-tool hook ───────────────────────────────────────────────────
-        crate::hooks::maybe_run_hook(
-            &config.hooks,
-            HookPoint::PostTool,
-            &config.session_id,
-            Some(post_tool_json(
-                &name,
-                &args,
-                result.is_error,
-                result.is_truncated,
-            )),
-            Some(&name),
-        )
-        .await;
+            tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.clone(),
+                args: args.clone(),
+            }));
 
+            let result = config
+                .executor
+                .execute_tool(
+                    &id,
+                    &name,
+                    args.clone(),
+                    &config.tools,
+                    &config.tool_output_log,
+                    Some(tx.clone()),
+                )
+                .await;
+
+            crate::hooks::maybe_run_hook(
+                &config.hooks,
+                HookPoint::PostTool,
+                &config.session_id,
+                Some(post_tool_json(
+                    &name,
+                    &args,
+                    result.is_error,
+                    result.is_truncated,
+                )),
+                Some(&name),
+            )
+            .await;
+
+            (id, name, args, result)
+        });
+
+    let results = join_all(calls).await;
+    let cancelled = *cancel_rx.borrow() >= CancelLevel::HardAbort;
+
+    for (id, name, args, result) in results {
         tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
             id: id.clone(),
             result: result.clone(),
         }));
         record_tool_call_result(session_events, &id, &name, args, result);
-
-        // Check for cancellation before the next call.
-        if *cancel_rx.borrow() >= CancelLevel::HardAbort {
-            for (skip_id, skip_name, skip_args) in pending_tool_calls.iter().skip(idx + 1).cloned()
-            {
-                tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallStart {
-                    id: skip_id.clone(),
-                    name: skip_name.clone(),
-                    args: skip_args.clone(),
-                }));
-                let interrupted = ToolResult::err("Interrupted by user");
-                tx.send_ignore(AppEvent::Agent(AgentEvent::ToolCallEnd {
-                    id: skip_id.clone(),
-                    result: interrupted.clone(),
-                }));
-                record_tool_call_result(
-                    session_events,
-                    &skip_id,
-                    &skip_name,
-                    skip_args,
-                    interrupted,
-                );
-            }
-            return BatchOutcome::Cancelled;
-        }
     }
 
-    BatchOutcome::Completed
+    if cancelled {
+        BatchOutcome::Cancelled
+    } else {
+        BatchOutcome::Completed
+    }
 }
 
 // ── Tool definition helpers ───────────────────────────────────────────────────

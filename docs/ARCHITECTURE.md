@@ -223,8 +223,9 @@ user steering text into a dedicated channel. The UI renders queued entries at
 the bottom with `🕹️` until the loop consumes them at the next turn boundary.
 On consumption, a `SteeringConsumed` event removes the pinned row and inserts
 the message into normal transcript order after the completed assistant turn and
-before the next assistant turn. Already-emitted tool calls in the current turn
-are allowed to finish; steering does not cancel them.
+before the next assistant turn. Tool calls in the current turn run concurrently
+and are all allowed to finish; steering does not cancel them. Their completion
+events and committed results are emitted in model order.
 
 **`LlmProvider` trait** — all provider-specific wire formats are contained
 in `llm/*.rs`. Message serialization is centralized in

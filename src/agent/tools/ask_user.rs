@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
 
 use crate::agent::file_tracker::FileTracker;
 use crate::agent::types::{AskRequest, AskUserOption, AskUserResponse, Tool, ToolResult};
@@ -11,11 +11,16 @@ use crate::app_event::{AppEvent, AppEventTx};
 pub struct AskUserTool {
     tx: Option<AppEventTx>,
     file_tracker: Option<Arc<Mutex<FileTracker>>>,
+    pending: Arc<Semaphore>,
 }
 
 impl AskUserTool {
     pub fn new(tx: Option<AppEventTx>, file_tracker: Option<Arc<Mutex<FileTracker>>>) -> Self {
-        Self { tx, file_tracker }
+        Self {
+            tx,
+            file_tracker,
+            pending: Arc::new(Semaphore::new(1)),
+        }
     }
 }
 
@@ -98,6 +103,13 @@ impl Tool for AskUserTool {
         ctx: crate::agent::types::ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
+            let Ok(_permit) = Arc::clone(&self.pending).try_acquire_owned() else {
+                return ToolResult::err(
+                    "ask_user request rejected: another question is already pending. ".to_string()
+                        + "Wait for its result, then repeat this question if it is still needed.",
+                );
+            };
+
             let Some(tx) = &self.tx else {
                 return ToolResult::err("ask_user is unavailable in non-interactive mode");
             };
@@ -227,4 +239,59 @@ fn parse_options(raw: Option<&Value>) -> Vec<AskUserOption> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::types::ToolCallContext;
+    use crate::app_event::AppEvent;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn rejects_overlapping_questions_and_releases_permit() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tool = AskUserTool::new(Some(tx), None);
+        let args = serde_json::json!({"question": "Continue?"});
+
+        let first = tool.run(args.clone(), ToolCallContext::noop("first"));
+        tokio::pin!(first);
+        let first_request = tokio::select! {
+            result = &mut first => panic!("first question completed early: {:?}", result.content.as_text()),
+            event = rx.recv() => match event.expect("first request") {
+                AppEvent::AskUser(request) => request,
+                other => panic!("unexpected event: {other:?}"),
+            },
+        };
+
+        let duplicate = tool
+            .run(args.clone(), ToolCallContext::noop("duplicate"))
+            .await;
+        assert!(duplicate.is_error);
+        assert_eq!(
+            duplicate.content.as_text(),
+            "ask_user request rejected: another question is already pending. Wait for its result, then repeat this question if it is still needed."
+        );
+
+        first_request
+            .reply
+            .send(AskUserResponse::Answer("yes".to_string()))
+            .expect("first reply");
+        assert_eq!(first.await.content.as_text(), "yes");
+
+        let second = tool.run(args, ToolCallContext::noop("second"));
+        tokio::pin!(second);
+        let second_request = tokio::select! {
+            result = &mut second => panic!("second question completed early: {:?}", result.content.as_text()),
+            event = rx.recv() => match event.expect("second request") {
+                AppEvent::AskUser(request) => request,
+                other => panic!("unexpected event: {other:?}"),
+            },
+        };
+        second_request
+            .reply
+            .send(AskUserResponse::Cancelled)
+            .expect("second reply");
+        assert!(second.await.is_error);
+    }
 }
