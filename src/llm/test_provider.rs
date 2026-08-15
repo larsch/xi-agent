@@ -240,6 +240,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `exec <prog> [args…]` | Execute a program via argv (shellword-split, no shell) |
 | `bash-background-job` | 4-step scripted loop: start `sleep 60` in background, check it is running, kill it, confirm it is gone |
 | `stream-bash` | Streaming `bash` tool call (~4–8 chars/chunk at 20/sec); runs a 10 s script with live output |
+| `parallel-stream` | Three parallel `bash` tool calls in one batch; each prints a line per second and finishes in reverse order (10 s, 8 s, 6 s) |
 | `stream-python` | Streaming `python` tool call (~4–8 chars/chunk at 20/sec); runs a 10 s script with live output |
 | `python-program` | Streaming `python` tool call with a ~21-line stats program (streamed in chunks at 20/sec) |
 
@@ -711,6 +712,43 @@ fn streaming_bash_stream() -> LlmStream {
     )
 }
 
+/// Build a tool call stream that emits three parallel `bash` tool calls in a
+/// single batch.
+///
+/// Each command prints a numbered line every second and finishes in reverse
+/// order (10 s, 8 s, 6 s), so the streaming of all three blocks and their
+/// out-of-order completion can be observed.
+fn parallel_stream_bash_stream() -> LlmStream {
+    let commands: [(&str, &str); 3] = [
+        (
+            "parallel-1",
+            "for i in $(seq 1 10); do echo \"tool-1: line $i/10\"; sleep 1; done",
+        ),
+        (
+            "parallel-2",
+            "for i in $(seq 1 8); do echo \"tool-2: line $i/8\"; sleep 1; done",
+        ),
+        (
+            "parallel-3",
+            "for i in $(seq 1 6); do echo \"tool-3: line $i/6\"; sleep 1; done",
+        ),
+    ];
+    Box::pin(stream! {
+        for (id, command) in commands {
+            yield LlmEvent::ToolCallStart {
+                id: id.to_string(),
+                name: "bash".to_string(),
+            };
+            yield LlmEvent::ToolCall {
+                id: id.to_string(),
+                name: "bash".to_string(),
+                args: serde_json::json!({ "command": command }),
+            };
+        }
+        yield LlmEvent::Done;
+    })
+}
+
 /// Build a streaming ask_user tool call with options and freeform.
 fn streaming_ask_stream(question: String, context: Option<&'static str>) -> LlmStream {
     let options: serde_json::Value = vec!["Option A", "Option B", "Option C"]
@@ -779,6 +817,28 @@ fn python_stream() -> LlmStream {
         };
         yield LlmEvent::Done;
     })
+}
+
+/// Collect the trailing tool results (the most recent tool batch) from the
+/// message history, in order, as `(call_id, content)` pairs.
+///
+/// Walks backward from the end until it leaves the trailing run of
+/// `ToolCall`/`ToolResult` messages, so a parallel batch yields every result
+/// rather than only the last one.
+fn collect_trailing_tool_results(messages: &[Message]) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    for m in messages.iter().rev() {
+        match m.role {
+            Role::ToolResult => {
+                let id = m.tool_call_id.clone().unwrap_or_else(|| "tool".to_string());
+                results.push((id, m.content.clone()));
+            }
+            Role::ToolCall => {}
+            _ => break,
+        }
+    }
+    results.reverse();
+    results
 }
 
 // ── LlmProvider impl ──────────────────────────────────────────────────────────
@@ -925,9 +985,17 @@ impl super::LlmProvider for TestProvider {
             if step > 0 {
                 return self.advance_sequence(step, &last.content.clone());
             }
-            // Not in a sequence — echo the result as before.
-            let content = last.content.clone();
-            let response = format!("Tool result:\n\n```\n{content}\n```\n");
+            // Not in a sequence — echo the batch's tool result(s).
+            let results = collect_trailing_tool_results(&messages);
+            if results.len() <= 1 {
+                let content = last.content.clone();
+                let response = format!("Tool result:\n\n```\n{content}\n```\n");
+                return stream_owned(response);
+            }
+            let mut response = format!("Tool results ({}):\n", results.len());
+            for (id, content) in results {
+                response.push_str(&format!("\n### {id}\n\n```\n{content}\n```\n"));
+            }
             return stream_owned(response);
         }
 
@@ -1146,6 +1214,8 @@ impl super::LlmProvider for TestProvider {
 
             "stream-bash" => streaming_bash_stream(),
 
+            "parallel-stream" => parallel_stream_bash_stream(),
+
             "stream-python" => streaming_python_stream(),
 
             "python-program" => streaming_python_program_stream(),
@@ -1292,5 +1362,102 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(ASK_CONTEXT_QUESTION)
         );
+    }
+
+    #[tokio::test]
+    async fn parallel_stream_command_emits_three_bash_tool_calls() {
+        let provider = TestProvider::new();
+        let events: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![Message::user("parallel-stream")],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+
+        let calls: Vec<(String, String)> = events
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::ToolCall { id, name, args } if name == "bash" => {
+                    let command = args.get("command").and_then(serde_json::Value::as_str);
+                    Some((id.clone(), command.unwrap_or_default().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(calls.len(), 3, "expected exactly three bash tool calls");
+        assert_eq!(calls[0].0, "parallel-1");
+        assert_eq!(calls[1].0, "parallel-2");
+        assert_eq!(calls[2].0, "parallel-3");
+
+        // Durations finish in reverse order: 10 s, 8 s, 6 s.
+        assert!(
+            calls[0].1.contains("seq 1 10"),
+            "first command should run 10 s"
+        );
+        assert!(
+            calls[1].1.contains("seq 1 8"),
+            "second command should run 8 s"
+        );
+        assert!(
+            calls[2].1.contains("seq 1 6"),
+            "third command should run 6 s"
+        );
+
+        // All three intents must precede the single Done event.
+        let done_idx = events
+            .iter()
+            .position(|e| matches!(e, LlmEvent::Done))
+            .expect("expected Done");
+        let last_call_idx = events
+            .iter()
+            .rposition(|e| matches!(e, LlmEvent::ToolCall { .. }))
+            .expect("expected a ToolCall");
+        assert!(last_call_idx < done_idx, "all tool calls must precede Done");
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_results_echo_all_results() {
+        let provider = TestProvider::new();
+        let messages = vec![
+            Message::user("parallel-stream"),
+            Message::assistant("running tools"),
+            Message::tool_call(
+                "parallel-1",
+                "bash",
+                serde_json::json!({"command": "cmd-1"}),
+            ),
+            Message::tool_result("parallel-1", "result-1", false),
+            Message::tool_call(
+                "parallel-2",
+                "bash",
+                serde_json::json!({"command": "cmd-2"}),
+            ),
+            Message::tool_result("parallel-2", "result-2", false),
+            Message::tool_call(
+                "parallel-3",
+                "bash",
+                serde_json::json!({"command": "cmd-3"}),
+            ),
+            Message::tool_result("parallel-3", "result-3", false),
+        ];
+
+        let events: Vec<LlmEvent> = provider
+            .stream_chat(messages, LlmRequestContext::default())
+            .collect()
+            .await;
+
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::Token { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for expected in ["result-1", "result-2", "result-3"] {
+            assert!(text.contains(expected), "missing {expected} in: {text}");
+        }
     }
 }
