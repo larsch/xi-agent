@@ -151,7 +151,7 @@ impl MouseSelectState {
             let line = &self.visible_lines[vis_idx];
             let deco = self
                 .hit_map
-                .get(self.log_scroll + vis_idx)
+                .get(vis_idx)
                 .map(|ls| ls.decoration_width)
                 .unwrap_or(0);
 
@@ -247,8 +247,7 @@ impl MouseSelectState {
 
         // Exclude streaming lines.
         let vis_idx = row.saturating_sub(self.log_area_top) as usize;
-        let line_idx = self.log_scroll + vis_idx;
-        if let Some(src) = self.hit_map.get(line_idx)
+        if let Some(src) = self.hit_map.get(vis_idx)
             && src.streaming
         {
             return false;
@@ -282,7 +281,7 @@ impl MouseSelectState {
         }
         let vis_idx = self.drag_start_row.saturating_sub(self.log_area_top) as usize;
         self.hit_map
-            .get(self.log_scroll + vis_idx)
+            .get(vis_idx)
             .filter(|source| source.foldable && !source.streaming)
             .and_then(|source| source.block_identity.clone())
     }

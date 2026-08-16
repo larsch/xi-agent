@@ -1,36 +1,30 @@
 use std::collections::HashSet;
 
-use ratatui::text::Line;
+use crate::ui::log::{LogBlockCache, LogLayout};
 
-use crate::mouse_select::LineSource;
-use crate::ui::log::LogBlockCache;
+/// Type alias for the cached log layout tuple: `(revision, width, step_cursor,
+/// layout)`. The block layout is retained as the render source of truth; the
+/// flattened line/source vectors are no longer cached (only the visible window
+/// is materialized each frame).
+pub(crate) type CachedLogLayout = (u64, usize, Option<usize>, LogLayout);
 
-/// Type alias for the cached log lines + hit map tuple.
-pub(crate) type CachedLogLines = (
-    u64,
-    usize,
-    Option<usize>,
-    Vec<Line<'static>>,
-    Vec<LineSource>,
-);
-
-/// Tracks the monotonic log revision and its pre-wrapped line cache.
+/// Tracks the monotonic log revision and its retained block layout.
 pub struct LogCache {
     pub(crate) revision: u64,
-    pub(crate) cached_lines: Option<CachedLogLines>,
+    pub(crate) cached_layout: Option<CachedLogLayout>,
 }
 
 impl LogCache {
     pub fn new() -> Self {
         Self {
             revision: 0,
-            cached_lines: None,
+            cached_layout: None,
         }
     }
 
     pub fn invalidate(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        self.cached_lines = None;
+        self.cached_layout = None;
     }
 }
 

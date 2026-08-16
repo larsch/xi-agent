@@ -41,6 +41,16 @@ fn halfblock_line(width: usize, ch: char, color: Color) -> Line<'static> {
     ))
 }
 
+/// Sentinel `LineSource` for padding rows that carry no block metadata.
+fn empty_line_source() -> LineSource {
+    LineSource {
+        decoration_width: 0,
+        streaming: false,
+        block_identity: None,
+        foldable: false,
+    }
+}
+
 fn split_panel(area: Rect, heights: layout::PanelHeights) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Vertical)
@@ -68,14 +78,14 @@ fn build_log_layout_cached(
     width: usize,
     inner_height: usize,
     display: &DisplayConfig,
-) -> (Vec<Line<'static>>, Vec<LineSource>) {
+) -> usize {
     // Flush any pending session-mutation dirty flag into the log cache.
     if app.session.take_dirty() {
         app.log_view.invalidate();
     }
     let step_cursor = app.step_back.cursor;
     let streaming = app.streaming();
-    if !matches!(&app.log_view.log_cache.cached_lines, Some((rev, w, sc, _, _))
+    if !matches!(&app.log_view.log_cache.cached_layout, Some((rev, w, sc, _))
         if *rev == app.log_view.log_cache.revision && *w == width && *sc == step_cursor)
     {
         let cfg = ToolBodyConfig {
@@ -167,26 +177,31 @@ fn build_log_layout_cached(
                 padding.remaining = 0;
             }
         }
-        let (lines, sources) = layout.flatten();
+        let content_len = layout.total_lines();
 
         // The initial total is the anchor. Subsequent positive visual deltas
         // consume this padding; do not raise the anchor after each update.
         if streaming && app.log_view.last_block_padding.is_none() {
             app.log_view.last_block_padding = Some(PaddingState {
-                max_total_lines: lines.len(),
+                max_total_lines: content_len,
                 inner_height_when_set: inner_height,
                 remaining: 0,
             });
         }
 
         let rev = app.log_view.log_cache.revision;
-        app.log_view.log_cache.cached_lines = Some((rev, width, step_cursor, lines, sources));
+        app.log_view.log_cache.cached_layout = Some((rev, width, step_cursor, layout));
     } else {
         app.agent_turn
             .update_visual_state(None, std::time::Instant::now());
     }
-    let cached = app.log_view.log_cache.cached_lines.as_ref().unwrap();
-    (cached.3.clone(), cached.4.clone())
+    app.log_view
+        .log_cache
+        .cached_layout
+        .as_ref()
+        .unwrap()
+        .3
+        .total_lines()
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -275,7 +290,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.last_block_padding.as_ref().map(|p| (p.max_total_lines, p.inner_height_when_set)),
     );
 
-    let (cached_lines, hit_map) = build_log_layout_cached(app, log_width, inner_height, &display);
+    let content_len = build_log_layout_cached(app, log_width, inner_height, &display);
 
     // The logical layout update above may change activity-row visibility. Recompute
     // panel geometry before rendering so the same frame uses the new row height;
@@ -322,7 +337,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.last_log_height = inner_height;
     }
 
-    let content_len = cached_lines.len();
     // The throbber is rendered as a virtual line appended after the last
     // content line, so it scrolls out of view with the rest of the log.
     let throbber_visible = app.throbber_visible();
@@ -330,14 +344,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let total_lines = content_len + usize::from(throbber_visible);
     if let Some((identity, block_screen_top)) = app.log_view.pending_anchor.take()
         && !app.log_view.auto_scroll
-        && let Some(new_top) = hit_map
-            .iter()
-            .position(|source| source.block_identity.as_ref() == Some(&identity))
+        && let Some(new_top) = app
+            .log_view
+            .log_cache
+            .cached_layout
+            .as_ref()
+            .and_then(|(_, _, _, layout)| layout.block_start_line(&identity))
     {
         app.log_view.log_scroll = new_top.saturating_sub(block_screen_top);
     }
-    // Store hit map for mouse selection in the next event loop iteration.
-    app.mouse_select.hit_map = hit_map;
     let max_scroll = total_lines.saturating_sub(inner_height);
 
     if app.log_view.auto_scroll {
@@ -361,9 +376,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     &app.log_view.expanded_blocks,
                     &mut app.log_view.block_cache,
                 )
-                .flatten()
-                .0
-                .len()
+                .total_lines()
             })
             .unwrap_or(0);
         let half_height = inner_height / 2;
@@ -422,8 +435,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.throbber_visible(),
     );
 
-    let visible_lines: Vec<Line<'static>> = {
-        let all = cached_lines;
+    let (visible_lines, visible_sources): (Vec<Line<'static>>, Vec<LineSource>) = {
+        let layout = &app.log_view.log_cache.cached_layout.as_ref().unwrap().3;
         if block_padding > 0 {
             // Anchor against the stored height so content stays put when the
             // log area resizes.  Bottom padding absorbs any shrinkage.
@@ -434,60 +447,70 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             let bottom_padding = block_padding.saturating_sub(height_decrease);
             let top_padding = inner_height.saturating_sub(raw_lines + bottom_padding);
 
-            let mut v: Vec<Line<'static>> = vec![Line::default(); top_padding];
-            v.extend(all[raw_start..raw_end].iter().cloned());
-            v.extend(std::iter::repeat_n(Line::default(), bottom_padding));
-            v
+            let mut lines: Vec<Line<'static>> = vec![Line::default(); top_padding];
+            let mut sources: Vec<LineSource> = vec![empty_line_source(); top_padding];
+            let (wl, ws) = layout.visible_window(raw_start, raw_end);
+            lines.extend(wl);
+            sources.extend(ws);
+            lines.extend(std::iter::repeat_n(Line::default(), bottom_padding));
+            sources.extend(std::iter::repeat_n(empty_line_source(), bottom_padding));
+            (lines, sources)
         } else if total_lines <= inner_height {
             let padding = inner_height - total_lines;
-            let mut v: Vec<Line<'static>> = vec![Line::default(); padding];
-            v.extend(all.iter().cloned());
+            let mut lines: Vec<Line<'static>> = vec![Line::default(); padding];
+            let mut sources: Vec<LineSource> = vec![empty_line_source(); padding];
+            let (wl, ws) = layout.visible_window(0, content_len);
+            lines.extend(wl);
+            sources.extend(ws);
             if let Some(throbber) = &throbber {
-                v.push(throbber.clone());
+                lines.push(throbber.clone());
+                sources.push(empty_line_source());
             }
-            v
+            (lines, sources)
         } else {
             let start = log_scroll;
             let end = (start + inner_height).min(total_lines);
             let content_end = end.min(content_len);
-            let mut v = all[start..content_end].to_vec();
+            let (mut lines, mut sources) = layout.visible_window(start, content_end);
             // The throbber occupies the virtual line at index `content_len`,
             // only included when the visible window reaches the bottom.
             if let Some(throbber) = &throbber
                 && content_len >= start
                 && content_len < end
             {
-                v.push(throbber.clone());
+                lines.push(throbber.clone());
+                sources.push(empty_line_source());
             }
-            v
+            (lines, sources)
         }
     };
 
     // ── Mouse selection highlight pass ────────────────────────────────────────
     // Store visible lines on the mouse state for text extraction.
     app.mouse_select.visible_lines = visible_lines.clone();
+    app.mouse_select.hit_map = visible_sources;
     app.mouse_select.log_area_top = 0;
     app.mouse_select.log_area_width = log_width as u16;
     app.mouse_select.log_scroll = log_scroll;
-    let visible_lines = apply_mouse_highlight(visible_lines, app, log_scroll);
+    let visible_lines = apply_mouse_highlight(visible_lines, app);
 
     let hover_source = app
         .mouse_select
         .hover_row
         .saturating_sub(app.mouse_select.log_area_top) as usize;
-    let hover_line_idx = log_scroll.saturating_add(hover_source);
     let hovered_identity = app
         .mouse_select
         .hit_map
-        .get(hover_line_idx)
+        .get(hover_source)
         .filter(|source| source.foldable && !source.streaming)
         .and_then(|source| source.block_identity.clone());
     let chevron_row = hovered_identity.as_ref().and_then(|identity| {
         let start = app
-            .mouse_select
-            .hit_map
-            .iter()
-            .position(|source| source.block_identity.as_ref() == Some(identity))?;
+            .log_view
+            .log_cache
+            .cached_layout
+            .as_ref()
+            .and_then(|(_, _, _, layout)| layout.block_start_line(identity))?;
         (start >= log_scroll && start < log_scroll.saturating_add(inner_height))
             .then_some(start.saturating_sub(log_scroll))
     });
@@ -745,11 +768,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
 /// Apply reverse-video highlighting to lines that are within the mouse
 /// drag selection range.
-fn apply_mouse_highlight(
-    mut lines: Vec<Line<'static>>,
-    app: &App,
-    log_scroll: usize,
-) -> Vec<Line<'static>> {
+fn apply_mouse_highlight(mut lines: Vec<Line<'static>>, app: &App) -> Vec<Line<'static>> {
     let (start_row, end_row, start_col, end_col) = match app.mouse_select.selection_range() {
         Some(r) => r,
         None => return lines,
@@ -765,10 +784,7 @@ fn apply_mouse_highlight(
             continue;
         }
 
-        let deco = hit_map
-            .get(log_scroll + vi)
-            .map(|ls| ls.decoration_width)
-            .unwrap_or(0);
+        let deco = hit_map.get(vi).map(|ls| ls.decoration_width).unwrap_or(0);
 
         // Clamp column bounds per row (matching extract_selected_text).
         let (col_from, col_to) = if abs_row == start_row && abs_row == end_row {
