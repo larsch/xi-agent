@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.6.0 — 2026-08-16
+
+### Added
+
+- **Parallel tool execution**: independent tool calls in a single assistant
+  batch now run concurrently, with results interleaved back to the model in
+  their original intent order.
+- **Mouse unfold**: click a truncated tool block to expand it in place.
+- **Braille waiting animations**: the activity throbber now animates with
+  Braille characters.
+- **Model vs. local activity throbbers**: the UI distinguishes work done by
+  the model from work done by local tool execution.
+- **Auto-submit initial prompt**: an initial prompt passed on the command line
+  is now submitted automatically in interactive mode.
+- **DeepSeek thinking mode**: the OpenAI-compatible provider supports DeepSeek
+  reasoning/thinking output.
+- **Refreshed theme palette**: the default theme palette and demo were
+  updated.
+- **Graceful shutdown**: SIGINT/SIGTERM handling via `tokio::signal` for clean
+  shutdown.
+
+### Fixed
+
+- **100% CPU hang**: large streaming tool output no longer pegs the CPU.
+- **`edit_file` diff collapse**: a new line that is a prefix extension of the
+  old line no longer silently collapses the diff.
+- **Control characters**: literal control characters are sanitized from
+  accumulated tool-call JSON.
+- **FileTracker on resume**: file tracking state is seeded from session events
+  on load/resume, so change detection works across restarts.
+- **Compaction**: plain `compact` now triggers compaction.
+- **Diff placeholders**: common-lines placeholders are suppressed in pure
+  addition/removal hunks.
+- **Keybindings**: ToggleFullOutput moved from Ctrl+F to Alt+O; Ctrl+D now
+  acts as delete-char when the input is non-empty.
+- **Windows build**: warnings fixed.
+- **UI layout**: throbber scrolling, anchor padding, and fold/unfold baseline
+  reset now behave consistently during streaming.
+
+### Performance
+
+- **Virtualized log rendering**: only the visible window is materialized.
+- **Memoized log blocks**: streaming re-renders only changed messages.
+- **Structural hashing**: role/phase/JSON hashed structurally to avoid serde
+  allocations.
+- **`Arc<str>` block identity** and borrowed-slice rendering reduce
+  allocations in the hot render path.
+
+### Internal
+
+- Terminal backend type centralized.
+- Logical log block layout introduced; continuation and panel layout state
+  centralized.
+- Tool rendering kept in a single visual block.
+- UI render benchmark harness and committed-history streaming benchmark added.
+- `test-provider` gained a `parallel-stream` command.
+
 ## v0.5.0 — 2026-07-20
 
 ### Added
