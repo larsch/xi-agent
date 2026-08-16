@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -52,7 +53,7 @@ impl Default for ToolBodyConfig {
 
 /// Stable classification of a renderable subsection of the conversation log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LogBlockKind {
+pub(crate) enum LogBlockKind {
     AssistantThinking,
     AssistantMarkdown,
     UserContent,
@@ -66,27 +67,32 @@ pub(super) enum LogBlockKind {
 
 /// Direction and limit information retained for a block that may be truncated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct TruncationMetadata {
+pub(crate) struct TruncationMetadata {
     pub limit: Option<usize>,
     pub total: Option<usize>,
     pub direction: Option<TruncationDirection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TruncationDirection {
+pub(crate) enum TruncationDirection {
     Head,
     Tail,
     Diff,
 }
 
 /// A stable logical subsection and its rendered representation.
+///
+/// Rendered lines and sources are stored behind `Arc` so an unchanged block
+/// can be reused across frames without re-cloning every span/string. This is
+/// the sharing boundary that makes rebuilds O(changed messages) instead of
+/// O(total log).
 #[derive(Debug, Clone)]
-pub(super) struct LogBlock {
+pub(crate) struct LogBlock {
     /// Identity is based on message and subsection, never on flattened rows.
     pub identity: String,
     pub kind: LogBlockKind,
-    pub lines: Vec<Line<'static>>,
-    pub sources: Vec<LineSource>,
+    pub lines: Arc<[Line<'static>]>,
+    pub sources: Arc<[LineSource]>,
     pub truncation: TruncationMetadata,
     pub foldable: bool,
 }
@@ -94,14 +100,62 @@ pub(super) struct LogBlock {
 /// Ordered logical layout of the log. Flattening is the compatibility boundary
 /// for viewport drawing and text selection.
 #[derive(Debug, Clone, Default)]
-pub(super) struct LogLayout {
+pub(crate) struct LogLayout {
     pub blocks: Vec<LogBlock>,
 }
 
 impl LogLayout {
+    /// Total number of rendered lines across all blocks.
+    pub(crate) fn total_lines(&self) -> usize {
+        self.blocks.iter().map(|block| block.lines.len()).sum()
+    }
+
+    /// Absolute (0-based) starting line index of the block with the given
+    /// identity, or `None` if no such block exists.
+    pub(crate) fn block_start_line(&self, identity: &str) -> Option<usize> {
+        let mut offset = 0;
+        for block in &self.blocks {
+            if block.identity == identity {
+                return Some(offset);
+            }
+            offset += block.lines.len();
+        }
+        None
+    }
+
+    /// Collect the lines (and their sources) in the half-open range
+    /// `[start, end)` without materializing the rest of the log. This is the
+    /// virtualization boundary: only the on-screen window is cloned.
+    pub(crate) fn visible_window(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> (Vec<Line<'static>>, Vec<LineSource>) {
+        let mut lines = Vec::new();
+        let mut sources = Vec::new();
+        let mut offset = 0usize;
+        for block in &self.blocks {
+            let len = block.lines.len();
+            let seg_start = offset;
+            let seg_end = offset + len;
+            offset = seg_end;
+            if seg_end <= start || seg_start >= end {
+                continue;
+            }
+            let lo = start.saturating_sub(seg_start);
+            let hi = end.min(seg_end) - seg_start;
+            lines.extend(block.lines[lo..hi].iter().cloned());
+            sources.extend(block.sources[lo..hi].iter().cloned().map(|mut source| {
+                source.foldable = block.foldable && !source.streaming;
+                source
+            }));
+        }
+        (lines, sources)
+    }
+
     pub fn dim(&mut self) {
         for block in &mut self.blocks {
-            block.lines = dim_lines(std::mem::take(&mut block.lines));
+            block.lines = Arc::from(dim_lines(block.lines.to_vec()));
         }
     }
 
@@ -173,10 +227,13 @@ impl LogLayout {
         let Some(last) = self.blocks.last_mut() else {
             return;
         };
-        last.lines.extend(std::iter::repeat_n(Line::default(), pad));
         let identity = last.identity.clone();
         let foldable = last.foldable;
-        last.sources.extend(std::iter::repeat_n(
+        let mut lines = last.lines.to_vec();
+        lines.extend(std::iter::repeat_n(Line::default(), pad));
+        last.lines = Arc::from(lines);
+        let mut sources = last.sources.to_vec();
+        sources.extend(std::iter::repeat_n(
             LineSource {
                 decoration_width: 0,
                 streaming: false,
@@ -185,8 +242,10 @@ impl LogLayout {
             },
             pad,
         ));
+        last.sources = Arc::from(sources);
     }
 
+    #[cfg(test)]
     pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
         let line_count = self.blocks.iter().map(|b| b.lines.len()).sum();
         let mut lines = Vec::with_capacity(line_count);
@@ -228,74 +287,6 @@ fn tool_block_kind(msg: &Message, body: bool) -> LogBlockKind {
         LogBlockKind::ToolBody
     } else {
         LogBlockKind::ToolIntent
-    }
-}
-
-struct LayoutBuilder {
-    layout: LogLayout,
-}
-
-#[derive(Clone)]
-struct LayoutBlockInput {
-    identity: String,
-    kind: LogBlockKind,
-    lines: Vec<Line<'static>>,
-    decoration_width: u16,
-    streaming: bool,
-    truncation: TruncationMetadata,
-    foldable: bool,
-}
-
-impl LayoutBuilder {
-    fn new() -> Self {
-        Self {
-            layout: LogLayout::default(),
-        }
-    }
-
-    fn push(&mut self, input: LayoutBlockInput) {
-        let LayoutBlockInput {
-            identity,
-            kind,
-            lines,
-            decoration_width,
-            streaming,
-            truncation,
-            foldable,
-        } = input;
-        // Truncation metadata is supplied by the renderer. Do not infer
-        // foldability from marker text: expanded variants intentionally omit
-        // the marker, and some renderers use another presentation.
-        let sources: Vec<_> = (0..lines.len())
-            .map(|_| LineSource {
-                decoration_width,
-                streaming,
-                block_identity: Some(identity.clone()),
-                foldable,
-            })
-            .collect();
-        if let Some(previous) = self.layout.blocks.last_mut()
-            && previous.identity == identity
-        {
-            previous.lines.extend(lines);
-            previous.sources.extend(sources);
-            previous.kind = kind;
-            previous.truncation = truncation;
-            previous.foldable |= foldable;
-        } else {
-            self.layout.blocks.push(LogBlock {
-                identity,
-                kind,
-                lines,
-                sources,
-                truncation,
-                foldable,
-            });
-        }
-    }
-
-    fn finish(self) -> LogLayout {
-        self.layout
     }
 }
 
@@ -429,13 +420,14 @@ mod layout_tests {
             blocks: vec![LogBlock {
                 identity: "message:3:body".into(),
                 kind: LogBlockKind::ToolBody,
-                lines: vec![Line::raw("… 20 total lines")],
+                lines: vec![Line::raw("… 20 total lines")].into(),
                 sources: vec![LineSource {
                     decoration_width: 3,
                     streaming: false,
                     block_identity: None,
                     foldable: false,
-                }],
+                }]
+                .into(),
                 truncation: metadata,
                 foldable: true,
             }],
@@ -530,16 +522,18 @@ struct CachedBlocks {
     fingerprint: u64,
     width: usize,
     streaming: bool,
-    blocks: Vec<LayoutBlockInput>,
+    blocks: Vec<LogBlock>,
 }
 
 /// Per-message render cache. Unchanged messages reuse their previously rendered
 /// blocks instead of re-running markdown + wrapping on every frame.
 ///
-/// Stores pre-merge [`LayoutBlockInput`]s so the final [`LayoutBuilder`] pass
-/// can still merge a tool result into its paired tool call block. Keyed by
-/// message index so a streaming message overwrites its own entry on each token
-/// instead of accumulating one entry per token.
+/// Stores final [`LogBlock`]s whose lines/sources are shared behind `Arc`, so a
+/// cache hit clones only the block shell (identity + `Arc` pointers), not the
+/// rendered line data. A tool call's paired result is rendered into the same
+/// block, so no cross-message merge happens at layout time. Keyed by message
+/// index so a streaming message overwrites its own entry on each token instead
+/// of accumulating one entry per token.
 #[derive(Default)]
 pub(crate) struct LogBlockCache {
     entries: std::collections::HashMap<usize, CachedBlocks>,
@@ -552,7 +546,7 @@ impl LogBlockCache {
         fingerprint: u64,
         width: usize,
         streaming: bool,
-    ) -> Option<&Vec<LayoutBlockInput>> {
+    ) -> Option<&Vec<LogBlock>> {
         self.entries.get(&idx).and_then(|e| {
             (e.fingerprint == fingerprint && e.width == width && e.streaming == streaming)
                 .then_some(&e.blocks)
@@ -565,7 +559,7 @@ impl LogBlockCache {
         fingerprint: u64,
         width: usize,
         streaming: bool,
-        blocks: Vec<LayoutBlockInput>,
+        blocks: Vec<LogBlock>,
     ) {
         self.entries.insert(
             idx,
@@ -627,7 +621,7 @@ fn message_render_fingerprint(msg: &Message) -> u64 {
 }
 
 /// Fingerprint of everything that affects rendering of `messages[idx]`,
-/// including immediate neighbor context for tool call/result pairing.
+/// including the paired tool result that renders into the same block.
 fn render_fingerprint(messages: &[Message], idx: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let msg = &messages[idx];
@@ -637,24 +631,17 @@ fn render_fingerprint(messages: &[Message], idx: usize) -> u64 {
         && let Some(next) = messages.get(idx + 1)
         && next.role == Role::ToolResult
     {
-        // A following result suppresses the streamed intent body (write/edit)
-        // and contributes a read_file range suffix to the intent label.
+        // The result body is rendered as part of this call's block, so the
+        // result's render-relevant fields must be part of the fingerprint:
+        // content and error state drive the body text, and display_range drives
+        // the read_file intent suffix.
         true.hash(&mut h);
+        next.content.hash(&mut h);
+        next.is_error.hash(&mut h);
         if let Some(dr) = &next.display_range {
             dr.first_line.hash(&mut h);
             dr.last_line.hash(&mut h);
             dr.total_lines.hash(&mut h);
-        }
-    }
-    if msg.role == Role::ToolResult
-        && let Some(prev) = messages.get(idx.saturating_sub(1))
-        && prev.role == Role::ToolCall
-    {
-        // The body renders from the preceding call's name and args (edit diff,
-        // write content, per-tool colors).
-        prev.tool_name.hash(&mut h);
-        if let Some(args) = &prev.tool_args {
-            hash_json(&mut h, args);
         }
     }
     h.finish()
@@ -701,7 +688,7 @@ fn push_sources(
 }
 
 /// Render a single message (and, for a tool call, its paired result) into
-/// pre-merge blocks. Does not consult the cache.
+/// final [`LogBlock`]s. Does not consult the cache.
 #[allow(clippy::too_many_arguments)]
 fn render_message_blocks(
     messages: &[Message],
@@ -711,9 +698,11 @@ fn render_message_blocks(
     theme: &Theme,
     display: &DisplayConfig,
     expanded_blocks: &HashSet<String>,
-    msg_streaming: bool,
-) -> Vec<LayoutBlockInput> {
+    streaming: bool,
+) -> Vec<LogBlock> {
     let msg = &messages[idx];
+    let is_last = idx == messages.len() - 1;
+    let msg_streaming = streaming && is_last && !is_static_assistant_notice(msg);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
@@ -881,19 +870,52 @@ fn render_message_blocks(
                 msg_streaming,
             );
             if let Some((_, _, _, identity)) = ranges.last_mut() {
-                *identity = block_id;
+                *identity = block_id.clone();
+            }
+
+            // A following result is rendered into the same visual block so the
+            // fold identity and hover/fold target stay on a single block.
+            if let Some(next) = messages.get(idx + 1)
+                && next.role == Role::ToolResult
+            {
+                let body_prev = lines.len();
+                let result_streaming = streaming && (idx + 1 == messages.len() - 1);
+                render_tool_result(
+                    messages,
+                    idx + 1,
+                    width,
+                    &block_cfg,
+                    theme,
+                    display,
+                    &mut lines,
+                    result_streaming,
+                );
+                push_sources(
+                    &mut sources,
+                    &mut ranges,
+                    &lines,
+                    body_prev,
+                    idx,
+                    tool_block_kind(next, true),
+                    "body",
+                    3,
+                    result_streaming,
+                );
+                if let Some((_, _, _, identity)) = ranges.last_mut() {
+                    *identity = block_id;
+                }
             }
         }
         Role::ToolResult => {
+            // A result preceded by its tool call is rendered by that call above.
+            if messages
+                .get(idx.saturating_sub(1))
+                .is_some_and(|m| m.role == Role::ToolCall)
+            {
+                return Vec::new();
+            }
             let prev = lines.len();
-            // The result merges into the preceding tool call's visual block
-            // when there is one; otherwise it stands alone.
-            let call_idx = idx
-                .checked_sub(1)
-                .filter(|&c| messages.get(c).is_some_and(|m| m.role == Role::ToolCall));
-            let block_id = call_idx
-                .map(|c| format!("message:{c}:tool"))
-                .unwrap_or_else(|| format!("message:{idx}:body"));
+            let block_id = format!("message:{idx}:body");
             let mut block_cfg = cfg.clone();
             block_cfg.full_output |= expanded_blocks.contains(&block_id);
             render_tool_result(
@@ -923,24 +945,55 @@ fn render_message_blocks(
         }
     }
 
-    let mut blocks = Vec::new();
+    // Assemble final blocks, merging adjacent ranges that share an identity
+    // (the tool call + result pairing above produces two such ranges).
+    let mut blocks: Vec<LogBlock> = Vec::new();
     for (start, end, kind, identity) in ranges {
-        blocks.push(LayoutBlockInput {
+        let foldable = !sources[start].streaming;
+        let truncation = TruncationMetadata {
+            limit: None,
+            total: None,
+            direction: Some(match kind {
+                LogBlockKind::Diff => TruncationDirection::Diff,
+                LogBlockKind::ToolBody => TruncationDirection::Tail,
+                _ => TruncationDirection::Head,
+            }),
+        };
+        if let Some(previous) = blocks.last_mut()
+            && previous.identity == identity
+        {
+            // Extend the merged block. The ranges are contiguous in `lines` and
+            // `sources`, so the combined span is rebuilt from the two halves
+            // without touching unrelated blocks.
+            let mut combined_lines = previous.lines.to_vec();
+            combined_lines.extend(lines[start..end].iter().cloned());
+            previous.lines = Arc::from(combined_lines);
+            let mut combined_sources = previous.sources.to_vec();
+            combined_sources.extend(sources[start..end].iter().cloned().map(|mut source| {
+                source.block_identity = Some(identity.clone());
+                source
+            }));
+            previous.sources = Arc::from(combined_sources);
+            previous.kind = kind;
+            previous.truncation = truncation;
+            previous.foldable |= foldable;
+            continue;
+        }
+        let block_sources: Vec<LineSource> = sources[start..end]
+            .iter()
+            .cloned()
+            .map(|mut source| {
+                source.block_identity = Some(identity.clone());
+                source
+            })
+            .collect();
+        blocks.push(LogBlock {
             identity,
             kind,
-            lines: lines[start..end].to_vec(),
-            decoration_width: sources[start].decoration_width,
-            streaming: sources[start].streaming,
-            truncation: TruncationMetadata {
-                limit: None,
-                total: None,
-                direction: Some(match kind {
-                    LogBlockKind::Diff => TruncationDirection::Diff,
-                    LogBlockKind::ToolBody => TruncationDirection::Tail,
-                    _ => TruncationDirection::Head,
-                }),
-            },
-            foldable: !sources[start].streaming,
+            lines: Arc::from(lines[start..end].to_vec()),
+            sources: Arc::from(block_sources),
+            truncation,
+            foldable,
         });
     }
     blocks
@@ -957,14 +1010,23 @@ pub(super) fn build_log_layout_with_expansion(
     expanded_blocks: &HashSet<String>,
     cache: &mut LogBlockCache,
 ) -> LogLayout {
-    let mut builder = LayoutBuilder::new();
+    let mut blocks = Vec::new();
     for idx in 0..messages.len() {
         let msg = &messages[idx];
         let is_last = idx == messages.len() - 1;
         let msg_streaming = streaming && is_last && !is_static_assistant_notice(msg);
+        // A tool call renders its paired result's body inline, so the cache key
+        // must also capture whether that result is still the streaming tail.
+        let paired_result_streaming = msg.role == Role::ToolCall
+            && messages
+                .get(idx + 1)
+                .is_some_and(|m| m.role == Role::ToolResult)
+            && streaming
+            && (idx + 1 == messages.len() - 1);
+        let streaming_key = msg_streaming || paired_result_streaming;
         let fingerprint = render_fingerprint(messages, idx);
-        let blocks = match cache.get(idx, fingerprint, width, msg_streaming) {
-            Some(cached) => cached.to_vec(),
+        let rendered: Vec<LogBlock> = match cache.get(idx, fingerprint, width, streaming_key) {
+            Some(cached) => cached.clone(),
             None => {
                 let rendered = render_message_blocks(
                     messages,
@@ -974,17 +1036,15 @@ pub(super) fn build_log_layout_with_expansion(
                     theme,
                     display,
                     expanded_blocks,
-                    msg_streaming,
+                    streaming,
                 );
-                cache.insert(idx, fingerprint, width, msg_streaming, rendered.clone());
+                cache.insert(idx, fingerprint, width, streaming_key, rendered.clone());
                 rendered
             }
         };
-        for block in blocks {
-            builder.push(block);
-        }
+        blocks.extend(rendered);
     }
-    builder.finish()
+    LogLayout { blocks }
 }
 
 // ── Tool call rendering ───────────────────────────────────────────────────────
