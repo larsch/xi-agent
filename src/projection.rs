@@ -286,6 +286,10 @@ pub struct DisplayProjection {
     messages: Vec<Message>,
     /// Number of events from the source log that are reflected in `messages`.
     processed: usize,
+    /// Monotonic counter bumped whenever `messages` changes. Used as a cheap
+    /// cache key so renderers can detect "committed messages changed" without
+    /// re-hashing content.
+    generation: u64,
 }
 
 impl DisplayProjection {
@@ -297,6 +301,11 @@ impl DisplayProjection {
     /// Return the current projected message list.
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Monotonic counter that changes whenever `messages` changes.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Return mutable access to the current rendered message list.
@@ -330,10 +339,14 @@ impl DisplayProjection {
     /// `self.processed` are projected; existing messages are preserved.
     /// This is O(new events).
     pub fn apply_new_events(&mut self, events: &[SessionEvent]) {
+        let had_new = events.len() > self.processed;
         for ev in events.iter().skip(self.processed) {
             push_display_message(&mut self.messages, ev);
         }
         self.processed = events.len();
+        if had_new {
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
 
     /// Rebuild the projection from scratch after a filter change.
@@ -350,6 +363,7 @@ impl DisplayProjection {
     pub(crate) fn rebuild(&mut self, events: &[SessionEvent]) {
         self.messages = project_display_messages(events);
         self.processed = events.len();
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
