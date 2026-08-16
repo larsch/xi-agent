@@ -23,7 +23,7 @@
 
 ### Fixed
 
-- **100% CPU hang**: large streaming tool output no longer pegs the CPU.
+- **High CPU load**: large streaming tool output no longer causes 100% CPU usage.
 - **`edit_file` diff collapse**: a new line that is a prefix extension of the
   old line no longer silently collapses the diff.
 - **Control characters**: literal control characters are sanitized from
@@ -270,5 +270,8 @@ First public release. xi is a focused AI agent for the terminal.
 - **Custom tools**: executable protocol with `--describe` JSON interface
 
 ## v0.1.0 — Unreleased
+
+Initial development. Internal use only prior to the v0.2.0 public release.
+eased
 
 Initial development. Internal use only prior to the v0.2.0 public release.
