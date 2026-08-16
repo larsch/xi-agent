@@ -89,7 +89,9 @@ pub(crate) enum TruncationDirection {
 #[derive(Debug, Clone)]
 pub(crate) struct LogBlock {
     /// Identity is based on message and subsection, never on flattened rows.
-    pub identity: String,
+    /// Stored behind `Arc` so reusing a cached block clones a refcount, not the
+    /// string, on every streaming frame.
+    pub identity: Arc<str>,
     pub kind: LogBlockKind,
     pub lines: Arc<[Line<'static>]>,
     pub sources: Arc<[LineSource]>,
@@ -115,7 +117,7 @@ impl LogLayout {
     pub(crate) fn block_start_line(&self, identity: &str) -> Option<usize> {
         let mut offset = 0;
         for block in &self.blocks {
-            if block.identity == identity {
+            if block.identity.as_ref() == identity {
                 return Some(offset);
             }
             offset += block.lines.len();
@@ -160,7 +162,7 @@ impl LogLayout {
     }
 
     /// Compare this rendered logical layout with the previous eligible layout.
-    pub(crate) fn visual_update(&self, previous: Option<&[(String, usize)]>) -> VisualUpdate {
+    pub(crate) fn visual_update(&self, previous: Option<&[(Arc<str>, usize)]>) -> VisualUpdate {
         let Some(previous) = previous else {
             return VisualUpdate::NonContentLayoutChange;
         };
@@ -202,7 +204,7 @@ impl LogLayout {
     /// appear to jump down. Appending the missing lines as bottom padding
     /// keeps the previous total height, so the viewport stays put and the
     /// removed lines are replaced by blanks at the bottom of the output log.
-    pub(crate) fn pad_shrink(&mut self, previous: &[(String, usize)]) {
+    pub(crate) fn pad_shrink(&mut self, previous: &[(Arc<str>, usize)]) {
         let before_total = previous.iter().map(|(_, lines)| *lines).sum::<usize>();
         let after_total = self
             .blocks
@@ -237,7 +239,7 @@ impl LogLayout {
             LineSource {
                 decoration_width: 0,
                 streaming: false,
-                block_identity: Some(identity),
+                block_identity: Some(identity.to_string()),
                 foldable,
             },
             pad,
@@ -296,10 +298,11 @@ mod layout_tests {
     use crate::agent_turn_state::VisualUpdate;
     use crate::mouse_select::LineSource;
     use ratatui::text::Line;
+    use std::sync::Arc;
 
     #[test]
     fn visual_update_classifies_bottom_growth_and_reflow() {
-        let old = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+        let old = vec![(Arc::from("a"), 1), (Arc::from("b"), 2)];
         let grown = LogLayout {
             blocks: vec![
                 block("a", LogBlockKind::UserContent, "a", false),
@@ -331,8 +334,8 @@ mod layout_tests {
             ],
         };
         let previous = vec![
-            ("message:0:user".to_string(), 1),
-            ("message:1:thinking".to_string(), 3),
+            (Arc::from("message:0:user"), 1),
+            (Arc::from("message:1:thinking"), 3),
         ];
         layout.pad_shrink(&previous);
 
@@ -361,14 +364,14 @@ mod layout_tests {
                 true,
             )],
         };
-        let previous = vec![("message:0:thinking".to_string(), 2)];
+        let previous = vec![(Arc::from("message:0:thinking"), 2)];
         layout.pad_shrink(&previous);
         assert_eq!(layout.blocks[0].lines.len(), 3);
     }
 
     fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {
         LogBlock {
-            identity: identity.to_string(),
+            identity: Arc::from(identity),
             kind,
             lines: text
                 .lines()
@@ -985,7 +988,7 @@ fn render_message_blocks(
             }),
         };
         if let Some(previous) = blocks.last_mut()
-            && previous.identity == identity
+            && previous.identity.as_ref() == identity.as_str()
         {
             // Extend the merged block. The ranges are contiguous in `lines` and
             // `sources`, so the combined span is rebuilt from the two halves
@@ -1013,7 +1016,7 @@ fn render_message_blocks(
             })
             .collect();
         blocks.push(LogBlock {
-            identity,
+            identity: Arc::from(identity),
             kind,
             lines: Arc::from(lines[start..end].to_vec()),
             sources: Arc::from(block_sources),
@@ -2623,7 +2626,7 @@ mod tests {
             &DisplayConfig::default(),
         );
         assert_eq!(layout.blocks.len(), 1);
-        assert_eq!(layout.blocks[0].identity, "message:0:tool");
+        assert_eq!(layout.blocks[0].identity.as_ref(), "message:0:tool");
     }
 
     #[test]

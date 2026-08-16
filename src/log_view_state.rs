@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::ui::log::{LogBlockCache, LogLayout};
 
@@ -54,7 +55,7 @@ pub struct LogViewState {
     pub(crate) pending_anchor: Option<(String, usize)>,
     pub(crate) last_block_padding: Option<PaddingState>,
     pub(crate) turn_generation: Option<u64>,
-    pub(crate) visual_baseline: Option<Vec<(String, usize)>>,
+    pub(crate) visual_baseline: Option<Vec<(Arc<str>, usize)>>,
     pub(crate) visual_baseline_width: Option<usize>,
 }
 
@@ -123,11 +124,11 @@ impl LogViewState {
         self.clear_padding();
     }
 
-    pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(String, usize)>> {
+    pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(Arc<str>, usize)>> {
         self.visual_baseline.take()
     }
 
-    pub(crate) fn set_visual_baseline(&mut self, baseline: Vec<(String, usize)>) {
+    pub(crate) fn set_visual_baseline(&mut self, baseline: Vec<(Arc<str>, usize)>) {
         self.visual_baseline = Some(baseline);
     }
 
