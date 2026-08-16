@@ -1,6 +1,9 @@
 use ratatui_textarea::{CursorMove, TextArea};
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::live_turn::compose_display;
+
 use crate::{
     agent::AgentLoopConfig,
     app_event::{AppEvent, AppEventTx},
@@ -8,7 +11,6 @@ use crate::{
     completion::{self, CompletionItem},
     config::DisplayConfig,
     keybindings::{BindingContext, KEYBINDINGS},
-    live_turn::compose_display,
     llm::{LlmProvider, Message, UsageStats},
     provider_instance::{ApiType, ProviderInstance},
     session::SessionStore,
@@ -389,6 +391,10 @@ impl App {
     /// Return all messages to display in the chat log: committed session
     /// messages followed by the live turn overlay (streaming assistant,
     /// in-flight tools, and UI-only notices).
+    ///
+    /// Only used by tests: the live renderer reads committed and overlay
+    /// separately to avoid cloning the committed history each frame.
+    #[cfg(test)]
     pub fn display_messages_combined(&self) -> Vec<Message> {
         let committed = self
             .session
