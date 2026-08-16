@@ -2531,6 +2531,41 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
         app
     }
 
+    /// Build an app whose log contains `turns` user/assistant pairs committed
+    /// to session state (the durable committed history), plus nothing in the
+    /// live overlay. Exercises the committed-heavy streaming path.
+    fn bench_app_committed(turns: usize) -> App {
+        use crate::event_log::EventLog;
+        use crate::session_event::SessionEvent;
+        use crate::session_state::SessionState;
+
+        let mut app = make_app();
+        let body = bench_assistant_body();
+        let path =
+            std::env::temp_dir().join(format!("xi-bench-committed-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut state = SessionState::from_event_log(EventLog::load(&path).expect("event log"));
+        for i in 0..turns {
+            state
+                .append_immediate(SessionEvent::UserMessage {
+                    content: format!("Question number {i}: explain this code and give a table."),
+                    timestamp: (i * 2) as u64,
+                })
+                .expect("append user");
+            state
+                .append_batch(&[SessionEvent::AssistantMessage {
+                    content: body.to_string(),
+                    thinking: None,
+                    phase: AssistantPhase::Final,
+                    usage: None,
+                    timestamp: (i * 2 + 1) as u64,
+                }])
+                .expect("append assistant");
+        }
+        app.session.session_state = Some(state);
+        app
+    }
+
     /// Measure three frame-cost scenarios across a sweep of terminal sizes and
     /// message counts:
     ///
@@ -2593,6 +2628,81 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
 
                 // Warm: idle redraw, no change.
                 let mut app = bench_app(turns);
+                let backend = ratatui::backend::TestBackend::new(w, h);
+                let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+                terminal.draw(|f| draw(f, &mut app)).unwrap(); // warm the caches
+                let mut warm = std::time::Duration::ZERO;
+                for _ in 0..ITERS {
+                    let t = Instant::now();
+                    terminal.draw(|f| draw(f, &mut app)).unwrap();
+                    warm += t.elapsed();
+                }
+
+                let full_us = full.as_micros() as f64 / ITERS as f64;
+                let stream_us = stream.as_micros() as f64 / ITERS as f64;
+                let warm_us = warm.as_micros() as f64 / ITERS as f64;
+                println!(
+                    "{:>5} | {:>3}x{:<3}     | {:>9.1} | {:>11.1} | {:>8.1}",
+                    turns, w, h, full_us, stream_us, warm_us
+                );
+            }
+        }
+        println!();
+    }
+
+    /// Same three scenarios, but with `turns` messages committed to session
+    /// state (the durable history) and the streaming tail in the live overlay.
+    /// This is the long-session shape the incremental rendering optimizes for:
+    /// committed messages should be cache hits, so `stream`/`warm` should not
+    /// scale with `turns`.
+    #[test]
+    #[ignore]
+    fn bench_render_committed() {
+        use std::time::Instant;
+
+        const ITERS: usize = 20;
+        let sizes: [(u16, u16); 3] = [(80, 24), (120, 40), (200, 60)];
+
+        println!("\n=== xi-agent render benchmark (committed history) ===");
+        println!("turns | size        | full (us) | stream (us) | warm (us)");
+        println!("------+-------------+-----------+-------------+----------");
+
+        for &turns in &[20usize, 50, 200] {
+            for &(w, h) in &sizes {
+                // Full rebuild: clear the block cache so every committed message
+                // re-renders.
+                let mut app = bench_app_committed(turns);
+                let backend = ratatui::backend::TestBackend::new(w, h);
+                let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+                let mut full = std::time::Duration::ZERO;
+                for _ in 0..ITERS {
+                    app.log_view.invalidate();
+                    app.log_view.block_cache.clear();
+                    let t = Instant::now();
+                    terminal.draw(|f| draw(f, &mut app)).unwrap();
+                    full += t.elapsed();
+                }
+
+                // Streaming: grow the overlay assistant each frame; committed
+                // messages must be cache hits (generation-keyed, no re-hash).
+                let mut app = bench_app_committed(turns);
+                app.session.live_turn.assistant_content = "initial".to_string();
+                let backend = ratatui::backend::TestBackend::new(w, h);
+                let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+                terminal.draw(|f| draw(f, &mut app)).unwrap(); // warm the caches
+                let mut stream = std::time::Duration::ZERO;
+                for _ in 0..ITERS {
+                    app.session
+                        .live_turn
+                        .assistant_content
+                        .push_str(" streaming word ");
+                    let t = Instant::now();
+                    terminal.draw(|f| draw(f, &mut app)).unwrap();
+                    stream += t.elapsed();
+                }
+
+                // Warm: idle redraw, no change.
+                let mut app = bench_app_committed(turns);
                 let backend = ratatui::backend::TestBackend::new(w, h);
                 let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
                 terminal.draw(|f| draw(f, &mut app)).unwrap(); // warm the caches
