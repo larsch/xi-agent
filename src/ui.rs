@@ -157,7 +157,7 @@ fn build_log_layout_cached(
         {
             layout.pad_shrink(previous);
         }
-        let baseline: Vec<(String, usize)> = layout
+        let baseline: Vec<(std::sync::Arc<str>, usize)> = layout
             .blocks
             .iter()
             .map(|block| (block.identity.clone(), block.lines.len()))
