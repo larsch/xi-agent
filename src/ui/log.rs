@@ -582,25 +582,51 @@ impl LogBlockCache {
     }
 }
 
-/// Hash a `serde_json::Value` (which does not implement `Hash`) via its
-/// canonical string form.
+/// Hash a `serde_json::Value` (which does not implement `Hash`) structurally,
+/// without allocating a serialized string.
 fn hash_json<H: std::hash::Hasher>(h: &mut H, value: &serde_json::Value) {
     use std::hash::Hash;
-    value.to_string().hash(h);
+    match value {
+        serde_json::Value::Null => 0u8.hash(h),
+        serde_json::Value::Bool(b) => b.hash(h),
+        serde_json::Value::Number(n) => {
+            // serde_json stores non-negative integers as u64, negative as i64,
+            // and everything else as f64; hash each form without allocating.
+            if let Some(u) = n.as_u64() {
+                u.hash(h);
+            } else if let Some(i) = n.as_i64() {
+                i.hash(h);
+            } else if let Some(f) = n.as_f64() {
+                f.to_bits().hash(h);
+            } else {
+                n.to_string().hash(h);
+            }
+        }
+        serde_json::Value::String(s) => s.hash(h),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                hash_json(h, item);
+            }
+            items.len().hash(h);
+        }
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                key.hash(h);
+                hash_json(h, value);
+            }
+            map.len().hash(h);
+        }
+    }
 }
 
 /// Fingerprint of a single message's render-relevant fields.
 fn message_render_fingerprint(msg: &Message) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(&msg.role)
-        .unwrap_or_default()
-        .hash(&mut h);
+    msg.role.hash(&mut h);
     msg.content.hash(&mut h);
     msg.thinking.hash(&mut h);
-    serde_json::to_string(&msg.assistant_phase)
-        .unwrap_or_default()
-        .hash(&mut h);
+    msg.assistant_phase.hash(&mut h);
     msg.tool_name.hash(&mut h);
     if let Some(args) = &msg.tool_args {
         hash_json(&mut h, args);

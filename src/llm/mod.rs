@@ -31,7 +31,9 @@ pub struct DisplayRange {
     pub total_lines: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum AssistantPhase {
     #[default]
     Unknown,
@@ -257,7 +259,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     System,
     User,
