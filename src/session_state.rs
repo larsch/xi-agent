@@ -96,6 +96,11 @@ impl SessionState {
         self.display.messages()
     }
 
+    /// Monotonic counter that changes whenever committed display messages change.
+    pub fn display_generation(&self) -> u64 {
+        self.display.generation()
+    }
+
     /// Mutable access to committed display messages.
     ///
     /// Restricted to tests and the session_state module. External code must

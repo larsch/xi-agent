@@ -95,6 +95,8 @@ fn build_log_layout_cached(
         let mut layout = if let Some((kept, discarded)) = app.display_messages_split() {
             let mut layout = build_log_layout_with_expansion(
                 &kept,
+                0,
+                0,
                 false,
                 width,
                 &cfg,
@@ -105,6 +107,8 @@ fn build_log_layout_cached(
             );
             let mut discarded_layout = build_log_layout_with_expansion(
                 &discarded,
+                0,
+                0,
                 false,
                 width,
                 &cfg,
@@ -118,8 +122,15 @@ fn build_log_layout_cached(
             layout
         } else {
             let combined = app.display_messages_combined();
+            let (committed_len, committed_generation) = app
+                .session
+                .session_state
+                .as_ref()
+                .map_or((0, 0), |s| (s.display_len(), s.display_generation()));
             build_log_layout_with_expansion(
                 &combined,
+                committed_len,
+                committed_generation,
                 streaming,
                 width,
                 &cfg,
@@ -368,6 +379,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 };
                 build_log_layout_with_expansion(
                     &kept,
+                    0,
+                    0,
                     false,
                     log_width,
                     &cfg,

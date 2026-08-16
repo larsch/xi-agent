@@ -501,6 +501,8 @@ pub(super) fn build_log_layout(
     let mut cache = LogBlockCache::default();
     build_log_layout_with_expansion(
         messages,
+        0,
+        0,
         streaming,
         width,
         cfg,
@@ -514,12 +516,16 @@ pub(super) fn build_log_layout(
 // ── Render cache ──────────────────────────────────────────────────────────────
 
 /// Cached rendered blocks for one message, keyed by its index in the display
-/// message list. The fingerprint/width/streaming fields detect staleness: any
-/// change re-renders and overwrites this entry, so the cache never grows past
-/// one entry per message index.
+/// message list. The key/width/streaming fields detect staleness: any change
+/// re-renders and overwrites this entry, so the cache never grows past one
+/// entry per message index.
+///
+/// `key` is a change token: the committed generation for immutable committed
+/// messages (cheap, no content hashing), or a content fingerprint for the live
+/// overlay tail.
 #[derive(Clone)]
 struct CachedBlocks {
-    fingerprint: u64,
+    key: u64,
     width: usize,
     streaming: bool,
     blocks: Vec<LogBlock>,
@@ -540,23 +546,16 @@ pub(crate) struct LogBlockCache {
 }
 
 impl LogBlockCache {
-    fn get(
-        &self,
-        idx: usize,
-        fingerprint: u64,
-        width: usize,
-        streaming: bool,
-    ) -> Option<&Vec<LogBlock>> {
+    fn get(&self, idx: usize, key: u64, width: usize, streaming: bool) -> Option<&Vec<LogBlock>> {
         self.entries.get(&idx).and_then(|e| {
-            (e.fingerprint == fingerprint && e.width == width && e.streaming == streaming)
-                .then_some(&e.blocks)
+            (e.key == key && e.width == width && e.streaming == streaming).then_some(&e.blocks)
         })
     }
 
     fn insert(
         &mut self,
         idx: usize,
-        fingerprint: u64,
+        key: u64,
         width: usize,
         streaming: bool,
         blocks: Vec<LogBlock>,
@@ -564,7 +563,7 @@ impl LogBlockCache {
         self.entries.insert(
             idx,
             CachedBlocks {
-                fingerprint,
+                key,
                 width,
                 streaming,
                 blocks,
@@ -1028,6 +1027,8 @@ fn render_message_blocks(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_log_layout_with_expansion(
     messages: &[Message],
+    committed_len: usize,
+    committed_generation: u64,
     streaming: bool,
     width: usize,
     cfg: &ToolBodyConfig,
@@ -1050,8 +1051,16 @@ pub(super) fn build_log_layout_with_expansion(
             && streaming
             && (idx + 1 == messages.len() - 1);
         let streaming_key = msg_streaming || paired_result_streaming;
-        let fingerprint = render_fingerprint(messages, idx);
-        let rendered: Vec<LogBlock> = match cache.get(idx, fingerprint, width, streaming_key) {
+        // Committed messages are immutable, so their cache entry is keyed on the
+        // cheap committed generation instead of re-hashing content every token.
+        // Only the live overlay tail (indices >= committed_len) needs a content
+        // fingerprint.
+        let key = if idx < committed_len {
+            committed_generation
+        } else {
+            render_fingerprint(messages, idx)
+        };
+        let rendered: Vec<LogBlock> = match cache.get(idx, key, width, streaming_key) {
             Some(cached) => cached.clone(),
             None => {
                 let rendered = render_message_blocks(
@@ -1064,7 +1073,7 @@ pub(super) fn build_log_layout_with_expansion(
                     expanded_blocks,
                     streaming,
                 );
-                cache.insert(idx, fingerprint, width, streaming_key, rendered.clone());
+                cache.insert(idx, key, width, streaming_key, rendered.clone());
                 rendered
             }
         };
@@ -2483,6 +2492,8 @@ mod tests {
 
         let layout1 = build_log_layout_with_expansion(
             &[user.clone(), assistant],
+            0,
+            0,
             true,
             80,
             &cfg(),
@@ -2498,6 +2509,8 @@ mod tests {
         // re-render; the user block must be a cache hit.
         let layout2 = build_log_layout_with_expansion(
             &[user, Message::assistant("partial answer grows longer")],
+            0,
+            0,
             true,
             80,
             &cfg(),
@@ -2539,6 +2552,8 @@ mod tests {
 
         let layout1 = build_log_layout_with_expansion(
             &[user.clone(), tool, assistant.clone()],
+            0,
+            0,
             false,
             80,
             &cfg(),
@@ -2555,6 +2570,8 @@ mod tests {
         tool2.tool_running_output = Some("1\n2\n3".to_string());
         let layout2 = build_log_layout_with_expansion(
             &[user, tool2, assistant],
+            0,
+            0,
             false,
             80,
             &cfg(),
@@ -2617,6 +2634,8 @@ mod tests {
         expanded.insert("message:0:tool".to_string());
         let layout = build_log_layout_with_expansion(
             &[call, result],
+            0,
+            0,
             false,
             120,
             &cfg(),
@@ -2672,6 +2691,8 @@ mod tests {
         expanded.insert("message:0:thinking".to_string());
         let layout = build_log_layout_with_expansion(
             &[msg],
+            0,
+            0,
             false,
             80,
             &cfg(),
