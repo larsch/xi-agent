@@ -203,6 +203,10 @@ impl LiveTurnState {
 }
 
 /// Build display messages for the UI: committed history + live overlay.
+///
+/// Only used by tests now: the live renderer reads committed and overlay
+/// separately to avoid cloning the committed history each frame.
+#[cfg(test)]
 pub fn compose_display(
     committed: &[Message],
     live: &LiveTurnState,

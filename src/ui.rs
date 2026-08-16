@@ -94,8 +94,8 @@ fn build_log_layout_cached(
         };
         let mut layout = if let Some((kept, discarded)) = app.display_messages_split() {
             let mut layout = build_log_layout_with_expansion(
+                &[],
                 &kept,
-                0,
                 0,
                 false,
                 width,
@@ -106,8 +106,8 @@ fn build_log_layout_cached(
                 &mut app.log_view.block_cache,
             );
             let mut discarded_layout = build_log_layout_with_expansion(
+                &[],
                 &discarded,
-                0,
                 0,
                 false,
                 width,
@@ -121,15 +121,21 @@ fn build_log_layout_cached(
             layout.blocks.extend(discarded_layout.blocks);
             layout
         } else {
-            let combined = app.display_messages_combined();
-            let (committed_len, committed_generation) = app
+            let committed = app
                 .session
                 .session_state
                 .as_ref()
-                .map_or((0, 0), |s| (s.display_len(), s.display_generation()));
+                .map(|s| s.display_messages())
+                .unwrap_or(&[]);
+            let overlay = app.session.live_turn.render_overlay(streaming);
+            let committed_generation = app
+                .session
+                .session_state
+                .as_ref()
+                .map_or(0, |s| s.display_generation());
             build_log_layout_with_expansion(
-                &combined,
-                committed_len,
+                committed,
+                &overlay,
                 committed_generation,
                 streaming,
                 width,
@@ -378,8 +384,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                     ..ToolBodyConfig::default()
                 };
                 build_log_layout_with_expansion(
+                    &[],
                     &kept,
-                    0,
                     0,
                     false,
                     log_width,

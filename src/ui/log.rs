@@ -500,8 +500,8 @@ pub(super) fn build_log_layout(
 ) -> LogLayout {
     let mut cache = LogBlockCache::default();
     build_log_layout_with_expansion(
+        &[],
         messages,
-        0,
         0,
         streaming,
         width,
@@ -647,9 +647,9 @@ fn message_render_fingerprint(msg: &Message) -> u64 {
 
 /// Fingerprint of everything that affects rendering of `messages[idx]`,
 /// including the paired tool result that renders into the same block.
-fn render_fingerprint(messages: &[Message], idx: usize) -> u64 {
+fn render_fingerprint(messages: &[&Message], idx: usize) -> u64 {
     use std::hash::{Hash, Hasher};
-    let msg = &messages[idx];
+    let msg = messages[idx];
     let mut h = std::collections::hash_map::DefaultHasher::new();
     message_render_fingerprint(msg).hash(&mut h);
     if msg.role == Role::ToolCall
@@ -716,7 +716,7 @@ fn push_sources(
 /// final [`LogBlock`]s. Does not consult the cache.
 #[allow(clippy::too_many_arguments)]
 fn render_message_blocks(
-    messages: &[Message],
+    messages: &[&Message],
     idx: usize,
     width: usize,
     cfg: &ToolBodyConfig,
@@ -725,7 +725,7 @@ fn render_message_blocks(
     expanded_blocks: &HashSet<String>,
     streaming: bool,
 ) -> Vec<LogBlock> {
-    let msg = &messages[idx];
+    let msg = messages[idx];
     let is_last = idx == messages.len() - 1;
     let msg_streaming = streaming && is_last && !is_static_assistant_notice(msg);
 
@@ -1026,8 +1026,8 @@ fn render_message_blocks(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_log_layout_with_expansion(
-    messages: &[Message],
-    committed_len: usize,
+    committed: &[Message],
+    overlay: &[Message],
     committed_generation: u64,
     streaming: bool,
     width: usize,
@@ -1037,9 +1037,13 @@ pub(super) fn build_log_layout_with_expansion(
     expanded_blocks: &HashSet<String>,
     cache: &mut LogBlockCache,
 ) -> LogLayout {
+    let committed_len = committed.len();
+    // Borrow both committed and overlay messages into one flat view without
+    // cloning any message content.
+    let messages: Vec<&Message> = committed.iter().chain(overlay.iter()).collect();
     let mut blocks = Vec::new();
     for idx in 0..messages.len() {
-        let msg = &messages[idx];
+        let msg = messages[idx];
         let is_last = idx == messages.len() - 1;
         let msg_streaming = streaming && is_last && !is_static_assistant_notice(msg);
         // A tool call renders its paired result's body inline, so the cache key
@@ -1058,13 +1062,13 @@ pub(super) fn build_log_layout_with_expansion(
         let key = if idx < committed_len {
             committed_generation
         } else {
-            render_fingerprint(messages, idx)
+            render_fingerprint(&messages, idx)
         };
         let rendered: Vec<LogBlock> = match cache.get(idx, key, width, streaming_key) {
             Some(cached) => cached.clone(),
             None => {
                 let rendered = render_message_blocks(
-                    messages,
+                    &messages,
                     idx,
                     width,
                     cfg,
@@ -1086,7 +1090,7 @@ pub(super) fn build_log_layout_with_expansion(
 
 #[allow(clippy::too_many_arguments)]
 fn render_tool_call(
-    messages: &[Message],
+    messages: &[&Message],
     idx: usize,
     width: usize,
     cfg: &ToolBodyConfig,
@@ -1095,7 +1099,7 @@ fn render_tool_call(
     out: &mut Vec<Line<'static>>,
     streaming: bool,
 ) {
-    let msg = &messages[idx];
+    let msg = messages[idx];
     let name = msg.tool_name.as_deref().unwrap_or("unknown");
 
     if name == "ask_user" {
@@ -1368,7 +1372,7 @@ fn render_tool_call(
 
 #[allow(clippy::too_many_arguments)]
 fn render_tool_result(
-    messages: &[Message],
+    messages: &[&Message],
     idx: usize,
     width: usize,
     cfg: &ToolBodyConfig,
@@ -1377,7 +1381,7 @@ fn render_tool_result(
     out: &mut Vec<Line<'static>>,
     streaming: bool,
 ) {
-    let msg = &messages[idx];
+    let msg = messages[idx];
     let prev = messages.get(idx.saturating_sub(1));
     let prev_name = prev
         .filter(|p| p.role == Role::ToolCall)
@@ -2491,8 +2495,8 @@ mod tests {
         let mut cache = LogBlockCache::default();
 
         let layout1 = build_log_layout_with_expansion(
+            &[],
             &[user.clone(), assistant],
-            0,
             0,
             true,
             80,
@@ -2508,8 +2512,8 @@ mod tests {
         // Streaming growth: only the tail assistant changes, so only it should
         // re-render; the user block must be a cache hit.
         let layout2 = build_log_layout_with_expansion(
+            &[],
             &[user, Message::assistant("partial answer grows longer")],
-            0,
             0,
             true,
             80,
@@ -2551,8 +2555,8 @@ mod tests {
         let mut cache = LogBlockCache::default();
 
         let layout1 = build_log_layout_with_expansion(
+            &[],
             &[user.clone(), tool, assistant.clone()],
-            0,
             0,
             false,
             80,
@@ -2569,8 +2573,8 @@ mod tests {
         let mut tool2 = Message::tool_call("c1", "bash", serde_json::json!({"command": "seq 5"}));
         tool2.tool_running_output = Some("1\n2\n3".to_string());
         let layout2 = build_log_layout_with_expansion(
+            &[],
             &[user, tool2, assistant],
-            0,
             0,
             false,
             80,
@@ -2633,8 +2637,8 @@ mod tests {
         let mut expanded = std::collections::HashSet::new();
         expanded.insert("message:0:tool".to_string());
         let layout = build_log_layout_with_expansion(
+            &[],
             &[call, result],
-            0,
             0,
             false,
             120,
@@ -2690,8 +2694,8 @@ mod tests {
         let mut expanded = std::collections::HashSet::new();
         expanded.insert("message:0:thinking".to_string());
         let layout = build_log_layout_with_expansion(
+            &[],
             &[msg],
-            0,
             0,
             false,
             80,
