@@ -1956,10 +1956,11 @@ fn render_diff_body(
 /// Layout: `·` at column 0, marker at column 1, `·` at column 2, content from
 /// column 3 onward.  Both the marker prefix and the content share `color`.
 fn tool_result_line(marker: char, content: impl Into<String>, color: Color) -> Line<'static> {
-    let style = Style::default().fg(color);
+    let content_style = Style::default().fg(color);
+    let marker_style = content_style.add_modifier(Modifier::DIM);
     Line::from(vec![
-        Span::styled(format!(" {} ", marker), style),
-        Span::styled(content.into(), style),
+        Span::styled(format!(" {} ", marker), marker_style),
+        Span::styled(content.into(), content_style),
     ])
 }
 
@@ -1978,10 +1979,10 @@ fn tool_result_line_subdued(
 }
 
 /// Build a truncation/context placeholder line with a `┆` margin marker at
-/// column 1.  The marker is rendered in `color`; the text is rendered in
+/// column 1. The marker is rendered in `color` + dim; the text is rendered in
 /// `color` + dim + italic.
 fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'static> {
-    let marker_style = Style::default().fg(color);
+    let marker_style = Style::default().fg(color).add_modifier(Modifier::DIM);
     let text_style = Style::default()
         .fg(color)
         .add_modifier(Modifier::ITALIC | Modifier::DIM);
@@ -2119,6 +2120,7 @@ fn append_message_colored(
     if dim {
         style = style.add_modifier(Modifier::ITALIC | Modifier::DIM);
     }
+    let marker_style = style.add_modifier(Modifier::DIM);
     let segments: Vec<&str> = content.split('\n').collect();
     let visible = visible_segments(&segments);
     let content_width = width.saturating_sub(3).max(1);
@@ -2158,7 +2160,7 @@ fn append_message_colored(
                         " │ "
                     };
                     out.push(Line::from(vec![
-                        Span::styled(marker, style),
+                        Span::styled(marker, marker_style),
                         Span::styled(chunk.clone(), style),
                     ]));
                 }
@@ -2174,7 +2176,7 @@ fn append_message_colored(
                     " │ "
                 };
                 out.push(Line::from(vec![
-                    Span::styled(marker, style),
+                    Span::styled(marker, marker_style),
                     Span::styled(chunk.clone(), style),
                 ]));
             }
@@ -2211,7 +2213,7 @@ pub(super) fn append_tool_result_block(
     width: usize,
     color: Color,
 ) {
-    let marker_style = Style::default().fg(color);
+    let marker_style = Style::default().fg(color).add_modifier(Modifier::DIM);
     let text_style = Style::default().fg(color);
 
     if content.is_empty() {
@@ -2280,7 +2282,10 @@ fn append_markdown_answer(
             } else {
                 " │ "
             };
-            line.spans.insert(0, Span::raw(marker));
+            line.spans.insert(
+                0,
+                Span::styled(marker, Style::default().add_modifier(Modifier::DIM)),
+            );
         }
 
         if streaming && i == last_idx {
@@ -2375,9 +2380,62 @@ mod tests {
         theme::Theme,
     };
     use ratatui::{
-        style::Color,
+        style::{Color, Modifier},
         text::{Line, Span},
     };
+
+    #[test]
+    fn placeholder_result_line_dims_margin_marker() {
+        let line = super::placeholder_result_line("… 20 total lines", Color::Green);
+
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn markdown_answer_dims_margins_but_not_content() {
+        let mut lines = Vec::new();
+        let markdown = vec![Line::raw("first"), Line::raw("middle"), Line::raw("last")];
+        super::append_markdown_answer(&mut lines, "🤖", markdown, false);
+
+        for line in &lines[1..] {
+            assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+            assert!(!line.spans[1].style.add_modifier.contains(Modifier::DIM));
+        }
+    }
+
+    #[test]
+    fn tool_result_line_dims_margin_but_not_content() {
+        let line = super::tool_result_line('│', "shell output", Color::LightBlue);
+
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(!line.spans[1].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn append_tool_result_block_dims_margin_but_not_content() {
+        let mut lines = Vec::new();
+        super::append_tool_result_block(&mut lines, "shell output", 80, Color::LightBlue);
+
+        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(!lines[0].spans[1].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn append_message_colored_dims_multiline_margin_but_not_content() {
+        let mut lines = Vec::new();
+        super::append_message_colored(
+            &mut lines,
+            "💻 command\ncontinued",
+            80,
+            Color::LightBlue,
+            false,
+            false,
+        );
+
+        assert!(lines[1].spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(!lines[1].spans[1].style.add_modifier.contains(Modifier::DIM));
+    }
 
     #[test]
     fn dim_lines_dims_fg_proportionally() {
