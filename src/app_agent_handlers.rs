@@ -52,6 +52,7 @@ impl App {
             AppEvent::Login(ev) => self.apply_login_event(ev),
             AppEvent::AskUser(req) => self.receive_ask_request(req),
             AppEvent::ShellComplete { call_id, result } => self.on_shell_complete(call_id, result),
+            AppEvent::ContextLoaded(ctx) => self.apply_loaded_context(ctx),
         }
     }
 

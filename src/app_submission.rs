@@ -14,6 +14,12 @@ impl App {
     // ── LLM submission ────────────────────────────────────────────────────────
 
     fn start_agent_task(&mut self, provider: &DynProvider) {
+        // Make sure the tool registry and system prompt are populated before
+        // starting a task. They are normally loaded in the background at
+        // startup; this covers `--prompt` and any submit that races ahead of
+        // that background load.
+        self.ensure_context_loaded();
+
         // Ensure the session ID is assigned before creating the log so the
         // output directory uses the real session key, not the "init" placeholder.
         let session_id = self.ensure_session_id();

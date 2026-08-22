@@ -335,6 +335,50 @@ impl App {
         self.agent_config.system_prompt = Some(system_prompt);
     }
 
+    /// Install a freshly loaded [`LoadedContext`] (tools, skills, agents) into
+    /// the app and rebuild the system prompt.
+    ///
+    /// A stale [`Self::active_agent`] (recorded before the load, e.g. from
+    /// `config.toml`) that no longer exists in the freshly loaded agent list is
+    /// cleared so the default prompt is used, matching the original startup
+    /// behaviour.
+    pub(crate) fn apply_loaded_context(&mut self, ctx: crate::LoadedContext) {
+        self.agent_config.tools = ctx.tools;
+        self.loaded_skills = ctx.skills;
+        self.agents = ctx.agents;
+
+        let cwd = self.session.current_cwd.clone();
+
+        if self.active_agent.is_some() && self.resolve_current_agent().is_none() {
+            self.active_agent = None;
+        }
+
+        if self.active_agent.is_some() {
+            self.rebuild_agent_system_prompt(&cwd);
+        } else {
+            self.agent_config.system_prompt = Some(crate::agent::build_system_prompt(
+                &self.agent_config.tools,
+                &cwd,
+                &self.loaded_skills,
+                None,
+            ));
+        }
+    }
+
+    /// Load the agent context (tools, skills, agents) synchronously if it has
+    /// not been loaded yet — e.g. by the deferred background task at startup.
+    ///
+    /// This is the fallback for the submit path: `--prompt` (and a user who
+    /// submits faster than the background load) must not proceed with an empty
+    /// tool registry / system prompt.
+    pub(crate) fn ensure_context_loaded(&mut self) {
+        if self.agent_config.system_prompt.is_some() {
+            return;
+        }
+        let ctx = crate::load_context(Some(self.app_event_tx()), &self.agent_config.file_tracker);
+        self.apply_loaded_context(ctx);
+    }
+
     /// Return a reference to the currently active agent.
     ///
     /// Falls back to the "default" agent (if present in the agents list) when

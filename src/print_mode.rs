@@ -122,8 +122,7 @@ pub(crate) async fn run_print_mode(
         Arc::clone(&headless_tracker),
         Arc::clone(&loaded_skills),
         custom_tools,
-    )
-    .await;
+    );
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -335,8 +334,7 @@ async fn run_print_mode_loop_inner(
         Arc::clone(&retry_tracker),
         Arc::clone(&retry_skills),
         custom_tools,
-    )
-    .await;
+    );
     let retry_config = AgentLoopConfig {
         tools: retry_tools,
         file_tracker: retry_tracker,
