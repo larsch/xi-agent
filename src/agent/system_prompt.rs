@@ -274,12 +274,31 @@ When a skill file references a relative path, resolve it against the skill direc
 /// Return the text up to and including the first `.`, `!`, or `?`,
 /// or the whole string if none is found. Strips leading/trailing whitespace.
 fn first_sentence(s: &str) -> &str {
-    let end = s
-        .char_indices()
-        .find(|(_, c)| matches!(c, '.' | '!' | '?'))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(s.len());
-    s[..end].trim()
+    // A sentence ends at the first `.`, `!`, or `?` that is followed by
+    // whitespace and then an uppercase letter (or the end of the string).
+    // This avoids truncating inside dotted paths (`…/.worktrees/…`) or
+    // abbreviations like `e.g.`.
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+
+    for (idx, &(byte, c)) in chars.iter().enumerate() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+
+        let mut next = idx + 1;
+        while next < chars.len() && chars[next].1.is_whitespace() {
+            next += 1;
+        }
+
+        let ends_string = next >= chars.len();
+        let starts_sentence = next < chars.len() && chars[next].1.is_uppercase();
+
+        if ends_string || starts_sentence {
+            return s[..byte + c.len_utf8()].trim();
+        }
+    }
+
+    s.trim()
 }
 
 #[cfg(test)]
@@ -342,6 +361,16 @@ mod tests {
         assert_eq!(first_sentence("  Hello world. More text"), "Hello world.");
         assert_eq!(first_sentence("What now? Later"), "What now?");
         assert_eq!(first_sentence("No punctuation"), "No punctuation");
+    }
+
+    #[test]
+    fn first_sentence_does_not_split_dotted_paths_or_abbreviations() {
+        // A dotted path and an `e.g.` abbreviation must not end the sentence.
+        let desc = "Restart the host — re-execute its binary (/home/u/.worktrees/x/target/release/xi) from disk (e.g. after a rebuild) and resume. Takes no arguments.";
+        assert_eq!(
+            first_sentence(desc),
+            "Restart the host — re-execute its binary (/home/u/.worktrees/x/target/release/xi) from disk (e.g. after a rebuild) and resume."
+        );
     }
 
     #[test]

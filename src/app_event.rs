@@ -21,6 +21,10 @@ pub enum AppEvent {
     },
     /// The deferred context load (tools, skills, agents) has completed.
     ContextLoaded(LoadedContext),
+    /// The `restart_host` tool requested a process restart.  Handled by the app
+    /// loop by flushing the pending turn and re-exec'ing the binary.
+    #[cfg(feature = "restart")]
+    Restart,
 }
 
 pub type AppEventTx = UnboundedSender<AppEvent>;

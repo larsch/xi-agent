@@ -22,6 +22,7 @@ pub fn tool_pending_label(name: &str) -> String {
         "write" | "write_file" => "writing…",
         "edit" | "edit_file" => "editing…",
         "find" | "find_files" => "finding…",
+        "restart_host" => "restarting…",
         _ => "working…",
     };
     format!("{emoji} {action}")
@@ -50,6 +51,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
         "read_skill" => "🎓",
+        "restart_host" => "🔄",
         _ => "⚙️",
     }
 }
@@ -582,6 +584,14 @@ mod tests {
         );
         assert!(ph);
         assert_eq!(lbl, "⚙️ working…");
+    }
+
+    #[test]
+    fn restart_host_shows_restarting_label() {
+        let (lbl, ph) =
+            tool_invocation_label("restart_host", &json!({}), None, &DisplayConfig::default());
+        assert!(ph);
+        assert_eq!(lbl, "🔄 restarting…");
     }
 
     // ── Partial JSON wrapper ──────────────────────────────────────────────────

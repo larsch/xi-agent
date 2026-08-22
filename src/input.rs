@@ -48,6 +48,10 @@ pub(crate) enum RunResult {
     /// Used for clean shutdown on SIGTERM / SIGINT / SIGHUP / SIGQUIT.
     #[cfg(unix)]
     Terminate(i32),
+    /// Re-exec the running binary and resume the active session, requested by
+    /// the `restart_host` tool.
+    #[cfg(feature = "restart")]
+    Restart,
 }
 
 pub(crate) enum KeyDispatch {

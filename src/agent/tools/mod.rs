@@ -164,6 +164,8 @@ pub mod powershell;
 pub mod python;
 pub mod read;
 pub mod read_skill;
+#[cfg(feature = "restart")]
+pub mod restart_host;
 pub mod subprocess;
 pub mod terminal;
 pub mod truncate;
@@ -184,6 +186,8 @@ use powershell::PowerShellTool;
 use python::PythonTool;
 use read::ReadFileTool;
 use read_skill::ReadSkillTool;
+#[cfg(feature = "restart")]
+use restart_host::RestartHostTool;
 use write::WriteTool;
 
 use crate::app_event::AppEventTx;
@@ -222,6 +226,11 @@ pub fn register_builtin_tools(
     {
         tools.push(Arc::new(BashTool));
         tools.push(Arc::new(ExecTool));
+    }
+
+    #[cfg(feature = "restart")]
+    {
+        tools.push(Arc::new(RestartHostTool::new()));
     }
 
     // Detect and register the Python tool if a suitable runtime is available.

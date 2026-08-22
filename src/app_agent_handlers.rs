@@ -53,7 +53,22 @@ impl App {
             AppEvent::AskUser(req) => self.receive_ask_request(req),
             AppEvent::ShellComplete { call_id, result } => self.on_shell_complete(call_id, result),
             AppEvent::ContextLoaded(ctx) => self.apply_loaded_context(ctx),
+            #[cfg(feature = "restart")]
+            AppEvent::Restart => self.on_restart_requested(),
         }
+    }
+
+    /// Handle the `restart_host` tool's request to re-exec the binary.
+    ///
+    /// Persists the in-flight turn — including the unanswered `restart_host`
+    /// `ToolCall` — so the resumed process can detect and complete it, then
+    /// flags the main loop to shut down and re-exec.
+    #[cfg(feature = "restart")]
+    fn on_restart_requested(&mut self) {
+        self.finalise_assistant_turn_event();
+        self.flush_turn_events();
+        self.persist_messages();
+        self.pending_restart = true;
     }
 
     // ── AgentEvent handlers ───────────────────────────────────────────────────

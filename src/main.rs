@@ -55,6 +55,8 @@ mod provider;
 mod provider_instance;
 mod provider_manager;
 mod provider_setup;
+#[cfg(feature = "restart")]
+mod restart;
 mod selection_state;
 mod session;
 mod session_event;
@@ -134,6 +136,10 @@ struct Cli {
     /// Auto-resume the most recent session for the current working directory.
     #[arg(long)]
     resume: bool,
+
+    /// Resume a specific session by ID (used by the `restart_host` tool).
+    #[arg(long, value_name = "SESSION_ID")]
+    resume_session: Option<String>,
 
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
@@ -376,6 +382,11 @@ async fn main() -> io::Result<()> {
     if cli.resume {
         app.resume_latest_for_current_cwd();
     }
+    #[cfg(feature = "restart")]
+    if let Some(session_id) = cli.resume_session.as_deref() {
+        app.resume_session_by_id(session_id);
+        app.pending_restart_continue = app.complete_pending_restart();
+    }
     if !initial_session_events.is_empty() {
         let session_id = app.session.ensure_session_id();
         if let Some(store) = app.session.session_store.as_ref()
@@ -459,8 +470,26 @@ async fn main() -> io::Result<()> {
             app.submit_chat_message(&provider);
         }
 
+        #[cfg(feature = "restart")]
+        if app.pending_restart_continue && app.provider.provider_selected {
+            app.pending_restart_continue = false;
+            app.launch_turn(&provider);
+        }
+
         match run(&mut terminal, &mut app, &provider, &config, &mut timer).await {
             Ok(RunResult::Quit) | Err(_) => break,
+
+            #[cfg(feature = "restart")]
+            Ok(RunResult::Restart) => {
+                // The restart_host tool requested a re-exec.  Restore the
+                // terminal, then exec the current binary resuming the session.
+                let _ = terminal::shutdown_terminal(&mut terminal, keyboard_enhancements_enabled);
+                let session_id = app.session.current_session_id.clone().unwrap_or_default();
+                let err = crate::restart::exec_self(&session_id);
+                // exec() returns only on failure.
+                eprintln!("restart failed: {err}");
+                std::process::exit(1);
+            }
 
             #[cfg(unix)]
             Ok(RunResult::Terminate(code)) => {
@@ -745,6 +774,10 @@ async fn run(
                 if app.login.needs_rebuild {
                     app.login.needs_rebuild = false;
                     return Ok(RunResult::RebuildProvider);
+                }
+                #[cfg(feature = "restart")]
+                if app.pending_restart {
+                    return Ok(RunResult::Restart);
                 }
             }
 
