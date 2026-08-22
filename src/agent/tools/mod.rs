@@ -192,7 +192,7 @@ use crate::app_event::AppEventTx;
 ///
 /// `custom` tools are appended after built-ins; any custom tool whose name
 /// collides with a built-in is silently dropped (logged at debug).
-pub async fn register_builtin_tools(
+pub fn register_builtin_tools(
     app_event_tx: Option<AppEventTx>,
     file_tracker: Arc<Mutex<FileTracker>>,
     skills: Arc<Vec<crate::skills::SkillMeta>>,
@@ -225,7 +225,7 @@ pub async fn register_builtin_tools(
     }
 
     // Detect and register the Python tool if a suitable runtime is available.
-    if let Some(runtime) = python::detect_python().await {
+    if let Some(runtime) = python::detect_python() {
         tools.push(Arc::new(PythonTool::new(runtime)));
     }
 

@@ -74,12 +74,12 @@ pub(crate) mod ui;
 
 use agent::tools::custom::custom_tool_dirs;
 use agent::{
-    AgentLoopConfig, FileTracker, ToolOutputLog, build_system_prompt,
+    AgentLoopConfig, FileTracker, ToolOutputLog,
     tools::{custom::load_custom_tools, register_builtin_tools},
 };
 use agents::load_agents;
 use app::App;
-use app_event::AppEvent;
+use app_event::{AppEvent, SendIgnore};
 
 use config::XiConfig;
 use hook_ipc::HookIpcPublisherHandle;
@@ -180,12 +180,45 @@ fn read_initial_prompt(
     }
 }
 
+/// Minimal phase timer for startup profiling. Each `mark` logs the elapsed
+/// time since the previous mark (and since process start) via `log::debug!`,
+/// so it is a no-op unless `XI_DEBUG` enables the debug log.
+struct StartupTimer {
+    start: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl StartupTimer {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            start: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, name: &str) {
+        let now = std::time::Instant::now();
+        log::debug!(
+            target: "startup",
+            "phase={name} elapsed_ms={:.2} total_ms={:.2}",
+            (now - self.last).as_secs_f64() * 1000.0,
+            (now - self.start).as_secs_f64() * 1000.0,
+        );
+        self.last = now;
+    }
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let mut timer = StartupTimer::new();
     migrate::run();
+    timer.mark("migrate::run");
     debug_log::init_logging();
+    timer.mark("debug_log::init_logging");
 
     let cli = Cli::parse();
+    timer.mark("Cli::parse");
 
     if cli.print_dirs {
         dirs::print_dirs();
@@ -193,6 +226,7 @@ async fn main() -> io::Result<()> {
     }
 
     let initial_prompt = read_initial_prompt(cli.prompt, cli.prompt_file)?;
+    timer.mark("read_initial_prompt");
 
     let mut config = XiConfig::load().map_err(|e| {
         eprintln!(
@@ -202,6 +236,7 @@ async fn main() -> io::Result<()> {
         );
         io::Error::other("config load failed")
     })?;
+    timer.mark("XiConfig::load");
 
     // --theme flag overrides config.toml theme path
     if let Some(theme_path) = cli.theme {
@@ -221,6 +256,7 @@ async fn main() -> io::Result<()> {
             crate::theme::Theme::default()
         }
     };
+    timer.mark("theme load");
 
     // Built-in hosted providers are always available from the static catalog.
     // Config only stores user-configured instances and overrides.
@@ -258,6 +294,7 @@ async fn main() -> io::Result<()> {
     } else {
         provider_setup::with_resolved_model(cli.model.as_deref(), &initial_instance)
     };
+    timer.mark("resolve_provider_instance");
     let initial_model = initial_instance.effective_model().to_string();
     let initial_thinking =
         provider_setup::resolve_thinking_level_for_model(&config, &initial_model);
@@ -273,8 +310,10 @@ async fn main() -> io::Result<()> {
     };
 
     let (mut terminal, mut keyboard_enhancements_enabled) = terminal::init_terminal(&window_title)?;
+    timer.mark("terminal::init_terminal");
 
     let file_tracker = Arc::new(Mutex::new(build_file_tracker()));
+    timer.mark("build_file_tracker");
     let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
     let hook_ipc = HookIpcPublisherHandle::new(&config.hook_ipc);
 
@@ -304,19 +343,32 @@ async fn main() -> io::Result<()> {
         config.display.clone(),
         config.throbber.clone(),
     );
+    timer.mark("App::new (incl. load_hooks)");
     app.theme = theme;
 
     let app_event_tx = app.app_event_tx();
-    let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let loaded_skills = Arc::new(skills::load_skills());
-    let tools = register_builtin_tools(
-        Some(app_event_tx.clone()),
-        Arc::clone(&file_tracker),
-        Arc::clone(&loaded_skills),
-        custom_tools,
-    )
-    .await;
+
+    // Record the desired agent now; the actual system-prompt rebuild happens
+    // once the context (tools, skills, agents) has been loaded, either by the
+    // background task below or synchronously on first submit.
+    app.active_agent = config.agent.clone();
+
+    // Load tools, skills, and agents on a background thread so the prompt
+    // appears instantly. The result is applied when the `ContextLoaded` event
+    // is received by the event loop. If the user submits before that happens
+    // (e.g. `--prompt`), the submit path loads the context synchronously.
+    {
+        let tx = app_event_tx.clone();
+        let ft = Arc::clone(&file_tracker);
+        tokio::task::spawn_blocking(move || {
+            let ctx = load_context(Some(tx.clone()), &ft);
+            tx.send_ignore(AppEvent::ContextLoaded(ctx));
+        });
+    }
+    timer.mark("spawn background context load");
+
     app.init_session_persistence(cwd.clone());
+    timer.mark("init_session_persistence");
     if !initial_session_events.is_empty() {
         let session_id = app.session.ensure_session_id();
         if let Some(store) = app.session.session_store.as_ref()
@@ -328,15 +380,8 @@ async fn main() -> io::Result<()> {
                 Some(crate::session_state::SessionState::from_event_log(log));
         }
     }
-    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
-    app.agent_config.tools = tools;
-    app.agent_config.system_prompt = Some(system_prompt);
-    app.loaded_skills = (*loaded_skills).clone();
-    app.agents = load_agents();
-    if let Some(ref agent_name) = config.agent {
-        app.switch_agent(agent_name, &cwd);
-    }
     app.provider.instances = config.resolve_effective_providers();
+    timer.mark("resolve_effective_providers");
     // Mark provider as explicitly selected when a provider was configured
     // (from config.toml or --provider flag), as opposed to the fallback.
     if config.provider.is_some() || cli.provider.is_some() || cli.theme_demo {
@@ -350,6 +395,7 @@ async fn main() -> io::Result<()> {
         // Build (or re-build) the provider for the current instance.
         // When no provider has been explicitly selected, skip the build
         // to avoid spurious "not authenticated" notices on fresh install.
+        timer.mark("pre provider build");
         let provider = if !app.provider.provider_selected {
             Arc::new(provider_setup::UnavailableProvider {
                 message: String::new(),
@@ -375,6 +421,7 @@ async fn main() -> io::Result<()> {
                 }
             }
         };
+        timer.mark("build_provider_for_instance");
 
         if app.login.retry_after_refresh {
             app.login.retry_after_refresh = false;
@@ -405,7 +452,7 @@ async fn main() -> io::Result<()> {
             app.submit_chat_message(&provider);
         }
 
-        match run(&mut terminal, &mut app, &provider, &config).await {
+        match run(&mut terminal, &mut app, &provider, &config, &mut timer).await {
             Ok(RunResult::Quit) | Err(_) => break,
 
             #[cfg(unix)]
@@ -430,11 +477,11 @@ async fn main() -> io::Result<()> {
             Ok(RunResult::RebuildProvider) => {}
 
             Ok(RunResult::ReloadContext) => {
-                handle_reload_context(&mut app, &file_tracker, app_event_tx.clone(), &cwd).await;
+                handle_reload_context(&mut app, &file_tracker, app_event_tx.clone());
             }
 
             Ok(RunResult::NewSession) => {
-                handle_new_session(&mut app, &file_tracker, app_event_tx.clone(), &cwd).await;
+                handle_new_session(&mut app, &file_tracker, app_event_tx.clone());
             }
 
             Ok(RunResult::ChangeModel {
@@ -538,6 +585,7 @@ async fn run(
     app: &mut App,
     provider: &Arc<dyn LlmProvider + Send + Sync>,
     config: &XiConfig,
+    timer: &mut StartupTimer,
 ) -> io::Result<RunResult> {
     let mut crossterm_events = EventStream::new();
     // The throbber animations are designed for 8 FPS (125 ms per frame).
@@ -560,9 +608,15 @@ async fn run(
         Ok(())
     };
 
+    let mut first_draw = true;
+
     loop {
         if needs_redraw {
             draw_frame(&mut *terminal, app)?;
+            if first_draw {
+                first_draw = false;
+                timer.mark("first_draw (prompt visible)");
+            }
             needs_redraw = false;
             if app.runtime.pending_finalize {
                 app.finalize_submission(provider);
@@ -710,34 +764,68 @@ async fn run(
     }
 }
 
-// ── Event-loop handlers ──────────────────────────────────────────────────
+// ── Context loading ──────────────────────────────────────────────────────
 
-async fn handle_reload_context(
-    app: &mut App,
+/// The result of loading the agent context (tools, skills, agents) from disk.
+///
+/// The system prompt is deliberately *not* included: it is rebuilt from the
+/// active agent via [`App::apply_loaded_context`] so that agent filtering is
+/// applied consistently regardless of which path loaded the context (startup
+/// background task, first-submit fallback, or a reload).
+struct LoadedContext {
+    tools: agent::ToolRegistry,
+    skills: Vec<skills::SkillMeta>,
+    agents: Vec<agents::AgentMeta>,
+    custom_tool_count: usize,
+}
+
+impl std::fmt::Debug for LoadedContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedContext")
+            .field("tools", &self.tools.len())
+            .field("skills", &self.skills.len())
+            .field("agents", &self.agents.len())
+            .field("custom_tool_count", &self.custom_tool_count)
+            .finish()
+    }
+}
+
+/// Load tools, skills, and agents from disk.  Blocking (file I/O + subprocess
+/// spawns for custom-tool `--describe` and Python detection), so callers should
+/// run this on a blocking thread where startup latency matters.
+fn load_context(
+    app_event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
     file_tracker: &Arc<Mutex<FileTracker>>,
-    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    cwd: &str,
-) {
+) -> LoadedContext {
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let custom_count = custom_tools.len();
+    let custom_tool_count = custom_tools.len();
     let loaded_skills = Arc::new(skills::load_skills());
     let tools = register_builtin_tools(
-        Some(app_event_tx),
+        app_event_tx,
         Arc::clone(file_tracker),
         Arc::clone(&loaded_skills),
         custom_tools,
-    )
-    .await;
-    let system_prompt = build_system_prompt(&tools, cwd, &loaded_skills, None);
-    let skills_count = loaded_skills.len();
-    app.agent_config.tools = tools;
-    app.agent_config.system_prompt = Some(system_prompt);
-    app.loaded_skills = (*loaded_skills).clone();
-    app.agents = load_agents();
-    if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
-        app.active_agent = None;
-        app.rebuild_agent_system_prompt(cwd);
+    );
+    let agents = load_agents();
+    LoadedContext {
+        tools,
+        skills: (*loaded_skills).clone(),
+        agents,
+        custom_tool_count,
     }
+}
+
+// ── Event-loop handlers ──────────────────────────────────────────────────
+
+fn handle_reload_context(
+    app: &mut App,
+    file_tracker: &Arc<Mutex<FileTracker>>,
+    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+) {
+    let ctx = load_context(Some(app_event_tx), file_tracker);
+    let skills_count = ctx.skills.len();
+    let custom_count = ctx.custom_tool_count;
+    app.apply_loaded_context(ctx);
     app.push_notice(Message::assistant(format!(
         "[reloaded context: {} skill{}, {} custom tool{}]",
         skills_count,
@@ -748,35 +836,18 @@ async fn handle_reload_context(
     app.completion.available_models = None;
 }
 
-async fn handle_new_session(
+fn handle_new_session(
     app: &mut App,
     file_tracker: &Arc<Mutex<FileTracker>>,
     app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    cwd: &str,
 ) {
     file_tracker.lock().unwrap().reset();
     app.clear_session_state();
 
-    let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let custom_count = custom_tools.len();
-    let loaded_skills = Arc::new(skills::load_skills());
-    let tools = register_builtin_tools(
-        Some(app_event_tx),
-        Arc::clone(file_tracker),
-        Arc::clone(&loaded_skills),
-        custom_tools,
-    )
-    .await;
-    let system_prompt = build_system_prompt(&tools, cwd, &loaded_skills, None);
-    let skills_count = loaded_skills.len();
-    app.agent_config.tools = tools;
-    app.agent_config.system_prompt = Some(system_prompt);
-    app.loaded_skills = (*loaded_skills).clone();
-    app.agents = load_agents();
-    if app.active_agent.is_some() && app.resolve_current_agent().is_none() {
-        app.active_agent = None;
-        app.rebuild_agent_system_prompt(cwd);
-    }
+    let ctx = load_context(Some(app_event_tx), file_tracker);
+    let skills_count = ctx.skills.len();
+    let custom_count = ctx.custom_tool_count;
+    app.apply_loaded_context(ctx);
     app.push_notice(Message::assistant(format!(
         "[new session: {} skill{}, {} custom tool{}]",
         skills_count,

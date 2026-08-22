@@ -1,6 +1,7 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
+    LoadedContext,
     agent::types::{AgentEvent, AskRequest, ToolResult},
     auth::LoginEvent,
     llm::ProviderError,
@@ -18,6 +19,8 @@ pub enum AppEvent {
         call_id: String,
         result: ToolResult,
     },
+    /// The deferred context load (tools, skills, agents) has completed.
+    ContextLoaded(LoadedContext),
 }
 
 pub type AppEventTx = UnboundedSender<AppEvent>;

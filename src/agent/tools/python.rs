@@ -29,13 +29,12 @@ impl PythonRuntime {
 }
 
 /// Run `<program> [args...]` and return trimmed stdout, or `None` on failure.
-async fn probe_version(program: &str, args: &[&str]) -> Option<String> {
-    let output = tokio::process::Command::new(program)
+fn probe_version(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .await
         .ok()?;
 
     if !output.status.success() {
@@ -66,16 +65,16 @@ fn major_version(raw: &str) -> Option<u32> {
 
 /// Detect the best available Python runtime.  Returns `None` if nothing usable
 /// is found.
-pub async fn detect_python() -> Option<PythonRuntime> {
+pub fn detect_python() -> Option<PythonRuntime> {
     // 1. Prefer uv.
-    if let Some(raw) = probe_version("uv", &["run", "python", "--version"]).await {
+    if let Some(raw) = probe_version("uv", &["run", "python", "--version"]) {
         let version = strip_python_prefix(&raw);
         log::debug!("python tool: detected uv with Python {version}");
         return Some(PythonRuntime::Uv { version });
     }
 
     // 2. Prefer `python` if it is Python 3+.
-    if let Some(raw) = probe_version("python", &["--version"]).await {
+    if let Some(raw) = probe_version("python", &["--version"]) {
         if major_version(&raw).unwrap_or(0) >= 3 {
             let version = strip_python_prefix(&raw);
             log::debug!("python tool: detected python ({version})");
@@ -88,7 +87,7 @@ pub async fn detect_python() -> Option<PythonRuntime> {
     }
 
     // 3. Fall back to `python3`.
-    if let Some(raw) = probe_version("python3", &["--version"]).await {
+    if let Some(raw) = probe_version("python3", &["--version"]) {
         let version = strip_python_prefix(&raw);
         log::debug!("python tool: detected python3 ({version})");
         return Some(PythonRuntime::Native {
