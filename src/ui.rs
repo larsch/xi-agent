@@ -923,6 +923,7 @@ mod tests {
                 session_id: String::new(),
             },
             DisplayConfig::default(),
+            crate::config::ThrobberConfig::default(),
         )
     }
 
@@ -1350,7 +1351,7 @@ mod tests {
                 .append_user_message(format!("user message {i:02}"), 0);
         }
         app.begin_agent_turn();
-        // Force the throbber visible immediately (skip the 240 ms hold-off).
+        // Force the throbber visible immediately for this layout test.
         app.agent_turn.activity_visible = true;
 
         let is_braille_line = |l: &str| {

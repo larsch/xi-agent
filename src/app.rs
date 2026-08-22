@@ -9,7 +9,7 @@ use crate::{
     app_event::{AppEvent, AppEventTx},
     auth::{self},
     completion::{self, CompletionItem},
-    config::DisplayConfig,
+    config::{DisplayConfig, ThrobberConfig},
     keybindings::{BindingContext, KEYBINDINGS},
     llm::{LlmProvider, Message, UsageStats},
     provider_instance::{ApiType, ProviderInstance},
@@ -159,7 +159,6 @@ pub struct App {
     pub(crate) theme: Theme,
     // ── Display thresholds ────────────────────────────────────────────────────
     pub(crate) display: DisplayConfig,
-
     // ── Mouse selection ───────────────────────────────────────────────────────
     pub(crate) mouse_select: MouseSelectState,
 }
@@ -174,7 +173,9 @@ impl App {
         initial_thinking: ThinkingLevel,
         agent_config: AgentLoopConfig,
         display: DisplayConfig,
+        throbber: ThrobberConfig,
     ) -> Self {
+        let throbber = throbber.normalized();
         let initial_model = initial_model.into();
         Self {
             textarea: Self::make_textarea(),
@@ -182,7 +183,7 @@ impl App {
             input_mode: InputMode::Chat,
             input_scroll: 0,
             log_view: LogViewState::new(),
-            agent_turn: AgentTurnState::new(),
+            agent_turn: AgentTurnState::new(throbber.clone()),
             provider: ProviderManager::new(initial_instance, initial_model, initial_thinking),
             agent_config,
             loaded_skills: Vec::new(),
@@ -1469,6 +1470,7 @@ mod tests {
                 session_id: String::new(),
             },
             crate::config::DisplayConfig::default(),
+            crate::config::ThrobberConfig::default(),
         )
     }
 

@@ -959,7 +959,7 @@ impl super::LlmProvider for TestProvider {
                 if self.write_edit_throbber.swap(false, Ordering::SeqCst) {
                     return Box::pin(stream! {
                         // Delay long enough for the edit_file result block to finish
-                        // rendering and the throbber to appear (240 ms idle threshold).
+                        // rendering and the throbber to appear (idle threshold).
                         sleep(Duration::from_secs(4)).await;
                         let summary = "write-edit sequence complete: wrote the file and edited it with 6 lines of context on each side.\n\
                                       (4 s delay inserted after edit to exercise throbber-after-shrink rendering.)\n";

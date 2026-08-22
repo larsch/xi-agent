@@ -1,7 +1,8 @@
 use crate::agent::types::AgentActivity;
 use crate::app::StreamingStatus;
+use crate::config::ThrobberConfig;
 use std::cell::Cell;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// How the rendered log changed during one draw preparation pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,9 @@ pub(crate) struct AgentTurnState {
     pub(crate) activity_visible: bool,
     /// Start of the current hidden-state hold-off.
     pub(crate) holdoff_started_at: Option<Instant>,
+    config: ThrobberConfig,
+    expected_interval_ms: f64,
+    last_growth_at: Option<Instant>,
     /// Generation of the current agent turn.
     turn_generation: u64,
     /// Track the last reported visible state so we only log transitions.
@@ -37,13 +41,17 @@ pub(crate) struct AgentTurnState {
 }
 
 impl AgentTurnState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(config: ThrobberConfig) -> Self {
+        let config = config.normalized();
         Self {
             status: None,
             tick: 0,
             activity: AgentActivity::ModelRequest,
             activity_visible: false,
             holdoff_started_at: None,
+            expected_interval_ms: config.low_confidence_target_ms as f64 / 2.0,
+            last_growth_at: None,
+            config,
             turn_generation: 0,
             last_reported_visible: Cell::new(None),
         }
@@ -71,8 +79,10 @@ impl AgentTurnState {
         self.turn_generation = self.turn_generation.wrapping_add(1);
         self.activity = AgentActivity::ModelRequest;
         self.status = Some(StreamingStatus::Waiting);
-        self.activity_visible = false;
-        self.holdoff_started_at = Some(Instant::now());
+        self.activity_visible = true;
+        self.holdoff_started_at = None;
+        self.expected_interval_ms = self.config.low_confidence_target_ms as f64 / 2.0;
+        self.last_growth_at = None;
     }
 
     /// Continue an active turn after a tool batch without resetting activity
@@ -84,8 +94,15 @@ impl AgentTurnState {
         self.activity = AgentActivity::ModelRequest;
         if !self.is_active() {
             self.status = Some(StreamingStatus::Waiting);
-            self.activity_visible = false;
-            self.holdoff_started_at = Some(Instant::now());
+            self.activity_visible = true;
+            self.holdoff_started_at = None;
+            self.expected_interval_ms = self.config.low_confidence_target_ms as f64;
+            self.last_growth_at = None;
+        } else {
+            self.activity_visible = true;
+            self.holdoff_started_at = None;
+            self.expected_interval_ms = self.config.low_confidence_target_ms as f64;
+            self.last_growth_at = None;
         }
     }
 
@@ -133,11 +150,26 @@ impl AgentTurnState {
             );
             return;
         }
+        if let Some(VisualUpdate::Delta(delta)) = update
+            && delta > 0
+        {
+            if let Some(previous) = self.last_growth_at {
+                let interval_ms = now.duration_since(previous).as_secs_f64() * 1000.0;
+                let lower = self.config.lower_bound_ms as f64;
+                let upper = self.config.upper_bound_ms as f64;
+                if (lower..=upper).contains(&interval_ms) {
+                    let alpha = self.config.alpha;
+                    self.expected_interval_ms =
+                        alpha * interval_ms + (1.0 - alpha) * self.expected_interval_ms;
+                }
+            }
+            self.last_growth_at = Some(now);
+        }
         if let Some(update) = update {
             match update {
                 VisualUpdate::Delta(delta)
-                    if anchor_padding != usize::MAX
-                        && delta > anchor_padding as isize
+                    if delta > 0
+                        && (anchor_padding == usize::MAX || delta > anchor_padding as isize)
                         && self.activity_visible =>
                 {
                     self.activity_visible = false;
@@ -150,10 +182,14 @@ impl AgentTurnState {
                 }
             }
         }
+        let timeout_ms = (2.0 * self.expected_interval_ms).clamp(
+            self.config.lower_bound_ms as f64,
+            self.config.upper_bound_ms as f64,
+        );
         if !self.activity_visible
-            && self
-                .holdoff_started_at
-                .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(240))
+            && self.holdoff_started_at.is_some_and(|started| {
+                now.duration_since(started).as_secs_f64() * 1000.0 >= timeout_ms
+            })
         {
             self.activity_visible = true;
             self.holdoff_started_at = None;
@@ -203,25 +239,19 @@ impl AgentTurnState {
 #[cfg(test)]
 mod tests {
     use super::{AgentTurnState, VisualUpdate};
+    use crate::config::ThrobberConfig;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn holdoff_expires_only_during_visual_state_update() {
-        let mut state = AgentTurnState::new();
+    fn request_starts_with_visible_throbber() {
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
-        assert!(!state.throbber_visible(false));
-
-        let now = Instant::now();
-        assert!(!state.throbber_visible(false));
-        state.update_visual_state(None, now + Duration::from_millis(239));
-        assert!(!state.throbber_visible(false));
-        state.update_visual_state(None, now + Duration::from_millis(241));
         assert!(state.throbber_visible(false));
     }
 
     #[test]
     fn visible_throbber_survives_non_growth_and_activity_changes() {
-        let mut state = AgentTurnState::new();
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
         let visible_at = Instant::now() + Duration::from_secs(1);
         state.update_visual_state(None, visible_at);
@@ -232,7 +262,7 @@ mod tests {
 
     #[test]
     fn tool_continuation_preserves_visible_throbber() {
-        let mut state = AgentTurnState::new();
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
         let visible_at = Instant::now() + Duration::from_millis(241);
         state.update_visual_state(None, visible_at);
@@ -245,17 +275,20 @@ mod tests {
 
     #[test]
     fn output_growth_hides_visible_throbber_and_restarts_holdoff() {
-        let mut state = AgentTurnState::new();
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
         let now = Instant::now();
-        state.update_visual_state(None, now + Duration::from_millis(241));
         assert!(state.throbber_visible(false));
 
-        state.update_visual_state_with_padding(Some(VisualUpdate::Delta(1)), 0, now);
+        state.update_visual_state_with_padding(
+            Some(VisualUpdate::Delta(1)),
+            0,
+            now + Duration::from_millis(1),
+        );
         assert!(!state.throbber_visible(false));
-        state.update_visual_state(None, now + Duration::from_millis(239));
+        state.update_visual_state(None, now + Duration::from_millis(1_999));
         assert!(!state.throbber_visible(false));
-        state.update_visual_state(None, now + Duration::from_millis(241));
+        state.update_visual_state(None, now + Duration::from_millis(2_001));
         assert!(state.throbber_visible(false));
     }
 }
