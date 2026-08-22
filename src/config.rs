@@ -52,6 +52,57 @@ impl Default for DisplayConfig {
     }
 }
 
+/// Timing controls for the model-response throbber.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ThrobberConfig {
+    #[serde(default = "ThrobberConfig::default_lower_bound_ms")]
+    pub lower_bound_ms: u64,
+    #[serde(default = "ThrobberConfig::default_upper_bound_ms")]
+    pub upper_bound_ms: u64,
+    #[serde(default = "ThrobberConfig::default_low_confidence_target_ms")]
+    pub low_confidence_target_ms: u64,
+    #[serde(default = "ThrobberConfig::default_alpha")]
+    pub alpha: f64,
+}
+
+impl ThrobberConfig {
+    const fn default_lower_bound_ms() -> u64 {
+        480
+    }
+    const fn default_upper_bound_ms() -> u64 {
+        4000
+    }
+    const fn default_low_confidence_target_ms() -> u64 {
+        2000
+    }
+    const fn default_alpha() -> f64 {
+        0.2
+    }
+
+    /// Return safe effective values while preserving a usable interval.
+    pub fn normalized(&self) -> Self {
+        let lower = self.lower_bound_ms.max(1);
+        let upper = self.upper_bound_ms.max(lower);
+        Self {
+            lower_bound_ms: lower,
+            upper_bound_ms: upper,
+            low_confidence_target_ms: self.low_confidence_target_ms.clamp(lower, upper),
+            alpha: self.alpha.clamp(0.0, 1.0),
+        }
+    }
+}
+
+impl Default for ThrobberConfig {
+    fn default() -> Self {
+        Self {
+            lower_bound_ms: Self::default_lower_bound_ms(),
+            upper_bound_ms: Self::default_upper_bound_ms(),
+            low_confidence_target_ms: Self::default_low_confidence_target_ms(),
+            alpha: Self::default_alpha(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct XiConfig {
     /// Path to the theme file. Overridden by the `--theme` CLI flag.
@@ -59,6 +110,9 @@ pub struct XiConfig {
     /// UI display thresholds.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Model-response throbber timing.
+    #[serde(default)]
+    pub throbber: ThrobberConfig,
 
     /// The id of the currently active provider instance.
     pub provider: Option<String>,
@@ -253,7 +307,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HookIpcConfig, XiConfig, save_config};
+    use super::{HookIpcConfig, ThrobberConfig, XiConfig, save_config};
     use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
 
     // ── Instance-format config tests ─────────────────────────────────────────
@@ -600,5 +654,34 @@ endpoint = "custom-endpoint"
             cfg.hook_ipc.effective_endpoint(),
             HookIpcConfig::default_endpoint()
         );
+    }
+
+    #[test]
+    fn throbber_defaults_and_round_trip() {
+        let cfg = XiConfig::from_toml_str(
+            "[throbber]\nlower_bound_ms = 600\nupper_bound_ms = 5000\nlow_confidence_target_ms = 2200\nalpha = 0.35\n",
+        )
+        .expect("config parses");
+        assert_eq!(cfg.throbber.lower_bound_ms, 600);
+        assert_eq!(cfg.throbber.alpha, 0.35);
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let round_trip = XiConfig::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(round_trip.throbber.upper_bound_ms, 5000);
+        assert_eq!(round_trip.throbber.low_confidence_target_ms, 2200);
+    }
+
+    #[test]
+    fn throbber_normalization_clamps_invalid_values() {
+        let cfg = ThrobberConfig {
+            lower_bound_ms: 0,
+            upper_bound_ms: 0,
+            low_confidence_target_ms: 0,
+            alpha: 2.0,
+        }
+        .normalized();
+        assert_eq!(cfg.lower_bound_ms, 1);
+        assert_eq!(cfg.upper_bound_ms, 1);
+        assert_eq!(cfg.low_confidence_target_ms, 1);
+        assert_eq!(cfg.alpha, 1.0);
     }
 }

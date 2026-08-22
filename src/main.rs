@@ -302,6 +302,7 @@ async fn main() -> io::Result<()> {
             session_id: String::new(),
         },
         config.display.clone(),
+        config.throbber.clone(),
     );
     app.theme = theme;
 
