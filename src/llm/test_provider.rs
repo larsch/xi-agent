@@ -212,6 +212,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `emoji` | Show emoji alignment test for all tool label glyphs |
 | `echo <text>` | Stream text back token by token |
 | `slow <text>` | Stream text with artificial delays |
+| `stream-lines <seconds>` | Stream 10 numbered lines with the given delay between each |
 | `thinking <text>` | Emit thinking tokens then a text answer |
 | `status <msg>` | Emit a `StatusUpdate` event then confirm |
 | `error` | Emit a provider error |
@@ -1045,6 +1046,27 @@ impl super::LlmProvider for TestProvider {
                 })
             }
 
+            "stream-lines" => {
+                // Stream 10 numbered lines, sleeping `interval` seconds between
+                // each. `rest` is the interval as a float (e.g. "0.5").
+                let interval = rest
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && *s >= 0.0)
+                    .unwrap_or(0.5);
+                let duration = Duration::from_secs_f64(interval);
+                Box::pin(stream! {
+                    for i in 1..=10 {
+                        sleep(duration).await;
+                        yield LlmEvent::Token {
+                            text: format!("- line {i}/10\n"),
+                            phase: AssistantPhase::Final,
+                        };
+                    }
+                    yield LlmEvent::Done;
+                })
+            }
+
             "thinking" => {
                 let answer = if rest.is_empty() {
                     "Thinking complete.".to_string()
@@ -1415,6 +1437,32 @@ mod tests {
             .rposition(|e| matches!(e, LlmEvent::ToolCall { .. }))
             .expect("expected a ToolCall");
         assert!(last_call_idx < done_idx, "all tool calls must precede Done");
+    }
+
+    #[tokio::test]
+    async fn stream_lines_command_emits_ten_lines() {
+        let provider = TestProvider::new();
+        let events: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![Message::user("stream-lines 0")],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+
+        let tokens: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::Token { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(tokens.len(), 10, "expected exactly ten lines");
+        for (i, t) in tokens.iter().enumerate() {
+            assert_eq!(t, &format!("- line {}/10\n", i + 1));
+        }
+        assert!(events.iter().any(|e| matches!(e, LlmEvent::Done)));
     }
 
     #[tokio::test]
