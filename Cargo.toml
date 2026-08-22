@@ -10,6 +10,12 @@ keywords = ["ai", "agent", "terminal", "llm", "cli"]
 categories = ["command-line-utilities"]
 exclude = [".github/", "docs/", "AGENTS.md"]
 
+[features]
+default = []
+# Enables the `restart_host` tool, which re-execs the running binary after a
+# rebuild and resumes the active session. Unix-only.
+restart = []
+
 [[bin]]
 name = "xi"
 path = "src/main.rs"

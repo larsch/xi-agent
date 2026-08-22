@@ -146,6 +146,16 @@ pub struct App {
     /// turn overlay, and pending event buffer.
     pub(crate) session: Tracked<SessionManager>,
 
+    // ── Restart (feature-gated) ──────────────────────────────────────────────
+    /// Set when the `restart_host` tool requests a process restart; the main loop
+    /// checks this to shut down and re-exec.
+    #[cfg(feature = "restart")]
+    pub(crate) pending_restart: bool,
+    /// Set on resume when a pending `restart_host` call was completed; the main
+    /// loop checks this to auto-continue the turn once the provider is ready.
+    #[cfg(feature = "restart")]
+    pub(crate) pending_restart_continue: bool,
+
     // ── Ask-user interaction state ──────────────────────────────────────────
     pub(crate) ask_user: AskUserState,
 
@@ -198,6 +208,10 @@ impl App {
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
             runtime: AgentRuntime::new(),
+            #[cfg(feature = "restart")]
+            pending_restart: false,
+            #[cfg(feature = "restart")]
+            pending_restart_continue: false,
             step_back: StepBackState::default(),
             theme: Theme::default(),
             display,
@@ -555,6 +569,47 @@ impl App {
             }
         }
         self.refresh_resume_availability();
+    }
+
+    /// Complete a pending `restart_host` call after a resume.
+    ///
+    /// When the resumed event log ends with an unanswered `restart_host`
+    /// `ToolCall` (i.e. the previous process was replaced before producing its
+    /// result), synthesize the success result — `Restarted from binary <path>
+    /// last modified at <timestamp>` — and append it so the agent loop can
+    /// continue the turn.  Returns `true` if a result was appended; idempotent
+    /// (returns `false` when the last event is not an unanswered `restart_host`
+    /// call, so a second resume does not double-append).
+    #[cfg(feature = "restart")]
+    pub fn complete_pending_restart(&mut self) -> bool {
+        let Some(ss) = self.session.session_state.as_mut() else {
+            return false;
+        };
+
+        let restart_id = match ss.events().last() {
+            Some(SessionEvent::ToolCall { id, name, .. })
+                if name == crate::restart::RESTART_TOOL_NAME =>
+            {
+                id.clone()
+            }
+            _ => return false,
+        };
+
+        let content = crate::restart::restart_message();
+        let ev = SessionEvent::ToolResult {
+            id: restart_id,
+            name: crate::restart::RESTART_TOOL_NAME.to_string(),
+            content,
+            is_error: false,
+            display_range: None,
+            include_in_llm: true,
+            timestamp: Self::now_ts(),
+        };
+        if let Err(e) = ss.append_immediate(ev) {
+            log::debug!("failed to append restart_host result: {e}");
+            return false;
+        }
+        true
     }
 
     /// Scan session events for the last known token usage data.
@@ -3442,6 +3497,66 @@ mod tests {
         // Keep tempdir alive inside app so the path is valid for the test duration.
         // We don't need the store for these unit tests.
         app
+    }
+
+    #[cfg(feature = "restart")]
+    #[test]
+    fn complete_pending_restart_synthesizes_result_and_is_idempotent() {
+        let call = crate::session_event::SessionEvent::ToolCall {
+            id: "call_restart".to_string(),
+            name: crate::restart::RESTART_TOOL_NAME.to_string(),
+            args: serde_json::json!({}),
+            include_in_llm: true,
+            timestamp: ts(),
+        };
+        let mut app = make_app_with_events(vec![user_ev("restart me"), call]);
+
+        assert!(
+            app.complete_pending_restart(),
+            "should complete a pending restart"
+        );
+
+        let events = app.session.session_state.as_ref().unwrap().events();
+        assert_eq!(events.len(), 3, "user + call + result");
+        match events.last().unwrap() {
+            crate::session_event::SessionEvent::ToolResult {
+                id,
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                assert_eq!(id, "call_restart");
+                assert_eq!(name, crate::restart::RESTART_TOOL_NAME);
+                assert!(!is_error);
+                assert!(
+                    content.starts_with("Restarted from binary "),
+                    "content: {content}"
+                );
+                assert!(content.contains(" last modified at "), "content: {content}");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        // Idempotent: a second call is a no-op.
+        assert!(
+            !app.complete_pending_restart(),
+            "second call should be a no-op"
+        );
+        let events = app.session.session_state.as_ref().unwrap().events();
+        assert_eq!(events.len(), 3, "no extra event should be appended");
+    }
+
+    #[cfg(feature = "restart")]
+    #[test]
+    fn complete_pending_restart_noops_without_trailing_restart_call() {
+        let mut app = make_app_with_events(vec![user_ev("hi"), assistant_ev("hello")]);
+        assert!(!app.complete_pending_restart());
+        assert_eq!(
+            app.session.session_state.as_ref().unwrap().events().len(),
+            2,
+            "no event should be appended"
+        );
     }
 
     fn ts() -> u64 {
