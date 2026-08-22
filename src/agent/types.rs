@@ -529,6 +529,8 @@ pub enum AgentEvent {
     /// A tool call finished; contains the result.
     ToolCallEnd { id: String, result: ToolResult },
     // ── Loop lifecycle ─────────────────────────────────────────────────────────
+    /// The agent is starting one model invocation.
+    TurnStart { continuation: bool },
     /// One or more tracked files were modified externally before this turn.
     /// `notification` is the pre-formatted user message text that was injected
     /// into the conversation history; `paths` lists the affected files.

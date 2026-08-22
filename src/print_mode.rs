@@ -239,6 +239,7 @@ async fn run_print_mode_loop(
             }
             AgentEvent::ToolOutputChunk { .. } => {}
             AgentEvent::ActivityChanged(_) => {}
+            AgentEvent::TurnStart { .. } => {}
             AgentEvent::TurnEnd => {}
             AgentEvent::ExternalFileChange { paths, .. } => {
                 for path in &paths {
@@ -369,6 +370,7 @@ async fn run_print_mode_loop_inner(
             | AgentEvent::ToolCallIntent { .. }
             | AgentEvent::ToolCallArgsDelta { .. }
             | AgentEvent::SteeringConsumed { .. }
+            | AgentEvent::TurnStart { .. }
             | AgentEvent::TurnEnd => {}
             AgentEvent::StatusUpdate(msg) => {
                 eprintln!("{msg}");

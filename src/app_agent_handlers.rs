@@ -77,6 +77,7 @@ impl App {
     pub fn apply_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::ActivityChanged(activity) => self.agent_turn.set_activity(activity),
+            AgentEvent::TurnStart { continuation } => self.on_turn_start(continuation),
             AgentEvent::ThinkingToken(token) => self.on_thinking_token(token),
             AgentEvent::Usage(usage) => self.on_usage(usage),
             AgentEvent::TextToken { text, phase } => self.on_text_token(text, phase),
@@ -106,6 +107,7 @@ impl App {
     }
 
     fn on_thinking_token(&mut self, token: String) {
+        self.agent_turn.record_chunk(std::time::Instant::now());
         self.session
             .live_turn
             .assistant_thinking
@@ -158,6 +160,7 @@ impl App {
     }
 
     fn on_text_token(&mut self, text: String, phase: AssistantPhase) {
+        self.agent_turn.record_chunk(std::time::Instant::now());
         self.session.live_turn.assistant_content.push_str(&text);
         if phase != AssistantPhase::Unknown {
             self.session.live_turn.assistant_phase = phase;
@@ -439,21 +442,18 @@ impl App {
         self.append_user_message(notification);
     }
 
-    fn on_turn_end(&mut self) {
-        // TurnEnd is emitted both after a final answer and after a tool batch.
-        // The latter is a continuation of the active turn: preserve a
-        // throbber that became visible while the tool was running instead of
-        // restarting the new-turn hold-off.
-        let continuing_after_tool = self
-            .session
-            .pending_turn_events
-            .last()
-            .is_some_and(|event| matches!(event, SessionEvent::ToolResult { .. }));
-        if continuing_after_tool {
+    fn on_turn_start(&mut self, continuation: bool) {
+        if continuation {
             self.continue_agent_turn_after_tool();
-        } else {
-            self.begin_agent_turn();
+        } else if !self.agent_turn.is_active() {
+            self.agent_turn.start();
+            self.log_view.begin_turn(self.agent_turn.turn_generation());
         }
+    }
+
+    fn on_turn_end(&mut self) {
+        // TurnStart explicitly manages model-invocation state. TurnEnd only
+        // finalizes the completed response; Done ends the overall loop.
         // Finalise the assistant message in the pending buffer before
         // flushing, using the current in-memory messages state.
         self.finalise_assistant_turn_event();

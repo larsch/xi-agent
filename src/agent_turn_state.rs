@@ -49,7 +49,7 @@ impl AgentTurnState {
             activity: AgentActivity::ModelRequest,
             activity_visible: false,
             holdoff_started_at: None,
-            expected_interval_ms: config.low_confidence_target_ms as f64 / 2.0,
+            expected_interval_ms: config.low_confidence_target_ms as f64,
             last_growth_at: None,
             config,
             turn_generation: 0,
@@ -81,7 +81,7 @@ impl AgentTurnState {
         self.status = Some(StreamingStatus::Waiting);
         self.activity_visible = true;
         self.holdoff_started_at = None;
-        self.expected_interval_ms = self.config.low_confidence_target_ms as f64 / 2.0;
+        self.expected_interval_ms = self.config.low_confidence_target_ms as f64;
         self.last_growth_at = None;
     }
 
@@ -128,6 +128,31 @@ impl AgentTurnState {
         self.status = status;
     }
 
+    /// Record one streamed chunk and restart the hidden hold-off.
+    ///
+    /// Chunk timing is deliberately separate from renderer layout timing:
+    /// several chunks can update an existing rendered line without producing a
+    /// positive line delta.
+    pub(crate) fn record_chunk(&mut self, now: Instant) {
+        if !self.is_active() {
+            return;
+        }
+        if let Some(previous) = self.last_growth_at {
+            let interval_ms = now.duration_since(previous).as_secs_f64() * 1000.0;
+            let lower = self.config.lower_bound_ms as f64;
+            let upper = self.config.upper_bound_ms as f64;
+            if (lower..=upper).contains(&interval_ms) {
+                let alpha = self.config.alpha;
+                self.expected_interval_ms =
+                    alpha * interval_ms + (1.0 - alpha) * self.expected_interval_ms;
+            }
+        }
+        self.last_growth_at = Some(now);
+        if !self.activity_visible {
+            self.holdoff_started_at = Some(now);
+        }
+    }
+
     /// Apply one renderer-confirmed visual update and poll the hidden hold-off.
     pub(crate) fn update_visual_state(&mut self, update: Option<VisualUpdate>, now: Instant) {
         self.update_visual_state_with_padding(update, usize::MAX, now);
@@ -149,21 +174,6 @@ impl AgentTurnState {
                 "visual update ignored: inactive update={update:?} visible={before_visible}"
             );
             return;
-        }
-        if let Some(VisualUpdate::Delta(delta)) = update
-            && delta > 0
-        {
-            if let Some(previous) = self.last_growth_at {
-                let interval_ms = now.duration_since(previous).as_secs_f64() * 1000.0;
-                let lower = self.config.lower_bound_ms as f64;
-                let upper = self.config.upper_bound_ms as f64;
-                if (lower..=upper).contains(&interval_ms) {
-                    let alpha = self.config.alpha;
-                    self.expected_interval_ms =
-                        alpha * interval_ms + (1.0 - alpha) * self.expected_interval_ms;
-                }
-            }
-            self.last_growth_at = Some(now);
         }
         if let Some(update) = update {
             match update {
@@ -253,7 +263,7 @@ mod tests {
     fn visible_throbber_survives_non_growth_and_activity_changes() {
         let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
-        let visible_at = Instant::now() + Duration::from_secs(1);
+        let visible_at = Instant::now() + Duration::from_millis(4_001);
         state.update_visual_state(None, visible_at);
         state.set_activity(crate::agent::types::AgentActivity::LocalWork);
         state.update_visual_state(Some(VisualUpdate::Delta(0)), visible_at);
@@ -264,7 +274,7 @@ mod tests {
     fn tool_continuation_preserves_visible_throbber() {
         let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
-        let visible_at = Instant::now() + Duration::from_millis(241);
+        let visible_at = Instant::now() + Duration::from_millis(4_001);
         state.update_visual_state(None, visible_at);
         assert!(state.throbber_visible(false));
 
@@ -278,6 +288,7 @@ mod tests {
         let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
         let now = Instant::now();
+        state.update_visual_state(None, now + Duration::from_millis(4_001));
         assert!(state.throbber_visible(false));
 
         state.update_visual_state_with_padding(
@@ -286,9 +297,44 @@ mod tests {
             now + Duration::from_millis(1),
         );
         assert!(!state.throbber_visible(false));
-        state.update_visual_state(None, now + Duration::from_millis(1_999));
+        state.update_visual_state(None, now + Duration::from_millis(3_999));
         assert!(!state.throbber_visible(false));
-        state.update_visual_state(None, now + Duration::from_millis(2_001));
+        state.update_visual_state(None, now + Duration::from_millis(4_001));
+        assert!(state.throbber_visible(false));
+    }
+
+    #[test]
+    fn regular_growth_keeps_throbber_hidden_after_interval_estimation() {
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
+        state.start();
+        let now = Instant::now();
+
+        for i in 0..40 {
+            state.record_chunk(now + Duration::from_millis(i * 100));
+            if i == 0 {
+                state.update_visual_state_with_padding(Some(VisualUpdate::Delta(1)), 0, now);
+            }
+            assert!(!state.throbber_visible(false));
+        }
+    }
+
+    #[test]
+    fn regular_content_updates_reset_holdoff_and_update_interval() {
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
+        state.start();
+        let now = Instant::now();
+
+        state.update_visual_state(Some(VisualUpdate::Delta(1)), now);
+        assert!(!state.throbber_visible(false));
+        state.record_chunk(now + Duration::from_millis(600));
+        state.record_chunk(now + Duration::from_millis(1_200));
+        state.record_chunk(now + Duration::from_millis(1_800));
+
+        // A chunk resets the holdoff. It must not expire based on the
+        // original hide time while chunks continue to arrive.
+        state.update_visual_state(None, now + Duration::from_millis(4_700));
+        assert!(!state.throbber_visible(false));
+        state.update_visual_state(None, now + Duration::from_millis(5_000));
         assert!(state.throbber_visible(false));
     }
 }

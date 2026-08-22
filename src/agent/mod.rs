@@ -557,6 +557,7 @@ pub async fn run_agent_loop(
         return;
     }
 
+    let mut continuing_turn = false;
     loop {
         // ── Cancellation check ────────────────────────────────────────────────
         let cancel_level = *cancel_rx.borrow();
@@ -657,6 +658,10 @@ pub async fn run_agent_loop(
         .await;
 
         // ── Stream assistant turn ─────────────────────────────────────────────
+        tx.send_ignore(AppEvent::Agent(AgentEvent::TurnStart {
+            continuation: continuing_turn,
+        }));
+        continuing_turn = false;
         tx.send_ignore(AppEvent::Agent(AgentEvent::ActivityChanged(
             AgentActivity::ModelRequest,
         )));
@@ -891,6 +896,7 @@ pub async fn run_agent_loop(
 
                 config.file_tracker.lock().unwrap().refresh_baselines();
                 tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));
+                continuing_turn = true;
 
                 // ── Post-turn hook (tool calls) ──────────────────────────────
                 config.hook_ipc.publish(
