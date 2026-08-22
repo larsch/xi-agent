@@ -213,6 +213,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `echo <text>` | Stream text back token by token |
 | `slow <text>` | Stream text with artificial delays |
 | `stream-lines <seconds>` | Stream 10 numbered lines with the given delay between each |
+| `stream-thinking <interval>` | Stream thinking tokens for 10 seconds at the given interval |
 | `thinking <text>` | Emit thinking tokens then a text answer |
 | `status <msg>` | Emit a `StatusUpdate` event then confirm |
 | `error` | Emit a provider error |
@@ -1067,6 +1068,35 @@ impl super::LlmProvider for TestProvider {
                 })
             }
 
+            "stream-thinking" => {
+                // Stream simulated thinking tokens for 10 seconds, emitting one
+                // token every `interval` seconds (float). `rest` is the interval.
+                let interval = rest
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && *s > 0.0)
+                    .unwrap_or(0.25);
+                let tick = Duration::from_secs_f64(interval);
+                let total = Duration::from_secs(10);
+                Box::pin(stream! {
+                    let start = tokio::time::Instant::now();
+                    let mut n = 0u64;
+                    loop {
+                        let elapsed = start.elapsed();
+                        if elapsed >= total {
+                            break;
+                        }
+                        n += 1;
+                        yield LlmEvent::ThinkingToken(format!(
+                            "thinking {n} ({:.2}s) ",
+                            elapsed.as_secs_f64()
+                        ));
+                        sleep(tick).await;
+                    }
+                    yield LlmEvent::Done;
+                })
+            }
+
             "thinking" => {
                 let answer = if rest.is_empty() {
                     "Thinking complete.".to_string()
@@ -1463,6 +1493,17 @@ mod tests {
             assert_eq!(t, &format!("- line {}/10\n", i + 1));
         }
         assert!(events.iter().any(|e| matches!(e, LlmEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn stream_thinking_command_emits_thinking_tokens() {
+        let provider = TestProvider::new();
+        let mut stream = std::pin::pin!(provider.stream_chat(
+            vec![Message::user("stream-thinking 0.001")],
+            LlmRequestContext::default(),
+        ));
+        let first = stream.next().await;
+        assert!(matches!(first, Some(LlmEvent::ThinkingToken(_))));
     }
 
     #[tokio::test]
