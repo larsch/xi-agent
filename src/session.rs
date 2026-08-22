@@ -114,10 +114,63 @@ impl SessionStore {
 
     pub fn latest_for_cwd(&self, cwd: &str) -> Option<SessionMeta> {
         let needle = normalize_cwd_for_match(cwd);
-        self.list_sessions()
-            .into_iter()
-            .filter(|s| normalize_cwd_for_match(&s.cwd) == needle && s.message_count > 0)
-            .max_by_key(|s| (s.updated_at_ms, s.created_at_ms, s.id.clone()))
+
+        // Cheap scan: only directory entries + file metadata. Session files are
+        // JSONL of non-empty message lines, so `len > 0` means the session has
+        // at least one message (an empty file was created but never written).
+        // This avoids the full-content reads that `list_sessions` performs, so
+        // the startup resume-availability check stays fast regardless of how
+        // much session history has accumulated.
+        let mut best: Option<(i64, i64, String, String)> = None;
+        let entries = self.collect_session_files().ok()?;
+        for (path, file_cwd) in entries {
+            let Some(decoded_cwd) = file_cwd else {
+                continue;
+            };
+            if normalize_cwd_for_match(&decoded_cwd) != needle {
+                continue;
+            }
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.len() == 0 {
+                continue;
+            }
+            let Some(id) = session_id_from_path(&path) else {
+                continue;
+            };
+            let file_updated = file_modified_at_ms(&path);
+            let created = session_id_created_at_ms(&id);
+            let updated = file_updated
+                .zip(created)
+                .map(|(f, i)| f.max(i))
+                .or(file_updated)
+                .or(created)
+                .unwrap_or_else(|| Utc::now().timestamp_millis());
+            let created = created.unwrap_or(updated);
+
+            let candidate = (updated, created, id, decoded_cwd);
+            let is_newer = match &best {
+                Some(current) => {
+                    (candidate.0, candidate.1, &candidate.2) > (current.0, current.1, &current.2)
+                }
+                None => true,
+            };
+            if is_newer {
+                best = Some(candidate);
+            }
+        }
+
+        best.map(|(updated, created, id, cwd)| SessionMeta {
+            id,
+            cwd,
+            created_at_ms: created,
+            updated_at_ms: updated,
+            // Only used as an "a resumable session exists" sentinel by callers;
+            // the exact count is computed lazily by `list_sessions`.
+            message_count: 1,
+            first_prompt: None,
+        })
     }
 
     fn write_session_messages(&self, path: &Path, messages: &[Message]) -> anyhow::Result<()> {
