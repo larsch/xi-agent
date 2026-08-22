@@ -131,6 +131,10 @@ struct Cli {
     )]
     prompt_file: Option<std::path::PathBuf>,
 
+    /// Auto-resume the most recent session for the current working directory.
+    #[arg(long)]
+    resume: bool,
+
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
     print_dirs: bool,
@@ -369,6 +373,9 @@ async fn main() -> io::Result<()> {
 
     app.init_session_persistence(cwd.clone());
     timer.mark("init_session_persistence");
+    if cli.resume {
+        app.resume_latest_for_current_cwd();
+    }
     if !initial_session_events.is_empty() {
         let session_id = app.session.ensure_session_id();
         if let Some(store) = app.session.session_store.as_ref()
