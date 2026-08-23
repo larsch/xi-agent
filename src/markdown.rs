@@ -658,14 +658,35 @@ pub fn render_with_theme(
             }
 
             Event::Start(Tag::CodeBlock(_)) => {
+                // A fenced block can occur after the paragraph in a list item.
+                // Flush that paragraph before emitting code lines; otherwise
+                // the code block is pushed directly to `out` while the item
+                // text remains buffered and is rendered after the block.
+                if in_list_item && !inline_spans.is_empty() {
+                    let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
+                    let item_prefix = current_ordered_item_prefix(
+                        &ancestor_indent,
+                        &list_stack,
+                        &list_item_counters,
+                    );
+                    let p = if list_item_first_para_done {
+                        " ".repeat(item_prefix.len())
+                    } else {
+                        item_prefix
+                    };
+                    flush_inline!(&p);
+                    list_item_first_para_done = true;
+                }
                 in_code_block = true;
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                // No explicit blank here: pulldown-cmark includes the trailing
-                // '\n' in the code-block Text event, and the split loop
-                // preserves it as an empty line.  Adding another blank would
-                // create a double gap.
+                // Separate the code block from the following block. The
+                // trailing newline in the Text event is not itself a blank
+                // line, so this is the single intentional separator.
+                if !in_list_item {
+                    out.push(Line::default());
+                }
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
@@ -806,7 +827,17 @@ pub fn render_with_theme(
                     // includes the newline).  Render with 2-space indent, hard-wrapping
                     // lines that exceed the available width.
                     let code_style = Style::default().fg(code_fg);
-                    for line in text.split('\n') {
+                    let text_lines: Vec<&str> = text.split('\n').collect();
+                    for (line_index, line) in text_lines.iter().enumerate() {
+                        let line = *line;
+                        // pulldown-cmark may split a code block into several
+                        // Text events, each ending in `\\n`. The empty item
+                        // produced by that event-local trailing newline is
+                        // not a blank line in the source; only preserve empty
+                        // lines before the final item of an event.
+                        if line.is_empty() && line_index == text_lines.len() - 1 {
+                            continue;
+                        }
                         if line.is_empty() {
                             // Preserve blank lines inside code blocks.
                             // Use Line::default() so the dedup/trailing-blank
@@ -1243,6 +1274,33 @@ mod tests {
         let md = "- Alpha\n\n- Beta\n\n- Gamma";
         let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
         assert_eq!(texts, vec!["• Alpha", "• Beta", "• Gamma"]);
+    }
+
+    #[test]
+    fn code_blocks_in_list_items_follow_item_text() {
+        let md = r#"- Rust example:
+  ```rust
+  let greeting = "hello";
+  ```
+- JSON example:
+  ```json
+  {
+    "nested": true
+  }
+  ```"#;
+        let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
+
+        assert_eq!(
+            texts,
+            vec![
+                "• Rust example:",
+                "  let greeting = \"hello\";",
+                "• JSON example:",
+                "  {",
+                "    \"nested\": true",
+                "  }",
+            ]
+        );
     }
 
     #[test]

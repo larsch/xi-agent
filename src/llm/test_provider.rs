@@ -119,6 +119,27 @@ fn main() {
 }
 ```
 
+## Lists with preformatted blocks
+
+The list below combines bullet items with fenced code blocks. This exercises the indentation and spacing required when preformatted content appears inside a list item.
+
+- Rust example:
+  ```rust
+  let greeting = "hello from a list item";
+  println!("{greeting}");
+  ```
+- JSON example:
+  ```json
+  {
+    "nested": true,
+    "inside": "a bullet item"
+  }
+  ```
+- Shell example:
+  ```bash
+  printf 'preformatted output\\n'
+  ```
+
 ## Blockquote
 
 > The test provider exists so you can exercise the xi-agent UI without burning real tokens or requiring authentication. It simulates every kind of LLM event — text tokens, thinking tokens, tool calls, status updates, and errors — through a simple command interface.
