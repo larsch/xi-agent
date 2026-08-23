@@ -114,7 +114,22 @@ pub(crate) fn suspend_interactive_ui(
         Show
     )?;
 
-    let pid = std::process::id() as i32;
+    // Tokio installs a SIGTSTP handler while the event loop is running. Restore
+    // the native default action before re-raising the signal so the kernel stops
+    // us as an interactive job, allowing the shell to resume us with `fg`.
+    // SAFETY: `action` is initialized with a valid empty signal mask and the
+    // default SIGTSTP disposition before it is passed to libc.
+    let rc = unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTSTP, &action, std::ptr::null_mut())
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let pid = std::process::id() as libc::pid_t;
     // SAFETY: sends SIGTSTP to the current process so the parent shell can resume it with fg.
     let rc = unsafe { libc::kill(pid, libc::SIGTSTP) };
     if rc != 0 {
