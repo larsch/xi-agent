@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.7.0 — 2026-08-23
+
+### Added
+
+- **Restart host tool**: the `restart_host` tool can re-exec the running binary after a rebuild and resume the active session when enabled with the `restart` feature.
+- **Resume option**: `--resume` now automatically resumes the latest session in the working directory.
+- **Streaming test commands**: `test-provider` now supports `stream-thinking` and `stream-lines` commands.
+
+### Changed
+
+- **Model activity lifecycle**: model turns now have explicit lifecycle handling in the UI.
+- **Model throbber timing**: the model activity indicator adapts its timeout to the stream cadence.
+
+### Fixed
+
+- **Terminal suspend**: the default SIGTSTP handler is restored before suspending, so Ctrl-Z works reliably.
+- **Markdown in lists**: fenced code blocks now render correctly inside list items.
+- **Log markers**: log margin markers are rendered consistently.
+
+### Performance
+
+- **Startup**: agent context loading now happens in the background.
+- **Resume checks**: checking for a resumable session avoids reading session files unnecessarily.
+
 ## v0.6.0 — 2026-08-16
 
 ### Added
