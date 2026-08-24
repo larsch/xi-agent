@@ -101,6 +101,9 @@ impl App {
                 notification,
             } => self.on_external_file_change(notification),
             AgentEvent::TurnEnd => self.on_turn_end(),
+            AgentEvent::FinalResponse { text } => {
+                crate::desktop_notification::notify_agent_loop_halt(&text)
+            }
             AgentEvent::Done => self.on_agent_done(),
             AgentEvent::Error(e) => self.on_agent_error(e),
         }

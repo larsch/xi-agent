@@ -540,6 +540,8 @@ pub enum AgentEvent {
     },
     /// One LLM turn (assistant response + any tool calls) is complete.
     TurnEnd,
+    /// The agent produced its final response and is about to stop.
+    FinalResponse { text: String },
     /// The agent loop finished successfully.
     Done,
     /// The agent loop encountered a fatal error from the LLM provider.

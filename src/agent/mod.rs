@@ -773,7 +773,7 @@ pub async fn run_agent_loop(
                 usage,
             } => {
                 session_events.push(SessionEvent::AssistantMessage {
-                    content: text,
+                    content: text.clone(),
                     thinking,
                     phase,
                     usage,
@@ -871,6 +871,7 @@ pub async fn run_agent_loop(
                     None,
                 )
                 .await;
+                tx.send_ignore(AppEvent::Agent(AgentEvent::FinalResponse { text }));
                 tx.send_ignore(AppEvent::Agent(AgentEvent::Done));
                 return;
             }
