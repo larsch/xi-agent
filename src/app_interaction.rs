@@ -775,6 +775,7 @@ impl App {
             reply,
         } = req;
 
+        crate::desktop_notification::notify_agent_loop_halt(&question);
         self.ask_user.pending = Some(PendingAsk {
             question,
             options: options.clone(),

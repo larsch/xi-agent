@@ -34,6 +34,7 @@ mod completion_state;
 mod config;
 mod context_window;
 mod debug_log;
+mod desktop_notification;
 mod dirs;
 mod event_log;
 mod export;

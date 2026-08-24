@@ -52,6 +52,7 @@ shlex = "1.3"
 jawohl = "0.1.0"
 csscolorparser = "0.8.3"
 interprocess = { version = "2", features = ["tokio"] }
+notify-rust = "4.11.7"
 
 # Pin native bracketed-paste support on Windows until it is released upstream.
 # Upstream tracking: https://github.com/crossterm-rs/crossterm/pull/1030

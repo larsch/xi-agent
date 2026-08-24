@@ -246,6 +246,9 @@ async fn run_print_mode_loop(
                     eprintln!("⚠️  {} was modified externally", path.display());
                 }
             }
+            AgentEvent::FinalResponse { .. } => {
+                // Desktop notifications are only emitted by the interactive UI.
+            }
             AgentEvent::Done => {
                 println!(); // final newline after streamed output
                 return 0;
@@ -409,6 +412,7 @@ async fn run_print_mode_loop_inner(
                     eprintln!("⚠️  {} was modified externally", path.display());
                 }
             }
+            AgentEvent::FinalResponse { .. } => {}
             AgentEvent::Done => {
                 println!();
                 return 0;
