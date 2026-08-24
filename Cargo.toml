@@ -53,6 +53,11 @@ jawohl = "0.1.0"
 csscolorparser = "0.8.3"
 interprocess = { version = "2", features = ["tokio"] }
 
+# Pin native bracketed-paste support on Windows until it is released upstream.
+# Upstream tracking: https://github.com/crossterm-rs/crossterm/pull/1030
+[patch.crates-io]
+crossterm = { git = "https://github.com/crossterm-rs/crossterm", rev = "11e491292c674d258c3469b9cb511201f63eb4ee" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
