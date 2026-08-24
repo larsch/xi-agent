@@ -9,7 +9,31 @@ use crossterm::{
     },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+#[cfg(windows)]
+use std::io::Write;
 use std::io::{self, ErrorKind};
+
+// Crossterm PR #1030 enables VT input on Windows, which makes Windows
+// Terminal/ConPTY deliver mouse input as VT sequences instead of Win32
+// MOUSE_EVENT records (https://github.com/microsoft/terminal/issues/15296).
+// Crossterm's Windows EnableMouseCapture still enables
+// only the Win32 path, so request VT mouse tracking as well. Keep the Win32
+// capture command for terminals such as conhost that continue to use it.
+#[cfg(windows)]
+const ENABLE_VT_MOUSE_CAPTURE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+#[cfg(windows)]
+const DISABLE_VT_MOUSE_CAPTURE: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+#[cfg(windows)]
+fn set_vt_mouse_capture(writer: &mut impl Write, enabled: bool) -> io::Result<()> {
+    let sequence = if enabled {
+        ENABLE_VT_MOUSE_CAPTURE
+    } else {
+        DISABLE_VT_MOUSE_CAPTURE
+    };
+    writer.write_all(sequence)?;
+    writer.flush()
+}
 
 /// Install a "last resort" signal guard that forces immediate exit if a
 /// second termination signal arrives while the primary cleanup path is
@@ -46,6 +70,8 @@ pub(crate) fn init_terminal(window_title: &str) -> io::Result<(Terminal<Backend>
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+    #[cfg(windows)]
+    set_vt_mouse_capture(&mut stdout, true)?;
 
     let mut keyboard_enhancements_enabled = false;
     match execute!(
@@ -74,6 +100,8 @@ pub(crate) fn shutdown_terminal(
     if keyboard_enhancements_enabled {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
+    #[cfg(windows)]
+    set_vt_mouse_capture(terminal.backend_mut(), false)?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
