@@ -56,6 +56,7 @@ impl App {
             )
         };
 
+        let python_repl = Arc::new(crate::agent::tools::python_repl::PythonReplSession::new());
         let config = AgentLoopConfig {
             tools,
             file_tracker: Arc::clone(&self.agent_config.file_tracker),
@@ -76,6 +77,7 @@ impl App {
                 ex.hook_ipc = self.agent_config.hook_ipc.clone();
                 ex.session_id = session_id.clone();
                 ex.cancel_rx = Some(cancel_rx.clone());
+                ex.python_repl = Some(Arc::clone(&python_repl));
                 ex
             }),
             system_prompt,

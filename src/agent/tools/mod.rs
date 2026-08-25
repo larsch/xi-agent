@@ -162,6 +162,7 @@ pub mod find;
 #[cfg(target_os = "windows")]
 pub mod powershell;
 pub mod python;
+pub mod python_repl;
 pub mod read;
 pub mod read_skill;
 #[cfg(feature = "restart")]
@@ -184,6 +185,7 @@ use find::FindTool;
 #[cfg(target_os = "windows")]
 use powershell::PowerShellTool;
 use python::PythonTool;
+use python_repl::PythonReplTool;
 use read::ReadFileTool;
 use read_skill::ReadSkillTool;
 #[cfg(feature = "restart")]
@@ -236,6 +238,11 @@ pub fn register_builtin_tools(
     // Detect and register the Python tool if a suitable runtime is available.
     if let Some(runtime) = python::detect_python() {
         tools.push(Arc::new(PythonTool::new(runtime)));
+    }
+    // The persistent REPL must use an already-installed interpreter; unlike
+    // the stateless uv tool, discovery must never provision a runtime.
+    if let Some(runtime) = python::detect_native_python() {
+        tools.push(Arc::new(PythonReplTool::new(runtime, python::detect_uv())));
     }
 
     for tool in tools {

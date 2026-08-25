@@ -263,6 +263,8 @@ pub struct ToolCallContext {
     /// When `Some`, tools can poll this to detect when the user has requested
     /// a hard abort or force kill.
     pub cancel_rx: Option<tokio::sync::watch::Receiver<CancelLevel>>,
+    /// Python REPL state scoped to the current agent loop.
+    pub python_repl: Option<Arc<crate::agent::tools::python_repl::PythonReplSession>>,
 }
 
 #[cfg(test)]
@@ -276,6 +278,7 @@ impl ToolCallContext {
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
             cancel_rx: None,
+            python_repl: None,
         }
     }
 }
@@ -326,6 +329,11 @@ pub type ToolRegistry = HashMap<String, Arc<dyn Tool>>;
 /// `Tool` trait directly, so test doubles can inject controlled behaviour
 /// without constructing shared-state wrappers.
 pub trait ToolExecutor: Send + Sync {
+    /// Release resources owned for the current agent loop.
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+
     /// Execute the named tool with the given arguments.
     ///
     /// `id` is the opaque call identifier (used for log-file keying).
@@ -365,6 +373,8 @@ pub struct DefaultToolExecutor {
     /// Optional cancellation receiver for mid-tool abort checks (passed to
     /// [`ToolCallContext`]).
     pub cancel_rx: Option<tokio::sync::watch::Receiver<CancelLevel>>,
+    /// Python REPL state owned by the current agent loop.
+    pub python_repl: Option<Arc<crate::agent::tools::python_repl::PythonReplSession>>,
 }
 
 impl DefaultToolExecutor {
@@ -377,6 +387,9 @@ impl DefaultToolExecutor {
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
             cancel_rx: None,
+            python_repl: Some(Arc::new(
+                crate::agent::tools::python_repl::PythonReplSession::new(),
+            )),
         }
     }
 
@@ -401,6 +414,14 @@ impl Default for DefaultToolExecutor {
 }
 
 impl ToolExecutor for DefaultToolExecutor {
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if let Some(session) = &self.python_repl {
+                session.shutdown().await;
+            }
+        })
+    }
+
     fn execute_tool<'a>(
         &'a self,
         id: &'a str,
@@ -429,6 +450,7 @@ impl ToolExecutor for DefaultToolExecutor {
                             hook_ipc: self.hook_ipc.clone(),
                             session_id: self.session_id.clone(),
                             cancel_rx: self.cancel_rx.clone(),
+                            python_repl: self.python_repl.clone(),
                         };
                         let r = tool.run(args.clone(), ctx).await;
                         let cmd_summary = args.get("command").and_then(|v| v.as_str());
