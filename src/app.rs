@@ -933,6 +933,7 @@ impl App {
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
             cancel_rx: None,
+            python_repl: None,
         };
 
         let selected_shell = self.shell.selected;

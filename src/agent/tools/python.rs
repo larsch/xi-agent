@@ -16,7 +16,7 @@ pub(crate) enum PythonRuntime {
 }
 
 impl PythonRuntime {
-    fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         match self {
             PythonRuntime::Uv { version } => version,
             PythonRuntime::Native { version, .. } => version,
@@ -63,17 +63,13 @@ fn major_version(raw: &str) -> Option<u32> {
     s.split('.').next()?.parse().ok()
 }
 
-/// Detect the best available Python runtime.  Returns `None` if nothing usable
-/// is found.
-pub fn detect_python() -> Option<PythonRuntime> {
-    // 1. Prefer uv.
-    if let Some(raw) = probe_version("uv", &["run", "python", "--version"]) {
-        let version = strip_python_prefix(&raw);
-        log::debug!("python tool: detected uv with Python {version}");
-        return Some(PythonRuntime::Uv { version });
-    }
+/// Return whether uv is installed and runnable.
+pub fn detect_uv() -> bool {
+    probe_version("uv", &["--version"]).is_some()
+}
 
-    // 2. Prefer `python` if it is Python 3+.
+/// Detect a native Python 3 runtime without downloading or installing one.
+pub fn detect_native_python() -> Option<PythonRuntime> {
     if let Some(raw) = probe_version("python", &["--version"]) {
         if major_version(&raw).unwrap_or(0) >= 3 {
             let version = strip_python_prefix(&raw);
@@ -86,7 +82,6 @@ pub fn detect_python() -> Option<PythonRuntime> {
         log::debug!("python tool: `python` is Python 2, skipping");
     }
 
-    // 3. Fall back to `python3`.
     if let Some(raw) = probe_version("python3", &["--version"]) {
         let version = strip_python_prefix(&raw);
         log::debug!("python tool: detected python3 ({version})");
@@ -96,8 +91,24 @@ pub fn detect_python() -> Option<PythonRuntime> {
         });
     }
 
-    log::debug!("python tool: no Python runtime found, tool not registered");
     None
+}
+
+/// Detect the best available Python runtime. Returns `None` if nothing usable
+/// is found.
+pub fn detect_python() -> Option<PythonRuntime> {
+    // Prefer uv for the stateless tool, which supports dependency installation.
+    if let Some(raw) = probe_version("uv", &["run", "python", "--version"]) {
+        let version = strip_python_prefix(&raw);
+        log::debug!("python tool: detected uv with Python {version}");
+        return Some(PythonRuntime::Uv { version });
+    }
+
+    let runtime = detect_native_python();
+    if runtime.is_none() {
+        log::debug!("python tool: no Python runtime found, tool not registered");
+    }
+    runtime
 }
 
 pub struct PythonTool {

@@ -506,6 +506,17 @@ pub async fn run_agent_loop(
     config: AgentLoopConfig,
     provider: Arc<dyn LlmProvider>,
     tx: UnboundedSender<AppEvent>,
+    steering_rx: UnboundedReceiver<String>,
+    cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
+) {
+    run_agent_loop_inner(&config, provider, tx, steering_rx, cancel_rx).await;
+    config.executor.shutdown().await;
+}
+
+async fn run_agent_loop_inner(
+    config: &AgentLoopConfig,
+    provider: Arc<dyn LlmProvider>,
+    tx: UnboundedSender<AppEvent>,
     mut steering_rx: UnboundedReceiver<String>,
     cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
 ) {
@@ -521,7 +532,7 @@ pub async fn run_agent_loop(
             Arc::clone(&provider),
             &tx,
             &session_events,
-            &config,
+            config,
             CompactionTrigger::Threshold,
             config.manual_compaction_instructions.clone(),
         )
@@ -736,7 +747,7 @@ pub async fn run_agent_loop(
                     Arc::clone(&provider),
                     &tx,
                     &session_events,
-                    &config,
+                    config,
                     CompactionTrigger::OverflowRetry,
                     None,
                 )
@@ -830,7 +841,7 @@ pub async fn run_agent_loop(
                             Arc::clone(&provider),
                             &tx,
                             &session_events,
-                            &config,
+                            config,
                             CompactionTrigger::Threshold,
                             None,
                         )
@@ -893,7 +904,7 @@ pub async fn run_agent_loop(
 
                 // ── Execute tool batch ────────────────────────────────────────
                 let batch_outcome =
-                    execute_tool_batch(&config, &calls, &tx, &cancel_rx, &mut session_events).await;
+                    execute_tool_batch(config, &calls, &tx, &cancel_rx, &mut session_events).await;
 
                 config.file_tracker.lock().unwrap().refresh_baselines();
                 tx.send_ignore(AppEvent::Agent(AgentEvent::TurnEnd));

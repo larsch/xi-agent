@@ -16,7 +16,7 @@ fn max_one_line_chars(cfg: &DisplayConfig) -> usize {
 pub fn tool_pending_label(name: &str) -> String {
     let emoji = tool_emoji(name);
     let action = match name {
-        "bash" | "cmd" | "powershell" | "exec" | "run_python" => "running…",
+        "bash" | "cmd" | "powershell" | "exec" | "run_python" | "python_repl_execute" => "running…",
         "ask_user" => "asking…",
         "read" | "read_file" => "reading…",
         "write" | "write_file" => "writing…",
@@ -47,7 +47,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "write" | "write_file" => "📄",
         "edit" | "edit_file" => "📝",
         "bash" | "cmd" | "powershell" | "exec" => "💻",
-        "run_python" => "🐍",
+        "run_python" | "python_repl_execute" => "🐍",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
         "read_skill" => "🎓",
@@ -63,6 +63,7 @@ pub fn tool_streaming_field(name: &str) -> Option<&'static str> {
     match name {
         "bash" | "cmd" | "powershell" => Some("command"),
         "run_python" => Some("script"),
+        "python_repl_execute" => Some("code"),
         "ask_user" => Some("question"),
         "read" | "read_file" => Some("path"),
         "write" | "write_file" => Some("path"),
@@ -103,7 +104,10 @@ pub fn tool_invocation_label(
     let emoji = tool_emoji(name);
 
     // Shell and script tools: multiline invocation, head-truncated with continuation marker.
-    if matches!(name, "bash" | "cmd" | "powershell" | "run_python") {
+    if matches!(
+        name,
+        "bash" | "cmd" | "powershell" | "run_python" | "python_repl_execute"
+    ) {
         let field = streaming_field.unwrap_or("command");
         let text = args.get(field).and_then(|v| v.as_str()).unwrap_or("");
         if text.is_empty() {
@@ -277,6 +281,7 @@ mod tests {
             "bash" | "cmd" | "powershell" => Some("command"),
             "exec" => Some("program"),
             "run_python" => Some("script"),
+            "python_repl_execute" => Some("code"),
             "ask_user" => Some("question"),
             "read" | "read_file" => Some("path"),
             "write" | "write_file" => Some("path"),
