@@ -6,7 +6,6 @@ This repository is a AI agent harness for the terminal, built with Rust.
 
 - The source code is hosted on **GitHub** at `https://github.com/larsch/xi-agent`.
 - Use `gh` for GitHub PRs, issues on the code repo, and other GitHub operations.
-- Use `tea` (Gitea CLI) **only** for project-tracking issues at `https://gitea.belunktum.dk/larsch/xi-agent`, not for code PRs or code-level issues.
 - When checking PRs or issues, always resolve the relevant remote (`git remote -v`) before picking a tool.
 
 ## General rules
@@ -35,15 +34,6 @@ Before staging any Rust changes, run `cargo fmt --all --` to auto-fix formatting
 - Lint with warnings as errors (`cargo clippy --all-targets --all-features -- -D warnings`)
 - Tests (`cargo test --all-features`)
 - Compilation of all targets (`cargo check --all-targets --all-features`)
-
-## Issue and plan tracking
-
-Open work items are tracked as Gitea issues at https://gitea.belunktum.dk/larsch/xi-agent/issues.
-
-- Do not create local `docs/plans/` files for new work — create a Gitea issue instead (use the `gitea-cli` skill).
-- When planning non-trivial work, the Gitea issue body should capture scope, approach, success criteria, steps, risks, and verification approach.
-- When work is complete, close the Gitea issue with a comment summarising what was done (use the `gitea-cli` skill).
-- `docs/plans/` is kept for temporary in-progress working notes only, not as a permanent record.
 
 ## Committing and pushing
 
