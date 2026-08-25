@@ -534,6 +534,7 @@ mod tests {
             hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
             session_id: String::new(),
             cancel_rx: Some(cancel_rx),
+            python_repl: None,
         }
     }
 
