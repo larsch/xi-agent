@@ -91,7 +91,6 @@ impl LogViewState {
         self.visual_baseline_width = None;
         self.log_cache.invalidate();
         self.block_cache.clear();
-        self.clear_padding();
     }
 
     pub fn clear_turn_baseline(&mut self) {
@@ -121,7 +120,6 @@ impl LogViewState {
         // `full_output` / `expanded_blocks` affect rendering but are not part
         // of the block cache key, so clear it on any toggle that changes them.
         self.block_cache.clear();
-        self.clear_padding();
     }
 
     pub(crate) fn take_visual_baseline(&mut self) -> Option<Vec<(Arc<str>, usize)>> {
@@ -150,7 +148,6 @@ impl LogViewState {
     }
 
     pub fn scroll_up(&mut self) {
-        self.clear_padding();
         self.scroll_up_lines(self.last_log_height.max(1));
     }
 
@@ -164,7 +161,6 @@ impl LogViewState {
     }
 
     pub fn scroll_down(&mut self) {
-        self.clear_padding();
         self.auto_scroll = false;
         self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
     }
@@ -183,7 +179,15 @@ impl Default for LogViewState {
 
 #[cfg(test)]
 mod tests {
-    use super::LogViewState;
+    use super::{LogViewState, PaddingState};
+
+    fn set_anchor_padding(state: &mut LogViewState) {
+        state.last_block_padding = Some(PaddingState {
+            max_total_lines: 40,
+            inner_height_when_set: 20,
+            remaining: 3,
+        });
+    }
 
     #[test]
     fn expansion_toggles_and_invalidates() {
@@ -241,5 +245,33 @@ mod tests {
         let mut state = LogViewState::new();
         state.pending_anchor = Some(("block:1".into(), 2));
         assert_eq!(state.pending_anchor, Some(("block:1".into(), 2)));
+    }
+
+    #[test]
+    fn anchor_padding_survives_agent_loop_updates() {
+        let mut state = LogViewState::new();
+        set_anchor_padding(&mut state);
+
+        state.begin_turn(1);
+        assert!(state.last_block_padding.is_some());
+
+        state.begin_tool_continuation();
+        assert!(state.last_block_padding.is_some());
+
+        state.toggle_full_output();
+        state.toggle_expanded("block:1".into());
+        state.scroll_up();
+        state.scroll_down();
+        assert!(state.last_block_padding.is_some());
+    }
+
+    #[test]
+    fn agent_loop_end_clears_anchor_padding() {
+        let mut state = LogViewState::new();
+        set_anchor_padding(&mut state);
+
+        state.clear_turn_baseline();
+
+        assert!(state.last_block_padding.is_none());
     }
 }
