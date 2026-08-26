@@ -289,10 +289,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let previous_log_height = app.log_view.last_log_height;
     app.log_view.last_log_height = inner_height;
 
-    // Reset block padding on terminal resize.
-    if app.log_view.last_log_width != 0 && app.log_view.last_log_width != log_width {
-        app.log_view.clear_padding();
-    }
     app.log_view.last_log_width = log_width;
 
     ::log::debug!(
@@ -409,11 +405,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let has_scrollbar = total_lines > inner_height && !app.log_view.auto_scroll;
     let log_scroll = app.log_view.log_scroll;
-
-    // Clear block padding when streaming is no longer active.
-    if !app.streaming() {
-        app.log_view.clear_padding();
-    }
 
     let stored_height = app
         .log_view
