@@ -970,6 +970,37 @@ mod tests {
     }
 
     #[test]
+    fn input_selection_is_mapped_across_wrapped_lines() {
+        let lines = vec!["hello world".to_string()];
+        let wrapped = input::wrap_input_for_render(&lines, (0, 11), Some(((0, 3), (0, 9))), 6);
+
+        assert_eq!(wrapped.lines, vec!["hello ", "world"]);
+        assert_eq!(wrapped.selection, Some(((0, 3), (1, 3))));
+    }
+
+    #[test]
+    fn input_selection_is_rendered_with_textarea_selection_style() {
+        use ratatui::style::Color;
+        use ratatui_textarea::CursorMove;
+
+        let mut app = make_app();
+        app.textarea.insert_str("select me");
+        app.textarea.move_cursor(CursorMove::Head);
+        app.textarea.start_selection();
+        app.textarea.move_cursor(CursorMove::Forward);
+        app.textarea
+            .set_selection_style(Style::default().bg(Color::Red));
+
+        let buffer = render_to_buffer(&mut app, 40, 12);
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|cell| { cell.symbol() == "s" && cell.style().bg == Some(Color::Red) })
+        );
+    }
+
+    #[test]
     fn input_visual_line_count_wraps_long_lines() {
         let lines = vec!["short".to_string(), "12345 67890".to_string()];
         let count = input_visual_line_count(&lines, 6);

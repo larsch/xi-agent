@@ -16,6 +16,7 @@ const TAB_WIDTH: usize = 4;
 pub(super) struct WrappedInput {
     pub(super) lines: Vec<String>,
     pub(super) cursor: (usize, usize),
+    pub(super) selection: Option<((usize, usize), (usize, usize))>,
 }
 
 pub(super) fn style_textarea(app: &mut App) {
@@ -186,48 +187,57 @@ pub(super) fn wrap_input_line(text: &str, width: usize) -> Vec<String> {
 pub(super) fn wrap_input_for_render(
     lines: &[String],
     cursor: (usize, usize),
+    selection: Option<((usize, usize), (usize, usize))>,
     width: usize,
 ) -> WrappedInput {
     if width == 0 {
         return WrappedInput {
             lines: lines.to_vec(),
             cursor,
+            selection,
         };
     }
 
     let mut wrapped_lines: Vec<String> = Vec::new();
     let mut wrapped_cursor = (0usize, 0usize);
+    let mut wrapped_selection = selection.map(|_| ((0usize, 0usize), (0usize, 0usize)));
 
     for (row_idx, line) in lines.iter().enumerate() {
         let normalized = normalize_terminal_segment(line, 0);
         let chunks = wrap_input_line(&normalized, width);
+        let wrapped_row_start = wrapped_lines.len();
 
-        if row_idx == cursor.0 {
-            let mut before = String::new();
-            for ch in normalized.chars().take(cursor.1) {
-                before.push(ch);
-            }
-            let before_w = before.width();
-
+        let wrap_position = |column: usize| {
+            let source_prefix: String = line.chars().take(column).collect();
+            let visual_column = normalize_terminal_segment(&source_prefix, 0).width();
             let mut consumed = 0usize;
-            let mut row_off = 0usize;
-            let mut col_off = 0usize;
 
             for (idx, chunk) in chunks.iter().enumerate() {
-                let chunk_w = chunk.width();
-                if before_w <= consumed + chunk_w {
-                    row_off = idx;
-                    col_off = before_w.saturating_sub(consumed);
-                    break;
+                let chunk_width = chunk.width();
+                if visual_column <= consumed + chunk_width || idx == chunks.len() - 1 {
+                    return (
+                        wrapped_row_start + idx,
+                        visual_column.saturating_sub(consumed).min(chunk_width),
+                    );
                 }
-                consumed += chunk_w;
-                if idx == chunks.len() - 1 {
-                    row_off = idx;
-                    col_off = chunk_w;
-                }
+                consumed += chunk_width;
             }
 
-            wrapped_cursor = (wrapped_lines.len() + row_off, col_off);
+            (wrapped_row_start, 0)
+        };
+
+        if row_idx == cursor.0 {
+            wrapped_cursor = wrap_position(cursor.1);
+        }
+        if let (Some((start, end)), Some((wrapped_start, wrapped_end))) =
+            (selection, wrapped_selection.as_mut())
+        {
+            if row_idx == start.0 {
+                *wrapped_start = wrap_position(start.1);
+            }
+            if row_idx == end.0 {
+                *wrapped_end = wrap_position(end.1);
+            }
         }
 
         wrapped_lines.extend(chunks);
@@ -240,6 +250,7 @@ pub(super) fn wrap_input_for_render(
     WrappedInput {
         lines: wrapped_lines,
         cursor: wrapped_cursor,
+        selection: wrapped_selection,
     }
 }
 
@@ -263,6 +274,17 @@ pub(super) fn render_input_panel(
 ) {
     let is_shell = app.input_mode == InputMode::Shell;
     let input_width = area.width as usize;
+    let (mut selection, selection_style) = if is_shell {
+        (
+            app.shell.textarea.selection_range(),
+            app.shell.textarea.selection_style(),
+        )
+    } else {
+        (
+            app.textarea.selection_range(),
+            app.textarea.selection_style(),
+        )
+    };
 
     let (mut input_lines, mut cursor, mut prefix, mut hint) = if is_shell {
         let cwd = if app.session.current_cwd.is_empty() {
@@ -322,6 +344,7 @@ pub(super) fn render_input_panel(
         };
         prefix = String::new();
         hint = None;
+        selection = None;
     }
 
     let wrap_width = if prefix.is_empty() {
@@ -330,9 +353,10 @@ pub(super) fn render_input_panel(
         input_width.saturating_sub(prefix.width()).max(1)
     };
     let cursor = (cursor.0, cursor.1);
-    let wrapped = wrap_input_for_render(&input_lines, cursor, wrap_width);
+    let wrapped = wrap_input_for_render(&input_lines, cursor, selection, wrap_width);
     let wrapped_lines = wrapped.lines;
     let wrapped_cursor = wrapped.cursor;
+    let wrapped_selection = wrapped.selection;
 
     // ── Viewport scrolling ────────────────────────────────────────────────
     let viewport_h = area.height as usize;
@@ -352,34 +376,70 @@ pub(super) fn render_input_panel(
     let visible_end = (scroll + viewport_h).min(total);
     let visible_lines: Vec<String> = wrapped_lines[scroll..visible_end].to_vec();
 
+    let input_style = Style::default().fg(Color::White).bg(panel_bg);
+    let selected_style = input_style.patch(selection_style);
     let mut lines: Vec<Line<'static>> = visible_lines
         .into_iter()
         .enumerate()
         .map(|(i, row)| {
             let abs_idx = scroll + i;
+            let mut spans = Vec::new();
             if abs_idx == 0 && !prefix.is_empty() {
-                Line::from(vec![
-                    Span::styled(
-                        prefix.clone(),
-                        Style::default()
-                            .fg(app
-                                .theme
-                                .input
-                                .normal
-                                .field
-                                .prefix
-                                .fg
-                                .unwrap_or(ratatui::style::Color::Cyan))
-                            .bg(panel_bg),
-                    ),
-                    Span::styled(row, Style::default().fg(Color::White).bg(panel_bg)),
-                ])
-            } else {
-                Line::from(Span::styled(
-                    row,
-                    Style::default().fg(Color::White).bg(panel_bg),
-                ))
+                spans.push(Span::styled(
+                    prefix.clone(),
+                    Style::default()
+                        .fg(app
+                            .theme
+                            .input
+                            .normal
+                            .field
+                            .prefix
+                            .fg
+                            .unwrap_or(ratatui::style::Color::Cyan))
+                        .bg(panel_bg),
+                ));
             }
+
+            let selected_columns = wrapped_selection.and_then(|(start, end)| {
+                if abs_idx < start.0 || abs_idx > end.0 || start == end {
+                    return None;
+                }
+                let row_width = row.width();
+                let start_col = if abs_idx == start.0 { start.1 } else { 0 };
+                let end_col = if abs_idx == end.0 { end.1 } else { row_width };
+                (start_col < end_col).then_some((start_col, end_col))
+            });
+
+            if let Some((start_col, end_col)) = selected_columns {
+                let mut column = 0usize;
+                let mut before = String::new();
+                let mut selected = String::new();
+                let mut after = String::new();
+                for ch in row.chars() {
+                    let next_column = column + ch.width().unwrap_or(0);
+                    if column < start_col {
+                        before.push(ch);
+                    } else if column < end_col {
+                        selected.push(ch);
+                    } else {
+                        after.push(ch);
+                    }
+                    column = next_column;
+                }
+                if !before.is_empty() {
+                    spans.push(Span::styled(before, input_style));
+                }
+                if !selected.is_empty() {
+                    spans.push(Span::styled(selected, selected_style));
+                }
+                if !after.is_empty() {
+                    spans.push(Span::styled(after, input_style));
+                }
+            } else {
+                spans.push(Span::styled(row, input_style));
+            }
+
+            Line::from(spans)
         })
         .collect();
 
