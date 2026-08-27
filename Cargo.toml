@@ -57,7 +57,7 @@ notify-rust = "4.11.7"
 # Pin native bracketed-paste support on Windows until it is released upstream.
 # Upstream tracking: https://github.com/crossterm-rs/crossterm/pull/1030
 [patch.crates-io]
-crossterm = { git = "https://github.com/crossterm-rs/crossterm", rev = "11e491292c674d258c3469b9cb511201f63eb4ee" }
+crossterm = { git = "https://github.com/crossterm-rs/crossterm", rev = "94ed7154e35d24a2f643c61760e1eb05b8ca9e63" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
