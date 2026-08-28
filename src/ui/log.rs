@@ -1147,14 +1147,9 @@ fn render_tool_call(
         // Context always renders in the log — the selection header only
         // shows the question, so there is no duplication risk.
         if let Some(ctx) = context {
-            append_ask_user_context_block(
-                out,
-                ctx,
-                width,
-                theme.log.ask_user.bg.unwrap_or(Color::Rgb(27, 71, 31)),
-                theme,
-                "📋 ",
-            );
+            let md_width = width.saturating_sub(3).max(1);
+            let md_lines = crate::markdown::render_with_theme(ctx, md_width, "", &theme.markdown);
+            append_markdown_answer(out, "📋", md_lines, false);
         }
 
         // The question always renders in the log body.
@@ -1993,36 +1988,6 @@ fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'stati
 }
 
 // ── ask_user block helpers ────────────────────────────────────────────────────
-
-/// Context block: green background, readable text, with an emoji prefix
-/// (e.g. "📋 ").  No DIM — the green background alone distinguishes it from
-/// surrounding content.
-fn append_ask_user_context_block(
-    out: &mut Vec<Line<'static>>,
-    content: &str,
-    width: usize,
-    bg: Color,
-    theme: &Theme,
-    emoji: &str,
-) {
-    let bg_style = Style::default().bg(bg);
-    let padding_style = Style::default().bg(bg);
-    let md_lines = crate::markdown::render_with_theme(content, width, emoji, &theme.markdown);
-    for line in md_lines {
-        let styled: Vec<Span<'static>> = line
-            .spans
-            .into_iter()
-            .map(|s| Span::styled(s.content, bg_style.patch(s.style)))
-            .collect();
-        let text_width: usize = styled.iter().map(|s| s.content.width()).sum();
-        let padding = width.saturating_sub(text_width);
-        let mut spans = styled;
-        if padding > 0 {
-            spans.push(Span::styled(" ".repeat(padding), padding_style));
-        }
-        out.push(Line::from(spans));
-    }
-}
 
 /// Response block: rendered like a normal user message but with the ask_user background color.
 fn append_ask_user_response(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
@@ -3374,6 +3339,44 @@ mod tests {
             text.iter().any(|t| t.contains("Proceed?")),
             "question should also be visible"
         );
+    }
+
+    #[test]
+    fn ask_user_context_matches_question_block_formatting() {
+        let call = Message::tool_call(
+            "c1",
+            "ask_user",
+            serde_json::json!({
+                "context": "Context first line  \nContext second line",
+                "question": "Question first line  \nQuestion second line"
+            }),
+        );
+        let lines = build_log_layout(
+            &[call],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let text: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(text[0], "📋 Context first line");
+        assert_eq!(text[1], " ╰ Context second line");
+        assert_eq!(text[2], "❓ Question first line");
+        assert_eq!(text[3], " ╰ Question second line");
+        assert!(lines[0].spans.iter().all(|span| span.style.bg.is_none()));
+        assert!(lines[1].spans.iter().all(|span| span.style.bg.is_none()));
     }
 
     // ── Regression: finalized write_file headline shows path, not placeholder ─
