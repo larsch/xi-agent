@@ -207,6 +207,13 @@ impl Tool for ReadFileTool {
                 crate::agent::tools::truncate::DEFAULT_MAX_BYTES,
             );
 
+            // A windowed read still carries range metadata for the UI, but a
+            // note in the model-visible content is only useful when content
+            // was actually omitted (by the output cap or by reaching EOF
+            // before the requested limit).
+            let requested_end = limit.map(|l| start.saturating_add(l));
+            let needs_notice =
+                tr.truncated || requested_end.is_some_and(|requested_end| requested_end > total);
             let truncated = is_windowed || tr.truncated;
 
             // Compute the effective displayed line range (1-indexed, inclusive).
@@ -220,18 +227,19 @@ impl Tool for ReadFileTool {
             // (File already recorded above before image detection.)
 
             let mut result_content = tr.content;
+            if needs_notice {
+                let notice_last_line = last_line;
+                let notice = format!(
+                    "\n[lines {first_line}-{notice_last_line} of {total}. Use offset/limit parameters to read more.]"
+                );
+                result_content.push_str(&notice);
+            }
             if truncated {
                 let output_lines = if last_line >= first_line {
                     last_line - first_line + 1
                 } else {
                     0
                 };
-                // Append an in-band notice so the model always sees the range
-                // and total, even when it cannot inspect ToolResult metadata.
-                let notice = format!(
-                    "\n[lines {first_line}-{last_line} of {total}. Use offset/limit parameters to read more.]"
-                );
-                result_content.push_str(&notice);
                 let mut result = ToolResult::ok_str(result_content.clone());
                 result.truncation = Some(TruncationResult {
                     content: result_content,
@@ -346,19 +354,16 @@ mod tests {
         });
         let result = tool.execute(args).await;
         assert!(!result.is_error);
-        // Content must start with the raw line body followed by the truncation notice.
+        // An exact offset/limit window should return only the requested
+        // content, without a redundant model-visible range notice.
+        assert_eq!(result.content.as_text(), "b\r\n");
         assert!(
-            result.content.as_text().starts_with("b\r\n"),
-            "unexpected content: {}",
+            !result.content.as_text().contains("Use offset/limit"),
+            "unexpected truncation notice: {}",
             result.content.as_text()
         );
-        assert!(
-            result.content.as_text().contains("[lines 2-2 of 3"),
-            "missing truncation notice: {}",
-            result.content.as_text()
-        );
-        // Range information must also be carried in the truncation field.
-        let tr = result.truncation.expect("truncation metadata expected");
+        // Range information is still carried in metadata for the UI.
+        let tr = result.truncation.expect("range metadata expected");
         assert_eq!(tr.first_kept_line, 2);
         assert_eq!(tr.total_lines, 3);
     }
