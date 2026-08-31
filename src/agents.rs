@@ -62,7 +62,7 @@ pub struct AgentMeta {
 // ── Always-present tools ──────────────────────────────────────────────────────
 
 /// Tools that are always available to every agent regardless of filter settings.
-pub const ALWAYS_PRESENT_TOOLS: &[&str] = &["ask_user", "read_skill"];
+pub const ALWAYS_PRESENT_TOOLS: &[&str] = &["ask_user", "read_skill", "agent_session"];
 
 // ── Agent discovery ───────────────────────────────────────────────────────────
 

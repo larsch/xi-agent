@@ -133,6 +133,10 @@ pub struct XiConfig {
     #[serde(default)]
     pub hooks: HashMap<HookPoint, Vec<HookConfig>>,
 
+    /// Enable the worktree session IPC control socket.
+    #[serde(default)]
+    pub enable_session_ipc: bool,
+
     /// Best-effort IPC publisher for hook events.
     #[serde(default)]
     pub hook_ipc: HookIpcConfig,
