@@ -149,6 +149,7 @@ pub(super) fn parse_args<T: DeserializeOwned>(
         .map_err(|e| Box::new(ToolResult::err(format_parse_error(e))))
 }
 
+pub mod agent_session;
 pub mod ask_user;
 #[cfg(not(target_os = "windows"))]
 pub mod bash;
@@ -173,6 +174,7 @@ pub mod truncate;
 pub mod utf8;
 pub mod write;
 
+use agent_session::AgentSessionTool;
 use ask_user::AskUserTool;
 #[cfg(not(target_os = "windows"))]
 use bash::BashTool;
@@ -212,6 +214,7 @@ pub fn register_builtin_tools(
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
         Arc::new(ReadSkillTool::new(Arc::clone(&skills))),
+        Arc::new(AgentSessionTool),
         Arc::new(AskUserTool::new(
             app_event_tx,
             Some(Arc::clone(&file_tracker)),

@@ -4,7 +4,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::{
     agent::types::CancelLevel,
-    app::{App, InputMode, SelectionResult},
+    app::{App, InputMode, SelectionResult, StreamingStatus},
     commands::CommandAction,
     config::XiConfig,
     keybindings::{self, KeyBindingId},
@@ -684,6 +684,15 @@ fn handle_chat_mode_key(
         }
         _ => {
             app.textarea.input(Event::Key(key));
+            if app.ipc_owner.is_some() {
+                let status = if app.streaming() {
+                    "IPC control active — submitting will take control and steer the agent"
+                } else {
+                    "IPC control active — submitting will take control and start a user turn"
+                };
+                app.agent_turn
+                    .set_status(Some(StreamingStatus::Message(status.to_string())));
+            }
             app.update_completions();
             if app.should_fetch_models() {
                 app.start_model_fetch(provider);
@@ -699,6 +708,7 @@ fn handle_chat_submit(
     provider: &Arc<dyn LlmProvider + Send + Sync>,
     config: &XiConfig,
 ) -> KeyDispatch {
+    app.take_ipc_control_for_user();
     match app.provider.setup_step.clone() {
         ProviderSetupStep::Endpoint => {
             // Determine whether this is the two-step URL→token flow (e.g. OpenWebUI)

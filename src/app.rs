@@ -162,6 +162,13 @@ pub struct App {
     // ── Runtime/task state ───────────────────────────────────────────────────
     pub(crate) runtime: AgentRuntime,
 
+    /// Clients subscribed to connection-lifetime completion notifications.
+    pub(crate) ipc_subscribers: Vec<(u64, crate::session_ipc::CompletionPublisher)>,
+    pub(crate) ipc_owner: Option<u64>,
+    pub(crate) user_owned: bool,
+    pub(crate) ipc_prompt: Option<crate::session_ipc::PendingPrompt>,
+    pub(crate) ipc_notifications: Vec<String>,
+
     // ── Step-back state ──────────────────────────────────────────────────────
     pub(crate) step_back: StepBackState,
 
@@ -212,6 +219,11 @@ impl App {
             pending_restart: false,
             #[cfg(feature = "restart")]
             pending_restart_continue: false,
+            ipc_subscribers: Vec::new(),
+            ipc_owner: None,
+            user_owned: false,
+            ipc_prompt: None,
+            ipc_notifications: Vec::new(),
             step_back: StepBackState::default(),
             theme: Theme::default(),
             display,

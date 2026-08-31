@@ -61,6 +61,7 @@ mod restart;
 mod selection_state;
 mod session;
 mod session_event;
+mod session_ipc;
 mod session_manager;
 mod session_state;
 mod shell;
@@ -141,6 +142,10 @@ struct Cli {
     /// Resume a specific session by ID (used by the `restart_host` tool).
     #[arg(long, value_name = "SESSION_ID")]
     resume_session: Option<String>,
+
+    /// Enable the worktree session IPC control socket.
+    #[arg(long)]
+    enable_session_ipc: bool,
 
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
@@ -399,6 +404,17 @@ async fn main() -> io::Result<()> {
                 Some(crate::session_state::SessionState::from_event_log(log));
         }
     }
+    let _ipc_server = if cli.enable_session_ipc || config.enable_session_ipc {
+        match session_ipc::IpcServer::bind(std::path::Path::new(&cwd), app_event_tx.clone()) {
+            Ok(server) => server,
+            Err(error) => {
+                log::debug!("session IPC unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     app.provider.instances = config.resolve_effective_providers();
     timer.mark("resolve_effective_providers");
     // Mark provider as explicitly selected when a provider was configured
@@ -772,6 +788,15 @@ async fn run(
             Some(ev) = app.recv_app_event() => {
                 needs_redraw = true;
                 app.apply_app_event(ev);
+                if let Some(text) = app.ipc_notifications.first().cloned() {
+                    app.ipc_notifications.remove(0);
+                    app.submit_with_text(text, provider);
+                }
+                if let Some((_connection_id, text, reply)) = app.take_ipc_prompt() {
+                    app.submit_with_text(text, provider);
+                    let accepted = app.runtime.pending_finalize;
+                    let _ = reply.send(Ok(serde_json::json!({"accepted": accepted, "mode": "prompt"})));
+                }
                 if app.login.needs_rebuild {
                     app.login.needs_rebuild = false;
                     return Ok(RunResult::RebuildProvider);

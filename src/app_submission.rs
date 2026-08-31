@@ -11,6 +11,34 @@ use crate::live_turn::LiveToolResult;
 use crate::llm::{Message, Role};
 use crate::session_event::SessionEvent;
 impl App {
+    /// Transfer an IPC-controlled session to the user at submission time.
+    /// Unapplied IPC input is discarded; already-applied loop work continues.
+    pub(crate) fn take_ipc_control_for_user(&mut self) {
+        let text = self.textarea.lines().join("\n");
+        if text.trim().is_empty() {
+            return;
+        }
+        self.user_owned = true;
+        self.agent_turn.set_status(None);
+        let Some(owner) = self.ipc_owner.take() else {
+            return;
+        };
+        self.runtime.queued_steering.clear();
+        if let Some((_, _, reply)) = self.ipc_prompt.take() {
+            let _ = reply.send(Err(crate::session_ipc::ErrorBody {
+                code: "control_revoked".into(),
+                message: "user took control of the session".into(),
+            }));
+        }
+        let session_id = self.session.current_session_id.clone().unwrap_or_default();
+        let event = crate::session_ipc::control_revoked_event(&session_id);
+        for (id, publisher) in &self.ipc_subscribers {
+            if *id == owner {
+                publisher.publish(event.clone());
+            }
+        }
+    }
+
     // ── LLM submission ────────────────────────────────────────────────────────
 
     fn start_agent_task(&mut self, provider: &DynProvider) {

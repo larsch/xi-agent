@@ -11,6 +11,7 @@ use crate::live_turn::{LiveToolEntry, LiveToolResult};
 use crate::llm::{AssistantPhase, DisplayRange, UsageStats};
 use crate::provider_manager::{active_provider_display_name, format_provider_error_for_display};
 use crate::session_event::SessionEvent;
+use crate::session_ipc::{CompletionPublisher, ErrorBody, IpcCommand};
 
 /// Current wall-clock time as seconds since UNIX epoch.
 pub(crate) fn now_ts() -> u64 {
@@ -55,6 +56,32 @@ impl App {
             AppEvent::ContextLoaded(ctx) => self.apply_loaded_context(ctx),
             #[cfg(feature = "restart")]
             AppEvent::Restart => self.on_restart_requested(),
+            AppEvent::Ipc(command) => self.handle_ipc_command(command),
+            AppEvent::IpcNotification { cwd, event } => self.handle_ipc_notification(cwd, event),
+        }
+    }
+
+    fn handle_ipc_notification(&mut self, cwd: String, event: serde_json::Value) {
+        let name = event
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let payload = event
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let message = format!(
+            "External subagent event from {cwd}: {name}. Payload: {}",
+            payload
+        );
+        if self.streaming() {
+            if let Some(tx) = self.runtime.steering_tx.as_ref()
+                && tx.send(message.clone()).is_ok()
+            {
+                self.runtime.queued_steering.push(message);
+            }
+        } else {
+            self.ipc_notifications.push(message);
         }
     }
 
@@ -69,6 +96,113 @@ impl App {
         self.flush_turn_events();
         self.persist_messages();
         self.pending_restart = true;
+    }
+
+    fn handle_ipc_command(&mut self, command: IpcCommand) {
+        match command {
+            IpcCommand::Subscribe {
+                connection_id,
+                events,
+            } => {
+                self.ipc_subscribers
+                    .push((connection_id, CompletionPublisher::from_sender(events)));
+            }
+            IpcCommand::Disconnect { connection_id } => {
+                self.ipc_subscribers.retain(|(id, _)| *id != connection_id);
+                if self.ipc_owner == Some(connection_id) {
+                    self.ipc_owner = None;
+                }
+            }
+            IpcCommand::Request {
+                connection_id,
+                op,
+                params,
+                reply,
+            } => match op.as_str() {
+                "inspect_session" => {
+                    let session_id = self.session.current_session_id.clone().unwrap_or_default();
+                    let log_path = self
+                        .session
+                        .session_store
+                        .as_ref()
+                        .and_then(|store| store.resolve_event_log_path(&session_id).ok());
+                    let result = serde_json::json!({
+                        "protocol_version": crate::session_ipc::PROTOCOL_VERSION,
+                        "session_id": session_id,
+                        "cwd": self.session.current_cwd,
+                        "pid": std::process::id(),
+                        "log_path": log_path,
+                        "capabilities": ["inspect_session", "get_state", "post_prompt", "completion_events"]
+                    });
+                    let _ = reply.send(Ok(result));
+                }
+                "get_state" => {
+                    let status = if self.streaming() { "looping" } else { "idle" };
+                    let activity = if self.streaming() {
+                        Some(format!("{:?}", self.agent_turn.activity).to_lowercase())
+                    } else {
+                        None
+                    };
+                    let _ = reply.send(Ok(serde_json::json!({"status": status, "activity": activity, "queued_steering_count": self.queued_steering().len(), "pending_ask": self.has_pending_ask()})));
+                }
+                "post_prompt" => {
+                    let text = params
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if text.is_empty() {
+                        let _ = reply.send(Err(ErrorBody {
+                            code: "prompt_empty".into(),
+                            message: "prompt must not be empty".into(),
+                        }));
+                    } else if self.streaming() {
+                        if self.ipc_owner != Some(connection_id) {
+                            let _ = reply.send(Err(ErrorBody {
+                                code: "control_owned".into(),
+                                message: "the active session is not owned by this IPC client"
+                                    .into(),
+                            }));
+                        } else {
+                            let accepted = self
+                                .runtime
+                                .steering_tx
+                                .as_ref()
+                                .is_some_and(|tx| tx.send(text.clone()).is_ok());
+                            if accepted {
+                                self.runtime.queued_steering.push(text);
+                            }
+                            let _ = reply.send(Ok(
+                                serde_json::json!({"accepted": accepted, "mode": "steering"}),
+                            ));
+                        }
+                    } else if let Some(owner) = self.ipc_owner {
+                        if owner != connection_id {
+                            let _ = reply.send(Err(ErrorBody {
+                                code: "control_owned".into(),
+                                message: "the session is controlled by another IPC client".into(),
+                            }));
+                        } else {
+                            self.ipc_prompt = Some((connection_id, text, reply));
+                        }
+                    } else {
+                        self.ipc_owner = Some(connection_id);
+                        self.ipc_prompt = Some((connection_id, text, reply));
+                    }
+                }
+                _ => {
+                    let _ = reply.send(Err(ErrorBody {
+                        code: "unknown_operation".into(),
+                        message: op,
+                    }));
+                }
+            },
+        }
+    }
+
+    pub(crate) fn take_ipc_prompt(&mut self) -> Option<crate::session_ipc::PendingPrompt> {
+        self.ipc_prompt.take()
     }
 
     // ── AgentEvent handlers ───────────────────────────────────────────────────
@@ -494,6 +628,7 @@ impl App {
     }
 
     fn on_agent_done(&mut self) {
+        self.publish_ipc_completion("success");
         self.end_agent_turn();
         self.runtime.agent_task = None;
         self.runtime.cancel_tx = None;
@@ -502,6 +637,39 @@ impl App {
         // The final TurnEnd already flushed the turn buffer.
         // Done only cleans up live streaming state.
         self.persist_messages();
+    }
+
+    fn publish_ipc_completion(&mut self, status: &str) {
+        let session_id = self.session.current_session_id.clone().unwrap_or_default();
+        let log_path = self
+            .session
+            .session_store
+            .as_ref()
+            .and_then(|store| store.resolve_event_log_path(&session_id).ok())
+            .unwrap_or_default();
+        let response = (status == "success")
+            .then(|| {
+                self.session.session_state.as_ref().and_then(|state| {
+                    state
+                        .events()
+                        .iter()
+                        .rev()
+                        .find(|event| matches!(event, SessionEvent::AssistantMessage { .. }))
+                })
+            })
+            .flatten();
+        let event =
+            crate::session_ipc::completion_event(&session_id, "", status, &log_path, response);
+        if let Some(owner) = self.ipc_owner.take() {
+            self.ipc_subscribers.retain(|(id, subscriber)| {
+                if *id == owner {
+                    subscriber.publish(event.clone());
+                    true
+                } else {
+                    true
+                }
+            });
+        }
     }
 
     fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
@@ -529,6 +697,7 @@ impl App {
             self.session.pending_turn_events.clear();
             self.session.live_turn.clear_turn();
         } else {
+            self.publish_ipc_completion("error");
             let provider_label = active_provider_display_name(
                 &self.provider.current_instance.id,
                 &self.provider.instances,

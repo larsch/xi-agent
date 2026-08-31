@@ -5,6 +5,7 @@ use crate::{
     agent::types::{AgentEvent, AskRequest, ToolResult},
     auth::LoginEvent,
     llm::ProviderError,
+    session_ipc::IpcCommand,
 };
 
 /// Background events delivered to the interactive app loop.
@@ -25,6 +26,11 @@ pub enum AppEvent {
     /// loop by flushing the pending turn and re-exec'ing the binary.
     #[cfg(feature = "restart")]
     Restart,
+    Ipc(IpcCommand),
+    IpcNotification {
+        cwd: String,
+        event: serde_json::Value,
+    },
 }
 
 pub type AppEventTx = UnboundedSender<AppEvent>;
