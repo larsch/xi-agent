@@ -568,8 +568,7 @@ impl App {
                 }
                 self.session.live_turn.clear_all();
                 self.session.current_session_id = Some(session_id.to_string());
-                self.log_view.auto_scroll = true;
-                self.log_view.log_scroll = 0;
+                self.log_view.reset_for_session();
             }
             Err(e) => {
                 self.session
@@ -2983,6 +2982,45 @@ mod tests {
         let combined = app.display_messages_combined();
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].content, "hello");
+    }
+
+    #[test]
+    fn switching_sessions_resets_log_view_for_selected_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().join("sessions"))
+            .expect("open session store");
+        let first_id = store.create_session(&cwd).expect("create first session");
+        let second_id = store.create_session(&cwd).expect("create second session");
+
+        for (id, content) in [(&first_id, "first session"), (&second_id, "second session")] {
+            let mut log = store.load_events(id).expect("load events");
+            log.append_batch(&[crate::session_event::SessionEvent::UserMessage {
+                content: content.to_string(),
+                timestamp: 1,
+            }])
+            .expect("append event");
+        }
+
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.resume_session_by_id(&first_id);
+        app.log_view.expanded_blocks.insert("old block".to_string());
+        app.log_view.log_scroll = 42;
+        app.log_view.auto_scroll = false;
+        let revision_before_switch = app.log_view.log_cache.revision;
+
+        app.resume_session_by_id(&second_id);
+
+        assert_eq!(
+            app.session.current_session_id.as_deref(),
+            Some(second_id.as_str())
+        );
+        assert_eq!(app.display_messages_combined()[0].content, "second session");
+        assert!(app.log_view.expanded_blocks.is_empty());
+        assert_eq!(app.log_view.log_scroll, 0);
+        assert!(app.log_view.auto_scroll);
+        assert!(app.log_view.log_cache.revision > revision_before_switch);
     }
 
     #[test]
