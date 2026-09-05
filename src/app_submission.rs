@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::agent::types::CancelLevel;
-use crate::agent::{AgentLoopConfig, ToolOutputLog, run_agent_loop};
+use crate::agent::{AgentLoopConfig, ToolOutputLog};
 use crate::app::{App, DynProvider, RetryTarget, StreamingStatus};
 use crate::at_file::{AtFileResult, parse_at_tokens, resolve_at_tokens};
 use crate::live_turn::LiveToolResult;
@@ -67,7 +67,6 @@ impl App {
         // Create cancel channel before the config so the executor can receive
         // a clone for passing into ToolCallContext.
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
-        self.runtime.cancel_tx = Some(cancel_tx);
 
         // Apply agent tool filtering when an agent is active.
         let (tools, system_prompt) = if let Some(agent) = self.resolve_current_agent() {
@@ -113,15 +112,14 @@ impl App {
             hook_ipc: self.agent_config.hook_ipc.clone(),
             session_id: session_id.clone(),
         };
-        let (steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.runtime.steering_tx = Some(steering_tx);
         self.runtime.queued_steering.clear();
 
         let provider = Arc::clone(provider);
         let tx = self.app_event_tx();
-        self.runtime.agent_task = Some(tokio::spawn(async move {
-            run_agent_loop(config, provider, tx, steering_rx, cancel_rx).await;
-        }));
+        let handle = crate::agent::runner::AgentHandle::spawn_with_cancel(
+            config, provider, tx, cancel_tx, cancel_rx,
+        );
+        self.runtime.set_agent_handle(handle);
     }
 
     /// Set streaming flags and spawn the agent task using the current history.
@@ -153,7 +151,7 @@ impl App {
             return;
         }
 
-        let Some(tx) = self.runtime.steering_tx.as_ref() else {
+        let Some(tx) = self.runtime.steering_tx() else {
             return;
         };
 
@@ -442,18 +440,15 @@ impl App {
     }
 
     pub fn abort_agent_loop(&mut self) {
-        if let Some(handle) = self.runtime.agent_task.take() {
+        if let Some(handle) = self.runtime.take_agent_handle() {
             // Signal cooperative cancellation; hard-abort as fallback.
-            if let Some(tx) = self.runtime.cancel_tx.take() {
-                let _ = tx.send(CancelLevel::HardAbort);
-            }
-            handle.abort();
+            let _ = handle.cancel_sender().send(CancelLevel::HardAbort);
+            handle.task.abort();
             self.agent_turn
                 .set_status(Some(StreamingStatus::CompletedMessage(
                     "[agent loop aborted]".to_string(),
                 )));
             self.agent_turn.holdoff_started_at = None;
-            self.runtime.steering_tx = None;
             self.runtime.queued_steering.clear();
             self.append_abort_results_for_pending_tool_calls();
             self.finalise_assistant_turn_event();
@@ -470,7 +465,7 @@ impl App {
             return;
         }
         self.runtime.abort_stage = CancelLevel::SoftStop;
-        if let Some(tx) = self.runtime.cancel_tx.as_ref() {
+        if let Some(tx) = self.runtime.cancel_tx() {
             let _ = tx.send(CancelLevel::SoftStop);
         }
         self.agent_turn.set_status(Some(StreamingStatus::Message(
@@ -487,7 +482,7 @@ impl App {
             return;
         }
         self.runtime.abort_stage = CancelLevel::HardAbort;
-        if let Some(tx) = self.runtime.cancel_tx.as_ref() {
+        if let Some(tx) = self.runtime.cancel_tx() {
             let _ = tx.send(CancelLevel::HardAbort);
         }
 
@@ -525,7 +520,7 @@ impl App {
             return;
         }
         self.runtime.abort_stage = CancelLevel::ForceKill;
-        if let Some(tx) = self.runtime.cancel_tx.as_ref() {
+        if let Some(tx) = self.runtime.cancel_tx() {
             let _ = tx.send(CancelLevel::ForceKill);
         }
         self.agent_turn

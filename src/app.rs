@@ -1585,10 +1585,15 @@ mod tests {
         )
     }
 
-    fn install_test_agent_task(app: &mut App) {
-        app.runtime.agent_task = Some(tokio::spawn(async {
-            std::future::pending::<()>().await;
-        }));
+    fn install_test_agent_task(
+        app: &mut App,
+    ) -> tokio::sync::watch::Receiver<crate::agent::CancelLevel> {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(crate::agent::CancelLevel::None);
+        app.runtime
+            .set_agent_handle(crate::agent::runner::AgentHandle::pending_for_test(
+                cancel_tx,
+            ));
+        cancel_rx
     }
 
     #[test]
@@ -2280,7 +2285,7 @@ mod tests {
                 "ESC slash cancel should not append an abort notice"
             );
 
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });
@@ -2315,7 +2320,7 @@ mod tests {
             );
 
             // Clean up.
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });
@@ -2448,7 +2453,7 @@ mod tests {
                 "closing help should not show the streaming abort hint"
             );
 
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });
@@ -2686,9 +2691,7 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.begin_agent_turn();
-            install_test_agent_task(&mut app);
-            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(crate::agent::CancelLevel::None);
-            app.runtime.cancel_tx = Some(cancel_tx);
+            let cancel_rx = install_test_agent_task(&mut app);
             app.session.live_turn.tool_entries.push(crate::live_turn::LiveToolEntry {
                 id: "call_1".to_string(),
                 name: "bash".to_string(),
@@ -2704,7 +2707,7 @@ mod tests {
 
             app.request_hard_abort();
 
-            assert!(app.runtime.agent_task.is_some(), "tool-phase hard abort should keep agent task alive");
+            assert!(app.runtime.is_running(), "tool-phase hard abort should keep agent task alive");
             assert_eq!(app.runtime.abort_stage, crate::agent::CancelLevel::HardAbort);
             assert_eq!(*cancel_rx.borrow(), crate::agent::CancelLevel::HardAbort);
             assert!(matches!(
@@ -2712,7 +2715,7 @@ mod tests {
                 Some(StreamingStatus::Message(ref s)) if s == "[Aborting… Press Ctrl-C again to force kill]"
             ));
 
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });
@@ -2734,12 +2737,12 @@ mod tests {
             install_test_agent_task(&mut app);
             let (cancel_tx, _cancel_rx) =
                 tokio::sync::watch::channel(crate::agent::CancelLevel::None);
-            app.runtime.cancel_tx = Some(cancel_tx);
+            let _ = cancel_tx;
 
             app.request_hard_abort();
 
             assert!(
-                app.runtime.agent_task.is_none(),
+                !app.runtime.is_running(),
                 "model-phase hard abort should stop the task immediately"
             );
             assert!(matches!(
@@ -2774,7 +2777,7 @@ mod tests {
                 .count();
             assert_eq!(matching, 1, "user message should appear once in display");
 
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });
@@ -2946,7 +2949,7 @@ mod tests {
                 "submit should always initialise session_state before launching a turn"
             );
 
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });
@@ -3096,7 +3099,7 @@ mod tests {
                     if id == "attach_0" && content == "attached contents\n" && !is_error
             ));
 
-            if let Some(handle) = app.runtime.agent_task.take() {
+            if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
         });

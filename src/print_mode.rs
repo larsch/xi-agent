@@ -7,10 +7,10 @@ use std::io::{self, ErrorKind, Write};
 use std::sync::{Arc, Mutex};
 
 use crate::agent::AgentLoopConfig;
+use crate::agent::runner::AgentHandle;
 use crate::agent::tools::custom::{custom_tool_dirs, load_custom_tools};
 use crate::agent::tools::register_builtin_tools;
-use crate::agent::types::CancelLevel;
-use crate::agent::{AgentEvent, ToolOutputLog, build_system_prompt};
+use crate::agent::{AgentEvent, CancelLevel, ToolOutputLog, build_system_prompt};
 use crate::app_event::AppEvent;
 use crate::auth;
 use crate::hook_ipc::HookIpcPublisherHandle;
@@ -176,12 +176,8 @@ async fn run_print_mode_loop(
     let system_prompt_for_retry = config.system_prompt.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
-
-    tokio::spawn(async move {
-        crate::agent::run_agent_loop(config, provider, tx, steering_rx, cancel_rx).await;
-    });
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let _runner = AgentHandle::spawn_with_cancel(config, provider, tx, cancel_tx, cancel_rx);
 
     while let Some(ev) = rx.recv().await {
         let AppEvent::Agent(ev) = ev else {
@@ -325,8 +321,7 @@ async fn run_print_mode_loop_inner(
     provider_label: &str,
 ) -> i32 {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let (_steering_tx, steering_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
 
     // AgentLoopConfig is not Clone; rebuild a minimal headless one for the retry.
     let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));
@@ -355,9 +350,7 @@ async fn run_print_mode_loop_inner(
         session_id: String::new(),
     };
 
-    tokio::spawn(async move {
-        crate::agent::run_agent_loop(retry_config, provider, tx, steering_rx, cancel_rx).await;
-    });
+    let _runner = AgentHandle::spawn_with_cancel(retry_config, provider, tx, cancel_tx, cancel_rx);
 
     while let Some(ev) = rx.recv().await {
         let AppEvent::Agent(ev) = ev else {

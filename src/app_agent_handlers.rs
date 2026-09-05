@@ -75,7 +75,7 @@ impl App {
             payload
         );
         if self.streaming() {
-            if let Some(tx) = self.runtime.steering_tx.as_ref()
+            if let Some(tx) = self.runtime.steering_tx()
                 && tx.send(message.clone()).is_ok()
             {
                 self.runtime.queued_steering.push(message);
@@ -167,8 +167,7 @@ impl App {
                         } else {
                             let accepted = self
                                 .runtime
-                                .steering_tx
-                                .as_ref()
+                                .steering_tx()
                                 .is_some_and(|tx| tx.send(text.clone()).is_ok());
                             if accepted {
                                 self.runtime.queued_steering.push(text);
@@ -630,9 +629,7 @@ impl App {
     fn on_agent_done(&mut self) {
         self.publish_ipc_completion("success");
         self.end_agent_turn();
-        self.runtime.agent_task = None;
-        self.runtime.cancel_tx = None;
-        self.runtime.steering_tx = None;
+        self.runtime.clear_agent_handle();
         self.runtime.queued_steering.clear();
         // The final TurnEnd already flushed the turn buffer.
         // Done only cleans up live streaming state.
@@ -674,9 +671,7 @@ impl App {
 
     fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
         self.end_agent_turn();
-        self.runtime.agent_task = None;
-        self.runtime.cancel_tx = None;
-        self.runtime.steering_tx = None;
+        self.runtime.clear_agent_handle();
         self.runtime.queued_steering.clear();
 
         let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
