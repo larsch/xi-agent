@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.8.0 — 2026-09-05
+
+### Added
+
+- **Persistent Python REPL**: an agent-loop-scoped Python kernel preserves state across executions, supports reset and asynchronous execution, handles timeouts, and can install dependencies through uv when available.
+- **Desktop notifications**: interactive sessions can show best-effort notifications when the agent halts, including the current project and a bounded preview of the question or response.
+- **Input text selection**: chat and shell input fields support selecting and highlighting text, including selections spanning wrapped lines.
+- **Experimental session IPC**: opt-in local IPC provides session control and event subscriptions through a worktree-local socket; this interface is experimental.
+
+### Changed
+
+- **Windows input**: bracketed paste and mouse input now use the updated Crossterm support while retaining compatibility with Windows Terminal and conhost.
+- **Viewport anchoring**: anchor padding is preserved through agent-loop continuations, layout changes, scrolling, and terminal resizing.
+- **Ask-user presentation**: ask-user context now uses the same margin block styling as the question.
+
+### Fixed
+
+- **`read_file` range notices**: exact offset/limit reads no longer show redundant range notices, while truncation and EOF-clipped ranges continue to be reported.
+- **Unix subprocess tests**: the Python REPL context is initialized correctly in Unix-only test helpers.
+- **Session switching**: switching sessions now clears stale log expansion, padding, generation, and scroll state from the previously selected session.
+
 ## v0.7.0 — 2026-08-23
 
 ### Added
