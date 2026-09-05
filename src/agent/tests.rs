@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures_util::stream;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::agent::tools::ask_user::AskUserTool;
 use crate::agent::types::{AgentEvent, AskUserResponse, CancelLevel, Tool};
@@ -91,6 +91,46 @@ impl LlmProvider for DelayedMockProvider {
     }
 }
 
+struct SynchronizedMockProvider {
+    events: Arc<Mutex<std::collections::VecDeque<LlmEvent>>>,
+    stream_started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl LlmProvider for SynchronizedMockProvider {
+    fn stream_chat(&self, messages: Vec<Message>, context: LlmRequestContext) -> LlmStream {
+        self.stream_chat_with_tools(messages, vec![], context)
+    }
+
+    fn stream_chat_with_tools(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+        _context: LlmRequestContext,
+    ) -> LlmStream {
+        let events = self.events.lock().unwrap().drain(..).collect::<Vec<_>>();
+        let started = Arc::clone(&self.stream_started);
+        let release = Arc::clone(&self.release);
+        Box::pin(stream::unfold(
+            (events.into_iter(), Some(started), release),
+            |(mut iter, started, release)| async move {
+                if started.is_none() {
+                    release.notified().await;
+                }
+                let ev = iter.next()?;
+                if let Some(started) = started {
+                    started.notify_one();
+                }
+                Some((ev, (iter, None, release)))
+            },
+        ))
+    }
+
+    fn list_models(&self) -> ModelListFuture {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
+
 struct SlowTool;
 
 impl Tool for SlowTool {
@@ -115,8 +155,9 @@ impl Tool for SlowTool {
         &self,
         args: serde_json::Value,
         _ctx: crate::agent::types::ToolCallContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::agent::ToolResult> + Send + '_>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::agent::types::ToolResult> + Send + '_>,
+    > {
         let value = args
             .get("value")
             .and_then(|v| v.as_str())
@@ -124,7 +165,7 @@ impl Tool for SlowTool {
             .to_string();
         Box::pin(async move {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            crate::agent::ToolResult::ok_str(format!("slow:{value}"))
+            crate::agent::types::ToolResult::ok_str(format!("slow:{value}"))
         })
     }
 }
@@ -1303,7 +1344,7 @@ fn registry_from_names(names: &[&'static str]) -> crate::agent::types::ToolRegis
 
 #[test]
 fn tool_defs_are_sorted_alphabetically() {
-    use crate::agent::build_sorted_tool_defs;
+    use crate::agent::tool_defs::build_sorted_tool_defs;
     use std::collections::HashSet;
 
     // Run with several different input orderings.  Without the sort in
@@ -1328,4 +1369,274 @@ fn tool_defs_are_sorted_alphabetically() {
         let got: HashSet<&str> = names.iter().copied().collect();
         assert_eq!(got, expected);
     }
+}
+
+// ── Agent runner race coverage ───────────────────────────────────────────────
+
+fn runner_config(
+    tools: HashMap<String, Arc<dyn Tool>>,
+    executor: Arc<dyn crate::agent::types::ToolExecutor>,
+) -> AgentLoopConfig {
+    AgentLoopConfig {
+        tools,
+        file_tracker: make_tracker(),
+        tool_output_log: make_log(),
+        executor,
+        session_events: vec![],
+        current_model: "gpt-4o".to_string(),
+        auto_compaction_enabled: false,
+        manual_compaction_requested: false,
+        manual_compaction_instructions: None,
+        system_prompt: None,
+        hooks: HashMap::new(),
+        hook_ipc: crate::hooks::HookIpcPublisherHandle::disabled(),
+        session_id: "runner-test".to_string(),
+    }
+}
+
+fn runner_events(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    while let Ok(AppEvent::Agent(event)) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn runner_hard_abort_during_model_streaming_stops_without_done() {
+    let stream_started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = SynchronizedMockProvider {
+        events: Arc::new(Mutex::new(
+            vec![
+                LlmEvent::Token {
+                    text: "partial".into(),
+                    phase: AssistantPhase::Unknown,
+                },
+                LlmEvent::Error(crate::llm::ProviderError::other("test", "cancelled")),
+            ]
+            .into_iter()
+            .collect(),
+        )),
+        stream_started: Arc::clone(&stream_started),
+        release: Arc::clone(&release),
+    };
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(HashMap::new(), make_executor()),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx.clone(),
+        cancel_rx,
+    );
+    stream_started.notified().await;
+    cancel_tx.send(CancelLevel::HardAbort).unwrap();
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !runner_events(&mut app_rx)
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Done))
+    );
+}
+
+#[tokio::test]
+async fn runner_hard_abort_during_tool_execution_reports_tool_end() {
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert("slow_tool".into(), Arc::new(SlowTool));
+    let provider = MockProvider::new(vec![vec![
+        LlmEvent::ToolCall {
+            id: "call-1".into(),
+            name: "slow_tool".into(),
+            args: serde_json::json!({"value": "x"}),
+        },
+        LlmEvent::Done,
+    ]]);
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(tools, make_executor()),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx.clone(),
+        cancel_rx,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    cancel_tx.send(CancelLevel::HardAbort).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        runner_events(&mut app_rx)
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallEnd { .. }))
+    );
+}
+
+#[tokio::test]
+async fn runner_soft_stop_after_tool_batch_does_not_start_next_turn() {
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert("slow_tool".into(), Arc::new(SlowTool));
+    let provider = MockProvider::new(vec![
+        vec![
+            LlmEvent::ToolCall {
+                id: "call-1".into(),
+                name: "slow_tool".into(),
+                args: serde_json::json!({"value": "x"}),
+            },
+            LlmEvent::Done,
+        ],
+        vec![
+            LlmEvent::Token {
+                text: "should-not-run".into(),
+                phase: AssistantPhase::Unknown,
+            },
+            LlmEvent::Done,
+        ],
+    ]);
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::SoftStop);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(tools, make_executor()),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx,
+        cancel_rx,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = runner_events(&mut app_rx);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::TurnStart { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Done)));
+}
+
+#[tokio::test]
+async fn runner_steering_during_final_answer_stream_is_consumed_next_turn() {
+    let stream_started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = SynchronizedMockProvider {
+        events: Arc::new(Mutex::new(
+            vec![
+                LlmEvent::Token {
+                    text: "first".into(),
+                    phase: AssistantPhase::Unknown,
+                },
+                LlmEvent::Done,
+            ]
+            .into_iter()
+            .collect(),
+        )),
+        stream_started: Arc::clone(&stream_started),
+        release: Arc::clone(&release),
+    };
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(HashMap::new(), make_executor()),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx,
+        cancel_rx,
+    );
+    stream_started.notified().await;
+    runner.steering_sender().send("steer".into()).unwrap();
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        runner_events(&mut app_rx)
+            .iter()
+            .any(|event| matches!(event, AgentEvent::SteeringConsumed { text } if text == "steer"))
+    );
+}
+
+struct ShutdownProbe(Arc<std::sync::atomic::AtomicBool>);
+
+impl crate::agent::types::ToolExecutor for ShutdownProbe {
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move { self.0.store(true, std::sync::atomic::Ordering::SeqCst) })
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        _id: &'a str,
+        _name: &'a str,
+        _args: serde_json::Value,
+        _tools: &'a crate::agent::types::ToolRegistry,
+        _log: &'a Arc<Mutex<crate::agent::tool_output_log::ToolOutputLog>>,
+        _tx: Option<mpsc::UnboundedSender<AppEvent>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::agent::types::ToolResult> + Send + 'a>,
+    > {
+        Box::pin(async { crate::agent::types::ToolResult::ok_str("") })
+    }
+}
+
+#[tokio::test]
+async fn runner_waits_for_executor_shutdown_before_task_completion() {
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = MockProvider::new(vec![vec![
+        LlmEvent::Token {
+            text: "done".into(),
+            phase: AssistantPhase::Unknown,
+        },
+        LlmEvent::Done,
+    ]]);
+    let (app_tx, _app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(
+            HashMap::new(),
+            Arc::new(ShutdownProbe(Arc::clone(&shutdown))),
+        ),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx,
+        cancel_rx,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(shutdown.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn runner_completes_when_event_receiver_is_dropped() {
+    let provider = MockProvider::new(vec![vec![
+        LlmEvent::Token {
+            text: "done".into(),
+            phase: AssistantPhase::Unknown,
+        },
+        LlmEvent::Done,
+    ]]);
+    let (app_tx, app_rx) = mpsc::unbounded_channel();
+    drop(app_rx);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(HashMap::new(), make_executor()),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx,
+        cancel_rx,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+        .await
+        .unwrap()
+        .unwrap();
 }
