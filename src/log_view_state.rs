@@ -143,6 +143,15 @@ impl LogViewState {
         self.reset_visual_comparison();
     }
 
+    /// Reset view state that belongs to the currently loaded session.
+    pub fn reset_for_session(&mut self) {
+        self.log_scroll = 0;
+        self.auto_scroll = true;
+        self.turn_generation = None;
+        self.clear_expanded();
+        self.clear_padding();
+    }
+
     pub fn clear_padding(&mut self) {
         self.last_block_padding = None;
     }
