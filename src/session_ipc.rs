@@ -4,10 +4,15 @@
 //! transport and framing separate from App state; commands are routed through
 //! the normal application event channel.
 
-use crate::app_event::{AppEvent, AppEventTx};
+#[cfg(unix)]
+use crate::app_event::AppEvent;
+use crate::app_event::AppEventTx;
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
@@ -16,8 +21,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub type IpcReply = oneshot::Sender<Result<serde_json::Value, ErrorBody>>;
 pub type PendingPrompt = (u64, String, IpcReply);
 
+#[cfg(unix)]
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(unix)]
 #[derive(Debug, serde::Deserialize)]
 struct Request {
     id: serde_json::Value,
@@ -26,6 +33,7 @@ struct Request {
     params: serde_json::Value,
 }
 
+#[cfg(unix)]
 #[derive(Debug, serde::Serialize)]
 struct Response {
     version: u32,
@@ -43,6 +51,9 @@ pub struct ErrorBody {
     pub message: String,
 }
 
+// Constructed by the Unix IPC transport; retained on other platforms so App
+// can use one platform-independent event handler.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub enum IpcCommand {
     Request {
@@ -173,6 +184,7 @@ async fn connection(stream: tokio::net::UnixStream, command_tx: AppEventTx, conn
     let _ = command_tx.send(AppEvent::Ipc(IpcCommand::Disconnect { connection_id }));
 }
 
+#[cfg(unix)]
 async fn dispatch(request: Request, tx: &AppEventTx, connection_id: u64) -> Response {
     let id = request.id.clone();
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -204,6 +216,7 @@ async fn dispatch(request: Request, tx: &AppEventTx, connection_id: u64) -> Resp
     }
 }
 
+#[cfg(unix)]
 fn error_response(id: serde_json::Value, code: &str, message: &str) -> Response {
     Response {
         version: PROTOCOL_VERSION,
