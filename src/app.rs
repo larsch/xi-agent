@@ -149,11 +149,11 @@ pub struct App {
     // ── Restart (feature-gated) ──────────────────────────────────────────────
     /// Set when the `restart_host` tool requests a process restart; the main loop
     /// checks this to shut down and re-exec.
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     pub(crate) pending_restart: bool,
     /// Set on resume when a pending `restart_host` call was completed; the main
     /// loop checks this to auto-continue the turn once the provider is ready.
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     pub(crate) pending_restart_continue: bool,
 
     // ── Ask-user interaction state ──────────────────────────────────────────
@@ -215,9 +215,9 @@ impl App {
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
             runtime: AgentRuntime::new(),
-            #[cfg(feature = "restart")]
+            #[cfg(all(feature = "restart", unix))]
             pending_restart: false,
-            #[cfg(feature = "restart")]
+            #[cfg(all(feature = "restart", unix))]
             pending_restart_continue: false,
             ipc_subscribers: Vec::new(),
             ipc_owner: None,
@@ -591,7 +591,7 @@ impl App {
     /// continue the turn.  Returns `true` if a result was appended; idempotent
     /// (returns `false` when the last event is not an unanswered `restart_host`
     /// call, so a second resume does not double-append).
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     pub fn complete_pending_restart(&mut self) -> bool {
         let Some(ss) = self.session.session_state.as_mut() else {
             return false;
@@ -3553,7 +3553,7 @@ mod tests {
         app
     }
 
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     #[test]
     fn complete_pending_restart_synthesizes_result_and_is_idempotent() {
         let call = crate::session_event::SessionEvent::ToolCall {
@@ -3601,7 +3601,7 @@ mod tests {
         assert_eq!(events.len(), 3, "no extra event should be appended");
     }
 
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     #[test]
     fn complete_pending_restart_noops_without_trailing_restart_call() {
         let mut app = make_app_with_events(vec![user_ev("hi"), assistant_ev("hello")]);

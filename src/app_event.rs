@@ -24,7 +24,7 @@ pub enum AppEvent {
     ContextLoaded(LoadedContext),
     /// The `restart_host` tool requested a process restart.  Handled by the app
     /// loop by flushing the pending turn and re-exec'ing the binary.
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     Restart,
     Ipc(IpcCommand),
     IpcNotification {

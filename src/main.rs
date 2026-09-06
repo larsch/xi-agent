@@ -56,7 +56,7 @@ mod provider;
 mod provider_instance;
 mod provider_manager;
 mod provider_setup;
-#[cfg(feature = "restart")]
+#[cfg(all(feature = "restart", unix))]
 mod restart;
 mod selection_state;
 mod session;
@@ -140,6 +140,7 @@ struct Cli {
     resume: bool,
 
     /// Resume a specific session by ID (used by the `restart_host` tool).
+    #[cfg(all(feature = "restart", unix))]
     #[arg(long, value_name = "SESSION_ID")]
     resume_session: Option<String>,
 
@@ -388,7 +389,7 @@ async fn main() -> io::Result<()> {
     if cli.resume {
         app.resume_latest_for_current_cwd();
     }
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     if let Some(session_id) = cli.resume_session.as_deref() {
         app.resume_session_by_id(session_id);
         app.pending_restart_continue = app.complete_pending_restart();
@@ -487,7 +488,7 @@ async fn main() -> io::Result<()> {
             app.submit_chat_message(&provider);
         }
 
-        #[cfg(feature = "restart")]
+        #[cfg(all(feature = "restart", unix))]
         if app.pending_restart_continue && app.provider.provider_selected {
             app.pending_restart_continue = false;
             app.launch_turn(&provider);
@@ -496,7 +497,7 @@ async fn main() -> io::Result<()> {
         match run(&mut terminal, &mut app, &provider, &config, &mut timer).await {
             Ok(RunResult::Quit) | Err(_) => break,
 
-            #[cfg(feature = "restart")]
+            #[cfg(all(feature = "restart", unix))]
             Ok(RunResult::Restart) => {
                 // The restart_host tool requested a re-exec.  Restore the
                 // terminal, then exec the current binary resuming the session.
@@ -801,7 +802,7 @@ async fn run(
                     app.login.needs_rebuild = false;
                     return Ok(RunResult::RebuildProvider);
                 }
-                #[cfg(feature = "restart")]
+                #[cfg(all(feature = "restart", unix))]
                 if app.pending_restart {
                     return Ok(RunResult::Restart);
                 }
