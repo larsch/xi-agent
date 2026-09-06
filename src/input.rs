@@ -50,7 +50,7 @@ pub(crate) enum RunResult {
     Terminate(i32),
     /// Re-exec the running binary and resume the active session, requested by
     /// the `restart_host` tool.
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     Restart,
 }
 

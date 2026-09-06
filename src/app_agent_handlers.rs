@@ -54,7 +54,7 @@ impl App {
             AppEvent::AskUser(req) => self.receive_ask_request(req),
             AppEvent::ShellComplete { call_id, result } => self.on_shell_complete(call_id, result),
             AppEvent::ContextLoaded(ctx) => self.apply_loaded_context(ctx),
-            #[cfg(feature = "restart")]
+            #[cfg(all(feature = "restart", unix))]
             AppEvent::Restart => self.on_restart_requested(),
             AppEvent::Ipc(command) => self.handle_ipc_command(command),
             AppEvent::IpcNotification { cwd, event } => self.handle_ipc_notification(cwd, event),
@@ -90,7 +90,7 @@ impl App {
     /// Persists the in-flight turn — including the unanswered `restart_host`
     /// `ToolCall` — so the resumed process can detect and complete it, then
     /// flags the main loop to shut down and re-exec.
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     fn on_restart_requested(&mut self) {
         self.finalise_assistant_turn_event();
         self.flush_turn_events();

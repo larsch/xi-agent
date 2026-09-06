@@ -166,7 +166,7 @@ pub mod python;
 pub mod python_repl;
 pub mod read;
 pub mod read_skill;
-#[cfg(feature = "restart")]
+#[cfg(all(feature = "restart", unix))]
 pub mod restart_host;
 pub mod subprocess;
 pub mod terminal;
@@ -190,7 +190,7 @@ use python::PythonTool;
 use python_repl::PythonReplTool;
 use read::ReadFileTool;
 use read_skill::ReadSkillTool;
-#[cfg(feature = "restart")]
+#[cfg(all(feature = "restart", unix))]
 use restart_host::RestartHostTool;
 use write::WriteTool;
 
@@ -233,7 +233,7 @@ pub fn register_builtin_tools(
         tools.push(Arc::new(ExecTool));
     }
 
-    #[cfg(feature = "restart")]
+    #[cfg(all(feature = "restart", unix))]
     {
         tools.push(Arc::new(RestartHostTool::new()));
     }
