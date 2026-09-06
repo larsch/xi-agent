@@ -26,7 +26,11 @@ pub enum AppEvent {
     /// loop by flushing the pending turn and re-exec'ing the binary.
     #[cfg(all(feature = "restart", unix))]
     Restart,
+    // Constructed by the Unix IPC transport; retained on other platforms so
+    // application event handling remains platform-independent.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Ipc(IpcCommand),
+    #[cfg_attr(not(unix), allow(dead_code))]
     IpcNotification {
         cwd: String,
         event: serde_json::Value,
