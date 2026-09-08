@@ -322,11 +322,13 @@ impl LoginState {
                     // LLM history; the retry will continue seamlessly.
                     self.needs_rebuild = true;
                 } else {
+                    let retrying_agent_turn = self.retry_after_refresh;
                     self.retry_after_refresh = false;
-                    // Still signal a rebuild so the event loop exits and the
-                    // error notice becomes visible — without this, the UI
-                    // would be stuck if the refresh happened during a turn.
-                    self.needs_rebuild = true;
+                    self.retry_model_fetch_after_refresh = false;
+                    // A failed agent-turn refresh still needs to exit the event
+                    // loop. A model-fetch refresh must not rebuild: startup
+                    // would auto-query models again and repeat the refresh.
+                    self.needs_rebuild = retrying_agent_turn;
                     session.live_turn.notices.push(Message::assistant(format!(
                         "[token refresh failed for {provider}: {message}. Run /login {provider}]"
                     )));
