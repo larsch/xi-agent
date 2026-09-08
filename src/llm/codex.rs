@@ -453,26 +453,40 @@ struct PendingCall {
     arguments: String,
 }
 
-// ── Known models ──────────────────────────────────────────────────────────────
+// ── Model discovery ──────────────────────────────────────────────────────────
 
-fn known_models() -> Vec<String> {
-    vec![
-        "gpt-5.4".to_string(),
-        "gpt-5.4-pro".to_string(),
-        "gpt-5.3-codex".to_string(),
-        "gpt-5.3-codex-spark".to_string(),
-        "gpt-5.2".to_string(),
-        "gpt-5.2-pro".to_string(),
-        "gpt-5.2-codex".to_string(),
-        "gpt-5.1".to_string(),
-        "gpt-5.1-codex".to_string(),
-        "gpt-5.1-codex-max".to_string(),
-        "gpt-5.1-codex-mini".to_string(),
-        "gpt-5".to_string(),
-        "gpt-5-codex".to_string(),
-        "gpt-5-mini".to_string(),
-        "codex-mini-latest".to_string(),
-    ]
+/// Response returned by the ChatGPT Codex `/models` endpoint.
+///
+/// The endpoint includes hidden/internal entries alongside models intended for
+/// the picker, so retain only entries explicitly marked as `"list"`.
+#[derive(Deserialize)]
+struct CodexModelsResponse {
+    models: Vec<CodexModel>,
+}
+
+#[derive(Deserialize)]
+struct CodexModel {
+    slug: String,
+    visibility: String,
+}
+
+/// Codex catalog compatibility version.
+///
+/// This is intentionally independent of xi's package version. The ChatGPT
+/// backend gates catalog entries against the Codex CLI protocol version; using
+/// xi's version (currently `0.8.0`) yields an empty catalog.
+const CODEX_CATALOG_CLIENT_VERSION: &str = "1.0.0";
+
+fn resolve_codex_models_url(base_url: &str) -> String {
+    let normalized = base_url.trim_end_matches('/');
+    let endpoint = if let Some(base) = normalized.strip_suffix("/responses") {
+        format!("{base}/models")
+    } else if normalized.ends_with("/codex") {
+        format!("{normalized}/models")
+    } else {
+        format!("{normalized}/codex/models")
+    };
+    format!("{endpoint}?client_version={CODEX_CATALOG_CLIENT_VERSION}")
 }
 
 // ── LlmProvider impl ──────────────────────────────────────────────────────────
@@ -492,8 +506,28 @@ impl LlmProvider for CodexProvider {
     }
 
     fn list_models(&self) -> ModelListFuture {
-        let models = known_models();
-        Box::pin(async move { Ok(models) })
+        let url = resolve_codex_models_url(&self.base_url);
+        let api_key = self.api_key.clone();
+        let extra_headers = self.extra_headers.clone();
+        let client = self.client.clone();
+        Box::pin(async move {
+            super::common::fetch_model_list::<CodexModelsResponse, _>(
+                &client,
+                &url,
+                "Codex",
+                Some(&api_key),
+                &extra_headers,
+                |response| {
+                    response
+                        .models
+                        .into_iter()
+                        .filter(|model| model.visibility == "list")
+                        .map(|model| model.slug)
+                        .collect()
+                },
+            )
+            .await
+        })
     }
 }
 
@@ -724,6 +758,60 @@ mod tests {
             resolve_codex_url("https://proxy.example.com/v1/responses"),
             "https://proxy.example.com/v1/responses"
         );
+    }
+
+    #[test]
+    fn resolve_codex_models_url_matches_responses_base_url() {
+        assert_eq!(
+            resolve_codex_models_url("https://chatgpt.com/backend-api"),
+            format!(
+                "https://chatgpt.com/backend-api/codex/models?client_version={CODEX_CATALOG_CLIENT_VERSION}"
+            )
+        );
+        assert_eq!(
+            resolve_codex_models_url("https://proxy.example.com/codex"),
+            format!(
+                "https://proxy.example.com/codex/models?client_version={CODEX_CATALOG_CLIENT_VERSION}"
+            )
+        );
+        assert_eq!(
+            resolve_codex_models_url("https://proxy.example.com/v1/responses"),
+            format!(
+                "https://proxy.example.com/v1/models?client_version={CODEX_CATALOG_CLIENT_VERSION}"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_fetches_picker_visible_models() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/codex/models"))
+            .and(matchers::query_param(
+                "client_version",
+                CODEX_CATALOG_CLIENT_VERSION,
+            ))
+            .and(matchers::header("authorization", "Bearer test-token"))
+            .and(matchers::header("chatgpt-account-id", "acct_test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    {"slug": "gpt-visible", "visibility": "list"},
+                    {"slug": "gpt-hidden", "visibility": "hide"},
+                    {"slug": "gpt-visible-second", "visibility": "list"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = CodexProvider::new(server.uri(), "gpt-visible", "test-token", "acct_test");
+        let models = provider
+            .list_models()
+            .await
+            .expect("model discovery succeeds");
+
+        assert_eq!(models, vec!["gpt-visible", "gpt-visible-second"]);
     }
 
     #[test]
