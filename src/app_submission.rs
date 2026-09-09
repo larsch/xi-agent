@@ -19,7 +19,12 @@ impl App {
             return;
         }
         self.user_owned = true;
-        self.agent_turn.set_status(None);
+        // A control transfer during an active IPC-owned task must preserve the
+        // active state. The submitting Enter then follows the steering path;
+        // clearing it would make that same input launch a second runner.
+        if !self.streaming() {
+            self.agent_turn.set_status(None);
+        }
         let Some(owner) = self.ipc_owner.take() else {
             return;
         };
@@ -42,6 +47,20 @@ impl App {
     // ── LLM submission ────────────────────────────────────────────────────────
 
     fn start_agent_task(&mut self, provider: &DynProvider) {
+        let existing_runner = self.runtime.is_running();
+        let session_id = self.session.current_session_id.as_deref().unwrap_or("init");
+        log::debug!(
+            "starting agent task: pid={} session_id={session_id} existing_runner={existing_runner} streaming={}",
+            std::process::id(),
+            self.streaming(),
+        );
+        if existing_runner {
+            log::error!(
+                "refusing to start an agent task while another runner is active: pid={} session_id={session_id}",
+                std::process::id(),
+            );
+            return;
+        }
         // Make sure the tool registry and system prompt are populated before
         // starting a task. They are normally loaded in the background at
         // startup; this covers `--prompt` and any submit that races ahead of

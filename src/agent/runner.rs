@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -6,6 +7,8 @@ use tokio::task::JoinHandle;
 use crate::agent::{AgentLoopConfig, CancelLevel, run_agent_loop};
 use crate::app_event::AppEventTx;
 use crate::llm::LlmProvider;
+
+static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Handles one spawned agent loop.
 ///
@@ -47,9 +50,19 @@ impl AgentHandle {
         cancel_tx: watch::Sender<CancelLevel>,
         cancel_rx: watch::Receiver<CancelLevel>,
     ) -> Self {
+        let runner_id = NEXT_RUNNER_ID.fetch_add(1, Ordering::Relaxed);
+        let session_id = config.session_id.clone();
+        log::debug!(
+            "agent runner spawned: runner_id={runner_id} pid={} session_id={session_id}",
+            std::process::id(),
+        );
         let (steering_tx, steering_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             run_agent_loop(config, provider, app_event_tx, steering_rx, cancel_rx).await;
+            log::debug!(
+                "agent runner exited: runner_id={runner_id} pid={} session_id={session_id}",
+                std::process::id(),
+            );
         });
         Self {
             steering_tx,
