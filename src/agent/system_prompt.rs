@@ -60,32 +60,37 @@ pub fn read_agents_md(
 ) -> Vec<AgentsEntry> {
     let mut entries: Vec<AgentsEntry> = Vec::new();
 
+    let system_home_dir = BaseDirs::new().map(|bd| bd.home_dir().to_path_buf());
+    let home_dir_buf = test_home
+        .map(|p| p.to_path_buf())
+        .or_else(|| system_home_dir.clone());
+
     if let Some(content) = agent_agents_md {
         entries.push(AgentsEntry {
             kind: AgentsKind::Agent,
             path: std::path::PathBuf::from("(agent AGENTS.md)"),
             content: content.to_string(),
         });
-    } else {
+    } else if let Some(home_dir) = home_dir_buf.as_deref()
+        && let Some((path, content)) = read_directory_agents(home_dir)
+    {
         // Global: one file from home directory (only when no agent override).
-        let home_dir_buf = test_home
-            .map(|p| p.to_path_buf())
-            .or_else(|| BaseDirs::new().map(|bd| bd.home_dir().to_path_buf()));
-        if let Some(home_dir) = home_dir_buf.as_deref()
-            && let Some((path, content)) = read_directory_agents(home_dir)
-        {
-            entries.push(AgentsEntry {
-                kind: AgentsKind::Global,
-                path,
-                content,
-            });
-        }
+        entries.push(AgentsEntry {
+            kind: AgentsKind::Global,
+            path,
+            content,
+        });
     }
 
-    // Walk cwd → root, one file per directory level.
+    // Walk cwd → root, one file per directory level. The home directory is
+    // excluded because its instructions are already represented by the global
+    // entry above (or replaced by an agent entry).
     let mut current_dir = Path::new(cwd).to_path_buf();
     loop {
-        if let Some((path, content)) = read_directory_agents(&current_dir) {
+        if home_dir_buf.as_deref() != Some(current_dir.as_path())
+            && system_home_dir.as_deref() != Some(current_dir.as_path())
+            && let Some((path, content)) = read_directory_agents(&current_dir)
+        {
             entries.push(AgentsEntry {
                 kind: AgentsKind::Local,
                 path,
