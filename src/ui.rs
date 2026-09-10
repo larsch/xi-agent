@@ -915,6 +915,7 @@ mod tests {
             },
             DisplayConfig::default(),
             crate::config::ThrobberConfig::default(),
+            false,
         )
     }
 

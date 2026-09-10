@@ -205,6 +205,7 @@ pub fn register_builtin_tools(
     file_tracker: Arc<Mutex<FileTracker>>,
     skills: Arc<Vec<crate::skills::SkillMeta>>,
     custom: Vec<custom::CustomTool>,
+    session_ipc_enabled: bool,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
@@ -214,12 +215,15 @@ pub fn register_builtin_tools(
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
         Arc::new(ReadSkillTool::new(Arc::clone(&skills))),
-        Arc::new(AgentSessionTool),
         Arc::new(AskUserTool::new(
             app_event_tx,
             Some(Arc::clone(&file_tracker)),
         )),
     ];
+
+    if session_ipc_enabled {
+        tools.push(Arc::new(AgentSessionTool));
+    }
 
     #[cfg(target_os = "windows")]
     {
@@ -269,8 +273,27 @@ pub fn register_builtin_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, translate_serde_message};
+    use super::{FileTracker, parse_args, register_builtin_tools, translate_serde_message};
     use serde::Deserialize;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn agent_session_tool_requires_session_ipc() {
+        let skills = Arc::new(Vec::new());
+        let tracker = Arc::new(Mutex::new(FileTracker::new()));
+
+        let disabled = register_builtin_tools(
+            None,
+            Arc::clone(&tracker),
+            Arc::clone(&skills),
+            vec![],
+            false,
+        );
+        assert!(!disabled.contains_key("agent_session"));
+
+        let enabled = register_builtin_tools(None, tracker, skills, vec![], true);
+        assert!(enabled.contains_key("agent_session"));
+    }
 
     // ── Structs used by parse_args tests ────────────────────────────────────
 

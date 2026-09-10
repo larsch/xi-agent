@@ -168,6 +168,8 @@ pub struct App {
     pub(crate) user_owned: bool,
     pub(crate) ipc_prompt: Option<crate::session_ipc::PendingPrompt>,
     pub(crate) ipc_notifications: Vec<String>,
+    /// Whether the session IPC control endpoint is enabled for this process.
+    pub(crate) session_ipc_enabled: bool,
 
     // ── Step-back state ──────────────────────────────────────────────────────
     pub(crate) step_back: StepBackState,
@@ -191,6 +193,7 @@ impl App {
         agent_config: AgentLoopConfig,
         display: DisplayConfig,
         throbber: ThrobberConfig,
+        session_ipc_enabled: bool,
     ) -> Self {
         let throbber = throbber.normalized();
         let initial_model = initial_model.into();
@@ -224,6 +227,7 @@ impl App {
             user_owned: false,
             ipc_prompt: None,
             ipc_notifications: Vec::new(),
+            session_ipc_enabled,
             step_back: StepBackState::default(),
             theme: Theme::default(),
             display,
@@ -401,7 +405,11 @@ impl App {
         if self.agent_config.system_prompt.is_some() {
             return;
         }
-        let ctx = crate::load_context(Some(self.app_event_tx()), &self.agent_config.file_tracker);
+        let ctx = crate::load_context(
+            Some(self.app_event_tx()),
+            &self.agent_config.file_tracker,
+            self.session_ipc_enabled,
+        );
         self.apply_loaded_context(ctx);
     }
 
@@ -1582,6 +1590,7 @@ mod tests {
             },
             crate::config::DisplayConfig::default(),
             crate::config::ThrobberConfig::default(),
+            false,
         )
     }
 
