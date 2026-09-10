@@ -201,7 +201,7 @@ impl CodexProvider {
             if let Some(effort) = explicit_reasoning {
                 body["reasoning"] = serde_json::json!({
                     "effort": effort,
-                    "summary": "auto",
+                    "summary": "detailed",
                 });
             } else if model.starts_with("gpt-5") {
                 // Align with pi-mono OpenAI-Responses behavior: when no explicit

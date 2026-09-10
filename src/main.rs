@@ -337,6 +337,7 @@ async fn main() -> io::Result<()> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
+    let session_ipc_enabled = cli.enable_session_ipc || config.enable_session_ipc;
 
     let mut app = App::new(
         initial_instance,
@@ -359,6 +360,7 @@ async fn main() -> io::Result<()> {
         },
         config.display.clone(),
         config.throbber.clone(),
+        session_ipc_enabled,
     );
     timer.mark("App::new (incl. load_hooks)");
     app.theme = theme;
@@ -378,7 +380,7 @@ async fn main() -> io::Result<()> {
         let tx = app_event_tx.clone();
         let ft = Arc::clone(&file_tracker);
         tokio::task::spawn_blocking(move || {
-            let ctx = load_context(Some(tx.clone()), &ft);
+            let ctx = load_context(Some(tx.clone()), &ft, session_ipc_enabled);
             tx.send_ignore(AppEvent::ContextLoaded(ctx));
         });
     }
@@ -405,7 +407,7 @@ async fn main() -> io::Result<()> {
                 Some(crate::session_state::SessionState::from_event_log(log));
         }
     }
-    let _ipc_server = if cli.enable_session_ipc || config.enable_session_ipc {
+    let _ipc_server = if session_ipc_enabled {
         match session_ipc::IpcServer::bind(std::path::Path::new(&cwd), app_event_tx.clone()) {
             Ok(server) => server,
             Err(error) => {
@@ -416,6 +418,7 @@ async fn main() -> io::Result<()> {
     } else {
         None
     };
+
     app.provider.instances = config.resolve_effective_providers();
     timer.mark("resolve_effective_providers");
     // Mark provider as explicitly selected when a provider was configured
@@ -863,6 +866,7 @@ impl std::fmt::Debug for LoadedContext {
 fn load_context(
     app_event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
     file_tracker: &Arc<Mutex<FileTracker>>,
+    session_ipc_enabled: bool,
 ) -> LoadedContext {
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let custom_tool_count = custom_tools.len();
@@ -872,6 +876,7 @@ fn load_context(
         Arc::clone(file_tracker),
         Arc::clone(&loaded_skills),
         custom_tools,
+        session_ipc_enabled,
     );
     let agents = load_agents();
     LoadedContext {
@@ -889,7 +894,7 @@ fn handle_reload_context(
     file_tracker: &Arc<Mutex<FileTracker>>,
     app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
 ) {
-    let ctx = load_context(Some(app_event_tx), file_tracker);
+    let ctx = load_context(Some(app_event_tx), file_tracker, app.session_ipc_enabled);
     let skills_count = ctx.skills.len();
     let custom_count = ctx.custom_tool_count;
     app.apply_loaded_context(ctx);
@@ -911,7 +916,7 @@ fn handle_new_session(
     file_tracker.lock().unwrap().reset();
     app.clear_session_state();
 
-    let ctx = load_context(Some(app_event_tx), file_tracker);
+    let ctx = load_context(Some(app_event_tx), file_tracker, app.session_ipc_enabled);
     let skills_count = ctx.skills.len();
     let custom_count = ctx.custom_tool_count;
     app.apply_loaded_context(ctx);
