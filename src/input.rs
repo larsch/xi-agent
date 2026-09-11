@@ -409,7 +409,11 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
     match key.code {
         KeyCode::Up => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                app.step_back();
+                if app.streaming() {
+                    app.recall_previous_steering();
+                } else {
+                    app.step_back();
+                }
                 return KeyDispatch::Continue;
             }
             app.selection_select_prev();
@@ -417,7 +421,11 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
         }
         KeyCode::Down => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                app.step_forward();
+                if app.streaming() {
+                    app.recall_next_steering();
+                } else {
+                    app.step_forward();
+                }
                 return KeyDispatch::Continue;
             }
             app.selection_select_next();
@@ -641,7 +649,11 @@ fn handle_chat_mode_key(
         KeyCode::PageDown => app.scroll_down(),
         KeyCode::Up => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                app.step_back();
+                if app.streaming() {
+                    app.recall_previous_steering();
+                } else {
+                    app.step_back();
+                }
                 return KeyDispatch::Continue;
             }
             if !app.completion.completions.is_empty() {
@@ -652,7 +664,11 @@ fn handle_chat_mode_key(
         }
         KeyCode::Down => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                app.step_forward();
+                if app.streaming() {
+                    app.recall_next_steering();
+                } else {
+                    app.step_forward();
+                }
                 return KeyDispatch::Continue;
             }
             if !app.completion.completions.is_empty() {

@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::agent::runner::SteeringCommand;
 use crate::agent::types::CancelLevel;
 use crate::agent::{AgentLoopConfig, ToolOutputLog};
 use crate::app::{App, DynProvider, RetryTarget, StreamingStatus};
@@ -132,6 +133,8 @@ impl App {
             session_id: session_id.clone(),
         };
         self.runtime.queued_steering.clear();
+        self.runtime.steering_cursor = None;
+        self.runtime.steering_saved_input = None;
 
         let provider = Arc::clone(provider);
         let tx = self.app_event_tx();
@@ -161,21 +164,85 @@ impl App {
         self.start_agent_task(provider);
     }
 
+    /// Recall an older pending steering message into the input field.
+    pub(crate) fn recall_previous_steering(&mut self) {
+        if !self.streaming() || self.runtime.queued_steering.is_empty() {
+            return;
+        }
+        let next = match self.runtime.steering_cursor {
+            Some(0) => return,
+            Some(idx) => idx - 1,
+            None => {
+                self.runtime.steering_saved_input = Some(self.textarea.lines().join("\n"));
+                self.runtime.queued_steering.len() - 1
+            }
+        };
+        // Remove the recalled message and every newer one from the runner
+        // immediately. Waiting for Enter here leaves a race where the runner
+        // can consume B/C while the user is editing B.
+        if let Some(tx) = self.runtime.steering_tx()
+            && tx
+                .send(SteeringCommand::ReplacePending(
+                    self.runtime.queued_steering[..next].to_vec(),
+                ))
+                .is_err()
+        {
+            return;
+        }
+        self.runtime.steering_cursor = Some(next);
+        self.textarea = crate::app::App::make_textarea();
+        self.textarea
+            .insert_str(&self.runtime.queued_steering[next]);
+    }
+
+    /// Move toward newer pending steering, restoring pre-recall input after
+    /// the newest message.
+    pub(crate) fn recall_next_steering(&mut self) {
+        let Some(current) = self.runtime.steering_cursor else {
+            return;
+        };
+        if current + 1 < self.runtime.queued_steering.len() {
+            let next = current + 1;
+            self.runtime.steering_cursor = Some(next);
+            self.textarea = crate::app::App::make_textarea();
+            self.textarea
+                .insert_str(&self.runtime.queued_steering[next]);
+        } else {
+            let saved = self.runtime.steering_saved_input.take().unwrap_or_default();
+            self.runtime.steering_cursor = None;
+            self.textarea = crate::app::App::make_textarea();
+            self.textarea.insert_str(&saved);
+        }
+    }
+
     /// Queue a user steering message while the agent loop is running.
     pub fn enqueue_steering_from_input(&mut self) {
-        let lines: Vec<String> = self.textarea.lines().to_vec();
-        let text = lines.join("\n");
+        let text = self.textarea.lines().join("\n");
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() || !self.streaming() || self.login.active {
             return;
         }
 
+        let command = if let Some(cursor) = self.runtime.steering_cursor {
+            let mut replacement = self.runtime.queued_steering[..=cursor].to_vec();
+            replacement[cursor] = trimmed.clone();
+            SteeringCommand::ReplacePending(replacement)
+        } else {
+            SteeringCommand::Enqueue(trimmed.clone())
+        };
         let Some(tx) = self.runtime.steering_tx() else {
             return;
         };
 
-        if tx.send(trimmed.clone()).is_ok() {
-            self.runtime.queued_steering.push(trimmed);
+        if tx.send(command).is_ok() {
+            if let Some(cursor) = self.runtime.steering_cursor {
+                self.runtime.queued_steering.truncate(cursor + 1);
+                self.runtime.queued_steering[cursor] = trimmed;
+            } else {
+                self.runtime.queued_steering.push(trimmed);
+            }
+            self.runtime.steering_cursor = None;
+            self.runtime.steering_saved_input = None;
             self.reset_textarea();
             self.log_view.auto_scroll = true;
         }

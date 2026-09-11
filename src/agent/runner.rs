@@ -15,14 +15,21 @@ static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
 /// The handle owns the channels used to steer and cancel the loop, together
 /// with its task. Consumers can keep the handle without depending on the
 /// details of channel construction or task spawning.
+/// Updates sent from the UI to the runner's pending steering queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SteeringCommand {
+    Enqueue(String),
+    ReplacePending(Vec<String>),
+}
+
 pub(crate) struct AgentHandle {
-    pub(crate) steering_tx: mpsc::UnboundedSender<String>,
+    pub(crate) steering_tx: mpsc::UnboundedSender<SteeringCommand>,
     pub(crate) cancel_tx: watch::Sender<CancelLevel>,
     pub(crate) task: JoinHandle<()>,
 }
 
 impl AgentHandle {
-    pub(crate) fn steering_sender(&self) -> &mpsc::UnboundedSender<String> {
+    pub(crate) fn steering_sender(&self) -> &mpsc::UnboundedSender<SteeringCommand> {
         &self.steering_tx
     }
 

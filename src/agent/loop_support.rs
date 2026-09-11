@@ -4,6 +4,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::compaction;
 use crate::agent::events::{AgentEventSink, send_agent_event};
+use crate::agent::runner::SteeringCommand;
 use crate::agent::types::{AgentEvent, AgentLoopConfig};
 
 use crate::hooks::{HookConfig, HookPoint, empty_payload};
@@ -19,13 +20,23 @@ pub(crate) struct HookDispatchContext<'a> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub(crate) async fn drain_steering_messages(
-    steering_rx: &mut UnboundedReceiver<String>,
+    steering_rx: &mut UnboundedReceiver<SteeringCommand>,
     session_events: &mut Vec<SessionEvent>,
     sink: &dyn AgentEventSink,
     hook_ctx: &HookDispatchContext<'_>,
 ) -> bool {
+    let mut pending = Vec::new();
+    while let Ok(command) = steering_rx.try_recv() {
+        match command {
+            SteeringCommand::Enqueue(text) => pending.push(text),
+            // Replacing the queue intentionally discards anything the user
+            // stepped past while editing an older steering message.
+            SteeringCommand::ReplacePending(replacement) => pending = replacement,
+        }
+    }
+
     let mut consumed = false;
-    while let Ok(text) = steering_rx.try_recv() {
+    for text in pending {
         send_agent_event(sink, AgentEvent::SteeringConsumed { text: text.clone() });
         session_events.push(SessionEvent::UserMessage {
             content: text.clone(),

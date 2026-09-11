@@ -4,6 +4,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::agent::events::{AgentEventSink, AppEventSink, send_agent_event};
 use crate::agent::file_tracker::build_notification;
+use crate::agent::runner::SteeringCommand;
 use crate::agent::{AgentActivity, AgentEvent, AgentLoopConfig, CancelLevel};
 use crate::agent::{compaction, lifecycle, loop_support, tool_batch, tool_defs, turn};
 use crate::app_event::AppEvent;
@@ -22,7 +23,7 @@ pub async fn run_agent_loop(
     config: AgentLoopConfig,
     provider: Arc<dyn LlmProvider>,
     tx: UnboundedSender<AppEvent>,
-    steering_rx: UnboundedReceiver<String>,
+    steering_rx: UnboundedReceiver<SteeringCommand>,
     cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
 ) {
     let sink = AppEventSink::new(tx.clone());
@@ -35,7 +36,7 @@ async fn run_agent_loop_inner(
     provider: Arc<dyn LlmProvider>,
     tx: UnboundedSender<AppEvent>,
     sink: &dyn AgentEventSink,
-    mut steering_rx: UnboundedReceiver<String>,
+    mut steering_rx: UnboundedReceiver<SteeringCommand>,
     cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
 ) {
     let tool_defs = tool_defs::build_sorted_tool_defs(&config.tools);
