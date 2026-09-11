@@ -17,7 +17,7 @@ impl Tool for AgentSessionTool {
     }
 
     fn description(&self) -> &str {
-        "Interact with a running xi session in another worktree. Actions: inspect, state, post_prompt. Returns unavailable when no xi session owns the worktree IPC endpoint."
+        "Interact with a live external xi session associated with another worktree. Use inspect to identify the session, state to check its runtime status, or post_prompt to ask it to act as a worker. This contacts a running session; it does not inspect source files. Returns unavailable when no live session owns the target directory."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -25,8 +25,8 @@ impl Tool for AgentSessionTool {
             "type": "object",
             "properties": {
                 "action": { "type": "string", "enum": ["inspect", "state", "post_prompt"] },
-                "cwd": { "type": "string", "description": "Canonical or absolute worktree path" },
-                "prompt": { "type": "string", "description": "Prompt to post; required for post_prompt" }
+                "cwd": { "type": "string", "description": "Absolute path to the worktree of the live external session to contact" },
+                "prompt": { "type": "string", "description": "Instruction for the external worker session; required for post_prompt" }
             },
             "required": ["action", "cwd"]
         })
