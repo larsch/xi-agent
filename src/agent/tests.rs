@@ -414,7 +414,9 @@ async fn steering_during_tool_batch_finishes_batch_before_consuming_steering() {
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     steering_tx
-        .send("interrupt".to_string())
+        .send(crate::agent::runner::SteeringCommand::Enqueue(
+            "interrupt".to_string(),
+        ))
         .expect("queue steering");
 
     handle.await.expect("agent loop join");
@@ -512,7 +514,9 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     steering_tx
-        .send("interrupt".to_string())
+        .send(crate::agent::runner::SteeringCommand::Enqueue(
+            "interrupt".to_string(),
+        ))
         .expect("queue steering");
     cancel_tx
         .send(CancelLevel::HardAbort)
@@ -602,7 +606,9 @@ async fn steering_after_streamed_text_is_consumed_after_turn_end() {
 
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     steering_tx
-        .send("test".to_string())
+        .send(crate::agent::runner::SteeringCommand::Enqueue(
+            "test".to_string(),
+        ))
         .expect("queue steering");
 
     handle.await.expect("agent loop join");
@@ -1552,7 +1558,12 @@ async fn runner_steering_during_final_answer_stream_is_consumed_next_turn() {
         cancel_rx,
     );
     stream_started.notified().await;
-    runner.steering_sender().send("steer".into()).unwrap();
+    runner
+        .steering_sender()
+        .send(crate::agent::runner::SteeringCommand::Enqueue(
+            "steer".into(),
+        ))
+        .unwrap();
     release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
         .await

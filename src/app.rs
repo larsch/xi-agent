@@ -319,8 +319,15 @@ impl App {
         self.ask_user.freeform_mode
     }
 
+    /// Pending steering messages still visible in the queue. Messages recalled
+    /// for editing are hidden, but retained internally for Alt+Down navigation
+    /// until the user submits or leaves recall mode.
     pub fn queued_steering(&self) -> &[String] {
-        self.runtime.queued_steering()
+        let visible_len = self
+            .runtime
+            .steering_cursor
+            .unwrap_or(self.runtime.queued_steering.len());
+        &self.runtime.queued_steering[..visible_len]
     }
 
     /// Toggle the info bar visibility.
@@ -3867,6 +3874,28 @@ mod tests {
 
         app.step_back();
         assert!(app.step_back.cursor.is_none());
+    }
+
+    #[test]
+    fn steering_recall_navigates_pending_messages_and_restores_draft() {
+        let mut app = make_app();
+        app.begin_agent_turn();
+        app.runtime.queued_steering = vec!["A".into(), "B".into(), "C".into()];
+        app.textarea.insert_str("draft");
+
+        app.recall_previous_steering();
+        assert_eq!(app.textarea.lines().join("\n"), "C");
+        assert_eq!(app.queued_steering(), ["A", "B"]);
+        app.recall_previous_steering();
+        assert_eq!(app.textarea.lines().join("\n"), "B");
+        assert_eq!(app.queued_steering(), ["A"]);
+        app.recall_next_steering();
+        assert_eq!(app.textarea.lines().join("\n"), "C");
+        assert_eq!(app.queued_steering(), ["A", "B"]);
+        app.recall_next_steering();
+
+        assert_eq!(app.textarea.lines().join("\n"), "draft");
+        assert!(app.runtime.steering_cursor.is_none());
     }
 
     // ── commit_step_branch ask_user preservation ───────────────────────────

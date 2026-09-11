@@ -3,6 +3,7 @@
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::agent::compaction::CompactionOutcome;
+use crate::agent::runner::SteeringCommand;
 use crate::agent::types::AgentEvent;
 use crate::app::{App, RetryTarget, StreamingStatus};
 use crate::app_event::AppEvent;
@@ -76,7 +77,7 @@ impl App {
         );
         if self.streaming() {
             if let Some(tx) = self.runtime.steering_tx()
-                && tx.send(message.clone()).is_ok()
+                && tx.send(SteeringCommand::Enqueue(message.clone())).is_ok()
             {
                 self.runtime.queued_steering.push(message);
             }
@@ -165,10 +166,9 @@ impl App {
                                     .into(),
                             }));
                         } else {
-                            let accepted = self
-                                .runtime
-                                .steering_tx()
-                                .is_some_and(|tx| tx.send(text.clone()).is_ok());
+                            let accepted = self.runtime.steering_tx().is_some_and(|tx| {
+                                tx.send(SteeringCommand::Enqueue(text.clone())).is_ok()
+                            });
                             if accepted {
                                 self.runtime.queued_steering.push(text);
                             }
@@ -334,6 +334,16 @@ impl App {
     fn on_steering_consumed(&mut self, text: String) {
         if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
             self.runtime.queued_steering.remove(pos);
+            match self.runtime.steering_cursor {
+                Some(cursor) if pos < cursor => self.runtime.steering_cursor = Some(cursor - 1),
+                // The selected message has just become unavailable. Keep its
+                // text in the editor, but submit it as a new steering message.
+                Some(cursor) if pos == cursor => {
+                    self.runtime.steering_cursor = None;
+                    self.runtime.steering_saved_input = None;
+                }
+                _ => {}
+            }
         }
         // Flush any buffered assistant turn events first so the assistant
         // response appears before the steering message in the conversation log.
@@ -631,6 +641,8 @@ impl App {
         self.end_agent_turn();
         self.runtime.clear_agent_handle();
         self.runtime.queued_steering.clear();
+        self.runtime.steering_cursor = None;
+        self.runtime.steering_saved_input = None;
         // The final TurnEnd already flushed the turn buffer.
         // Done only cleans up live streaming state.
         self.persist_messages();

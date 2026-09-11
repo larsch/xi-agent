@@ -1,4 +1,4 @@
-use crate::agent::runner::AgentHandle;
+use crate::agent::runner::{AgentHandle, SteeringCommand};
 use crate::agent::types::CancelLevel;
 use crate::app_event::{AppEvent, AppEventTx};
 
@@ -8,7 +8,13 @@ pub(crate) struct AgentRuntime {
     pub(crate) app_event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     pub(crate) app_event_tx: AppEventTx,
     pub(crate) agent_handle: Option<AgentHandle>,
+    /// Steering messages not yet reported as consumed by the runner.
     pub(crate) queued_steering: Vec<String>,
+    /// Selected pending steering message while recalling with Alt+Up/Down.
+    pub(crate) steering_cursor: Option<usize>,
+    /// Input present before steering recall began, restored after moving past
+    /// the newest pending message.
+    pub(crate) steering_saved_input: Option<String>,
     pub(crate) abort_stage: CancelLevel,
     pub(crate) ctrl_d_last_press: Option<std::time::Instant>,
     pub(crate) pending_finalize: bool,
@@ -23,6 +29,8 @@ impl AgentRuntime {
             app_event_tx,
             agent_handle: None,
             queued_steering: Vec::new(),
+            steering_cursor: None,
+            steering_saved_input: None,
             abort_stage: CancelLevel::None,
             ctrl_d_last_press: None,
             pending_finalize: false,
@@ -49,15 +57,13 @@ impl AgentRuntime {
         self.app_event_rx.try_recv()
     }
 
-    pub fn queued_steering(&self) -> &[String] {
-        &self.queued_steering
-    }
-
     pub(crate) fn set_agent_handle(&mut self, handle: AgentHandle) {
         self.agent_handle = Some(handle);
     }
 
-    pub(crate) fn steering_tx(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<String>> {
+    pub(crate) fn steering_tx(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<SteeringCommand>> {
         self.agent_handle.as_ref().map(|h| h.steering_sender())
     }
 
@@ -97,7 +103,7 @@ mod tests {
     fn new_produces_idle_runtime() {
         let rt = AgentRuntime::new();
         assert!(!rt.is_running());
-        assert!(rt.queued_steering().is_empty());
+        assert!(rt.queued_steering.is_empty());
         assert_eq!(rt.abort_stage, CancelLevel::None);
     }
 
