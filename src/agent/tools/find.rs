@@ -4,7 +4,7 @@ use globset::Glob;
 use ignore::WalkBuilder;
 use serde_json::Value;
 
-use crate::agent::types::{Tool, ToolResult};
+use crate::agent::types::{CancelLevel, Tool, ToolCallContext, ToolResult};
 
 const DEFAULT_LIMIT: usize = 1000;
 
@@ -58,9 +58,10 @@ impl Tool for FindTool {
     fn run(
         &self,
         args: Value,
-        _ctx: crate::agent::types::ToolCallContext,
+        ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
+            let cancel_rx = ctx.cancel_rx.clone();
             let FindArgs {
                 pattern,
                 path,
@@ -88,6 +89,7 @@ impl Tool for FindTool {
             // The ignore::Walk API is synchronous; run it on the blocking thread pool.
             let result = tokio::task::spawn_blocking(move || {
                 let mut matches: Vec<String> = Vec::new();
+                let mut cancelled = false;
 
                 let walker = WalkBuilder::new(&search_dir)
                     // Exclude hidden files/directories (dotfiles, .git, etc.).
@@ -100,6 +102,14 @@ impl Tool for FindTool {
                     .build();
 
                 for entry in walker {
+                    if cancel_rx
+                        .as_ref()
+                        .is_some_and(|rx| *rx.borrow() >= CancelLevel::HardAbort)
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
                     let entry = match entry {
                         Ok(e) => e,
                         Err(_) => continue,
@@ -126,14 +136,17 @@ impl Tool for FindTool {
                     }
                 }
 
-                matches
+                (matches, cancelled)
             })
             .await;
 
-            let mut matches = match result {
-                Ok(m) => m,
+            let (mut matches, cancelled) = match result {
+                Ok(result) => result,
                 Err(e) => return ToolResult::err(format!("Find failed: {e}")),
             };
+            if cancelled {
+                return ToolResult::err("Find search cancelled by user");
+            }
 
             let limit_reached = matches.len() > limit;
             if limit_reached {
@@ -200,6 +213,29 @@ mod tests {
             result.content.as_text()
         );
         assert!(result.content.as_text().contains("hello.rs"));
+    }
+
+    #[tokio::test]
+    async fn find_cancels_before_processing_walk_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.rs"), "fn main() {}").unwrap();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        cancel_tx.send(CancelLevel::HardAbort).unwrap();
+        let ctx = ToolCallContext {
+            cancel_rx: Some(cancel_rx),
+            ..ToolCallContext::noop("cancel-test")
+        };
+        let result = FindTool
+            .run(
+                serde_json::json!({
+                    "pattern": "*.rs",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert_eq!(result.content.as_text(), "Find search cancelled by user");
     }
 
     #[tokio::test]

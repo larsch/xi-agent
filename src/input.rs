@@ -318,8 +318,15 @@ fn handle_global_key_shortcuts(
             let now = std::time::Instant::now();
             match app.runtime.ctrl_d_last_press {
                 Some(last) if now.duration_since(last) < std::time::Duration::from_secs(2) => {
-                    // Second press within timeout — quit + abort.
+                    // Second press within timeout — request graceful quit + abort.
                     app.request_hard_abort();
+                    if app.runtime.is_running() {
+                        app.runtime.pending_graceful_quit = true;
+                        app.agent_turn.set_status(Some(StreamingStatus::Message(
+                            "[Aborting current tool; waiting before exit]".to_string(),
+                        )));
+                        return KeyDispatch::Continue;
+                    }
                     return KeyDispatch::Return(RunResult::Quit);
                 }
                 _ => {
@@ -724,6 +731,11 @@ fn handle_chat_submit(
     provider: &Arc<dyn LlmProvider + Send + Sync>,
     config: &XiConfig,
 ) -> KeyDispatch {
+    if app.streaming() && app.runtime.abort_stage >= CancelLevel::HardAbort {
+        app.show_abort_pending_notice();
+        return KeyDispatch::Continue;
+    }
+
     app.take_ipc_control_for_user();
     match app.provider.setup_step.clone() {
         ProviderSetupStep::Endpoint => {
