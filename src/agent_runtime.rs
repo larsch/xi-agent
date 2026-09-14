@@ -17,6 +17,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) steering_saved_input: Option<String>,
     pub(crate) abort_stage: CancelLevel,
     pub(crate) ctrl_d_last_press: Option<std::time::Instant>,
+    pub(crate) pending_graceful_quit: bool,
     pub(crate) pending_finalize: bool,
     pub(crate) pending_shell_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -33,6 +34,7 @@ impl AgentRuntime {
             steering_saved_input: None,
             abort_stage: CancelLevel::None,
             ctrl_d_last_press: None,
+            pending_graceful_quit: false,
             pending_finalize: false,
             pending_shell_handle: None,
         }
@@ -41,6 +43,7 @@ impl AgentRuntime {
     pub(crate) fn reset_abort_stages(&mut self) {
         self.abort_stage = CancelLevel::None;
         self.ctrl_d_last_press = None;
+        self.pending_graceful_quit = false;
     }
 
     pub fn app_event_tx(&self) -> AppEventTx {

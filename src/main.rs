@@ -792,6 +792,10 @@ async fn run(
             Some(ev) = app.recv_app_event() => {
                 needs_redraw = true;
                 app.apply_app_event(ev);
+                if app.runtime.pending_graceful_quit && !app.runtime.is_running() {
+                    app.runtime.pending_graceful_quit = false;
+                    return Ok(RunResult::Quit);
+                }
                 if let Some(text) = app.ipc_notifications.first().cloned() {
                     app.ipc_notifications.remove(0);
                     app.submit_with_text(text, provider);

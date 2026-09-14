@@ -217,6 +217,10 @@ impl App {
 
     /// Queue a user steering message while the agent loop is running.
     pub fn enqueue_steering_from_input(&mut self) {
+        if self.streaming() && self.runtime.abort_stage >= CancelLevel::HardAbort {
+            self.show_abort_pending_notice();
+            return;
+        }
         let text = self.textarea.lines().join("\n");
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() || !self.streaming() || self.login.active {
@@ -516,6 +520,12 @@ impl App {
         }
     }
 
+    pub(crate) fn show_abort_pending_notice(&mut self) {
+        self.agent_turn.set_status(Some(StreamingStatus::Message(
+            "[Aborting current tool; wait for it to finish before submitting]".to_string(),
+        )));
+    }
+
     fn clear_abort_status_notice(&mut self) {
         if matches!(
             self.agent_turn.status,
@@ -609,10 +619,9 @@ impl App {
         if let Some(tx) = self.runtime.cancel_tx() {
             let _ = tx.send(CancelLevel::ForceKill);
         }
-        self.agent_turn
-            .set_status(Some(StreamingStatus::CompletedMessage(
-                "[agent loop aborted]".to_string(),
-            )));
+        self.agent_turn.set_status(Some(StreamingStatus::Message(
+            "[Force abort requested; waiting for current tool to stop]".to_string(),
+        )));
     }
 
     // ── Scrolling ─────────────────────────────────────────────────────────────
