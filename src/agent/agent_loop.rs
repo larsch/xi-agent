@@ -72,6 +72,10 @@ async fn run_agent_loop_inner(
         let cancel_level = *cancel_rx.borrow();
         if cancel_level >= CancelLevel::HardAbort {
             lifecycle::on_cancel(config).await;
+            // App clears its runner handle only on Done. Every cooperative
+            // cancellation exit must emit it, including a cancel observed
+            // before the next turn begins.
+            send_agent_event(sink, AgentEvent::Done);
             return;
         }
 

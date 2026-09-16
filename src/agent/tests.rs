@@ -1020,8 +1020,8 @@ async fn agent_loop_ask_user_no_options_completes_loop() {
 
 // ── Cancellation tests ────────────────────────────────────────────────────────
 
-/// A loop started with cancel already set to true must return immediately
-/// without making any LLM call.
+/// A loop started with cancellation already set must finish immediately
+/// without making an LLM call, while still notifying the UI lifecycle.
 #[tokio::test]
 async fn agent_loop_pre_cancelled_exits_immediately() {
     // Provider would panic if called — any invocation means the test fails.
@@ -1067,7 +1067,6 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
 
     run_agent_loop(config, Arc::new(PanicProvider), tx, steering_rx, cancel_rx).await;
 
-    // No events should have been emitted.
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if let AppEvent::Agent(agent_ev) = ev {
@@ -1075,8 +1074,8 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         }
     }
     assert!(
-        events.is_empty(),
-        "expected no events for pre-cancelled loop, got: {events:?}"
+        matches!(events.as_slice(), [AgentEvent::Done]),
+        "expected exactly one Done event, got: {events:?}"
     );
 }
 

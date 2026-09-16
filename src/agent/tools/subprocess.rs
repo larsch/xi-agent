@@ -73,6 +73,108 @@ struct ProcessOutcome {
     signal: Option<i32>,
 }
 
+/// Native Windows control-event and process-tree termination support.
+///
+/// Agent subprocesses are created in their own process group. HardAbort sends
+/// CTRL_BREAK_EVENT to that group; ForceKill walks descendant processes and
+/// terminates them leaves-first, matching `taskkill /T` without spawning it.
+#[cfg(windows)]
+mod windows_process {
+    use std::collections::{HashMap, HashSet};
+
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    /// Ask every console process in the isolated tool group to stop gracefully.
+    pub(super) fn send_break(process_group_id: u32) {
+        // SAFETY: the PID comes from the child process spawned by this tool.
+        // CREATE_NEW_PROCESS_GROUP makes it a valid, isolated group identifier.
+        if let Err(error) = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process_group_id) }
+        {
+            log::debug!(
+                "failed to send CTRL_BREAK_EVENT to process group {process_group_id}: {error}"
+            );
+        }
+    }
+
+    /// Terminate a root process and all currently enumerated descendants,
+    /// deepest first so children cannot survive through their parent.
+    pub(super) fn terminate_tree(root_pid: u32) {
+        let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::debug!("failed to snapshot processes while terminating {root_pid}: {error}");
+                return;
+            }
+        };
+
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `entry` is initialized with the required size and remains
+        // valid throughout enumeration; `snapshot` is owned until scope exit.
+        let first = unsafe { Process32FirstW(snapshot, &mut entry) };
+        if first.is_ok() {
+            loop {
+                children
+                    .entry(entry.th32ParentProcessID)
+                    .or_default()
+                    .push(entry.th32ProcessID);
+                // SAFETY: same initialized entry buffer as Process32FirstW.
+                if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+        }
+        // SAFETY: snapshot is the owned handle returned by CreateToolhelp32Snapshot.
+        let _ = unsafe { CloseHandle(snapshot) };
+
+        let mut descendants = Vec::new();
+        let mut visited = HashSet::new();
+        collect_descendants(root_pid, &children, &mut visited, &mut descendants);
+        descendants.push(root_pid);
+        for pid in descendants {
+            // SAFETY: PROCESS_TERMINATE requests only the right needed for a
+            // process ID obtained from the operating-system process snapshot.
+            match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
+                Ok(process) => {
+                    // SAFETY: `process` is a valid owned process handle.
+                    if let Err(error) = unsafe { TerminateProcess(process, 1) } {
+                        log::debug!("failed to terminate process {pid}: {error}");
+                    }
+                    // SAFETY: `process` is the owned handle returned by OpenProcess.
+                    let _ = unsafe { CloseHandle(process) };
+                }
+                Err(error) => log::debug!("failed to open process {pid} for termination: {error}"),
+            }
+        }
+    }
+
+    fn collect_descendants(
+        pid: u32,
+        children: &HashMap<u32, Vec<u32>>,
+        visited: &mut HashSet<u32>,
+        descendants: &mut Vec<u32>,
+    ) {
+        if !visited.insert(pid) {
+            return;
+        }
+        if let Some(child_pids) = children.get(&pid) {
+            for &child_pid in child_pids {
+                collect_descendants(child_pid, children, visited, descendants);
+                descendants.push(child_pid);
+            }
+        }
+    }
+}
+
 impl SubprocessCommand {
     /// Create a new builder for `program`.
     pub fn new(program: impl Into<String>) -> Self {
@@ -214,6 +316,8 @@ impl SubprocessCommand {
         // Cancel-aware path: race output collection against cancel signal.
         #[cfg(unix)]
         let child_pid = child.id().map(|id| id as i32);
+        #[cfg(windows)]
+        let child_pid = child.id();
         let ctx_tx = ctx.tx.clone();
 
         let collect_fut = collect_output(child, ctx, self.error_on_nonzero);
@@ -239,6 +343,10 @@ impl SubprocessCommand {
                                     // SAFETY: libc::kill only sends a signal to the child PID.
                                     unsafe { libc::kill(pid, libc::SIGKILL); }
                                 }
+                                #[cfg(windows)]
+                                if let Some(pid) = child_pid {
+                                    windows_process::terminate_tree(pid);
+                                }
                                 termination_requested = Some(RequestedTermination::Sigkill);
                             }
                         }
@@ -248,6 +356,10 @@ impl SubprocessCommand {
                                 if let Some(pid) = child_pid {
                                     // SAFETY: libc::kill only sends a signal to the child PID.
                                     unsafe { libc::kill(pid, libc::SIGTERM); }
+                                }
+                                #[cfg(windows)]
+                                if let Some(pid) = child_pid {
+                                    windows_process::send_break(pid);
                                 }
                                 termination_requested = Some(RequestedTermination::Sigterm);
                             } else if termination_requested == Some(RequestedTermination::Sigterm)
@@ -513,16 +625,12 @@ async fn collect_other(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
-    #[cfg(unix)]
     use crate::agent::types::CancelLevel;
-    #[cfg(unix)]
+
     use crate::app_event::AppEvent;
-    #[cfg(unix)]
     use tokio::sync::mpsc;
 
-    #[cfg(unix)]
     fn test_ctx(
         cancel_rx: tokio::sync::watch::Receiver<CancelLevel>,
         tx: Option<mpsc::UnboundedSender<AppEvent>>,
@@ -536,6 +644,70 @@ mod tests {
             cancel_rx: Some(cancel_rx),
             python_repl: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn hard_abort_sends_ctrl_break_to_powershell_process_group() {
+        let _marker_dir = tempfile::tempdir().expect("create startup marker directory");
+        let marker_path = _marker_dir
+            .path()
+            .join("powershell-ready")
+            .to_string_lossy()
+            .replace('\'', "''");
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        let ctx = test_ctx(cancel_rx, None);
+        let command_marker_path = marker_path.clone();
+        let task = tokio::spawn(async move {
+            crate::agent::tools::powershell::powershell_subprocess(format!(
+                "Set-Content -LiteralPath '{command_marker_path}' -Value ready; Start-Sleep -Seconds 30"
+            ))
+            .run(ctx)
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !std::path::Path::new(&marker_path).is_file() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("PowerShell should be ready before cancellation");
+        cancel_tx
+            .send(CancelLevel::HardAbort)
+            .expect("send hard abort");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("CTRL_BREAK_EVENT should stop PowerShell promptly")
+            .expect("join subprocess task");
+        assert!(result.is_error);
+        assert!(result.content.as_text().contains("killed by user"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn force_kill_terminates_powershell_process_tree() {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        let ctx = test_ctx(cancel_rx, None);
+        let task = tokio::spawn(async move {
+            crate::agent::tools::powershell::powershell_subprocess(
+                "Start-Process powershell.exe -ArgumentList '-NoProfile -Command Start-Sleep -Seconds 30' | Wait-Process; Start-Sleep -Seconds 30",
+            )
+            .run(ctx)
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        cancel_tx
+            .send(CancelLevel::ForceKill)
+            .expect("send force kill");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("PowerShell tree should terminate promptly")
+            .expect("join subprocess task");
+        assert!(result.is_error);
+        assert!(result.content.as_text().contains("killed by user"));
     }
 
     #[cfg(unix)]

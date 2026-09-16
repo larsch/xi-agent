@@ -1,14 +1,12 @@
 //! Platform-specific process spawning helpers.
 
-/// Extension trait for detaching a command from the controlling terminal.
+/// Extension trait for preventing a child from using the agent's terminal.
 ///
 /// Call [`detach_from_tty`](DetachFromTty::detach_from_tty) on a
-/// `std::process::Command` or `tokio::process::Command` before spawning to
-/// ensure the child runs in its own session with no controlling terminal.
-/// This prevents it from reading `/dev/tty`, seeing `isatty() == true`,
-/// stealing the foreground process group, or receiving terminal signals.
-///
-/// On non-Unix platforms this is a no-op.
+/// `std::process::Command` or `tokio::process::Command` before spawning.
+/// On Unix, this creates a new session with no controlling terminal. On
+/// Windows, this creates an isolated process group so cancellation can target
+/// the tool with CTRL_BREAK_EVENT without affecting the agent's console.
 pub trait DetachFromTty {
     fn detach_from_tty(&mut self) -> &mut Self;
 }
@@ -44,14 +42,44 @@ impl DetachFromTty for tokio::process::Command {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Windows process-creation flags used for agent subprocesses. A separate
+/// process group lets HardAbort target only the tool with CTRL_BREAK_EVENT;
+/// ForceKill can then terminate its full descendant tree without affecting xi.
+///
+/// Do not use CREATE_NO_WINDOW here: console control events require the child
+/// to remain attached to a console.
+#[cfg(windows)]
+pub const AGENT_SUBPROCESS_CREATION_FLAGS: u32 = CREATE_NEW_PROCESS_GROUP;
+
+#[cfg(windows)]
+impl DetachFromTty for std::process::Command {
+    fn detach_from_tty(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.creation_flags(AGENT_SUBPROCESS_CREATION_FLAGS)
+    }
+}
+
+#[cfg(windows)]
+impl DetachFromTty for tokio::process::Command {
+    fn detach_from_tty(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.as_std_mut()
+            .creation_flags(AGENT_SUBPROCESS_CREATION_FLAGS);
+        self
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 impl DetachFromTty for std::process::Command {
     fn detach_from_tty(&mut self) -> &mut Self {
         self
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl DetachFromTty for tokio::process::Command {
     fn detach_from_tty(&mut self) -> &mut Self {
         self
