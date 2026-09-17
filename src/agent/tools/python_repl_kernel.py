@@ -10,6 +10,25 @@ import traceback
 PROTOCOL_VERSION = 1
 
 
+class CountingTextStream:
+    """Forward a text stream while tracking the UTF-8 bytes sent to its pipe."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.byte_count = 0
+
+    def write(self, value):
+        written = self.stream.write(value)
+        self.byte_count += len(value.encode(self.stream.encoding or "utf-8", self.stream.errors or "strict"))
+        return written
+
+    def flush(self):
+        return self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 def send_frame(stream, value):
     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
@@ -75,6 +94,8 @@ def evaluate(code, namespace):
 
 
 def main():
+    sys.stdout = CountingTextStream(sys.stdout)
+    sys.stderr = CountingTextStream(sys.stderr)
     address = ("127.0.0.1", int(os.environ["XI_REPL_PORT"]))
     token = os.environ["XI_REPL_TOKEN"]
     sock = socket.create_connection(address, timeout=10)
@@ -97,12 +118,27 @@ def main():
         request_id = request.get("id")
         method = request.get("method")
         if method == "shutdown":
-            send_frame(stream, {"id": request_id, "result": None, "exception": None})
+            send_frame(
+                stream,
+                {
+                    "id": request_id,
+                    "result": None,
+                    "exception": None,
+                    "stdout_bytes": sys.stdout.byte_count,
+                    "stderr_bytes": sys.stderr.byte_count,
+                },
+            )
             return
         if method != "execute":
             send_frame(
                 stream,
-                {"id": request_id, "result": None, "exception": f"unknown method: {method}"},
+                {
+                    "id": request_id,
+                    "result": None,
+                    "exception": f"unknown method: {method}",
+                    "stdout_bytes": sys.stdout.byte_count,
+                    "stderr_bytes": sys.stderr.byte_count,
+                },
             )
             continue
         try:
@@ -121,6 +157,8 @@ def main():
             }
         sys.stdout.flush()
         sys.stderr.flush()
+        response["stdout_bytes"] = sys.stdout.byte_count
+        response["stderr_bytes"] = sys.stderr.byte_count
         send_frame(stream, response)
 
 

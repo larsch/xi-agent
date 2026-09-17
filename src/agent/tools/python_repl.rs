@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use super::python::PythonRuntime;
 use super::terminal::apply_terminal_render;
@@ -21,6 +21,7 @@ const KERNEL_BOOTSTRAP: &str =
     "import sys; exec(compile(sys.argv[1], '<xi-python-repl-kernel>', 'exec'))";
 const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -194,7 +195,15 @@ impl Tool for PythonReplTool {
             let kernel = state.kernel.as_mut().expect("kernel was initialized");
             match kernel.execute(&code, timeout, &ctx).await {
                 KernelOutcome::Completed(response) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    if let Err(error) = kernel
+                        .wait_for_output(&response, OUTPUT_DRAIN_TIMEOUT)
+                        .await
+                    {
+                        if let Some(mut dead) = state.kernel.take() {
+                            dead.stop().await;
+                        }
+                        return ToolResult::err(error);
+                    }
                     format_completed(kernel.take_output().await, response)
                 }
                 KernelOutcome::TimedOut => {
@@ -218,7 +227,6 @@ impl Tool for PythonReplTool {
                     )
                 }
                 KernelOutcome::Exited(status) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                     let output = kernel.take_output().await;
                     state.kernel = None;
                     format_status(output, &status)
@@ -246,6 +254,8 @@ struct KernelResponse {
     id: u64,
     result: Option<String>,
     exception: Option<String>,
+    stdout_bytes: usize,
+    stderr_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -261,12 +271,31 @@ struct CapturedOutput {
     stderr: String,
 }
 
+struct OutputCapture {
+    bytes: Mutex<Vec<u8>>,
+    length_tx: watch::Sender<usize>,
+}
+
+impl OutputCapture {
+    fn new() -> Self {
+        let (length_tx, _) = watch::channel(0);
+        Self {
+            bytes: Mutex::new(Vec::new()),
+            length_tx,
+        }
+    }
+
+    fn subscribe_length(&self) -> watch::Receiver<usize> {
+        self.length_tx.subscribe()
+    }
+}
+
 struct PythonKernel {
     child: Child,
     pid: Option<u32>,
     control: TcpStream,
-    stdout: Arc<Mutex<Vec<u8>>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
+    stdout: Arc<OutputCapture>,
+    stderr: Arc<OutputCapture>,
     stdout_pos: usize,
     stderr_pos: usize,
     next_id: u64,
@@ -349,8 +378,8 @@ impl PythonKernel {
             return Err("Python REPL handshake validation failed".to_string());
         }
         log::debug!("python repl: connected to Python {}", hello.runtime_version);
-        let stdout_buffer = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buffer = Arc::new(Mutex::new(Vec::new()));
+        let stdout_buffer = Arc::new(OutputCapture::new());
+        let stderr_buffer = Arc::new(OutputCapture::new());
         spawn_reader(stdout, Arc::clone(&stdout_buffer));
         spawn_reader(stderr, Arc::clone(&stderr_buffer));
         Ok(Self {
@@ -442,15 +471,47 @@ impl PythonKernel {
         }
     }
 
+    async fn wait_for_output(
+        &self,
+        response: &KernelResponse,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let mut stdout_length = self.stdout.subscribe_length();
+        let mut stderr_length = self.stderr.subscribe_length();
+        let wait = async {
+            loop {
+                if *stdout_length.borrow() >= response.stdout_bytes
+                    && *stderr_length.borrow() >= response.stderr_bytes
+                {
+                    return;
+                }
+                tokio::select! {
+                    changed = stdout_length.changed() => {
+                        changed.expect("output length sender lives with the kernel");
+                    }
+                    changed = stderr_length.changed() => {
+                        changed.expect("output length sender lives with the kernel");
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.map_err(|_| {
+            format!(
+                "Python REPL output was not captured within {} ms. The kernel was terminated and its state was discarded.",
+                timeout.as_millis()
+            )
+        })
+    }
+
     async fn take_output(&mut self) -> CapturedOutput {
         let stdout = {
-            let buffer = self.stdout.lock().await;
+            let buffer = self.stdout.bytes.lock().await;
             let bytes = buffer[self.stdout_pos.min(buffer.len())..].to_vec();
             self.stdout_pos = buffer.len();
             String::from_utf8_lossy(&bytes).into_owned()
         };
         let stderr = {
-            let buffer = self.stderr.lock().await;
+            let buffer = self.stderr.bytes.lock().await;
             let bytes = buffer[self.stderr_pos.min(buffer.len())..].to_vec();
             self.stderr_pos = buffer.len();
             String::from_utf8_lossy(&bytes).into_owned()
@@ -481,7 +542,7 @@ impl PythonKernel {
     }
 }
 
-fn spawn_reader<R>(mut reader: R, buffer: Arc<Mutex<Vec<u8>>>)
+fn spawn_reader<R>(mut reader: R, capture: Arc<OutputCapture>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -490,7 +551,14 @@ where
         loop {
             match reader.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
-                Ok(count) => buffer.lock().await.extend_from_slice(&chunk[..count]),
+                Ok(count) => {
+                    let length = {
+                        let mut bytes = capture.bytes.lock().await;
+                        bytes.extend_from_slice(&chunk[..count]);
+                        bytes.len()
+                    };
+                    capture.length_tx.send_replace(length);
+                }
             }
         }
     });
