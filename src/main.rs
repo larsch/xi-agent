@@ -774,6 +774,12 @@ async fn run(
                     Event::Resize(_, _) => {
                         needs_redraw = true;
                     }
+                    Event::FocusGained => {
+                        app.terminal_focused = true;
+                    }
+                    Event::FocusLost => {
+                        app.terminal_focused = false;
+                    }
                     _ => {}
                 }
 

@@ -21,8 +21,18 @@ fn truncate_content(content: &str) -> String {
     truncated
 }
 
+fn should_notify(terminal_focused: bool) -> bool {
+    !terminal_focused
+}
+
 /// Show a desktop notification without blocking the UI or failing the agent run.
-pub(crate) fn notify_agent_loop_halt(content: &str) {
+///
+/// Notifications are suppressed while the terminal has focus.
+pub(crate) fn notify_agent_loop_halt(content: &str, terminal_focused: bool) {
+    if !should_notify(terminal_focused) {
+        return;
+    }
+
     #[cfg(not(test))]
     {
         let cwd = std::env::current_dir().unwrap_or_default();
@@ -53,6 +63,12 @@ mod tests {
             notification_title(std::path::Path::new("/work/projects/xi-agent")),
             "xi in xi-agent"
         );
+    }
+
+    #[test]
+    fn notifications_are_only_shown_while_unfocused() {
+        assert!(!should_notify(true));
+        assert!(should_notify(false));
     }
 
     #[test]
