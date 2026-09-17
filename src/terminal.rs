@@ -1,7 +1,8 @@
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -44,7 +45,8 @@ pub(crate) fn init_terminal(window_title: &str) -> io::Result<(Terminal<Backend>
         SetTitle(window_title),
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableFocusChange
     )?;
 
     let mut keyboard_enhancements_enabled = false;
@@ -78,7 +80,8 @@ pub(crate) fn shutdown_terminal(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableFocusChange
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -111,6 +114,7 @@ pub(crate) fn suspend_interactive_ui(
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste,
+        DisableFocusChange,
         Show
     )?;
 

@@ -137,6 +137,9 @@ pub struct App {
     /// the current response shows zero cached tokens.  Cleared when the user
     /// submits a new message.
     pub(crate) cache_miss_warning: bool,
+    /// Whether the terminal window is focused. Desktop notifications are only
+    /// shown while it is unfocused.
+    pub(crate) terminal_focused: bool,
 
     // ── Login panel ───────────────────────────────────────────────────────────
     pub(crate) login: LoginState,
@@ -214,6 +217,9 @@ impl App {
             show_info: false,
             latest_usage: None,
             cache_miss_warning: false,
+            // A terminal is focused when xi starts; focus reporting only
+            // updates this once the terminal sends a focus-change event.
+            terminal_focused: true,
             login: LoginState::new(),
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
