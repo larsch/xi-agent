@@ -7,6 +7,7 @@ use crate::agent::file_tracker::FileTracker;
 use crate::agent::tools::truncate::{TruncationResult, truncate_head_with_limits};
 use crate::agent::tools::utf8::read_utf8_payload_file;
 use crate::agent::types::{Tool, ToolResult};
+use credential_guard::CredentialGuard;
 
 pub struct ReadFileTool {
     tracker: Arc<Mutex<FileTracker>>,
@@ -178,6 +179,9 @@ impl Tool for ReadFileTool {
                 }
             };
 
+            let content = CredentialGuard
+                .redact_output(&content, &credential_guard::RedactionConfig::default())
+                .text;
             let all_lines = split_lines_preserving_endings(&content);
             let total = all_lines.len();
 

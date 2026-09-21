@@ -21,6 +21,7 @@ name = "xi"
 path = "src/main.rs"
 
 [dependencies]
+credential-guard = { path = "crates/credential-guard" }
 anyhow = "1.0.102"
 clap = { version = "4", features = ["derive"] }
 async-stream = "0.3"

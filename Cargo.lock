@@ -613,6 +613,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "credential-guard"
+version = "0.1.0"
+
+[[package]]
 name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4421,6 +4425,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "credential-guard",
  "crossterm",
  "csscolorparser 0.8.3",
  "directories",

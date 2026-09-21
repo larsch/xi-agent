@@ -1,0 +1,8 @@
+[package]
+name = "credential-guard"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Heuristic credential access detection and output redaction"
+
+[dependencies]

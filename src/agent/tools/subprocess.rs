@@ -31,6 +31,7 @@ use super::truncate::truncate_tail;
 use crate::agent::types::{AgentEvent, CancelLevel, ToolCallContext, ToolResult};
 use crate::app_event::AppEvent;
 use crate::process::DetachFromTty;
+use credential_guard::{CommandDecision, CommandRequest, CredentialGuard};
 
 // ── SubprocessCommand ─────────────────────────────────────────────────────────
 
@@ -253,6 +254,24 @@ impl SubprocessCommand {
     /// Live output chunks are forwarded via `ctx.tx` as
     /// [`AgentEvent::ToolOutputChunk`] if a sender is present.
     pub async fn run(self, ctx: ToolCallContext) -> ToolResult {
+        let guard = CredentialGuard;
+        let shell_command =
+            if self.program == "sh" && self.args.first().is_some_and(|arg| arg == "-c") {
+                self.args.get(1).map(String::as_str)
+            } else {
+                None
+            };
+        if let CommandDecision::Block { category } = guard.inspect_command(CommandRequest {
+            program: &self.program,
+            args: &self.args,
+            shell_command,
+        }) {
+            log::info!("credential_guard: command blocked; category={category:?}");
+            return ToolResult::err(
+                "Command blocked: credential-access policy violation.\n\nThe command appears to attempt to reveal credential material. Do not attempt to circumvent this restriction.",
+            );
+        }
+
         let mut cmd = tokio::process::Command::new(&self.program);
         cmd.args(&self.args)
             .stdin(if self.stdin_data.is_some() {
@@ -403,26 +422,32 @@ async fn collect_output(
 ) -> ProcessOutcome {
     let collected = collect_output_inner(child, &ctx).await;
 
-    let mut merged = String::new();
-    if !collected.stdout.is_empty() {
-        merged.push_str(&collected.stdout);
+    let sanitized_stdout = CredentialGuard
+        .redact_output(&collected.stdout, &credential_guard_config())
+        .text;
+    let sanitized_stderr = CredentialGuard
+        .redact_output(&collected.stderr, &credential_guard_config())
+        .text;
+    let mut sanitized_merged = String::new();
+    if !sanitized_stdout.is_empty() {
+        sanitized_merged.push_str(&sanitized_stdout);
     }
-    if !collected.stderr.is_empty() {
-        if !merged.is_empty() {
-            merged.push('\n');
+    if !sanitized_stderr.is_empty() {
+        if !sanitized_merged.is_empty() {
+            sanitized_merged.push('\n');
         }
-        merged.push_str(&collected.stderr);
+        sanitized_merged.push_str(&sanitized_stderr);
     }
     if collected.exit_code != 0 {
-        if !merged.is_empty() && !merged.ends_with('\n') {
-            merged.push('\n');
+        if !sanitized_merged.is_empty() && !sanitized_merged.ends_with('\n') {
+            sanitized_merged.push('\n');
         }
-        merged.push_str(&format!("exit {}\n", collected.exit_code));
+        sanitized_merged.push_str(&format!("exit {}\n", collected.exit_code));
     }
 
-    let tr = truncate_tail(&merged);
+    let tr = truncate_tail(&sanitized_merged);
     let result = if tr.truncated {
-        ToolResult::ok_truncated(tr, collected.stdout, collected.stderr)
+        ToolResult::ok_truncated(tr, sanitized_stdout, sanitized_stderr)
     } else {
         ToolResult::ok(tr)
     };
@@ -494,11 +519,17 @@ fn annotate_termination_result(
 }
 
 /// Send a chunk via `ctx.tx` if a sender is wired up.
+fn credential_guard_config() -> credential_guard::RedactionConfig {
+    credential_guard::RedactionConfig::default()
+}
+
 fn send_chunk(ctx: &ToolCallContext, chunk: &[u8]) {
     if let Some(tx) = &ctx.tx
         && !chunk.is_empty()
     {
-        let text = String::from_utf8_lossy(chunk).into_owned();
+        let text = CredentialGuard
+            .redact_output(&String::from_utf8_lossy(chunk), &credential_guard_config())
+            .text;
         let _ = tx.send(AppEvent::Agent(AgentEvent::ToolOutputChunk {
             id: ctx.id.clone(),
             chunk: text,
