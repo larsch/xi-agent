@@ -308,7 +308,10 @@ at debug). All three tool directories are shown in `xi --print-dirs`.
 **Credential guard model boundary** — Text returned through subprocesses,
 `read_file`, `@file` attachments, the Python REPL, and `read_skill` is passed
 through the dependency-free `credential-guard` redactor before it becomes
-model-visible. The guard is heuristic and does not inspect image pixels;
+model-visible. Command inspection also blocks common credential-provider
+lookups and known credential-store/configuration paths; output redaction
+covers common provider token prefixes and structured secret fields. The guard
+is heuristic and does not inspect image pixels;
 image reads and image `@file` attachments remain outside this text-redaction
 boundary.
 

@@ -77,7 +77,7 @@ impl CredentialGuard {
                 category: ViolationCategory::EnvironmentDump,
             };
         }
-        if contains_extraction_tool(&lower) {
+        if contains_extraction_tool(&lower) || contains_credential_provider_command(&lower) {
             return CommandDecision::Block {
                 category: ViolationCategory::SecretExtraction,
             };
@@ -120,20 +120,15 @@ impl CredentialGuard {
             &mut matches,
             |s| s.len() >= 16 && s.chars().all(|c| c.is_ascii_alphanumeric()),
         );
-        replace_prefixed(
-            &mut text,
-            "ghp_",
-            MatchCategory::GithubToken,
-            config,
-            &mut matches,
-        );
-        replace_prefixed(
-            &mut text,
-            "github_pat_",
-            MatchCategory::GithubToken,
-            config,
-            &mut matches,
-        );
+        for prefix in ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
+            replace_prefixed(
+                &mut text,
+                prefix,
+                MatchCategory::GithubToken,
+                config,
+                &mut matches,
+            );
+        }
         replace_prefixed(
             &mut text,
             "xoxb-",
@@ -156,6 +151,7 @@ impl CredentialGuard {
             &mut matches,
         );
         replace_pem(&mut text, config, &mut matches);
+        replace_sensitive_structured_fields(&mut text, config, &mut matches);
         replace_sensitive_assignments(&mut text, config, &mut matches);
         matches.sort_unstable_by_key(|m| *m as u8);
         matches.dedup();
@@ -193,6 +189,29 @@ fn is_environment_dump(s: &str) -> bool {
     tokens.len() == 1 && matches!(tokens[0], "export" | "set")
 }
 
+fn contains_credential_provider_command(s: &str) -> bool {
+    [
+        "gh auth token",
+        "gcloud auth print-access-token",
+        "az account get-access-token",
+        "git credential fill",
+        "pass show",
+        "keyring get",
+        "secret-tool lookup",
+        "npm config get",
+        "pip config get",
+        "kubectl config view --raw",
+        "helm registry login",
+    ]
+    .iter()
+    .any(|pattern| s.contains(pattern))
+        || (s.contains("aws configure get")
+            && ["access_key", "secret", "token", "credential", "password"]
+                .iter()
+                .any(|key| s.contains(key)))
+        || (s.contains("docker-credential-") && s.contains(" get"))
+}
+
 fn contains_extraction_tool(s: &str) -> bool {
     [
         ("ansible-vault", "view"),
@@ -226,6 +245,14 @@ fn contains_sensitive_path(s: &str) -> bool {
         ".npmrc",
         ".pypirc",
         ".cargo/credentials",
+        ".config/gh/hosts.yml",
+        ".config/gcloud/application_default_credentials.json",
+        ".config/gcloud/credentials.db",
+        ".azure/accesstokens.json",
+        ".config/containers/auth.json",
+        ".config/helm/registry/config.json",
+        ".local/share/keyrings",
+        ".config/keyring",
         "credentials.",
         "secrets.",
         ".tfvars",
@@ -311,6 +338,76 @@ fn replace_pem(text: &mut String, config: &RedactionConfig, matches: &mut Vec<Ma
     }
 }
 
+fn replace_sensitive_structured_fields(
+    text: &mut String,
+    config: &RedactionConfig,
+    matches: &mut Vec<MatchCategory>,
+) {
+    let keys = [
+        "secret",
+        "password",
+        "token",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "authtoken",
+        "_authtoken",
+        "auth_token",
+    ];
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let lower = text[cursor..].to_ascii_lowercase();
+        let Some((relative, key)) = keys
+            .iter()
+            .filter_map(|key| {
+                let quoted = format!("\"{key}\"");
+                lower.find(&quoted).map(|position| (position, *key))
+            })
+            .min_by_key(|(position, _)| *position)
+        else {
+            break;
+        };
+        let key_start = cursor + relative;
+        let key_end = key_start + key.len() + 2;
+        let Some(colon_relative) = text[key_end..].find(':') else {
+            break;
+        };
+        if colon_relative > 8 {
+            cursor = key_end;
+            continue;
+        }
+        let value_start = key_end + colon_relative + 1;
+        let Some(value_offset) =
+            text[value_start..].find(|character: char| !character.is_whitespace())
+        else {
+            break;
+        };
+        let value_begin = value_start + value_offset;
+        let quoted = text.as_bytes().get(value_begin) == Some(&b'"');
+        let content_begin = if quoted { value_begin + 1 } else { value_begin };
+        let value_end = if quoted {
+            text[content_begin..]
+                .find('"')
+                .map(|offset| content_begin + offset)
+                .unwrap_or(text.len())
+        } else {
+            text[value_begin..]
+                .find(|character: char| matches!(character, ',' | '}' | '\n' | '\r'))
+                .map(|offset| value_begin + offset)
+                .unwrap_or(text.len())
+        };
+        let value = &text[content_begin..value_end];
+        if !is_placeholder(value) && !value.is_empty() {
+            let replacement = replacement(MatchCategory::SensitiveAssignment, config);
+            text.replace_range(content_begin..value_end, replacement);
+            matches.push(MatchCategory::SensitiveAssignment);
+            cursor = content_begin + replacement.len();
+        } else {
+            cursor = value_end.max(key_end);
+        }
+    }
+}
+
 fn replace_sensitive_assignments(
     text: &mut String,
     config: &RedactionConfig,
@@ -323,6 +420,9 @@ fn replace_sensitive_assignments(
         "password",
         "client_secret",
         "access_token",
+        "refresh_token",
+        "authtoken",
+        "auth_token",
         "private_key",
     ];
     let mut output = String::with_capacity(text.len());
@@ -332,7 +432,8 @@ fn replace_sensitive_assignments(
             .strip_suffix('\r')
             .map_or((body, ""), |body| (body, "\r"));
         let lower = body.to_ascii_lowercase();
-        if keys.iter().any(|key| lower.contains(key))
+        if !body.contains(['{', '}'])
+            && keys.iter().any(|key| lower.contains(key))
             && let Some(pos) = body.find(['=', ':'])
         {
             let value_start = body[pos + 1..]
@@ -439,6 +540,41 @@ mod tests {
     }
 
     #[test]
+    fn blocks_credential_provider_commands() {
+        let guard = CredentialGuard;
+        for command in [
+            "gh auth token",
+            "gcloud auth print-access-token",
+            "az account get-access-token",
+            "git credential fill",
+            "pass show production/db",
+            "keyring get service account",
+            "secret-tool lookup service github",
+            "docker-credential-secretservice get",
+            "aws configure get aws_secret_access_key",
+            "aws configure get aws_session_token",
+            "npm config get //registry.example.com/:_authToken",
+            "pip config get global.index-url",
+            "kubectl config view --raw",
+            "helm registry login registry.example.com",
+        ] {
+            assert!(
+                matches!(
+                    guard.inspect_command(shell(command)),
+                    CommandDecision::Block {
+                        category: ViolationCategory::SecretExtraction
+                    }
+                ),
+                "must block credential provider command: {command}"
+            );
+        }
+        assert!(matches!(
+            guard.inspect_command(shell("aws configure get region")),
+            CommandDecision::Allow
+        ));
+    }
+
+    #[test]
     fn redaction_is_configurable() {
         let mut config = RedactionConfig::default();
         config.secret = "<secret>".into();
@@ -516,6 +652,14 @@ mod tests {
             "cat ~/.npmrc",
             "cat ~/.pypirc",
             "cat ~/.cargo/credentials.toml",
+            "cat ~/.config/gh/hosts.yml",
+            "cat ~/.config/gcloud/application_default_credentials.json",
+            "cat ~/.config/gcloud/credentials.db",
+            "cat ~/.azure/accessTokens.json",
+            "cat ~/.config/containers/auth.json",
+            "cat ~/.config/helm/registry/config.json",
+            "cat ~/.local/share/keyrings/login.keyring",
+            "cat ~/.config/keyring/secrets.json",
             "cat server.key",
             "cat server.pem",
             "cat client.p12",
@@ -609,6 +753,27 @@ mod tests {
             }),
             CommandDecision::Allow
         ));
+    }
+
+    #[test]
+    fn redacts_github_token_families_and_structured_fields() {
+        let input = concat!(
+            "gho_abcdefghijklmnopqrstuvwxyz1234567890 ",
+            "ghu_abcdefghijklmnopqrstuvwxyz1234567890 ",
+            "ghs_abcdefghijklmnopqrstuvwxyz1234567890 ",
+            "ghr_abcdefghijklmnopqrstuvwxyz1234567890 ",
+            r#"{"credentials":{"access_token":"real-token","refresh_token":"real-refresh","_authToken":"real-auth"}}"#,
+        );
+        let result = CredentialGuard.redact_output(input, &RedactionConfig::default());
+        assert!(!result.text.contains("gho_"));
+        assert!(!result.text.contains("ghu_"));
+        assert!(!result.text.contains("ghs_"));
+        assert!(!result.text.contains("ghr_"));
+        assert!(!result.text.contains("real-token"));
+        assert!(!result.text.contains("real-refresh"));
+        assert!(!result.text.contains("real-auth"));
+        assert!(result.text.contains(r#""access_token":"[REDACTED]""#));
+        assert!(result.text.contains(r#""refresh_token":"[REDACTED]""#));
     }
 
     #[test]
