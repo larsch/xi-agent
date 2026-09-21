@@ -71,8 +71,9 @@ impl CredentialGuard {
                 .collect::<Vec<_>>()
                 .join(" ")
         });
-        let lower = text.to_ascii_lowercase();
-        if is_environment_dump(&lower) {
+        let normalized = normalize_command(&text);
+        let lower = normalized.as_str();
+        if is_environment_dump(lower) {
             return CommandDecision::Block {
                 category: ViolationCategory::EnvironmentDump,
             };
@@ -163,12 +164,50 @@ impl CredentialGuard {
     }
 }
 
-fn is_environment_dump(s: &str) -> bool {
-    let tokens: Vec<_> = s
-        .split_whitespace()
-        .map(|token| token.trim_matches(|c: char| "'\"();".contains(c)))
+fn normalize_command(command: &str) -> String {
+    let mut normalized = String::with_capacity(command.len());
+    let mut whitespace = false;
+    let mut chars = command.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\' && chars.peek().is_some_and(|next| *next == '\n') {
+            chars.next();
+            whitespace = true;
+        } else if character.is_whitespace() {
+            whitespace = true;
+        } else {
+            if whitespace && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            normalized.push(character.to_ascii_lowercase());
+            whitespace = false;
+        }
+    }
+    normalized
+}
+
+fn command_tokens(s: &str) -> Vec<&str> {
+    s.split(|character: char| character.is_whitespace() || matches!(character, ';' | '&' | '|'))
         .filter(|token| !token.is_empty())
-        .collect();
+        .map(|token| token.trim_matches(|character: char| "'\"()".contains(character)))
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn has_command_sequence(tokens: &[&str], sequence: &[&str]) -> bool {
+    let mut next = 0;
+    for token in tokens {
+        if *token == sequence[next] {
+            next += 1;
+            if next == sequence.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_environment_dump(s: &str) -> bool {
+    let tokens = command_tokens(s);
 
     for (index, token) in tokens.iter().enumerate() {
         let command = token.rsplit('/').next().unwrap_or(token);
@@ -190,26 +229,28 @@ fn is_environment_dump(s: &str) -> bool {
 }
 
 fn contains_credential_provider_command(s: &str) -> bool {
-    [
-        "gh auth token",
-        "gcloud auth print-access-token",
-        "az account get-access-token",
-        "git credential fill",
-        "pass show",
-        "keyring get",
-        "secret-tool lookup",
-        "npm config get",
-        "pip config get",
-        "kubectl config view --raw",
-        "helm registry login",
-    ]
-    .iter()
-    .any(|pattern| s.contains(pattern))
-        || (s.contains("aws configure get")
+    let tokens = command_tokens(s);
+    let has = |sequence: &[&str]| has_command_sequence(&tokens, sequence);
+    has(&["gh", "auth", "token"])
+        || has(&["gcloud", "auth", "print-access-token"])
+        || has(&["az", "account", "get-access-token"])
+        || has(&["git", "credential", "fill"])
+        || has(&["pass", "show"])
+        || has(&["keyring", "get"])
+        || has(&["keyring", "get_password"])
+        || has(&["secret-tool", "lookup"])
+        || has(&["npm", "config", "get"])
+        || has(&["pip", "config", "get"])
+        || has(&["kubectl", "config", "view", "--raw"])
+        || has(&["helm", "registry", "login"])
+        || (has(&["aws", "configure", "get"])
             && ["access_key", "secret", "token", "credential", "password"]
                 .iter()
-                .any(|key| s.contains(key)))
-        || (s.contains("docker-credential-") && s.contains(" get"))
+                .any(|key| tokens.iter().any(|token| token.contains(key))))
+        || (tokens
+            .iter()
+            .any(|token| token.starts_with("docker-credential-"))
+            && tokens.contains(&"get"))
 }
 
 fn contains_extraction_tool(s: &str) -> bool {
@@ -217,12 +258,18 @@ fn contains_extraction_tool(s: &str) -> bool {
         ("ansible-vault", "view"),
         ("ansible-vault", "decrypt"),
         ("sops", "decrypt"),
+        ("sops", "-d"),
         ("gpg", "--decrypt"),
+        ("gpg", "-d"),
+        ("gpg", "--decrypt-files"),
         ("age", "-d"),
+        ("age", "--decrypt"),
         ("op", "read"),
         ("op", "inject"),
         ("bw", "get"),
+        ("bw", "unlock --raw"),
         ("vault", "kv get"),
+        ("vault", "read"),
     ]
     .iter()
     .any(|(tool, action)| s.contains(tool) && s.contains(action))
@@ -350,9 +397,18 @@ fn replace_sensitive_structured_fields(
         "access_token",
         "refresh_token",
         "client_secret",
+        "clientsecret",
+        "api_key",
+        "apikey",
+        "private_key",
+        "private-key",
+        "privatekey",
         "authtoken",
         "_authtoken",
         "auth_token",
+        "auth-token",
+        "access-token",
+        "refresh-token",
     ];
     let mut cursor = 0;
     while cursor < text.len() {
@@ -575,6 +631,34 @@ mod tests {
     }
 
     #[test]
+    fn blocks_whitespace_and_option_variants() {
+        let guard = CredentialGuard;
+        for command in [
+            "gh\tauth\ttoken",
+            "gcloud  --account user@example.com auth print-access-token",
+            "git -c credential.helper=store credential fill",
+            "aws --profile prod configure get aws_secret_access_key",
+            "secret-tool --unlock lookup service github",
+            "sops -d secrets.yaml",
+            "gpg -d --batch secret.gpg",
+            "vault   read   secret/app",
+            "printenv\tAWS_SECRET_ACCESS_KEY",
+        ] {
+            assert!(
+                matches!(
+                    guard.inspect_command(shell(command)),
+                    CommandDecision::Block { .. }
+                ),
+                "must block command variant: {command:?}"
+            );
+        }
+        assert!(matches!(
+            guard.inspect_command(shell("gh auth status")),
+            CommandDecision::Allow
+        ));
+    }
+
+    #[test]
     fn redaction_is_configurable() {
         let mut config = RedactionConfig::default();
         config.secret = "<secret>".into();
@@ -774,6 +858,16 @@ mod tests {
         assert!(!result.text.contains("real-auth"));
         assert!(result.text.contains(r#""access_token":"[REDACTED]""#));
         assert!(result.text.contains(r#""refresh_token":"[REDACTED]""#));
+    }
+
+    #[test]
+    fn redacts_structured_spacing_and_key_variants() {
+        let input = r#"{"apiKey" : "one", "private-key": "two", "clientSecret":"three", "access-token": "four"}"#;
+        let result = CredentialGuard.redact_output(input, &RedactionConfig::default());
+        assert!(!result.text.contains("one"));
+        assert!(!result.text.contains("two"));
+        assert!(!result.text.contains("three"));
+        assert!(!result.text.contains("four"));
     }
 
     #[test]
