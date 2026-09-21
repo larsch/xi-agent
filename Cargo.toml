@@ -20,6 +20,10 @@ restart = []
 name = "xi"
 path = "src/main.rs"
 
+[[bin]]
+name = "xi-credential-audit"
+path = "src/bin/xi-credential-audit.rs"
+
 [dependencies]
 credential-guard = { path = "crates/credential-guard" }
 anyhow = "1.0.102"

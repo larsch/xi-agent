@@ -19,6 +19,23 @@ busy tool loops.
 * Custom tools and skills — extend without bloat
 * Caveats: **No safety guards** on tool calls; you are in control
 
+## Credential session audit
+
+Build the standalone `xi-credential-audit` binary to scan persisted session
+JSONL files with the credential guard:
+
+```sh
+cargo run --bin xi-credential-audit --
+cargo run --bin xi-credential-audit -- --json
+cargo run --bin xi-credential-audit -- --details
+```
+
+The default and JSON modes report categories and metadata without matched
+values. `--details` is intentionally unsafe and may print raw persisted
+session content for validating the guard. Use `--sessions-dir PATH` to scan an
+alternate session directory. The tool is read-only; it exits 1 when hits are
+found and 2 when scanning fails.
+
 ## Providers
 
 | Provider | Type | Auth |
