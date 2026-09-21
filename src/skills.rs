@@ -21,12 +21,14 @@ pub struct SkillMeta {
 /// Scan all supported skill roots for subdirectories that contain a
 /// `SKILL.md` with YAML frontmatter.
 ///
-/// Skill roots:
-/// - `~/.xi/skills`
-/// - `~/.agents/skills`
+/// Skill roots are searched in precedence order:
+/// - `.xi/skills`, then `.agents/skills`, at every directory from the current
+///   working directory through the filesystem root
+/// - `~/.xi/skills`, then `~/.agents/skills`
 /// - `%USERPROFILE%\\.agents\\skills` (Windows)
-/// - `./.agents/skills`
-/// - `./.xi/skills`
+///
+/// A skill name found in a higher-precedence root suppresses same-named skills
+/// in lower-precedence roots.
 ///
 /// Also injects the embedded `edit_skill` that tells the model where skill
 /// files live on this system and where to create new ones.
@@ -46,19 +48,18 @@ pub fn load_skills() -> Vec<SkillMeta> {
 fn build_embedded_edit_skill(loaded: &[SkillMeta]) -> SkillMeta {
     let dirs = skill_dirs();
 
-    // Split dirs into global (home-relative) and project (cwd-relative).
-    let cwd = env::current_dir().ok();
-    let cwd_canon = cwd
-        .as_ref()
-        .and_then(|p| p.canonicalize().ok())
-        .or_else(|| cwd.clone());
+    // Split dirs into global (home-relative) and project (cwd-to-root) roots.
+    let project_root_dirs = env::current_dir()
+        .map(|cwd| project_skill_dirs(&cwd))
+        .unwrap_or_default();
     let is_project = |d: &PathBuf| -> bool {
-        if let Some(ref cwd) = cwd_canon {
-            let d_canon = d.canonicalize().unwrap_or_else(|_| d.clone());
-            d_canon.starts_with(cwd)
-        } else {
-            false
-        }
+        let d_canon = d.canonicalize().unwrap_or_else(|_| d.clone());
+        project_root_dirs.iter().any(|project_dir| {
+            project_dir
+                .canonicalize()
+                .unwrap_or_else(|_| project_dir.clone())
+                == d_canon
+        })
     };
 
     let (project_dirs, global_dirs): (Vec<&PathBuf>, Vec<&PathBuf>) =
@@ -92,7 +93,9 @@ fn build_embedded_edit_skill(loaded: &[SkillMeta]) -> SkillMeta {
             }
         }
         if !project_dirs.is_empty() {
-            lines.push("Project-local (current working directory):".to_string());
+            lines.push(
+                "Project-local (current working directory through filesystem root):".to_string(),
+            );
             for d in &project_dirs {
                 let marker = if in_use.contains(d) {
                     " ← in use"
@@ -197,7 +200,7 @@ Find the skill's absolute path in the list above and edit its `SKILL.md`.
 
 Scope indicators:
 - `[global]` — lives under a home-directory skill root, shared across all projects.
-- `[project]` — lives under a project-local skill root, specific to the current repo.
+- `[project]` — lives under a project-local skill root in the current directory or an ancestor.
 
 ## Creating a new skill
 
@@ -220,8 +223,19 @@ Scope indicators:
 fn skill_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(home) = env::var_os("HOME").filter(|s| !s.is_empty()) {
-        let home = PathBuf::from(home);
+    let home = env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+
+    if let Ok(cwd) = env::current_dir() {
+        dirs.extend(
+            project_skill_dirs(&cwd)
+                .into_iter()
+                .filter(|dir| !home.as_ref().is_some_and(|home| dir.starts_with(home))),
+        );
+    }
+
+    if let Some(home) = home {
         dirs.push(home.join(".xi").join("skills"));
         dirs.push(home.join(".agents").join("skills"));
     }
@@ -232,9 +246,23 @@ fn skill_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(user_profile).join(".agents").join("skills"));
     }
 
-    if let Ok(cwd) = env::current_dir() {
-        dirs.push(cwd.join(".agents").join("skills"));
-        dirs.push(cwd.join(".xi").join("skills"));
+    dirs
+}
+
+/// Return project skill roots from `cwd` to the filesystem root. At each
+/// directory level, `.xi` precedes `.agents`.
+fn project_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current_dir = cwd.to_path_buf();
+
+    loop {
+        dirs.push(current_dir.join(".xi").join("skills"));
+        dirs.push(current_dir.join(".agents").join("skills"));
+
+        match current_dir.parent() {
+            Some(parent) if parent != current_dir => current_dir = parent.to_path_buf(),
+            _ => break,
+        }
     }
 
     dirs
@@ -243,17 +271,20 @@ fn skill_dirs() -> Vec<PathBuf> {
 fn load_skills_from_dirs(dirs: Vec<PathBuf>) -> Vec<SkillMeta> {
     let mut seen_files: HashSet<PathBuf> = HashSet::new();
     let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
     let mut skills: Vec<SkillMeta> = Vec::new();
 
     for dir in dirs {
-        skills.extend(load_skills_from_dir(
-            &dir,
-            &mut seen_files,
-            &mut visited_dirs,
-        ));
+        let mut root_skills = load_skills_from_dir(&dir, &mut seen_files, &mut visited_dirs);
+        root_skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+        for skill in root_skills {
+            if seen_names.insert(skill.name.clone()) {
+                skills.push(skill);
+            }
+        }
     }
 
-    // Deterministic order.
+    // Deterministic presentation order. Discovery order establishes precedence.
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     skills
 }
@@ -425,8 +456,23 @@ fn strip_frontmatter(content: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_skill, load_skills_from_dirs, parse_skill_meta, strip_frontmatter};
-    use std::path::PathBuf;
+    use super::{
+        expand_skill, load_skills_from_dirs, parse_skill_meta, project_skill_dirs,
+        strip_frontmatter,
+    };
+    use std::path::{Path, PathBuf};
+
+    fn write_skill(root: &Path, directory: &str, name: &str, description: &str) -> PathBuf {
+        let skill_dir = root.join(directory);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            format!("---\nname: {name}\ndescription: {description}\n---\n"),
+        )
+        .unwrap();
+        path
+    }
 
     fn dummy_path() -> PathBuf {
         PathBuf::from("/tmp/skills/work-loop/SKILL.md")
@@ -517,6 +563,48 @@ description: guides most non-trivial coding work.
 
         let expanded = expand_skill(&meta, "implement the feature").unwrap();
         assert!(expanded.ends_with("\n\nimplement the feature"));
+    }
+
+    #[test]
+    fn project_skill_dirs_walks_ancestors_with_xi_before_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project").join("nested");
+        let dirs = project_skill_dirs(&cwd);
+
+        assert_eq!(
+            &dirs[..6],
+            [
+                cwd.join(".xi/skills"),
+                cwd.join(".agents/skills"),
+                cwd.parent().unwrap().join(".xi/skills"),
+                cwd.parent().unwrap().join(".agents/skills"),
+                cwd.parent().unwrap().parent().unwrap().join(".xi/skills"),
+                cwd.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(".agents/skills"),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_skills_prefers_first_root_for_duplicate_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let nearer = dir.path().join("nearer");
+        let farther = dir.path().join("farther");
+        let nearer_path = write_skill(&nearer, "same", "duplicate", "nearer skill");
+        write_skill(&farther, "same", "duplicate", "farther skill");
+        write_skill(&farther, "other", "other", "other skill");
+
+        let skills = load_skills_from_dirs(vec![nearer, farther]);
+
+        assert_eq!(skills.len(), 2);
+        let duplicate = skills
+            .iter()
+            .find(|skill| skill.name == "duplicate")
+            .unwrap();
+        assert_eq!(duplicate.path, nearer_path);
     }
 
     #[test]

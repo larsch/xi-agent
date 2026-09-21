@@ -114,11 +114,12 @@ cargo install --path .
 
 Add custom agent capabilities and expertise by placing [SKILL.md](https://agentskills.io/) files in these directories; reference them with `/skill:<name>`:
 
+- `.xi/skills` and `.agents/skills` at the current working directory and each ancestor directory up to the filesystem root
 - `~/.xi/skills`
 - `~/.agents/skills`
 - `%USERPROFILE%\\.agents\\skills` (Windows)
-- `./.agents/skills`
-- `./.xi/skills`
+
+Within each directory, `.xi/skills` takes precedence over `.agents/skills`. For duplicate skill names, the nearest project directory wins; user-level skills are fallbacks.
 
 ## Custom tools
 
