@@ -14,6 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
+use credential_guard::{CredentialGuard, RedactionConfig};
+
 // ── Token parsing ─────────────────────────────────────────────────────────────
 
 /// A single `@<path>` token extracted from user input.
@@ -234,7 +236,9 @@ pub fn resolve_at_tokens(tokens: &[AtToken], cwd: &Path) -> Vec<AtFileResult> {
                     match std::fs::read_to_string(&abs) {
                         Ok(content) => AtFileResult::Text {
                             path: display,
-                            content,
+                            content: CredentialGuard
+                                .redact_output(&content, &RedactionConfig::default())
+                                .text,
                         },
                         Err(e) => AtFileResult::Error {
                             path: display,
@@ -366,6 +370,21 @@ mod tests {
         assert!(
             matches!(&results[0], AtFileResult::Text { content, .. } if content == "hello world")
         );
+    }
+
+    #[test]
+    fn resolve_text_file_redacts_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.txt");
+        std::fs::write(&path, "API_KEY=real-secret-value").unwrap();
+        let tokens = vec![AtToken {
+            path: "secrets.txt".into(),
+            span_start: 0,
+            span_end: 11,
+        }];
+        let results = resolve_at_tokens(&tokens, dir.path());
+        assert!(matches!(&results[0], AtFileResult::Text { content, .. }
+            if content == "API_KEY=[REDACTED]"));
     }
 
     #[test]

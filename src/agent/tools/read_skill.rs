@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 use crate::skills::SkillMeta;
+use credential_guard::{CredentialGuard, RedactionConfig};
 
 /// A built-in tool that loads a skill's body by name.
 ///
@@ -94,6 +95,9 @@ impl Tool for ReadSkillTool {
             };
 
             let body = strip_frontmatter(&content).trim().to_string();
+            let body = CredentialGuard
+                .redact_output(&body, &RedactionConfig::default())
+                .text;
             ToolResult::ok_str(body)
         })
     }
@@ -186,6 +190,16 @@ mod tests {
             !text.contains("description:"),
             "frontmatter not stripped: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn redacts_credentials_from_skill_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = write_skill_file(dir.path(), "secret", "API_KEY=real-secret-value");
+        let tool = make_tool(vec![skill]);
+
+        let result = tool.execute(serde_json::json!({"name": "secret"})).await;
+        assert_eq!(result.content.as_text(), "API_KEY=[REDACTED]");
     }
 
     #[tokio::test]

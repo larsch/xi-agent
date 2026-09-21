@@ -15,6 +15,7 @@ use super::terminal::apply_terminal_render;
 use super::truncate::truncate_tail;
 use crate::agent::types::{CancelLevel, Tool, ToolCallContext, ToolResult};
 use crate::process::DetachFromTty;
+use credential_guard::{CredentialGuard, RedactionConfig};
 
 const KERNEL_SOURCE: &str = include_str!("python_repl_kernel.py");
 const KERNEL_BOOTSTRAP: &str =
@@ -690,7 +691,10 @@ fn finish_result(content: String, is_error: bool) -> ToolResult {
 }
 
 fn sanitize(value: &str) -> String {
-    apply_terminal_render(value).trim_end().to_string()
+    let rendered = apply_terminal_render(value).trim_end().to_string();
+    CredentialGuard
+        .redact_output(&rendered, &RedactionConfig::default())
+        .text
 }
 
 fn format_exit(status: std::process::ExitStatus) -> String {
@@ -740,6 +744,11 @@ mod tests {
         let missing = run(&tool, &session, serde_json::json!({"code": "x"})).await;
         assert!(missing.content.as_text().contains("NameError"));
         session.shutdown().await;
+    }
+
+    #[test]
+    fn sanitize_redacts_credentials() {
+        assert_eq!(sanitize("API_KEY=real-secret-value"), "API_KEY=[REDACTED]");
     }
 
     #[tokio::test]

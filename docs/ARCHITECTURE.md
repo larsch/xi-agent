@@ -305,6 +305,13 @@ exit becomes `ToolResult::err`. Built-in tool names take precedence — a
 custom tool whose name collides with a built-in is silently dropped (logged
 at debug). All three tool directories are shown in `xi --print-dirs`.
 
+**Credential guard model boundary** — Text returned through subprocesses,
+`read_file`, `@file` attachments, the Python REPL, and `read_skill` is passed
+through the dependency-free `credential-guard` redactor before it becomes
+model-visible. The guard is heuristic and does not inspect image pixels;
+image reads and image `@file` attachments remain outside this text-redaction
+boundary.
+
 **Bash tool terminal rendering** — `apply_terminal_render()` in
 `agent/tools/terminal.rs` emulates terminal cursor behavior for carriage
 returns (`\r`). When bash commands output progress bars or spinners that use

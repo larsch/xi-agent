@@ -181,6 +181,7 @@ fn is_environment_dump(s: &str) -> bool {
         }
         let rest = &tokens[index + 1..];
         if rest.is_empty()
+            || (command == "printenv" && rest.iter().any(|arg| !arg.starts_with('-')))
             || rest.iter().all(|arg| arg.starts_with('-'))
             || s.contains('|')
             || s.contains('>')
@@ -457,6 +458,8 @@ mod tests {
             "command env",
             "env -0",
             "printenv -0",
+            "printenv AWS_SECRET_ACCESS_KEY",
+            "/usr/bin/printenv GITHUB_TOKEN",
             "env | sort",
             "printenv > /tmp/environment.txt",
             "sh -c 'env'",
