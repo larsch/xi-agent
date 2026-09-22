@@ -2,7 +2,22 @@
 //!
 //! This crate deliberately has no agent, UI, or model-facing policy wording.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-wide runtime guard state from application configuration.
+pub fn set_enabled(enabled: bool) {
+    ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Return whether runtime credential checks and redaction are enabled.
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViolationCategory {
@@ -983,16 +998,8 @@ mod tests {
                 "github_pat_11AAAAAAAAAAAAAAAAAAAAAA_abcdefghijklmnopqrstuvwxyz1234567890"
             )
         );
-        assert!(
-            !result
-                .text
-                .contains("xoxb-test-fixture")
-        );
-        assert!(
-            !result
-                .text
-                .contains("xoxp-test-fixture")
-        );
+        assert!(!result.text.contains("xoxb-test-fixture"));
+        assert!(!result.text.contains("xoxp-test-fixture"));
         assert!(!result.text.contains("AIzaSyDUMMYKEY1234567890"));
         assert!(!result.text.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
         assert_eq!(result.redaction_count, result.matches.len());
@@ -1036,18 +1043,15 @@ mod tests {
 
     #[test]
     fn redacts_multiple_occurrences_and_keeps_unrelated_output() {
-        let input = "before ghp_abcdefghijklmnopqrstuvwxyz1234567890 middle xoxb-test-fixture after";
+        let input =
+            "before ghp_abcdefghijklmnopqrstuvwxyz1234567890 middle xoxb-test-fixture after";
         let result = CredentialGuard.redact_output(input, &RedactionConfig::default());
         assert!(
             !result
                 .text
                 .contains("ghp_abcdefghijklmnopqrstuvwxyz1234567890")
         );
-        assert!(
-            !result
-                .text
-                .contains("xoxb-test-fixture")
-        );
+        assert!(!result.text.contains("xoxb-test-fixture"));
         assert!(result.text.starts_with("before "));
         assert!(result.text.ends_with(" after"));
     }

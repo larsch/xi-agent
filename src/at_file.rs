@@ -201,6 +201,14 @@ fn expand_tilde(path: &str) -> PathBuf {
 ///
 /// Uses blocking `std::fs` — files are expected to be local and small.
 pub fn resolve_at_tokens(tokens: &[AtToken], cwd: &Path) -> Vec<AtFileResult> {
+    resolve_at_tokens_with_guard(tokens, cwd, credential_guard::is_enabled())
+}
+
+pub fn resolve_at_tokens_with_guard(
+    tokens: &[AtToken],
+    cwd: &Path,
+    credential_guard: bool,
+) -> Vec<AtFileResult> {
     tokens
         .iter()
         .map(|tok| {
@@ -236,9 +244,13 @@ pub fn resolve_at_tokens(tokens: &[AtToken], cwd: &Path) -> Vec<AtFileResult> {
                     match std::fs::read_to_string(&abs) {
                         Ok(content) => AtFileResult::Text {
                             path: display,
-                            content: CredentialGuard
-                                .redact_output(&content, &RedactionConfig::default())
-                                .text,
+                            content: if credential_guard {
+                                CredentialGuard
+                                    .redact_output(&content, &RedactionConfig::default())
+                                    .text
+                            } else {
+                                content
+                            },
                         },
                         Err(e) => AtFileResult::Error {
                             path: display,
@@ -382,7 +394,7 @@ mod tests {
             span_start: 0,
             span_end: 11,
         }];
-        let results = resolve_at_tokens(&tokens, dir.path());
+        let results = resolve_at_tokens_with_guard(&tokens, dir.path(), true);
         assert!(matches!(&results[0], AtFileResult::Text { content, .. }
             if content == "API_KEY=[REDACTED]"));
     }

@@ -3,6 +3,17 @@
 Xi is configured via `~/.config/xi/config.toml`. All fields are optional;
 missing values fall back to built-in defaults.
 
+## Credential guard
+
+```toml
+credential_guard = true
+```
+
+The default is `false`. When enabled, xi blocks credential-access commands,
+redacts detected credential material from tool output, and tells the model what
+`[REDACTED]` means. The explicit `xi-credential-audit` command remains
+independently available.
+
 ---
 
 ## Display thresholds

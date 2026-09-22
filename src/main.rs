@@ -254,6 +254,7 @@ async fn main() -> io::Result<()> {
         io::Error::other("config load failed")
     })?;
     timer.mark("XiConfig::load");
+    credential_guard::set_enabled(config.credential_guard);
 
     // --theme flag overrides config.toml theme path
     if let Some(theme_path) = cli.theme {

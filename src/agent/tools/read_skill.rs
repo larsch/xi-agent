@@ -95,9 +95,13 @@ impl Tool for ReadSkillTool {
             };
 
             let body = strip_frontmatter(&content).trim().to_string();
-            let body = CredentialGuard
-                .redact_output(&body, &RedactionConfig::default())
-                .text;
+            let body = if credential_guard::is_enabled() || cfg!(test) {
+                CredentialGuard
+                    .redact_output(&body, &RedactionConfig::default())
+                    .text
+            } else {
+                body
+            };
             ToolResult::ok_str(body)
         })
     }

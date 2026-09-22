@@ -261,11 +261,13 @@ impl SubprocessCommand {
             } else {
                 None
             };
-        if let CommandDecision::Block { category } = guard.inspect_command(CommandRequest {
-            program: &self.program,
-            args: &self.args,
-            shell_command,
-        }) {
+        if credential_guard::is_enabled()
+            && let CommandDecision::Block { category } = guard.inspect_command(CommandRequest {
+                program: &self.program,
+                args: &self.args,
+                shell_command,
+            })
+        {
             log::info!("credential_guard: command blocked; category={category:?}");
             return ToolResult::err(
                 "Command blocked: credential-access policy violation.\n\nThe command appears to attempt to reveal credential material. Do not attempt to circumvent this restriction.",
@@ -326,9 +328,14 @@ impl SubprocessCommand {
         // If no cancel receiver, use the simple path.
         let cancel_rx_opt = ctx.cancel_rx.clone();
         if cancel_rx_opt.is_none() {
-            return collect_output(child, ctx, self.error_on_nonzero)
-                .await
-                .result;
+            return collect_output(
+                child,
+                ctx,
+                self.error_on_nonzero,
+                credential_guard::is_enabled(),
+            )
+            .await
+            .result;
         }
         let mut cancel_rx = cancel_rx_opt.expect("checked is_some");
 
@@ -339,7 +346,12 @@ impl SubprocessCommand {
         let child_pid = child.id();
         let ctx_tx = ctx.tx.clone();
 
-        let collect_fut = collect_output(child, ctx, self.error_on_nonzero);
+        let collect_fut = collect_output(
+            child,
+            ctx,
+            self.error_on_nonzero,
+            credential_guard::is_enabled(),
+        );
         tokio::pin!(collect_fut);
 
         // Track whether we've requested termination and whether the user has
@@ -419,15 +431,24 @@ async fn collect_output(
     child: tokio::process::Child,
     ctx: ToolCallContext,
     error_on_nonzero: bool,
+    credential_guard: bool,
 ) -> ProcessOutcome {
     let collected = collect_output_inner(child, &ctx).await;
 
-    let sanitized_stdout = CredentialGuard
-        .redact_output(&collected.stdout, &credential_guard_config())
-        .text;
-    let sanitized_stderr = CredentialGuard
-        .redact_output(&collected.stderr, &credential_guard_config())
-        .text;
+    let sanitized_stdout = if credential_guard {
+        CredentialGuard
+            .redact_output(&collected.stdout, &credential_guard_config())
+            .text
+    } else {
+        collected.stdout.clone()
+    };
+    let sanitized_stderr = if credential_guard {
+        CredentialGuard
+            .redact_output(&collected.stderr, &credential_guard_config())
+            .text
+    } else {
+        collected.stderr.clone()
+    };
     let mut sanitized_merged = String::new();
     if !sanitized_stdout.is_empty() {
         sanitized_merged.push_str(&sanitized_stdout);
@@ -527,9 +548,13 @@ fn send_chunk(ctx: &ToolCallContext, chunk: &[u8]) {
     if let Some(tx) = &ctx.tx
         && !chunk.is_empty()
     {
-        let text = CredentialGuard
-            .redact_output(&String::from_utf8_lossy(chunk), &credential_guard_config())
-            .text;
+        let text = if credential_guard::is_enabled() {
+            CredentialGuard
+                .redact_output(&String::from_utf8_lossy(chunk), &credential_guard_config())
+                .text
+        } else {
+            String::from_utf8_lossy(chunk).into_owned()
+        };
         let _ = tx.send(AppEvent::Agent(AgentEvent::ToolOutputChunk {
             id: ctx.id.clone(),
             chunk: text,

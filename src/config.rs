@@ -105,6 +105,9 @@ impl Default for ThrobberConfig {
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct XiConfig {
+    /// Enable host-side credential access checks, redaction, and model guidance.
+    #[serde(default)]
+    pub credential_guard: bool,
     /// Path to the theme file. Overridden by the `--theme` CLI flag.
     pub theme: Option<PathBuf>,
     /// UI display thresholds.

@@ -211,6 +211,9 @@ pub fn build_system_prompt(
     guidelines.push("Never describe a change as done or claim to have implemented something unless you have called the appropriate tools in this response to make that change. If you intend to make edits, call the tools now.".to_string());
     guidelines.push("Be concise in your responses.".to_string());
     guidelines.push("Show file paths clearly when working with files.".to_string());
+    if credential_guard::is_enabled() {
+        guidelines.push("Tool output may contain [REDACTED], which means the host removed sensitive credential material before it reached you. Treat it as unavailable; do not reconstruct it or bypass the host credential-access policy.".to_string());
+    }
 
     let guidelines_text = guidelines
         .iter()

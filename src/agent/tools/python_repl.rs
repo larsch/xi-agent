@@ -692,9 +692,13 @@ fn finish_result(content: String, is_error: bool) -> ToolResult {
 
 fn sanitize(value: &str) -> String {
     let rendered = apply_terminal_render(value).trim_end().to_string();
-    CredentialGuard
-        .redact_output(&rendered, &RedactionConfig::default())
-        .text
+    if credential_guard::is_enabled() || cfg!(test) {
+        CredentialGuard
+            .redact_output(&rendered, &RedactionConfig::default())
+            .text
+    } else {
+        rendered
+    }
 }
 
 fn format_exit(status: std::process::ExitStatus) -> String {

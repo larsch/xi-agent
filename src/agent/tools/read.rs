@@ -179,9 +179,13 @@ impl Tool for ReadFileTool {
                 }
             };
 
-            let content = CredentialGuard
-                .redact_output(&content, &credential_guard::RedactionConfig::default())
-                .text;
+            let content = if credential_guard::is_enabled() || cfg!(test) {
+                CredentialGuard
+                    .redact_output(&content, &credential_guard::RedactionConfig::default())
+                    .text
+            } else {
+                content
+            };
             let all_lines = split_lines_preserving_endings(&content);
             let total = all_lines.len();
 
