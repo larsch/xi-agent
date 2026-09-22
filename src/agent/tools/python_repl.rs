@@ -748,7 +748,10 @@ mod tests {
 
     #[test]
     fn sanitize_redacts_credentials() {
-        assert_eq!(sanitize("API_KEY=real-secret-value"), "API_KEY=[REDACTED]");
+        assert_eq!(
+            sanitize("API_KEY=RealSecretValue_1234567890abcdef"),
+            "API_KEY=[REDACTED]"
+        );
     }
 
     #[tokio::test]

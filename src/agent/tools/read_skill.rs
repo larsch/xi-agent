@@ -195,7 +195,11 @@ mod tests {
     #[tokio::test]
     async fn redacts_credentials_from_skill_body() {
         let dir = tempfile::tempdir().unwrap();
-        let skill = write_skill_file(dir.path(), "secret", "API_KEY=real-secret-value");
+        let skill = write_skill_file(
+            dir.path(),
+            "secret",
+            "API_KEY=RealSecretValue_1234567890abcdef",
+        );
         let tool = make_tool(vec![skill]);
 
         let result = tool.execute(serde_json::json!({"name": "secret"})).await;

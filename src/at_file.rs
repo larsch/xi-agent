@@ -376,7 +376,7 @@ mod tests {
     fn resolve_text_file_redacts_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secrets.txt");
-        std::fs::write(&path, "API_KEY=real-secret-value").unwrap();
+        std::fs::write(&path, "API_KEY=RealSecretValue_1234567890abcdef").unwrap();
         let tokens = vec![AtToken {
             path: "secrets.txt".into(),
             span_start: 0,

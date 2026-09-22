@@ -288,7 +288,7 @@ mod tests {
             concat!(
                 "{\"type\":\"tool_call\",\"args\":{\"program\":\"gh\",\"args\":[\"auth\",\"token\"]}}\n",
                 "not json\n",
-                "{\"type\":\"tool_result\",\"name\":\"exec\",\"content\":\"API_KEY=real-value\"}\n",
+                "{\"type\":\"tool_result\",\"name\":\"exec\",\"content\":\"API_KEY=RealSecretValue_1234567890abcdef\"}\n",
                 "{\"type\":\"user_message\",\"content\":\"Please explain what an API_KEY is\"}\n"
             ),
         )
@@ -320,12 +320,12 @@ mod tests {
                 event: 1,
                 field: "event.content".into(),
                 category: "match::SensitiveAssignment".into(),
-                detail: "API_KEY=real-value".into(),
+                detail: "API_KEY=RealSecretValue_1234567890abcdef".into(),
             }],
             ..Default::default()
         };
-        assert!(!render(&report, false, false).contains("real-value"));
-        assert!(!render(&report, false, true).contains("real-value"));
-        assert!(render(&report, true, false).contains("real-value"));
+        assert!(!render(&report, false, false).contains("RealSecretValue_"));
+        assert!(!render(&report, false, true).contains("RealSecretValue_"));
+        assert!(render(&report, true, false).contains("RealSecretValue_"));
     }
 }

@@ -151,8 +151,11 @@ impl CredentialGuard {
             config,
             &mut matches,
         );
+        replace_jwt(&mut text, config, &mut matches);
         replace_pem(&mut text, config, &mut matches);
-        replace_sensitive_structured_fields(&mut text, config, &mut matches);
+        if looks_like_json_document(&text) {
+            replace_sensitive_structured_fields(&mut text, config, &mut matches);
+        }
         replace_sensitive_assignments(&mut text, config, &mut matches);
         matches.sort_unstable_by_key(|m| *m as u8);
         matches.dedup();
@@ -371,6 +374,35 @@ fn replace_pattern<F: Fn(&str) -> bool>(
     }
 }
 
+fn replace_jwt(text: &mut String, config: &RedactionConfig, matches: &mut Vec<MatchCategory>) {
+    let mut cursor = 0;
+    while let Some(relative) = text[cursor..].find("eyJ") {
+        let begin = cursor + relative;
+        let end = text[begin..]
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, '"' | '\'' | ',' | '}' | ']')
+            })
+            .map(|offset| begin + offset)
+            .unwrap_or(text.len());
+        let candidate = &text[begin..end];
+        let parts = candidate.split('.').collect::<Vec<_>>();
+        if parts.len() == 3
+            && parts.iter().all(|part| {
+                part.len() >= 8
+                    && part.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                    })
+            })
+        {
+            text.replace_range(begin..end, replacement(MatchCategory::Jwt, config));
+            matches.push(MatchCategory::Jwt);
+            cursor = begin + replacement(MatchCategory::Jwt, config).len();
+        } else {
+            cursor = end;
+        }
+    }
+}
+
 fn replace_pem(text: &mut String, config: &RedactionConfig, matches: &mut Vec<MatchCategory>) {
     while let Some(begin) = text.find("-----BEGIN ") {
         let Some(end_rel) = text[begin..].find("-----END ") else {
@@ -383,6 +415,11 @@ fn replace_pem(text: &mut String, config: &RedactionConfig, matches: &mut Vec<Ma
         text.replace_range(begin..end, replacement(MatchCategory::PrivateKey, config));
         matches.push(MatchCategory::PrivateKey);
     }
+}
+
+fn looks_like_json_document(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with('{') || trimmed.starts_with('[')) && text.trim_end().ends_with(['}', ']'])
 }
 
 fn replace_sensitive_structured_fields(
@@ -453,7 +490,7 @@ fn replace_sensitive_structured_fields(
                 .unwrap_or(text.len())
         };
         let value = &text[content_begin..value_end];
-        if !is_placeholder(value) && !value.is_empty() {
+        if looks_like_opaque_secret(value) {
             let replacement = replacement(MatchCategory::SensitiveAssignment, config);
             text.replace_range(content_begin..value_end, replacement);
             matches.push(MatchCategory::SensitiveAssignment);
@@ -487,16 +524,26 @@ fn replace_sensitive_assignments(
         let (body, ending) = body
             .strip_suffix('\r')
             .map_or((body, ""), |body| (body, "\r"));
-        let lower = body.to_ascii_lowercase();
         if !body.contains(['{', '}'])
-            && keys.iter().any(|key| lower.contains(key))
             && let Some(pos) = body.find(['=', ':'])
         {
+            let key_name = body[..pos]
+                .trim()
+                .trim_matches(|c: char| c == '"' || c == '\'')
+                .to_ascii_lowercase();
+            let normalized_key = key_name.replace(['-', '_'], "");
+            if !keys.iter().any(|key| {
+                let normalized = key.replace(['-', '_'], "");
+                normalized_key == normalized || normalized_key.ends_with(&normalized)
+            }) {
+                output.push_str(line);
+                continue;
+            }
             let value_start = body[pos + 1..]
                 .find(|c: char| !c.is_whitespace() && c != '"' && c != '\'')
                 .map(|n| pos + 1 + n);
             if let Some(value_start) = value_start
-                && !is_placeholder(&body[value_start..])
+                && looks_like_opaque_secret(&body[value_start..])
             {
                 output.push_str(&body[..value_start]);
                 output.push_str(replacement(MatchCategory::SensitiveAssignment, config));
@@ -511,6 +558,41 @@ fn replace_sensitive_assignments(
         output.push_str(line);
     }
     *text = output;
+}
+
+fn looks_like_opaque_secret(value: &str) -> bool {
+    let value = value
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '}' || c.is_whitespace());
+    if value.len() < 24
+        || is_placeholder(value)
+        || value.chars().any(char::is_whitespace)
+        || value
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '[' | ']' | '(' | ')' | ';'))
+        || value.contains("::")
+        || value.contains("=>")
+        || value.contains('/')
+    {
+        return false;
+    }
+    let mut classes = 0;
+    if value.chars().any(|c| c.is_ascii_lowercase()) {
+        classes += 1;
+    }
+    if value.chars().any(|c| c.is_ascii_uppercase()) {
+        classes += 1;
+    }
+    if value.chars().any(|c| c.is_ascii_digit()) {
+        classes += 1;
+    }
+    if value.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        classes += 1;
+    }
+    let unique = value
+        .chars()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    classes >= 3 && unique >= 12
 }
 
 fn is_placeholder(value: &str) -> bool {
@@ -528,6 +610,11 @@ fn is_placeholder(value: &str) -> bool {
             "null",
         ]
         .contains(&v.as_str())
+        || v.starts_with("replace_with_")
+        || v.starts_with("your_")
+        || v.starts_with("example_")
+        || v.starts_with("dummy_")
+        || v == "test"
 }
 
 #[cfg(test)]
@@ -587,7 +674,7 @@ mod tests {
     #[test]
     fn redacts_formats_assignments_and_placeholders() {
         let result = CredentialGuard.redact_output(
-            "API_KEY=real-value\nTOKEN=your_token_here\nghp_abcdefghijklmnopqrstuvwxyz",
+            "API_KEY=RealSecretValue_1234567890abcdef\nTOKEN=your_token_here\nghp_abcdefghijklmnopqrstuvwxyz",
             &RedactionConfig::default(),
         );
         assert!(result.text.contains("API_KEY=[REDACTED]"));
@@ -662,7 +749,8 @@ mod tests {
     fn redaction_is_configurable() {
         let mut config = RedactionConfig::default();
         config.secret = "<secret>".into();
-        let result = CredentialGuard.redact_output("API_KEY=real", &config);
+        let result =
+            CredentialGuard.redact_output("API_KEY=RealSecretValue_1234567890abcdef", &config);
         assert!(result.text.contains("<secret>"));
     }
 
@@ -846,28 +934,28 @@ mod tests {
             "ghu_abcdefghijklmnopqrstuvwxyz1234567890 ",
             "ghs_abcdefghijklmnopqrstuvwxyz1234567890 ",
             "ghr_abcdefghijklmnopqrstuvwxyz1234567890 ",
-            r#"{"credentials":{"access_token":"real-token","refresh_token":"real-refresh","_authToken":"real-auth"}}"#,
+            r#"{"credentials":{"access_token":"RealAccessToken_1234567890abcdef","refresh_token":"RealRefreshToken_1234567890abcdef","_authToken":"RealAuthToken_1234567890abcdef"}}"#,
         );
         let result = CredentialGuard.redact_output(input, &RedactionConfig::default());
         assert!(!result.text.contains("gho_"));
         assert!(!result.text.contains("ghu_"));
         assert!(!result.text.contains("ghs_"));
         assert!(!result.text.contains("ghr_"));
-        assert!(!result.text.contains("real-token"));
-        assert!(!result.text.contains("real-refresh"));
-        assert!(!result.text.contains("real-auth"));
+        assert!(!result.text.contains("RealAccessToken_"));
+        assert!(!result.text.contains("RealRefreshToken_"));
+        assert!(!result.text.contains("RealAuthToken_"));
         assert!(result.text.contains(r#""access_token":"[REDACTED]""#));
         assert!(result.text.contains(r#""refresh_token":"[REDACTED]""#));
     }
 
     #[test]
     fn redacts_structured_spacing_and_key_variants() {
-        let input = r#"{"apiKey" : "one", "private-key": "two", "clientSecret":"three", "access-token": "four"}"#;
+        let input = r#"{"apiKey" : "RealApiKeyValue_1234567890abcdef", "private-key": "RealPrivateKey_1234567890abcdef", "clientSecret":"RealClientSecret_1234567890abcdef", "access-token": "RealAccessToken_1234567890abcdef"}"#;
         let result = CredentialGuard.redact_output(input, &RedactionConfig::default());
-        assert!(!result.text.contains("one"));
-        assert!(!result.text.contains("two"));
-        assert!(!result.text.contains("three"));
-        assert!(!result.text.contains("four"));
+        assert!(!result.text.contains("RealApiKeyValue_"));
+        assert!(!result.text.contains("RealPrivateKey_"));
+        assert!(!result.text.contains("RealClientSecret_"));
+        assert!(!result.text.contains("RealAccessToken_"));
     }
 
     #[test]
@@ -879,7 +967,8 @@ mod tests {
             "github_pat_11AAAAAAAAAAAAAAAAAAAAAA_abcdefghijklmnopqrstuvwxyz1234567890 ",
             "xoxb-test-fixture ",
             "xoxp-test-fixture ",
-            "AIzaSyDUMMYKEY1234567890"
+            "AIzaSyDUMMYKEY1234567890 ",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYmYiOjE3Njk2OTUxNjN9.LAd8kftGNwSf9BXR6vj1TFfnmy0e0aizRKruRkcZ30U"
         );
         let result = CredentialGuard.redact_output(input, &RedactionConfig::default());
         assert!(!result.text.contains("AKIAIOSFODNN7EXAMPLE"));
@@ -905,6 +994,7 @@ mod tests {
                 .contains("xoxp-test-fixture")
         );
         assert!(!result.text.contains("AIzaSyDUMMYKEY1234567890"));
+        assert!(!result.text.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
         assert_eq!(result.redaction_count, result.matches.len());
         assert!(result.redaction_count >= 4);
     }
@@ -912,9 +1002,9 @@ mod tests {
     #[test]
     fn redacts_pem_and_structured_assignments() {
         let input = concat!(
-            "AWS_SECRET_ACCESS_KEY=real-secret\n",
-            "password: \"real-password\"\n",
-            "client_secret = 'real-client-secret'\n",
+            "AWS_SECRET_ACCESS_KEY=RealSecretValue_1234567890abcdef\n",
+            "password: \"RealPasswordValue_1234567890abcdef\"\n",
+            "client_secret = 'RealClientSecret_1234567890abcdef'\n",
             "private_key: |\n",
             "  -----BEGIN PRIVATE KEY-----\n",
             "  base64-secret-material\n",
