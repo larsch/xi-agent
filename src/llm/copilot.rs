@@ -226,7 +226,13 @@ fn build_inner(
     // For OpenAI-vendor models the Responses vs. Chat-Completions split is not
     // encoded in the API; use name heuristics.
     let m = model.to_ascii_lowercase();
-    if m.contains("codex") || m.starts_with("gpt-5") {
+    // Newer GPT models exposed by Copilot may only support the Responses API.
+    // Keep this explicit rather than sending them to /chat/completions, which
+    // produces `unsupported_api_for_model` for models such as gpt-6-luna.
+    // Pi and LiteLLM route GitHub Copilot's GPT family through Responses,
+    // including older IDs such as gpt-4o. Copilot does not expose the
+    // Chat-Completions/Responses split in the model vendor field.
+    if m.starts_with("gpt-") || m.contains("codex") {
         let responses_url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
         log::debug!(
             "copilot transport resolved: api=openai-responses base_url={base_url} endpoint={responses_url}"

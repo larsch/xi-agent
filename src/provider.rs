@@ -52,7 +52,9 @@ fn classify_copilot_route(model: &str) -> CopilotApiRoute {
     let m = model.to_ascii_lowercase();
     if m.starts_with("claude") {
         CopilotApiRoute::AnthropicMessages
-    } else if m.contains("codex") || m.starts_with("gpt-5") {
+    // Pi and LiteLLM route every GitHub Copilot GPT model through Responses,
+    // rather than inferring support from the GPT generation.
+    } else if m.starts_with("gpt-") || m.contains("codex") {
         CopilotApiRoute::OpenAiResponses
     } else {
         CopilotApiRoute::OpenAiChatCompletions
@@ -360,11 +362,14 @@ mod tests {
     }
 
     #[test]
-    fn copilot_route_uses_chat_completions_for_gpt4o() {
-        assert_eq!(
-            classify_copilot_route("gpt-4o"),
-            CopilotApiRoute::OpenAiChatCompletions
-        );
+    fn copilot_route_uses_responses_for_all_gpt_models() {
+        for model in ["gpt-4o", "gpt-5-mini", "gpt-6-luna"] {
+            assert_eq!(
+                classify_copilot_route(model),
+                CopilotApiRoute::OpenAiResponses,
+                "unexpected route for {model}"
+            );
+        }
     }
 
     #[test]
@@ -402,10 +407,10 @@ mod tests {
             thinking_support_for_instance(&instance, "gpt-5.3-codex"),
             ThinkingSupport::Applied
         );
-        assert!(matches!(
+        assert_eq!(
             thinking_support_for_instance(&instance, "gpt-4o"),
-            ThinkingSupport::Ignored(_)
-        ));
+            ThinkingSupport::Applied
+        );
         assert!(matches!(
             thinking_support_for_instance(&instance, "claude-sonnet-4.5"),
             ThinkingSupport::Ignored(_)
