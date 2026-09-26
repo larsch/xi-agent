@@ -42,7 +42,7 @@ Each agent output line and tool invocation is prefixed with an indicator icon:
 | Agent provisional response     | 💭   |
 | Agent thinking                 | 🧠   |
 | `bash` / `cmd` / `powershell`  | 💻   |
-| `exec`                         | ⚙️   |
+| `exec`                         | 🔧   |
 | `read_file`                    | 👀   |
 | `write_file`                   | ✏️   |
 | `edit_file`                    | 📝   |
@@ -112,12 +112,12 @@ Truncated logical blocks are independently unfoldable with the mouse:
 
 #### `exec`
 
-- Intent: `⚙️ <program> [args…]` — rendered as a shell-quoted argv string, using whichever fields (`program`, `args`) are available. At minimum shows `⚙️ exec`.
+- Intent: `🔧 <program> [args…]` — rendered as a shell-quoted argv string, using whichever fields (`program`, `args`) are available. At minimum shows `🔧 exec`.
 - Body: combined stdout/stderr output interleaved as produced, tail-truncated to 8 lines.
 
 #### Custom and unknown tools
 
-- Intent: `⚙️ <best available argument summary>` — using the first available string argument, or the tool name only if no arguments are available.
+- Intent: `🔧 <best available argument summary>` — using the first available string argument, or the tool name only if no arguments are available.
 - Body: tool result content, tail-truncated to 8 lines.
 
 #### `ask_user`

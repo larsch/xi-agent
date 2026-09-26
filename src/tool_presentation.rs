@@ -52,7 +52,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "ask_user" => "❓",
         "read_skill" => "🎓",
         "restart_host" => "🔄",
-        _ => "⚙️",
+        _ => "🔧",
     }
 }
 
@@ -588,7 +588,7 @@ mod tests {
             &DisplayConfig::default(),
         );
         assert!(ph);
-        assert_eq!(lbl, "⚙️ working…");
+        assert_eq!(lbl, "🔧 working…");
     }
 
     #[test]
@@ -708,15 +708,15 @@ mod tests {
 
     #[test]
     fn split_icon_from_label_no_space_returns_whole_label() {
-        let (icon, text) = split_icon_from_label("⚙️");
-        assert_eq!(icon, "⚙️");
+        let (icon, text) = split_icon_from_label("🔧");
+        assert_eq!(icon, "🔧");
         assert_eq!(text, "");
     }
 
     #[test]
-    fn split_icon_from_label_variation_selector_emoji() {
-        let (icon, text) = split_icon_from_label("⚙️ running…");
-        assert_eq!(icon, "⚙️");
+    fn split_icon_from_label_wide_symbol() {
+        let (icon, text) = split_icon_from_label("🔧 running…");
+        assert_eq!(icon, "🔧");
         assert_eq!(text, "running…");
     }
 }

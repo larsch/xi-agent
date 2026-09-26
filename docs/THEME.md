@@ -415,7 +415,7 @@ The full default configuration for all built-in tools is shown below:
 
 ```toml
 [tools.default]
-prefix.text = "⚙️ "
+prefix.text = "🔧 "
 prefix.fg = "#aaaaaa"
 body.fg = "#aaaaaa"
 placeholder.fg = "#666688"

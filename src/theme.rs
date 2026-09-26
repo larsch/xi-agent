@@ -1106,7 +1106,7 @@ fn default_tools_map() -> HashMap<String, ToolTheme> {
         "default".to_string(),
         ToolTheme {
             prefix: PrefixStyle {
-                text: Some("⚙️ ".to_string()),
+                text: Some("🔧 ".to_string()),
                 fg: Some(Color::Rgb(255, 164, 185)),
                 ..Default::default()
             },
@@ -1289,7 +1289,7 @@ impl<'a> ResolvedToolTheme<'a> {
     pub fn prefix_text(&self) -> &str {
         self.prefix_text_chain()
             .find_map(|p| p.text.as_deref())
-            .unwrap_or("⚙️ ")
+            .unwrap_or("🔧 ")
     }
 
     /// Resolved prefix ratatui style.

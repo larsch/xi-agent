@@ -1184,9 +1184,9 @@ fn render_tool_call(
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let lbl = if prefix.is_empty() {
-            format!("⚙ {command}")
+            format!("🔧 {command}")
         } else {
-            format!("⚙ {prefix} {command}")
+            format!("🔧 {prefix} {command}")
         };
         (lbl, false)
     } else if let Some(partial) = msg.tool_partial_args.as_deref() {
