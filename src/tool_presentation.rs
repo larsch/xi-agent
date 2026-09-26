@@ -23,6 +23,7 @@ pub fn tool_pending_label(name: &str) -> String {
         "edit" | "edit_file" => "editing…",
         "find" | "find_files" => "finding…",
         "restart_host" => "restarting…",
+        _ if !is_builtin_tool(name) => return format!("{emoji} {name} · working…"),
         _ => "working…",
     };
     format!("{emoji} {action}")
@@ -38,6 +39,31 @@ pub fn split_icon_from_label(label: &str) -> (&str, &str) {
         Some(pos) => (&label[..pos], &label[pos + 1..]),
         None => (label, ""),
     }
+}
+
+/// Return whether a tool name belongs to the built-in presentation set.
+fn is_builtin_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read"
+            | "read_file"
+            | "write"
+            | "write_file"
+            | "edit"
+            | "edit_file"
+            | "bash"
+            | "cmd"
+            | "powershell"
+            | "exec"
+            | "run_python"
+            | "python_repl_execute"
+            | "find"
+            | "find_files"
+            | "ask_user"
+            | "read_skill"
+            | "restart_host"
+            | "local_shell"
+    )
 }
 
 /// Return the display emoji for a tool name.
@@ -166,17 +192,21 @@ pub fn tool_invocation_label(
         return (format!("{emoji} {detail}"), false);
     }
 
-    // All other tools: extract the streaming_field value, 1-line compact.
-    let Some(field) = streaming_field else {
-        return (tool_pending_label(name), true);
-    };
+    // Preserve the existing streaming-field behavior for built-ins that do not
+    // have a specialized formatter above.
+    if is_builtin_tool(name) {
+        let Some(field) = streaming_field else {
+            return (tool_pending_label(name), true);
+        };
+        let text = match args.get(field).and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t,
+            _ => return (tool_pending_label(name), true),
+        };
+        return (format!("{emoji} {}", compact(text, display)), false);
+    }
 
-    let text = match args.get(field).and_then(|v| v.as_str()) {
-        Some(t) if !t.is_empty() => t,
-        _ => return (tool_pending_label(name), true),
-    };
-
-    let detail = compact(text, display);
+    // Generic tools: show their actual name and readable parameter values.
+    let detail = generic_tool_detail(name, args, display);
     (format!("{emoji} {detail}"), false)
 }
 
@@ -213,6 +243,43 @@ fn compact(input: &str, display: &DisplayConfig) -> String {
         return one_line;
     }
     one_line.chars().take(max_chars).collect::<String>() + "…"
+}
+
+fn generic_tool_detail(name: &str, args: &Value, display: &DisplayConfig) -> String {
+    let Some(parameters) = args.as_object() else {
+        return name.to_string();
+    };
+
+    let details = parameters
+        .iter()
+        .filter_map(|(key, value)| generic_parameter_value(value).map(|value| (key, value)))
+        .map(|(key, value)| format!("{key}: {}", compact(&value, display)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if details.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} · {details}")
+    }
+}
+
+/// Convert JSON parameter values to readable text without JSON syntax.
+/// Nested object fields are omitted rather than displaying raw JSON.
+fn generic_parameter_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => Some(one_line(text)),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .filter_map(generic_parameter_value)
+                .collect::<Vec<_>>();
+            (!values.is_empty()).then(|| values.join(", "))
+        }
+        Value::Null | Value::Object(_) | Value::String(_) => None,
+    }
 }
 
 fn multiline_head_truncated(input: &str, display: &DisplayConfig) -> String {
@@ -580,15 +647,42 @@ mod tests {
     // ── Custom / no streaming_field ───────────────────────────────────────────
 
     #[test]
-    fn custom_tool_shows_placeholder() {
+    fn custom_tool_shows_name_and_readable_parameters() {
         let (lbl, ph) = tool_invocation_label(
-            "custom_tool",
-            &json!({"some_field": "value"}),
+            "web-search",
+            &json!({"query": "weather in Paris", "limit": 3, "options": {"safe": true}}),
             None,
             &DisplayConfig::default(),
         );
-        assert!(ph);
-        assert_eq!(lbl, "🔧 working…");
+        assert!(!ph);
+        assert_eq!(lbl, "🔧 web-search · query: weather in Paris, limit: 3");
+        assert!(!lbl.contains('{'));
+        assert!(!lbl.contains('}'));
+    }
+
+    #[test]
+    fn custom_tool_without_arguments_shows_name() {
+        let (lbl, ph) =
+            tool_invocation_label("web-search", &json!({}), None, &DisplayConfig::default());
+        assert!(!ph);
+        assert_eq!(lbl, "🔧 web-search");
+    }
+
+    #[test]
+    fn custom_tool_pending_label_includes_name() {
+        assert_eq!(tool_pending_label("web-search"), "🔧 web-search · working…");
+    }
+
+    #[test]
+    fn partial_custom_tool_shows_readable_parameters() {
+        let (lbl, ph) = tool_invocation_label_from_partial(
+            "web-search",
+            r#"{"query":"weather in Paris"}"#,
+            None,
+            &DisplayConfig::default(),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "🔧 web-search · query: weather in Paris");
     }
 
     #[test]

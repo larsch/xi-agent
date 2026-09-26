@@ -117,7 +117,7 @@ Truncated logical blocks are independently unfoldable with the mouse:
 
 #### Custom and unknown tools
 
-- Intent: `🔧 <best available argument summary>` — using the first available string argument, or the tool name only if no arguments are available.
+- Intent: `🔧 <tool-name> · <parameter>: <value>, …` — shows the actual tool name and readable scalar parameter values, compacted onto one line. Nested object values are omitted rather than rendered as raw JSON. If no readable parameters are available, shows only the tool name; before arguments arrive, shows the tool name with `working…`.
 - Body: tool result content, tail-truncated to 8 lines.
 
 #### `ask_user`
