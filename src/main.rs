@@ -112,7 +112,13 @@ struct Cli {
 
     /// Run in non-interactive mode: send PROMPT, stream the response to
     /// stdout, and exit.  Accepts multiple words without shell quoting.
-    #[arg(long, short = 'p', value_name = "PROMPT", num_args = 1.., conflicts_with = "theme_demo")]
+    #[arg(
+        long,
+        short = 'p',
+        value_name = "PROMPT",
+        num_args = 1..,
+        conflicts_with_all = ["theme_demo", "print_system_prompt"]
+    )]
     print: Option<Vec<String>>,
 
     /// Start the interactive UI and automatically submit PROMPT.
@@ -151,6 +157,20 @@ struct Cli {
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
     print_dirs: bool,
+
+    /// Render the system prompt and print it to stdout without starting a session.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "print_dirs",
+            "print",
+            "prompt",
+            "prompt_file",
+            "resume",
+            "theme_demo"
+        ]
+    )]
+    print_system_prompt: bool,
 
     /// Path to a theme.toml file. Overrides the `theme` key in config.toml.
     #[arg(long, value_name = "PATH")]
@@ -258,6 +278,42 @@ async fn main() -> io::Result<()> {
     // --theme flag overrides config.toml theme path
     if let Some(theme_path) = cli.theme {
         config.theme = Some(theme_path);
+    }
+
+    if cli.print_system_prompt {
+        // Resolve provider/model using the same precedence as interactive mode.
+        // These selections do not alter today's prompt template, but resolving
+        // them ensures CLI overrides and invalid provider IDs behave consistently.
+        let instance = provider_setup::resolve_provider_instance(cli.provider.as_deref(), &config)
+            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
+        let _instance = provider_setup::with_resolved_model(cli.model.as_deref(), &instance);
+
+        let tracker = Arc::new(Mutex::new(build_file_tracker()));
+        let ctx = load_context(
+            None,
+            &tracker,
+            cli.enable_session_ipc || config.enable_session_ipc,
+        );
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".to_string());
+        let agent = config
+            .agent
+            .as_deref()
+            .and_then(|name| ctx.agents.iter().find(|agent| agent.name == name));
+        let tools = if let Some(agent) = agent {
+            agents::filter_tools(&ctx.tools, &agent.include_tools, &agent.exclude_tools)
+        } else {
+            ctx.tools
+        };
+        let loaded_skills = if let Some(agent) = agent {
+            agents::filter_skills(&ctx.skills, &agent.include_skills, &agent.exclude_skills)
+        } else {
+            ctx.skills
+        };
+        let system_prompt = agent::build_system_prompt(&tools, &cwd, &loaded_skills, agent);
+        println!("{system_prompt}");
+        return Ok(());
     }
 
     // Load theme (missing file → built-in defaults)
