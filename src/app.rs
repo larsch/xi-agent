@@ -1285,6 +1285,12 @@ impl App {
 
     // ── Step-back navigation ──────────────────────────────────────────────────
 
+    /// Replace the textarea while preserving its logical line boundaries.
+    fn restore_textarea_content(&mut self, text: &str) {
+        self.textarea = TextArea::new(text.split('\n').map(str::to_owned).collect());
+        self.textarea.move_cursor(CursorMove::End);
+    }
+
     /// Returns the event indices (into the committed event log) of all
     /// step-back boundaries: `UserMessage` events and `ToolResult` events
     /// for `ask_user` (user answers to in-turn questions), in order.
@@ -1386,8 +1392,7 @@ impl App {
     /// Cancel step-back mode, restoring the original input and full view.
     pub(crate) fn cancel_stepping(&mut self) {
         if let Some(saved) = self.step_back.cancel() {
-            self.textarea = TextArea::new(vec![saved]);
-            self.textarea.move_cursor(CursorMove::End);
+            self.restore_textarea_content(&saved);
         }
         self.log_view.auto_scroll = true;
         self.log_view.invalidate();
@@ -1408,8 +1413,7 @@ impl App {
         match ss.events().get(idx) {
             Some(SessionEvent::UserMessage { content, .. }) => {
                 let text = content.clone();
-                self.textarea = TextArea::new(vec![text]);
-                self.textarea.move_cursor(CursorMove::End);
+                self.restore_textarea_content(&text);
             }
             Some(SessionEvent::ToolResult { id, name, .. }) if name == "ask_user" => {
                 // Find the preceding ToolCall with matching id to get the
@@ -3812,6 +3816,21 @@ mod tests {
         assert_eq!(app.step_back.saved_input.as_deref(), Some("current input"));
         assert_eq!(app.step_back.cursor, Some(2));
         assert_eq!(app.textarea.lines().join(""), "second");
+    }
+
+    #[test]
+    fn step_back_and_cancel_preserve_multiline_input() {
+        let historical_prompt = "A paragraph.\n\n- first item\n- second item";
+        let draft = "Draft paragraph.\n\n- draft item";
+        let mut app = make_app_with_events(vec![user_ev(historical_prompt), assistant_ev("reply")]);
+        app.textarea =
+            ratatui_textarea::TextArea::new(draft.split('\n').map(str::to_owned).collect());
+
+        app.step_back();
+        assert_eq!(app.textarea.lines().join("\n"), historical_prompt);
+
+        app.cancel_stepping();
+        assert_eq!(app.textarea.lines().join("\n"), draft);
     }
 
     #[test]
