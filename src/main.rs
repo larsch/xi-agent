@@ -47,6 +47,7 @@ mod llm;
 mod log_view_state;
 mod login_state;
 mod markdown;
+mod mermaid;
 mod migrate;
 mod mouse_select;
 mod print_mode;
@@ -422,6 +423,9 @@ async fn main() -> io::Result<()> {
     app.theme = theme;
 
     let app_event_tx = app.app_event_tx();
+    // Capability probing must happen after entering the alternate screen but
+    // before the event stream starts reading terminal input.
+    mermaid::initialize(app_event_tx.clone());
 
     // Record the desired agent now; the actual system-prompt rebuild happens
     // once the context (tools, skills, agents) has been loaded, either by the

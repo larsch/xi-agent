@@ -445,7 +445,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.throbber_visible(),
     );
 
-    let (visible_lines, visible_sources): (Vec<Line<'static>>, Vec<LineSource>) = {
+    let (visible_lines, visible_sources, diagram_window_start, diagram_screen_start): (
+        Vec<Line<'static>>,
+        Vec<LineSource>,
+        usize,
+        usize,
+    ) = {
         let layout = &app.log_view.log_cache.cached_layout.as_ref().unwrap().3;
         if block_padding > 0 {
             // Anchor against the stored height so content stays put when the
@@ -464,7 +469,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             sources.extend(ws);
             lines.extend(std::iter::repeat_n(Line::default(), bottom_padding));
             sources.extend(std::iter::repeat_n(empty_line_source(), bottom_padding));
-            (lines, sources)
+            (lines, sources, raw_start, top_padding)
         } else if total_lines <= inner_height {
             let padding = inner_height - total_lines;
             let mut lines: Vec<Line<'static>> = vec![Line::default(); padding];
@@ -476,7 +481,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 lines.push(throbber.clone());
                 sources.push(empty_line_source());
             }
-            (lines, sources)
+            (lines, sources, 0, padding)
         } else {
             let start = log_scroll;
             let end = (start + inner_height).min(total_lines);
@@ -491,7 +496,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 lines.push(throbber.clone());
                 sources.push(empty_line_source());
             }
-            (lines, sources)
+            (lines, sources, start, 0)
         }
     };
 
@@ -530,6 +535,78 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     f.render_widget(Clear, log_area);
     f.render_widget(log_paragraph, log_content_area);
+    let diagram_row_offset = diagram_window_start;
+    let cached_layout = &app.log_view.log_cache.cached_layout.as_ref().unwrap().3;
+    for block in &cached_layout.blocks {
+        let Some(block_start) = cached_layout.block_start_line(&block.identity) else {
+            continue;
+        };
+        for diagram in block.diagrams.iter() {
+            let absolute_row = block_start + diagram.row;
+            let diagram_height = diagram.height;
+            let window_end = diagram_window_start + inner_height;
+            if absolute_row + diagram_height <= diagram_window_start || absolute_row >= window_end {
+                continue;
+            }
+            let source = diagram.source.as_ref();
+            let skipped_rows = diagram_window_start.saturating_sub(absolute_row);
+            let screen_row = diagram_screen_start + absolute_row.saturating_sub(diagram_row_offset);
+            let diagram_indent = 3u16;
+            let area = Rect::new(
+                log_content_area.x.saturating_add(diagram_indent),
+                log_content_area.y.saturating_add(screen_row as u16),
+                if diagram.width == 0 {
+                    log_content_area.width.saturating_sub(diagram_indent)
+                } else {
+                    (diagram.width as u16)
+                        .min(log_content_area.width.saturating_sub(diagram_indent))
+                },
+                (diagram_height - skipped_rows).min(inner_height.saturating_sub(screen_row)) as u16,
+            );
+            if area.height == 0 {
+                continue;
+            }
+            let image = crate::mermaid::get(source);
+            if let Some((image, size)) = image.filter(|(_, size)| {
+                size.width <= log_content_area.width.saturating_sub(diagram_indent)
+            }) {
+                f.render_widget(
+                    ratatui_image::sliced::SlicedImage::new(
+                        &image,
+                        (0, -(skipped_rows as i16)).into(),
+                    ),
+                    Rect {
+                        width: size.width,
+                        height: area
+                            .height
+                            .min(size.height.saturating_sub(skipped_rows as u16)),
+                        ..area
+                    },
+                );
+            } else {
+                if !crate::mermaid::is_failed(source) {
+                    let _ = crate::mermaid::request(source);
+                }
+                let fallback_source = if crate::mermaid::available() {
+                    source.to_owned()
+                } else {
+                    format!("mermaid\n{source}")
+                };
+                let code_lines: Vec<Line<'static>> = fallback_source
+                    .lines()
+                    .skip(skipped_rows)
+                    .take(area.height as usize)
+                    .map(|line| {
+                        Line::from(Span::styled(
+                            format!("  {line}"),
+                            Style::default().fg(Color::Rgb(210, 160, 100)),
+                        ))
+                    })
+                    .collect();
+                f.render_widget(Paragraph::new(code_lines), area);
+            }
+        }
+    }
     if let (Some(row), Some(identity)) = (chevron_row, hovered_identity) {
         let glyph = if app.log_view.expanded_blocks.contains(&identity) {
             "⌃"

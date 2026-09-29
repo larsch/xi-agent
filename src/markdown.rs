@@ -456,6 +456,62 @@ impl TableBuilder {
 
 // ── Main render function ────────────────────────────────────────────────────────
 
+/// Mermaid source plus its placeholder position and reserved cell dimensions.
+pub type MermaidSlot = (usize, String, usize, usize);
+
+/// Render Markdown while reserving placeholder rows for Mermaid fences.
+///
+/// The returned offsets are relative to the returned lines. The source is kept
+/// separately so terminal image rendering does not leak into the text renderer.
+pub fn render_with_mermaid(
+    text: &str,
+    width: usize,
+    prefix: &str,
+    theme: &MarkdownTheme,
+) -> (Vec<Line<'static>>, Vec<MermaidSlot>) {
+    let mut rewritten = String::new();
+    let mut markers: Vec<(String, String)> = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == "```mermaid" {
+            let mut source = String::new();
+            for diagram_line in lines.by_ref() {
+                if diagram_line.trim().starts_with("```") {
+                    break;
+                }
+                source.push_str(diagram_line);
+                source.push('\n');
+            }
+            let marker = format!("XI_MERMAID_SLOT_{}", markers.len());
+            markers.push((marker.clone(), source));
+            rewritten.push_str("```text\n");
+            rewritten.push_str(&marker);
+            rewritten.push_str("\n```\n");
+        } else {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    let mut rendered = render_with_theme(&rewritten, width, prefix, theme);
+    let mut diagrams = Vec::new();
+    for (marker, source) in markers {
+        if let Some(index) = rendered
+            .iter()
+            .position(|line| line.spans.iter().any(|span| span.content.contains(&marker)))
+        {
+            let (slot_width, slot_height) = crate::mermaid::cached_size(&source)
+                .map(|size| (size.width as usize, size.height as usize))
+                .unwrap_or((0, crate::mermaid::FALLBACK_SLOT_MIN_HEIGHT));
+            rendered.splice(
+                index..=index,
+                std::iter::repeat_n(Line::default(), slot_height),
+            );
+            diagrams.push((index, source, slot_width, slot_height));
+        }
+    }
+    (rendered, diagrams)
+}
+
 /// Convert `text` (markdown) to a list of ratatui `Line<'static>` styled for
 /// the terminal chat log.
 ///
@@ -994,6 +1050,31 @@ mod tests {
     }
 
     // ── Plain text ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mermaid_fence_reserves_image_rows_and_keeps_source() {
+        let theme = MarkdownTheme::default();
+        let (lines, diagrams) = render_with_mermaid(
+            "before\n\n```mermaid\ngraph TD\n  A-->B\n```\n\nafter",
+            70,
+            "",
+            &theme,
+        );
+        assert_eq!(diagrams.len(), 1);
+        assert_eq!(diagrams[0].1, "graph TD\n  A-->B\n");
+        assert_eq!(diagrams[0].3, crate::mermaid::FALLBACK_SLOT_MIN_HEIGHT);
+        assert_eq!(lines.len(), 4 + crate::mermaid::FALLBACK_SLOT_MIN_HEIGHT);
+        assert!(
+            lines[diagrams[0].0..diagrams[0].0 + diagrams[0].3]
+                .iter()
+                .all(|line| line.spans.is_empty())
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line_text(line).contains("XI_MERMAID_SLOT"))
+        );
+    }
 
     #[test]
     fn plain_text_renders_as_single_line() {

@@ -87,7 +87,20 @@ pub(crate) enum TruncationDirection {
 /// the sharing boundary that makes rebuilds O(changed messages) instead of
 /// O(total log).
 #[derive(Debug, Clone)]
+pub(crate) struct DiagramSlot {
+    /// First row within the logical block.
+    pub row: usize,
+    /// Natural image dimensions in terminal cells, zero width while pending.
+    pub width: usize,
+    pub height: usize,
+    /// Mermaid source used to look up/render the cached terminal image.
+    pub source: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct LogBlock {
+    /// Mermaid slots reserve terminal rows in the text flow and retain their diagram source.
+    pub diagrams: Arc<[DiagramSlot]>,
     /// Identity is based on message and subsection, never on flattened rows.
     /// Stored behind `Arc` so reusing a cached block clones a refcount, not the
     /// string, on every streaming frame.
@@ -371,6 +384,7 @@ mod layout_tests {
 
     fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {
         LogBlock {
+            diagrams: Arc::from([]),
             identity: Arc::from(identity),
             kind,
             lines: text
@@ -421,6 +435,7 @@ mod layout_tests {
         };
         let layout = LogLayout {
             blocks: vec![LogBlock {
+                diagrams: Arc::from([]),
                 identity: "message:3:body".into(),
                 kind: LogBlockKind::ToolBody,
                 lines: vec![Line::raw("… 20 total lines")].into(),
@@ -572,6 +587,16 @@ impl LogBlockCache {
                 blocks,
             },
         );
+    }
+
+    pub(crate) fn invalidate_diagram(&mut self, source: &str) {
+        self.entries.retain(|_, entry| {
+            !entry
+                .blocks
+                .iter()
+                .flat_map(|block| block.diagrams.iter())
+                .any(|diagram| diagram.source.as_ref() == source)
+        });
     }
 
     pub(crate) fn clear(&mut self) {
@@ -735,6 +760,7 @@ fn render_message_blocks(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
     let mut ranges: Vec<(usize, usize, LogBlockKind, String)> = Vec::new();
+    let mut diagrams: Vec<(usize, String, usize, usize)> = Vec::new();
 
     match msg.role {
         Role::User => {
@@ -854,10 +880,21 @@ fn render_message_blocks(
 
             if has_answer {
                 let md_width = width.saturating_sub(3).max(1);
-                let md_lines =
-                    crate::markdown::render_with_theme(&content, md_width, "", &theme.markdown);
+                let (md_lines, md_diagrams) = if is_streaming_last {
+                    (
+                        crate::markdown::render_with_theme(&content, md_width, "", &theme.markdown),
+                        Vec::new(),
+                    )
+                } else {
+                    crate::markdown::render_with_mermaid(&content, md_width, "", &theme.markdown)
+                };
                 let prev = lines.len();
                 append_markdown_answer(&mut lines, answer_icon, md_lines, is_streaming_last);
+                diagrams.extend(
+                    md_diagrams
+                        .into_iter()
+                        .map(|(row, source, width, height)| (prev + row, source, width, height)),
+                );
                 push_sources(
                     &mut sources,
                     &mut ranges,
@@ -987,6 +1024,16 @@ fn render_message_blocks(
                 _ => TruncationDirection::Head,
             }),
         };
+        let block_diagrams: Vec<DiagramSlot> = diagrams
+            .iter()
+            .filter(|(row, _, _, _)| *row >= start && *row < end)
+            .map(|(row, source, width, height)| DiagramSlot {
+                row: row - start,
+                width: *width,
+                height: *height,
+                source: Arc::from(source.as_str()),
+            })
+            .collect();
         if let Some(previous) = blocks.last_mut()
             && previous.identity.as_ref() == identity.as_str()
         {
@@ -1003,6 +1050,9 @@ fn render_message_blocks(
             }));
             previous.sources = Arc::from(combined_sources);
             previous.kind = kind;
+            let mut combined_diagrams = previous.diagrams.to_vec();
+            combined_diagrams.extend(block_diagrams);
+            previous.diagrams = Arc::from(combined_diagrams);
             previous.truncation = truncation;
             previous.foldable |= foldable;
             continue;
@@ -1016,6 +1066,7 @@ fn render_message_blocks(
             })
             .collect();
         blocks.push(LogBlock {
+            diagrams: Arc::from(block_diagrams),
             identity: Arc::from(identity),
             kind,
             lines: Arc::from(lines[start..end].to_vec()),

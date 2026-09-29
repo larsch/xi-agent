@@ -22,6 +22,10 @@ pub enum AppEvent {
     },
     /// The deferred context load (tools, skills, agents) has completed.
     ContextLoaded(LoadedContext),
+    /// A Mermaid diagram finished rendering and its image is ready to draw.
+    MermaidReady {
+        source: String,
+    },
     /// The `restart_host` tool requested a process restart.  Handled by the app
     /// loop by flushing the pending turn and re-exec'ing the binary.
     #[cfg(all(feature = "restart", unix))]

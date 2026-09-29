@@ -55,6 +55,12 @@ impl App {
             AppEvent::AskUser(req) => self.receive_ask_request(req),
             AppEvent::ShellComplete { call_id, result } => self.on_shell_complete(call_id, result),
             AppEvent::ContextLoaded(ctx) => self.apply_loaded_context(ctx),
+            AppEvent::MermaidReady { source } => {
+                // Only the message containing this diagram has changed size;
+                // retain unrelated per-message rendering cache entries.
+                self.log_view.block_cache.invalidate_diagram(&source);
+                self.log_view.invalidate();
+            }
             #[cfg(all(feature = "restart", unix))]
             AppEvent::Restart => self.on_restart_requested(),
             AppEvent::Ipc(command) => self.handle_ipc_command(command),
