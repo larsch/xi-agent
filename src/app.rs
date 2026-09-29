@@ -2748,6 +2748,160 @@ mod tests {
     }
 
     #[test]
+    fn force_kill_status_stays_pending_while_tool_is_running() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.begin_agent_turn();
+            let cancel_rx = install_test_agent_task(&mut app);
+            app.session
+                .live_turn
+                .tool_entries
+                .push(crate::live_turn::LiveToolEntry {
+                    id: "call_1".to_string(),
+                    name: "find_files".to_string(),
+                    args: serde_json::json!({"pattern": "**/*"}),
+                    partial_args: String::new(),
+                    partial_snapshot: None,
+                    streaming_field: None,
+                    running_output: String::new(),
+                    running_output_line_count: 0,
+                    last_output_line_count: 0,
+                    result: None,
+                });
+
+            app.request_force_kill();
+
+            assert!(app.streaming());
+            assert!(app.runtime.is_running());
+            assert_eq!(*cancel_rx.borrow(), crate::agent::CancelLevel::ForceKill);
+            assert!(matches!(
+                app.agent_turn.status,
+                Some(StreamingStatus::Message(ref s))
+                    if s == "[Force abort requested; waiting for current tool to stop]"
+            ));
+
+            if let Some(handle) = app.runtime.take_agent_task() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
+    fn enter_during_hard_abort_preserves_input_and_does_not_steer() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.begin_agent_turn();
+            install_test_agent_task(&mut app);
+            app.runtime.abort_stage = crate::agent::CancelLevel::HardAbort;
+            app.session
+                .live_turn
+                .tool_entries
+                .push(crate::live_turn::LiveToolEntry {
+                    id: "call_1".to_string(),
+                    name: "find_files".to_string(),
+                    args: serde_json::json!({"pattern": "**/*"}),
+                    partial_args: String::new(),
+                    partial_snapshot: None,
+                    streaming_field: None,
+                    running_output: String::new(),
+                    running_output_line_count: 0,
+                    last_output_line_count: 0,
+                    result: None,
+                });
+            app.textarea.insert_str("keep this prompt");
+
+            let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+                std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+            let enter = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            #[allow(unused_mut)]
+            let mut last_key_at: Option<std::time::Instant> = None;
+            let result = crate::input::handle_key_event(
+                &mut app,
+                &provider,
+                &crate::config::XiConfig::default(),
+                enter,
+                #[cfg(windows)]
+                &mut last_key_at,
+            );
+
+            assert!(result.is_none());
+            assert_eq!(app.textarea.lines().join("\n"), "keep this prompt");
+            assert!(app.runtime.queued_steering.is_empty());
+            assert!(matches!(
+                app.agent_turn.status,
+                Some(StreamingStatus::Message(ref s))
+                    if s == "[Aborting current tool; wait for it to finish before submitting]"
+            ));
+
+            if let Some(handle) = app.runtime.take_agent_task() {
+                handle.abort();
+            }
+        });
+    }
+
+    #[test]
+    fn ctrl_d_waits_for_running_tool_before_graceful_quit() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut app = make_app();
+            app.begin_agent_turn();
+            install_test_agent_task(&mut app);
+            app.session
+                .live_turn
+                .tool_entries
+                .push(crate::live_turn::LiveToolEntry {
+                    id: "call_1".to_string(),
+                    name: "find_files".to_string(),
+                    args: serde_json::json!({"pattern": "**/*"}),
+                    partial_args: String::new(),
+                    partial_snapshot: None,
+                    streaming_field: None,
+                    running_output: String::new(),
+                    running_output_line_count: 0,
+                    last_output_line_count: 0,
+                    result: None,
+                });
+            let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+                std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+            let ctrl_d = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('d'),
+                crossterm::event::KeyModifiers::CONTROL,
+            );
+            #[allow(unused_mut)]
+            let mut last_key_at: Option<std::time::Instant> = None;
+            for _ in 0..2 {
+                let result = crate::input::handle_key_event(
+                    &mut app,
+                    &provider,
+                    &crate::config::XiConfig::default(),
+                    ctrl_d,
+                    #[cfg(windows)]
+                    &mut last_key_at,
+                );
+                assert!(result.is_none(), "Ctrl-D must keep the UI event loop alive");
+            }
+
+            assert!(app.runtime.pending_graceful_quit);
+            assert!(app.runtime.is_running());
+            assert_eq!(
+                app.runtime.abort_stage,
+                crate::agent::CancelLevel::HardAbort
+            );
+
+            app.apply_agent_event(crate::agent::types::AgentEvent::Done);
+            assert!(!app.runtime.is_running());
+            assert!(app.runtime.pending_graceful_quit);
+
+            app.runtime.pending_graceful_quit = false;
+        });
+    }
+
+    #[test]
     fn request_hard_abort_without_running_tool_aborts_immediately() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {

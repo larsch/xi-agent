@@ -8,6 +8,64 @@ use crate::agent::types::{CancelLevel, Tool, ToolCallContext, ToolResult};
 
 const DEFAULT_LIMIT: usize = 1000;
 
+fn walk_matching_files<F>(
+    search_dir: &str,
+    matcher: &globset::GlobMatcher,
+    limit: usize,
+    mut is_cancelled: F,
+) -> (Vec<String>, bool)
+where
+    F: FnMut() -> bool,
+{
+    let mut matches = Vec::new();
+    let walker = WalkBuilder::new(search_dir)
+        // Exclude hidden files/directories (dotfiles, .git, etc.).
+        .hidden(true)
+        // Respect .gitignore, .ignore, and global gitignore.
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .sort_by_file_path(std::cmp::Ord::cmp)
+        .build();
+
+    let mut entries = walker.into_iter();
+    loop {
+        if is_cancelled() {
+            return (matches, true);
+        }
+        let Some(entry) = entries.next() else {
+            return (matches, is_cancelled());
+        };
+
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Skip directory entries themselves; we only report files.
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            continue;
+        }
+
+        // Build a forward-slash relative path for matching.
+        let abs = entry.path();
+        let rel = match abs.strip_prefix(search_dir) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => abs.to_string_lossy().replace('\\', "/"),
+        };
+
+        if matcher.is_match(&rel) {
+            matches.push(rel);
+            // Collect one extra to detect whether the limit was hit.
+            if matches.len() > limit {
+                break;
+            }
+        }
+    }
+
+    (matches, false)
+}
+
 pub struct FindTool;
 
 #[derive(serde::Deserialize)]
@@ -88,55 +146,12 @@ impl Tool for FindTool {
 
             // The ignore::Walk API is synchronous; run it on the blocking thread pool.
             let result = tokio::task::spawn_blocking(move || {
-                let mut matches: Vec<String> = Vec::new();
-                let mut cancelled = false;
-
-                let walker = WalkBuilder::new(&search_dir)
-                    // Exclude hidden files/directories (dotfiles, .git, etc.).
-                    .hidden(true)
-                    // Respect .gitignore, .ignore, and global gitignore.
-                    .git_ignore(true)
-                    .git_global(true)
-                    .git_exclude(true)
-                    .sort_by_file_path(std::cmp::Ord::cmp)
-                    .build();
-
-                for entry in walker {
-                    if cancel_rx
+                let is_cancelled = || {
+                    cancel_rx
                         .as_ref()
                         .is_some_and(|rx| *rx.borrow() >= CancelLevel::HardAbort)
-                    {
-                        cancelled = true;
-                        break;
-                    }
-
-                    let entry = match entry {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-
-                    // Skip directory entries themselves; we only report files.
-                    if entry.file_type().is_some_and(|t| t.is_dir()) {
-                        continue;
-                    }
-
-                    // Build a forward-slash relative path for matching.
-                    let abs = entry.path();
-                    let rel = match abs.strip_prefix(&search_dir) {
-                        Ok(p) => p.to_string_lossy().replace('\\', "/"),
-                        Err(_) => abs.to_string_lossy().replace('\\', "/"),
-                    };
-
-                    if matcher.is_match(&rel) {
-                        matches.push(rel);
-                        // Collect one extra to detect whether the limit was hit.
-                        if matches.len() > limit {
-                            break;
-                        }
-                    }
-                }
-
-                (matches, cancelled)
+                };
+                walk_matching_files(&search_dir, &matcher, limit, is_cancelled)
             })
             .await;
 
@@ -236,6 +251,31 @@ mod tests {
             .await;
         assert!(result.is_error);
         assert_eq!(result.content.as_text(), "Find search cancelled by user");
+    }
+
+    #[test]
+    fn walk_stops_when_cancellation_arrives_mid_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+        let matcher = Glob::new("*.rs").unwrap().compile_matcher();
+        let mut checks = 0;
+
+        let (_, cancelled) = walk_matching_files(
+            dir.path().to_str().unwrap(),
+            &matcher,
+            DEFAULT_LIMIT,
+            || {
+                checks += 1;
+                checks == 3
+            },
+        );
+
+        assert!(
+            cancelled,
+            "the walk should stop once cancellation is observed"
+        );
+        assert_eq!(checks, 3, "the walk should not inspect later entries");
     }
 
     #[tokio::test]
