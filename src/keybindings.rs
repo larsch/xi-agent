@@ -10,6 +10,7 @@ pub(crate) enum KeyBindingId {
     ToggleInfoAlt,
     CopyLastAssistantResponse,
     ToggleFullOutput,
+    RefreshScreen,
     ResumeLatestSession,
     CycleShell,
     EditProvider,
@@ -110,6 +111,12 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         shortcut: "Alt+O",
         context: BindingContext::Global,
         description: "Toggle full tool output in the log",
+    },
+    KeyBinding {
+        id: Some(KeyBindingId::RefreshScreen),
+        shortcut: "Ctrl+L",
+        context: BindingContext::Global,
+        description: "Refresh the full terminal screen",
     },
     KeyBinding {
         id: Some(KeyBindingId::ResumeLatestSession),
@@ -221,6 +228,9 @@ pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
         KeyBindingId::ToggleFullOutput => {
             key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::ALT)
         }
+        KeyBindingId::RefreshScreen => {
+            key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL)
+        }
         KeyBindingId::ResumeLatestSession => {
             key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
@@ -296,6 +306,10 @@ mod tests {
             (
                 KeyBindingId::ToggleFullOutput,
                 KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+            ),
+            (
+                KeyBindingId::RefreshScreen,
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
             ),
             (
                 KeyBindingId::ResumeLatestSession,

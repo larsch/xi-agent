@@ -21,6 +21,7 @@ use crate::{
 pub(crate) enum RunResult {
     Quit,
     Suspend,
+    RefreshScreen,
     RebuildProvider,
     ReloadContext,
     /// Start a fresh session: clear session state, reset the file tracker,
@@ -226,6 +227,10 @@ fn handle_global_key_shortcuts(
             app.enter_keybinding_help_mode();
         }
         return KeyDispatch::Continue;
+    }
+
+    if keybindings::matches(KeyBindingId::RefreshScreen, key) {
+        return KeyDispatch::Return(RunResult::RefreshScreen);
     }
 
     if keybindings::matches(KeyBindingId::Abort, key) {
