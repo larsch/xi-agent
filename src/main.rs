@@ -582,6 +582,10 @@ async fn main() -> io::Result<()> {
                 std::process::exit(code);
             }
 
+            Ok(RunResult::RefreshScreen) => {
+                terminal.clear()?;
+            }
+
             Ok(RunResult::Suspend) => {
                 terminal::suspend_interactive_ui(&mut terminal, keyboard_enhancements_enabled)?;
                 terminal = terminal::recreate_terminal(
