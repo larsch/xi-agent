@@ -2819,14 +2819,14 @@ mod tests {
                 crossterm::event::KeyModifiers::NONE,
             );
             #[allow(unused_mut)]
-            let mut last_key_at: Option<std::time::Instant> = None;
+            let mut _last_key_at: Option<std::time::Instant> = None;
             let result = crate::input::handle_key_event(
                 &mut app,
                 &provider,
                 &crate::config::XiConfig::default(),
                 enter,
                 #[cfg(windows)]
-                &mut last_key_at,
+                &mut _last_key_at,
             );
 
             assert!(result.is_none());
@@ -2873,7 +2873,7 @@ mod tests {
                 crossterm::event::KeyModifiers::CONTROL,
             );
             #[allow(unused_mut)]
-            let mut last_key_at: Option<std::time::Instant> = None;
+            let mut _last_key_at: Option<std::time::Instant> = None;
             for _ in 0..2 {
                 let result = crate::input::handle_key_event(
                     &mut app,
@@ -2881,7 +2881,7 @@ mod tests {
                     &crate::config::XiConfig::default(),
                     ctrl_d,
                     #[cfg(windows)]
-                    &mut last_key_at,
+                    &mut _last_key_at,
                 );
                 assert!(result.is_none(), "Ctrl-D must keep the UI event loop alive");
             }
