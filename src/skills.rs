@@ -271,26 +271,36 @@ fn skill_dirs() -> Vec<PathBuf> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
 
-    if let Ok(cwd) = env::current_dir() {
-        dirs.extend(
-            project_skill_dirs(&cwd)
-                .into_iter()
-                .filter(|dir| !home.as_ref().is_some_and(|home| dir.starts_with(home))),
-        );
-    }
-
+    let mut global_dirs = Vec::new();
     if let Some(home) = home {
-        dirs.push(home.join(".xi").join("skills"));
-        dirs.push(home.join(".agents").join("skills"));
+        global_dirs.push(home.join(".xi").join("skills"));
+        global_dirs.push(home.join(".agents").join("skills"));
     }
 
     if cfg!(windows)
         && let Some(user_profile) = env::var_os("USERPROFILE").filter(|s| !s.is_empty())
     {
-        dirs.push(PathBuf::from(user_profile).join(".agents").join("skills"));
+        global_dirs.push(PathBuf::from(user_profile).join(".agents").join("skills"));
     }
 
+    if let Ok(cwd) = env::current_dir() {
+        dirs.extend(exclude_global_skill_roots(
+            project_skill_dirs(&cwd),
+            &global_dirs,
+        ));
+    }
+
+    dirs.extend(global_dirs);
     dirs
+}
+
+/// Exclude only project-search roots that are also explicit global roots.
+/// Other project roots remain local even when the checkout is under `$HOME`.
+fn exclude_global_skill_roots(project_dirs: Vec<PathBuf>, global_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    project_dirs
+        .into_iter()
+        .filter(|dir| !global_dirs.contains(dir))
+        .collect()
 }
 
 /// Return project skill roots from `cwd` to the filesystem root. At each
@@ -679,6 +689,48 @@ description: guides most non-trivial coding work.
                     .unwrap()
                     .join(".agents/skills"),
             ]
+        );
+    }
+
+    #[test]
+    fn discovers_project_skill_under_home_without_duplicating_global_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("project");
+        let project_skills = project.join(".agents/skills");
+        let global_agents = home.join(".agents/skills");
+        let global_xi = home.join(".xi/skills");
+        let skill_path = write_skill(
+            &project_skills,
+            "xi-agent-planning",
+            "xi-agent-planning",
+            "planning skill",
+        );
+        write_skill(
+            &global_agents,
+            "global-skill",
+            "global-skill",
+            "global skill",
+        );
+
+        let local_dirs = super::exclude_global_skill_roots(
+            project_skill_dirs(&project),
+            &[global_agents.clone(), global_xi.clone()],
+        );
+        let search_dirs = [local_dirs, vec![global_agents, global_xi]].concat();
+        let skills = load_skills_from_dirs(search_dirs);
+
+        assert!(
+            skills
+                .iter()
+                .any(|skill| { skill.name == "xi-agent-planning" && skill.path == skill_path })
+        );
+        assert_eq!(
+            skills
+                .iter()
+                .filter(|skill| skill.name == "global-skill")
+                .count(),
+            1
         );
     }
 
