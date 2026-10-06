@@ -106,6 +106,10 @@ struct Cli {
     #[arg(long, short = 'P', value_name = "PROVIDER")]
     provider: Option<String>,
 
+    /// Agent profile to use (must match a discovered agent name).
+    #[arg(long, value_name = "AGENT")]
+    agent: Option<String>,
+
     /// Model name to use (e.g. gpt-4o, llama3.1).
     #[arg(long, short = 'm', value_name = "MODEL")]
     model: Option<String>,
@@ -275,6 +279,14 @@ async fn main() -> io::Result<()> {
     })?;
     timer.mark("XiConfig::load");
 
+    let discovered_agents = load_agents();
+    let selected_agent = agents::select_startup_agent(
+        &discovered_agents,
+        cli.agent.as_deref(),
+        config.agent.as_deref(),
+    )?;
+    let active_agent_name = selected_agent.as_ref().map(|agent| agent.name.clone());
+
     // --theme flag overrides config.toml theme path
     if let Some(theme_path) = cli.theme {
         config.theme = Some(theme_path);
@@ -297,10 +309,7 @@ async fn main() -> io::Result<()> {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| ".".to_string());
-        let agent = config
-            .agent
-            .as_deref()
-            .and_then(|name| ctx.agents.iter().find(|agent| agent.name == name));
+        let agent = selected_agent.as_ref();
         let tools = if let Some(agent) = agent {
             agents::filter_tools(&ctx.tools, &agent.include_tools, &agent.exclude_tools)
         } else {
@@ -347,6 +356,7 @@ async fn main() -> io::Result<()> {
             prompt,
             provider_override,
             cli.model.as_deref(),
+            selected_agent.as_ref(),
             &config,
         )
         .await;
@@ -426,7 +436,7 @@ async fn main() -> io::Result<()> {
     // Record the desired agent now; the actual system-prompt rebuild happens
     // once the context (tools, skills, agents) has been loaded, either by the
     // background task below or synchronously on first submit.
-    app.active_agent = config.agent.clone();
+    app.active_agent = active_agent_name;
 
     // Load tools, skills, and agents on a background thread so the prompt
     // appears instantly. The result is applied when the `ContextLoaded` event

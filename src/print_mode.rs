@@ -96,6 +96,7 @@ pub(crate) async fn run_print_mode(
     prompt: String,
     provider_override: &str,
     model_override: Option<&str>,
+    selected_agent: Option<&crate::agents::AgentMeta>,
     config: &crate::config::XiConfig,
 ) -> io::Result<()> {
     let resolved_instance = with_resolved_model(
@@ -124,11 +125,21 @@ pub(crate) async fn run_print_mode(
         custom_tools,
         false,
     );
+    let skills = if let Some(agent) = selected_agent {
+        crate::agents::filter_skills(&loaded_skills, &agent.include_skills, &agent.exclude_skills)
+    } else {
+        (*loaded_skills).clone()
+    };
+    let tools = if let Some(agent) = selected_agent {
+        crate::agents::filter_tools(&tools, &agent.include_tools, &agent.exclude_tools)
+    } else {
+        tools
+    };
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
     let headless_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless")));
-    let system_prompt = build_system_prompt(&tools, &cwd, &loaded_skills, None);
+    let system_prompt = build_system_prompt(&tools, &cwd, &skills, selected_agent);
 
     let session_events = vec![crate::session_event::SessionEvent::UserMessage {
         content: prompt.clone(),

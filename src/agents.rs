@@ -13,7 +13,7 @@
 
 use std::{
     collections::HashSet,
-    env, fs,
+    env, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -398,14 +398,38 @@ pub fn filter_skills(
 
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
-/// Find an agent by name in a list.  Returns `None` when `name` is empty
+/// Find an agent by name in a list. Returns `None` when `name` is empty
 /// (representing "default / no agent").
-#[allow(dead_code)] // Will be used by Phase 2 subagent orchestration
+#[allow(dead_code)] // Used by planned subagent orchestration.
 pub fn resolve_agent<'a>(agents: &'a [AgentMeta], name: &str) -> Option<&'a AgentMeta> {
     if name.is_empty() {
         return None;
     }
-    agents.iter().find(|a| a.name == name)
+    agents.iter().find(|agent| agent.name == name)
+}
+
+pub fn select_startup_agent(
+    agents: &[AgentMeta],
+    cli_name: Option<&str>,
+    configured_name: Option<&str>,
+) -> io::Result<Option<AgentMeta>> {
+    if let Some(name) = cli_name {
+        return agents
+            .iter()
+            .find(|agent| agent.name == name)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown agent '{name}'; use a discovered agent profile name"),
+                )
+            });
+    }
+
+    Ok(configured_name
+        .and_then(|name| agents.iter().find(|agent| agent.name == name))
+        .cloned())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -463,6 +487,57 @@ mod tests {
                 embedded_body: None,
             })
             .collect()
+    }
+
+    // ── Startup selection tests ───────────────────────────────────────────────
+
+    fn startup_agents() -> Vec<AgentMeta> {
+        ["configured", "cli-choice"]
+            .into_iter()
+            .map(|name| {
+                parse_agent_meta(
+                    &format!("---\nname: {name}\ndescription: test\n---\nbody"),
+                    PathBuf::from(format!("/tmp/agents/{name}/SYSTEM.md")),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn startup_agent_cli_name_overrides_configured_name() {
+        let agents = startup_agents();
+        let selected = select_startup_agent(&agents, Some("cli-choice"), Some("configured"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.name, "cli-choice");
+    }
+
+    #[test]
+    fn startup_agent_uses_configured_name_when_cli_is_absent() {
+        let agents = startup_agents();
+        let selected = select_startup_agent(&agents, None, Some("configured"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.name, "configured");
+    }
+
+    #[test]
+    fn startup_agent_rejects_unknown_cli_name() {
+        let agents = startup_agents();
+        let error = select_startup_agent(&agents, Some("missing"), Some("configured")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn startup_agent_ignores_unknown_configured_name_for_compatibility() {
+        let agents = startup_agents();
+        assert!(
+            select_startup_agent(&agents, None, Some("missing"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── Parsing tests ─────────────────────────────────────────────────────────

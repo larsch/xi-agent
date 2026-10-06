@@ -58,6 +58,7 @@ cargo install --path .
 | Short | Long | Description |
 |-------|------|-------------|
 | `-P` | `--provider <PROVIDER>` | Configured provider instance id to use |
+| | `--agent <AGENT>` | Agent profile to use (overrides the configured agent for this run) |
 | `-m` | `--model <MODEL>` | Model name to use (e.g. gpt-4o, llama3.1) |
 | `-p` | `--print <PROMPT>...` | Run in non-interactive mode: send PROMPT, stream the response to stdout, and exit. Accepts multiple words without shell quoting |
 | | `--prompt <PROMPT>...` | Start the interactive UI and automatically submit PROMPT. Accepts multiple words without shell quoting |
