@@ -346,15 +346,9 @@ async fn main() -> io::Result<()> {
     // ── Non-interactive (--print / -p) mode ───────────────────────────────────
     if let Some(words) = cli.print {
         let prompt = words.join(" ");
-        let provider_override = cli.provider.as_deref().ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                "--print requires --provider <name>",
-            )
-        })?;
         return print_mode::run_print_mode(
             prompt,
-            provider_override,
+            cli.provider.as_deref(),
             cli.model.as_deref(),
             selected_agent.as_ref(),
             &config,

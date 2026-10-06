@@ -94,14 +94,14 @@ async fn preflight_token_refresh(provider: &str) -> bool {
 
 pub(crate) async fn run_print_mode(
     prompt: String,
-    provider_override: &str,
+    provider_override: Option<&str>,
     model_override: Option<&str>,
     selected_agent: Option<&crate::agents::AgentMeta>,
     config: &crate::config::XiConfig,
 ) -> io::Result<()> {
     let resolved_instance = with_resolved_model(
         model_override,
-        &resolve_provider_instance(Some(provider_override), config)
+        &resolve_provider_instance(provider_override, config)
             .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?,
     );
     let current_thinking =
