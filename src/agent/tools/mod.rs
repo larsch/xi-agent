@@ -200,6 +200,15 @@ use crate::app_event::AppEventTx;
 ///
 /// `custom` tools are appended after built-ins; any custom tool whose name
 /// collides with a built-in is silently dropped (logged at debug).
+/// Replace the registry's `read_skill` tool with one restricted to the skills
+/// active for the current agent.
+pub fn set_active_skills(registry: &mut ToolRegistry, skills: Vec<crate::skills::SkillMeta>) {
+    registry.insert(
+        "read_skill".to_string(),
+        Arc::new(ReadSkillTool::new(Arc::new(skills))),
+    );
+}
+
 pub fn register_builtin_tools(
     app_event_tx: Option<AppEventTx>,
     file_tracker: Arc<Mutex<FileTracker>>,

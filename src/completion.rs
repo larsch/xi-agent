@@ -451,6 +451,7 @@ mod tests {
 
     fn skill(name: &str, description: &str) -> SkillMeta {
         SkillMeta {
+            scope: crate::skills::SkillScope::Standard,
             name: name.to_string(),
             description: description.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),

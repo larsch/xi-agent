@@ -407,9 +407,31 @@ after the agent's AGENTS.md.
 | `include_skills` | no | `["*"]` | Skill name glob patterns to include |
 | `exclude_skills` | no | `[]` | Skill name glob patterns to exclude |
 
-Filtering is applied in order: include first, then exclude. `globset` is used
-for glob matching. When no filter fields are present, all tools and skills are
+Tool filtering is applied in order: include first, then exclude. `globset` is
+used for glob matching. When no tool filter fields are present, all tools are
 available (backward-compatible default).
+
+### Skill scope and selection
+
+Skills in the standard skill roots (`.xi/skills`, `.agents/skills`,
+`~/.xi/skills`, and `~/.agents/skills`) are shared baseline skills. A selected
+specialized agent can remove them only with a matching `exclude_skills` rule;
+`include_skills` does not mask standard skills.
+
+Each agent may also have a `skills/` directory beside its `SYSTEM.md` (or
+legacy `AGENT.md`). The default agent's directory contributes default skills.
+They are included in default mode and, for a specialized agent, are subject to
+that agent's `include_skills` whitelist. A specialized agent's own `skills/`
+directory contributes skills only while that agent is selected; its whitelist
+can narrow those skills too. An omitted include list retains the `[*]` default;
+an explicit empty list masks agent-scoped skills. Exclusions can remove
+agent-scoped skills as well as standard skills for specialized agents.
+
+Skill names have no special syntax: location determines scope. Filtering is
+performed before name collisions are resolved. For duplicate active names, the
+selected agent's skill wins over a default-agent skill, which wins over a
+standard skill. An inactive or filtered narrower skill does not shadow a wider
+active one. Both inline and block-style YAML string lists are accepted.
 
 ### Always-present tools
 

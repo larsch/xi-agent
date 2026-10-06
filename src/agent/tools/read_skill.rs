@@ -156,6 +156,7 @@ mod tests {
         )
         .unwrap();
         SkillMeta {
+            scope: crate::skills::SkillScope::Standard,
             name: name.to_string(),
             description: "test skill".to_string(),
             path: path.clone(),
@@ -222,6 +223,7 @@ mod tests {
     #[tokio::test]
     async fn missing_file_returns_error() {
         let tool = make_tool(vec![SkillMeta {
+            scope: crate::skills::SkillScope::Standard,
             name: "ghost".to_string(),
             description: "missing file".to_string(),
             path: PathBuf::from("/nonexistent/path/SKILL.md"),

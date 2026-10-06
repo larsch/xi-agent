@@ -20,7 +20,7 @@ use std::{
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::agent::types::ToolRegistry;
-use crate::skills::SkillMeta;
+use crate::skills::{SkillMeta, SkillScope};
 
 // ── AgentMode ────────────────────────────────────────────────────────────────
 
@@ -212,11 +212,26 @@ fn parse_agent_meta(content: &str, path: PathBuf) -> Option<AgentMeta> {
     let mut _tools_exclude_seen = false;
     let mut skills_include_seen = false;
     let mut _skills_exclude_seen = false;
+    let mut list_target: Option<u8> = None;
 
     for line in lines.by_ref() {
         let trimmed = line.trim();
         if trimmed == "---" {
             break;
+        }
+        if let Some(item) = trimmed.strip_prefix("- ") {
+            let item = item.trim().trim_matches('"').trim_matches('\'');
+            match list_target {
+                Some(0) => include_tools.push(item.to_string()),
+                Some(1) => exclude_tools.push(item.to_string()),
+                Some(2) => include_skills.push(item.to_string()),
+                Some(3) => exclude_skills.push(item.to_string()),
+                _ => {}
+            }
+            continue;
+        }
+        if !trimmed.is_empty() {
+            list_target = None;
         }
 
         if let Some(v) = trimmed.strip_prefix("name:") {
@@ -231,15 +246,19 @@ fn parse_agent_meta(content: &str, path: PathBuf) -> Option<AgentMeta> {
         } else if let Some(v) = trimmed.strip_prefix("include_tools:") {
             include_tools = parse_yaml_string_list(v);
             tools_include_seen = true;
+            list_target = v.trim().is_empty().then_some(0);
         } else if let Some(v) = trimmed.strip_prefix("exclude_tools:") {
             exclude_tools = parse_yaml_string_list(v);
             _tools_exclude_seen = true;
+            list_target = v.trim().is_empty().then_some(1);
         } else if let Some(v) = trimmed.strip_prefix("include_skills:") {
             include_skills = parse_yaml_string_list(v);
             skills_include_seen = true;
+            list_target = v.trim().is_empty().then_some(2);
         } else if let Some(v) = trimmed.strip_prefix("exclude_skills:") {
             exclude_skills = parse_yaml_string_list(v);
             _skills_exclude_seen = true;
+            list_target = v.trim().is_empty().then_some(3);
         }
     }
 
@@ -377,21 +396,55 @@ pub fn filter_tools(tools: &ToolRegistry, include: &[String], exclude: &[String]
     filtered
 }
 
-/// Filter skills according to agent include/exclude rules.
-pub fn filter_skills(
-    skills: &[SkillMeta],
-    include: &[String],
-    exclude: &[String],
-) -> Vec<SkillMeta> {
+/// Select the active skill set, then resolve name collisions by the narrowest
+/// active scope. Names are opaque; scope comes only from the source directory.
+pub fn select_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<SkillMeta> {
+    let selected_name = agent.map(|a| a.name.as_str()).unwrap_or("default");
+    let is_specialized = selected_name != "default";
+    let include = agent.map(|a| a.include_skills.as_slice()).unwrap_or(&[]);
+    let exclude = agent.map(|a| a.exclude_skills.as_slice()).unwrap_or(&[]);
     let include_globs = build_glob_set(include);
     let exclude_globs = build_glob_set(exclude);
+    let include_scoped_skill = |name: &str| {
+        !is_specialized || (!include.is_empty() && matches_any(name, &include_globs, include))
+    };
 
-    skills
+    let mut active: Vec<&SkillMeta> = skills
         .iter()
-        .filter(|s| {
-            matches_any(&s.name, &include_globs, include)
-                && (exclude.is_empty() || !matches_any(&s.name, &exclude_globs, exclude))
+        .filter(|skill| match &skill.scope {
+            SkillScope::Standard => {
+                !is_specialized
+                    || exclude.is_empty()
+                    || !matches_any(&skill.name, &exclude_globs, exclude)
+            }
+            SkillScope::Agent(scope_name) if scope_name == "default" && !is_specialized => true,
+            SkillScope::Agent(scope_name) if scope_name == selected_name => {
+                include_scoped_skill(&skill.name)
+                    && (exclude.is_empty() || !matches_any(&skill.name, &exclude_globs, exclude))
+            }
+            SkillScope::Agent(scope_name) if scope_name == "default" => {
+                include_scoped_skill(&skill.name)
+                    && (exclude.is_empty() || !matches_any(&skill.name, &exclude_globs, exclude))
+            }
+            SkillScope::Agent(_) => false,
         })
+        .collect();
+
+    // The narrower active source wins: selected agent, then default agent,
+    // then standard roots. Filtering precedes this collapse so inactive skills
+    // never shadow an available broader-scope definition.
+    active.sort_by(|a, b| {
+        let rank = |skill: &SkillMeta| match &skill.scope {
+            SkillScope::Standard => 0,
+            SkillScope::Agent(name) if name == selected_name => 2,
+            SkillScope::Agent(_) => 1,
+        };
+        a.name.cmp(&b.name).then_with(|| rank(b).cmp(&rank(a)))
+    });
+    let mut names = HashSet::new();
+    active
+        .into_iter()
+        .filter(|skill| names.insert(skill.name.clone()))
         .cloned()
         .collect()
 }
@@ -480,6 +533,7 @@ mod tests {
         names
             .iter()
             .map(|n| SkillMeta {
+                scope: SkillScope::Standard,
                 name: n.to_string(),
                 description: format!("desc: {n}"),
                 path: PathBuf::from(format!("/tmp/skills/{n}/SKILL.md")),
@@ -716,39 +770,89 @@ No skills here.
         assert!(!filtered.contains_key("write_file"));
     }
 
-    // ── Skill filtering tests ─────────────────────────────────────────────────
+    // ── Scoped skill selection tests ────────────��─────────────────────────────
 
-    #[test]
-    fn filter_skills_include_all_by_default() {
-        let skills = test_skills(&["workflow", "fastpath", "brainstorm"]);
-        let filtered = filter_skills(&skills, &["*".into()], &[]);
-        assert_eq!(filtered.len(), 3);
+    fn scoped_skill(name: &str, scope: SkillScope) -> SkillMeta {
+        let mut skill = test_skills(&[name]).remove(0);
+        skill.scope = scope;
+        skill
+    }
+
+    fn test_agent(name: &str, include: &[&str], exclude: &[&str]) -> AgentMeta {
+        let mut agent = parse_agent_meta(
+            &format!("---\nname: {name}\ndescription: test\n---\n"),
+            PathBuf::from(format!("/tmp/agents/{name}/SYSTEM.md")),
+        )
+        .unwrap();
+        agent.include_skills = include.iter().map(|s| s.to_string()).collect();
+        agent.exclude_skills = exclude.iter().map(|s| s.to_string()).collect();
+        agent
     }
 
     #[test]
-    fn filter_skills_include_subset() {
-        let skills = test_skills(&["workflow", "fastpath", "brainstorm", "plan"]);
-        let filtered = filter_skills(&skills, &["workflow".into()], &[]);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].name, "workflow");
+    fn specialized_agent_keeps_standard_skills_unless_explicitly_excluded() {
+        let skills = vec![
+            scoped_skill("alpha", SkillScope::Standard),
+            scoped_skill("beta", SkillScope::Standard),
+        ];
+        let agent = test_agent("specialist", &["only-this"], &["beta"]);
+        let selected = select_skills(&skills, Some(&agent));
+        let names: Vec<_> = selected.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["alpha"]);
     }
 
     #[test]
-    fn filter_skills_exclude_overrides() {
-        let skills = test_skills(&["workflow", "fastpath", "brainstorm"]);
-        let filtered = filter_skills(&skills, &["*".into()], &["fastpath".into()]);
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().any(|s| s.name == "workflow"));
-        assert!(filtered.iter().any(|s| s.name == "brainstorm"));
-        assert!(!filtered.iter().any(|s| s.name == "fastpath"));
+    fn specialized_whitelist_masks_default_skills_but_adds_selected_agent_skills() {
+        let skills = vec![
+            scoped_skill("core", SkillScope::Standard),
+            scoped_skill("default-extra", SkillScope::Agent("default".into())),
+            scoped_skill("special-extra", SkillScope::Agent("specialist".into())),
+        ];
+        let agent = test_agent("specialist", &["special-extra"], &[]);
+        let selected = select_skills(&skills, Some(&agent));
+        let names: Vec<_> = selected.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["core", "special-extra"]);
     }
 
     #[test]
-    fn filter_skills_glob_pattern() {
-        let skills = test_skills(&["workflow", "fastpath", "bug-triage", "xxx"]);
-        let filtered = filter_skills(&skills, &["*".into()], &["*-triage".into()]);
-        assert_eq!(filtered.len(), 3);
-        assert!(!filtered.iter().any(|s| s.name == "bug-triage"));
+    fn default_agent_gets_standard_and_default_scoped_skills_only() {
+        let skills = vec![
+            scoped_skill("core", SkillScope::Standard),
+            scoped_skill("default-extra", SkillScope::Agent("default".into())),
+            scoped_skill("special-extra", SkillScope::Agent("specialist".into())),
+        ];
+        let selected = select_skills(&skills, None);
+        let names: Vec<_> = selected.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["core", "default-extra"]);
+    }
+
+    #[test]
+    fn narrowest_active_skill_wins_collision_and_names_have_no_scope_meaning() {
+        let skills = vec![
+            scoped_skill("default", SkillScope::Standard),
+            scoped_skill("default", SkillScope::Agent("default".into())),
+            scoped_skill("default", SkillScope::Agent("specialist".into())),
+        ];
+        let agent = test_agent("specialist", &["default"], &[]);
+        let selected = select_skills(&skills, Some(&agent));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].scope, SkillScope::Agent("specialist".into()));
+
+        let no_whitelist_match = test_agent("specialist", &["other"], &[]);
+        let selected = select_skills(&skills, Some(&no_whitelist_match));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].scope, SkillScope::Standard);
+    }
+
+    #[test]
+    fn block_style_skill_lists_are_parsed() {
+        let agent = parse_agent_meta(
+            "---\nname: specialist\ndescription: test\ninclude_skills:\n  - alpha\nexclude_skills:\n  - beta\n---\n",
+            PathBuf::from("/tmp/agents/specialist/SYSTEM.md"),
+        )
+        .unwrap();
+        assert_eq!(agent.include_skills, ["alpha"]);
+        assert_eq!(agent.exclude_skills, ["beta"]);
     }
 
     // ── Discovery tests ───────────────────────────────────────────────────────

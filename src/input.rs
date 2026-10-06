@@ -1020,7 +1020,10 @@ fn handle_slash_submit(
             }
         }
         Some(CommandAction::Skill { name, args }) => {
-            match app.loaded_skills.iter().find(|s| s.name == name) {
+            let active_agent = app.resolve_current_agent().cloned();
+            let active_skills =
+                crate::agents::select_skills(&app.loaded_skills, active_agent.as_ref());
+            match active_skills.iter().find(|s| s.name == name) {
                 Some(skill) => match crate::skills::expand_skill(skill, &args) {
                     Ok(expanded) => {
                         app.submit_with_text(expanded, provider);

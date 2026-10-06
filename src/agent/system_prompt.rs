@@ -419,6 +419,7 @@ mod tests {
     fn build_system_prompt_renders_skills_block() {
         let tools = registry(&[]);
         let skills = vec![SkillMeta {
+            scope: crate::skills::SkillScope::Standard,
             name: "plan".to_string(),
             description: "Create an implementation plan".to_string(),
             path: Path::new("/tmp/skills/plan/SKILL.md").to_path_buf(),
@@ -452,6 +453,7 @@ mod tests {
     fn build_system_prompt_skill_special_chars_not_escaped() {
         let tools = registry(&[]);
         let skills = vec![SkillMeta {
+            scope: crate::skills::SkillScope::Standard,
             name: "a-skill".to_string(),
             description: "handles x < y and \"quoted\" values".to_string(),
             path: Path::new("/tmp/skills/a-skill/SKILL.md").to_path_buf(),
@@ -476,6 +478,7 @@ mod tests {
     fn build_system_prompt_with_agent_uses_agent_body_as_identity() {
         let tools = registry(&[]);
         let skills = vec![SkillMeta {
+            scope: crate::skills::SkillScope::Standard,
             name: "workflow".to_string(),
             description: "structured workflow".to_string(),
             path: Path::new("/tmp/skills/workflow/SKILL.md").to_path_buf(),

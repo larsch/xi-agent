@@ -395,12 +395,10 @@ impl App {
     /// or the default when none is active.  Skills and tools in the prompt
     /// are filtered according to the active agent's include/exclude rules.
     pub(crate) fn rebuild_agent_system_prompt(&mut self, cwd: &str) {
-        let agent = self.resolve_current_agent();
-        let skills: Vec<crate::skills::SkillMeta> = if let Some(a) = agent {
-            crate::agents::filter_skills(&self.loaded_skills, &a.include_skills, &a.exclude_skills)
-        } else {
-            self.loaded_skills.clone()
-        };
+        let agent = self.resolve_current_agent().cloned();
+        let agent = agent.as_ref();
+        let skills = crate::agents::select_skills(&self.loaded_skills, agent);
+        crate::agent::tools::set_active_skills(&mut self.agent_config.tools, skills.clone());
         let system_prompt =
             crate::agent::build_system_prompt(&self.agent_config.tools, cwd, &skills, agent);
         self.agent_config.system_prompt = Some(system_prompt);
@@ -424,16 +422,7 @@ impl App {
             self.active_agent = None;
         }
 
-        if self.active_agent.is_some() {
-            self.rebuild_agent_system_prompt(&cwd);
-        } else {
-            self.agent_config.system_prompt = Some(crate::agent::build_system_prompt(
-                &self.agent_config.tools,
-                &cwd,
-                &self.loaded_skills,
-                None,
-            ));
-        }
+        self.rebuild_agent_system_prompt(&cwd);
     }
 
     /// Load the agent context (tools, skills, agents) synchronously if it has
@@ -1111,9 +1100,12 @@ impl App {
     /// cached model list. Call this after every keystroke.
     pub fn update_completions(&mut self) {
         let cwd = self.session.current_cwd.clone();
+        let active_agent = self.resolve_current_agent().cloned();
+        let active_skills =
+            crate::agents::select_skills(&self.loaded_skills, active_agent.as_ref());
         self.completion.update(
             &self.textarea,
-            &self.loaded_skills,
+            &active_skills,
             self.provider.thinking_supported,
             &self.provider.instances,
             &cwd,

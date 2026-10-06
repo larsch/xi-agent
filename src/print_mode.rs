@@ -117,7 +117,8 @@ pub(crate) async fn run_print_mode(
 
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let headless_tracker = Arc::new(Mutex::new(build_file_tracker()));
-    let loaded_skills = Arc::new(skills::load_skills());
+    let discovered_agents = crate::agents::load_agents();
+    let loaded_skills = Arc::new(skills::load_skills_for_agents(&discovered_agents));
     let tools = register_builtin_tools(
         None,
         Arc::clone(&headless_tracker),
@@ -125,16 +126,13 @@ pub(crate) async fn run_print_mode(
         custom_tools,
         false,
     );
-    let skills = if let Some(agent) = selected_agent {
-        crate::agents::filter_skills(&loaded_skills, &agent.include_skills, &agent.exclude_skills)
-    } else {
-        (*loaded_skills).clone()
-    };
-    let tools = if let Some(agent) = selected_agent {
+    let skills = crate::agents::select_skills(&loaded_skills, selected_agent);
+    let mut tools = if let Some(agent) = selected_agent {
         crate::agents::filter_tools(&tools, &agent.include_tools, &agent.exclude_tools)
     } else {
         tools
     };
+    crate::agent::tools::set_active_skills(&mut tools, skills.clone());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -169,7 +167,7 @@ pub(crate) async fn run_print_mode(
         name: &provider_name,
     };
 
-    let exit_code = run_print_mode_loop(loop_config, provider, &provider_ctx).await;
+    let exit_code = run_print_mode_loop(loop_config, skills, provider, &provider_ctx).await;
 
     std::process::exit(exit_code);
 }
@@ -180,6 +178,7 @@ pub(crate) async fn run_print_mode(
 /// refresh + retry on a 401 Unauthorized error. Returns the process exit code.
 async fn run_print_mode_loop(
     config: AgentLoopConfig,
+    active_skills: Vec<skills::SkillMeta>,
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
     ctx: &PrintModeProviderCtx<'_>,
 ) -> i32 {
@@ -285,6 +284,7 @@ async fn run_print_mode_loop(
                                     return run_print_mode_loop_inner(
                                         session_events_for_retry,
                                         system_prompt_for_retry,
+                                        active_skills.clone(),
                                         new_provider,
                                         &provider_display_name(ctx.instance),
                                     )
@@ -329,6 +329,7 @@ async fn run_print_mode_loop(
 async fn run_print_mode_loop_inner(
     session_events: Vec<crate::session_event::SessionEvent>,
     system_prompt: Option<String>,
+    active_skills: Vec<skills::SkillMeta>,
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
     provider_label: &str,
 ) -> i32 {
@@ -339,14 +340,15 @@ async fn run_print_mode_loop_inner(
     let retry_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let retry_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("headless-retry")));
     let custom_tools = load_custom_tools(&custom_tool_dirs());
-    let retry_skills = Arc::new(skills::load_skills());
-    let retry_tools = register_builtin_tools(
+    let retry_skills = Arc::new(active_skills.clone());
+    let mut retry_tools = register_builtin_tools(
         None,
         Arc::clone(&retry_tracker),
         Arc::clone(&retry_skills),
         custom_tools,
         false,
     );
+    crate::agent::tools::set_active_skills(&mut retry_tools, active_skills);
     let retry_config = AgentLoopConfig {
         tools: retry_tools,
         file_tracker: retry_tracker,

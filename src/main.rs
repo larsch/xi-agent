@@ -311,16 +311,13 @@ async fn main() -> io::Result<()> {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| ".".to_string());
         let agent = selected_agent.as_ref();
-        let tools = if let Some(agent) = agent {
+        let mut tools = if let Some(agent) = agent {
             agents::filter_tools(&ctx.tools, &agent.include_tools, &agent.exclude_tools)
         } else {
             ctx.tools
         };
-        let loaded_skills = if let Some(agent) = agent {
-            agents::filter_skills(&ctx.skills, &agent.include_skills, &agent.exclude_skills)
-        } else {
-            ctx.skills
-        };
+        let loaded_skills = agents::select_skills(&ctx.skills, agent);
+        agent::tools::set_active_skills(&mut tools, loaded_skills.clone());
         let system_prompt = agent::build_system_prompt(&tools, &cwd, &loaded_skills, agent);
         println!("{system_prompt}");
         return Ok(());
@@ -945,7 +942,8 @@ fn load_context(
 ) -> LoadedContext {
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let custom_tool_count = custom_tools.len();
-    let loaded_skills = Arc::new(skills::load_skills());
+    let agents = load_agents();
+    let loaded_skills = Arc::new(skills::load_skills_for_agents(&agents));
     let tools = register_builtin_tools(
         app_event_tx,
         Arc::clone(file_tracker),
@@ -953,7 +951,6 @@ fn load_context(
         custom_tools,
         session_ipc_enabled,
     );
-    let agents = load_agents();
     LoadedContext {
         tools,
         skills: (*loaded_skills).clone(),

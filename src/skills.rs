@@ -5,9 +5,19 @@ use std::{
 };
 
 /// Metadata parsed from the YAML frontmatter of a `SKILL.md` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillScope {
+    /// Discovered through a standard skill root; available to every agent.
+    Standard,
+    /// Discovered under the named agent's `skills/` directory.
+    Agent(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct SkillMeta {
     pub name: String,
+    /// Availability scope inferred from the skill's location, never its name.
+    pub scope: SkillScope,
     pub description: String,
     /// Absolute path to the `SKILL.md` file.
     pub path: PathBuf,
@@ -21,22 +31,34 @@ pub struct SkillMeta {
 /// Scan all supported skill roots for subdirectories that contain a
 /// `SKILL.md` with YAML frontmatter.
 ///
-/// Skill roots are searched in precedence order:
-/// - `.xi/skills`, then `.agents/skills`, at every directory from the current
-///   working directory through the filesystem root
-/// - `~/.xi/skills`, then `~/.agents/skills`
-/// - `%USERPROFILE%\\.agents\\skills` (Windows)
-///
-/// A skill name found in a higher-precedence root suppresses same-named skills
-/// in lower-precedence roots.
-///
-/// Also injects the embedded `edit_skill` that tells the model where skill
-/// files live on this system and where to create new ones.
-///
-/// Returns an empty vec when no skill roots exist or are readable.
-pub fn load_skills() -> Vec<SkillMeta> {
-    let mut skills = load_skills_from_dirs(skill_dirs());
-    skills.push(build_embedded_edit_skill(&skills));
+/// Skill roots are searched in precedence order: project `.xi/skills` and
+/// `.agents/skills` roots from cwd to filesystem root, followed by global
+/// `~/.xi/skills`, `~/.agents/skills`, and Windows `%USERPROFILE%\\.agents\\skills`.
+/// Duplicate names within standard roots use the first matching root. Agent-local
+/// duplicates are retained for active-scope resolution after filters are applied.
+/// An embedded `edit_skill` is always added to the result.
+pub fn load_skills_for_agents(agents: &[crate::agents::AgentMeta]) -> Vec<SkillMeta> {
+    let mut skills = load_scoped_skills(skill_dirs(), agents);
+    skills.push(build_embedded_edit_skill(&skills, agents));
+    skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    skills
+}
+
+fn load_scoped_skills(
+    standard_dirs: Vec<PathBuf>,
+    agents: &[crate::agents::AgentMeta],
+) -> Vec<SkillMeta> {
+    let mut skills = load_skills_from_dirs(standard_dirs);
+    for skill in &mut skills {
+        skill.scope = SkillScope::Standard;
+    }
+    for agent in agents {
+        let mut scoped = load_skills_from_dirs(vec![agent.base_dir.join("skills")]);
+        for skill in &mut scoped {
+            skill.scope = SkillScope::Agent(agent.name.clone());
+        }
+        skills.extend(scoped);
+    }
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     skills
 }
@@ -45,7 +67,10 @@ pub fn load_skills() -> Vec<SkillMeta> {
 /// - all loaded skill files with absolute paths
 /// - the skill root directories where xi searches
 /// - guidance for modifying existing skills and creating new ones
-fn build_embedded_edit_skill(loaded: &[SkillMeta]) -> SkillMeta {
+fn build_embedded_edit_skill(
+    loaded: &[SkillMeta],
+    agents: &[crate::agents::AgentMeta],
+) -> SkillMeta {
     let dirs = skill_dirs();
 
     // Split dirs into global (home-relative) and project (cwd-to-root) roots.
@@ -105,6 +130,21 @@ fn build_embedded_edit_skill(loaded: &[SkillMeta]) -> SkillMeta {
                 lines.push(format!("  - `{}`{marker}", d.display()));
             }
         }
+        if !agents.is_empty() {
+            lines.push("Agent-specific:".to_string());
+            for agent in agents {
+                let d = agent.base_dir.join("skills");
+                let marker = if loaded
+                    .iter()
+                    .any(|skill| skill.scope == SkillScope::Agent(agent.name.clone()))
+                {
+                    " ← in use"
+                } else {
+                    ""
+                };
+                lines.push(format!("  - `{}` ({}){marker}", d.display(), agent.name));
+            }
+        }
         lines.join("\n")
     };
 
@@ -118,22 +158,24 @@ fn build_embedded_edit_skill(loaded: &[SkillMeta]) -> SkillMeta {
                 if s.name == "edit_skill" {
                     return String::new();
                 }
-                let scope = if project_dirs.iter().any(|d| classify_skill_root(d)) {
-                    let base = s
-                        .base_dir
-                        .canonicalize()
-                        .unwrap_or_else(|_| s.base_dir.clone());
-                    let is_project_skill = project_dirs.iter().any(|d| {
-                        let d_canon = d.canonicalize().unwrap_or_else(|_| (*d).clone());
-                        base.starts_with(&d_canon)
-                    });
-                    if is_project_skill {
-                        " [project]"
-                    } else {
-                        " [global]"
+                let scope = match &s.scope {
+                    SkillScope::Agent(agent) => format!(" [agent: {agent}]"),
+                    SkillScope::Standard if project_dirs.iter().any(|d| classify_skill_root(d)) => {
+                        let base = s
+                            .base_dir
+                            .canonicalize()
+                            .unwrap_or_else(|_| s.base_dir.clone());
+                        let is_project_skill = project_dirs.iter().any(|d| {
+                            let d_canon = d.canonicalize().unwrap_or_else(|_| (*d).clone());
+                            base.starts_with(&d_canon)
+                        });
+                        if is_project_skill {
+                            " [project]".to_string()
+                        } else {
+                            " [global]".to_string()
+                        }
                     }
-                } else {
-                    ""
+                    SkillScope::Standard => String::new(),
                 };
                 format!("- `{}`{} → {}", s.name, scope, s.path.display())
             })
@@ -213,6 +255,8 @@ Scope indicators:
         description:
             "use when the user wants to edit, modify, create, or delete a skill. catch phrases: 'change the skill', 'update SKILL.md', 'add a new skill', 'where are skill files', 'create a skill'."
                 .to_string(),
+        // Embedded edit skill is a standard skill available to every agent.
+        scope: SkillScope::Standard,
         // Dummy path — never read from disk; read_skill uses embedded_body.
         path: PathBuf::from("__embedded__/edit_skill/SKILL.md"),
         base_dir: PathBuf::from("__embedded__/edit_skill"),
@@ -377,6 +421,7 @@ fn parse_skill_meta(content: &str, path: PathBuf) -> Option<SkillMeta> {
     Some(SkillMeta {
         name: name?,
         description: description?,
+        scope: SkillScope::Standard,
         path,
         base_dir,
         embedded_body: None,
@@ -457,8 +502,8 @@ fn strip_frontmatter(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_skill, load_skills_from_dirs, parse_skill_meta, project_skill_dirs,
-        strip_frontmatter,
+        SkillScope, expand_skill, load_scoped_skills, load_skills_from_dirs, parse_skill_meta,
+        project_skill_dirs, strip_frontmatter,
     };
     use std::path::{Path, PathBuf};
 
@@ -476,6 +521,55 @@ mod tests {
 
     fn dummy_path() -> PathBuf {
         PathBuf::from("/tmp/skills/work-loop/SKILL.md")
+    }
+
+    #[test]
+    fn loads_scoped_skills_from_temporary_standard_and_agent_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let standard_root = temp.path().join("standard");
+        let default_dir = temp.path().join("agents/default");
+        let specialist_dir = temp.path().join("agents/specialist");
+        write_skill(&standard_root, "alpha", "alpha", "standard");
+        write_skill(&default_dir.join("skills"), "beta", "beta", "default");
+        write_skill(
+            &specialist_dir.join("skills"),
+            "gamma",
+            "gamma",
+            "specialized",
+        );
+
+        let agents = ["default", "specialist"].map(|name| crate::agents::AgentMeta {
+            name: name.to_string(),
+            description: "fixture agent".to_string(),
+            mode: crate::agents::AgentMode::Primary,
+            include_tools: vec!["*".to_string()],
+            exclude_tools: vec![],
+            include_skills: vec!["*".to_string()],
+            exclude_skills: vec![],
+            system_prompt: String::new(),
+            agents_md: None,
+            path: temp.path().join(format!("agents/{name}/SYSTEM.md")),
+            base_dir: temp.path().join(format!("agents/{name}")),
+        });
+        let loaded = load_scoped_skills(vec![standard_root], &agents);
+        let mut names: Vec<_> = loaded.iter().map(|skill| skill.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["alpha", "beta", "gamma"]);
+        assert!(
+            loaded
+                .iter()
+                .any(|s| s.name == "alpha" && s.scope == SkillScope::Standard)
+        );
+        assert!(
+            loaded
+                .iter()
+                .any(|s| s.name == "beta" && s.scope == SkillScope::Agent("default".into()))
+        );
+        assert!(
+            loaded
+                .iter()
+                .any(|s| s.name == "gamma" && s.scope == SkillScope::Agent("specialist".into()))
+        );
     }
 
     #[test]
