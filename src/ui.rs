@@ -27,6 +27,7 @@ use crate::{
 
 use self::{
     info::build_info_line,
+    input::wrap_str,
     input::{render_input_panel, split_scrollbar_column, style_textarea},
     layout::{PanelInputs, compute_panel_heights, input_visual_line_count},
     log::{ToolBodyConfig, build_log_layout_with_expansion},
@@ -48,6 +49,95 @@ fn empty_line_source() -> LineSource {
         streaming: false,
         block_identity: None,
         foldable: false,
+    }
+}
+
+fn context_prompt_lines(prompt: Option<&str>, width: usize) -> Vec<Line<'static>> {
+    let Some(prompt) = prompt.filter(|text| !text.is_empty()) else {
+        return vec![Line::from(Span::styled(
+            "System prompt is not loaded yet.",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    };
+    let width = width.max(1);
+    prompt
+        .split('\n')
+        .flat_map(|line| wrap_str(line, width))
+        .map(Line::from)
+        .collect()
+}
+
+fn context_view_max_scroll(line_count: usize, viewport_height: usize) -> usize {
+    line_count.saturating_sub(viewport_height)
+}
+
+fn render_context_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    const TITLE: &str = "  System prompt  ";
+    const HINTS: &str = "↑↓ / PgUp/PgDn scroll   Home/End jump   Esc/F2 close  ";
+    let header_bg = app
+        .theme
+        .menu
+        .selection
+        .header
+        .bg
+        .unwrap_or(Color::Rgb(20, 45, 20));
+    let gap = (area.width as usize).saturating_sub(TITLE.width() + HINTS.width());
+    let header = Line::from(vec![
+        Span::styled(
+            TITLE,
+            Style::default()
+                .fg(Color::White)
+                .bg(header_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(gap), Style::default().bg(header_bg)),
+        Span::styled(
+            HINTS,
+            Style::default().bg(header_bg).add_modifier(Modifier::DIM),
+        ),
+    ]);
+    let header_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1.min(area.height),
+    };
+    f.render_widget(Paragraph::new(header), header_area);
+    if area.height <= 1 {
+        app.context_view.clamp_scroll(0);
+        return;
+    }
+
+    let (content_area, scrollbar_area) = split_scrollbar_column(Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height - 1,
+    });
+    let prompt_lines = context_prompt_lines(
+        app.agent_config.system_prompt.as_deref(),
+        content_area.width as usize,
+    );
+    let viewport_height = content_area.height as usize;
+    let max_scroll = context_view_max_scroll(prompt_lines.len(), viewport_height);
+    app.context_view.clamp_scroll(max_scroll);
+    let visible_end = app
+        .context_view
+        .scroll
+        .saturating_add(viewport_height)
+        .min(prompt_lines.len());
+    let visible =
+        prompt_lines[app.context_view.scroll.min(prompt_lines.len())..visible_end].to_vec();
+    f.render_widget(Paragraph::new(visible), content_area);
+    if max_scroll > 0
+        && let Some(scrollbar_area) = scrollbar_area
+    {
+        let mut state = ScrollbarState::new(max_scroll + 1).position(app.context_view.scroll);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            scrollbar_area,
+            &mut state,
+        );
     }
 }
 
@@ -303,7 +393,19 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         app.log_view.last_block_padding.as_ref().map(|p| (p.max_total_lines, p.inner_height_when_set)),
     );
 
-    let content_len = build_log_layout_cached(app, log_width, inner_height, &display);
+    let content_len = if app.context_view.active {
+        if app.log_view.log_cache.cached_layout.is_none() {
+            app.log_view.log_cache.cached_layout = Some((
+                app.log_view.log_cache.revision,
+                log_width,
+                app.step_back.cursor,
+                log::LogLayout::default(),
+            ));
+        }
+        0
+    } else {
+        build_log_layout_cached(app, log_width, inner_height, &display)
+    };
 
     // The logical layout update above may change activity-row visibility. Recompute
     // panel geometry before rendering so the same frame uses the new row height;
@@ -354,7 +456,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // content line, so it scrolls out of view with the rest of the log.
     let throbber_visible = app.throbber_visible();
     let throbber = throbber_visible.then(|| status::throbber_line(app));
-    let total_lines = content_len + usize::from(throbber_visible);
+    let total_lines = if app.context_view.active {
+        0
+    } else {
+        content_len + usize::from(throbber_visible)
+    };
     if let Some((identity, block_screen_top)) = app.log_view.pending_anchor.take()
         && !app.log_view.auto_scroll
         && let Some(new_top) = app
@@ -529,7 +635,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Paragraph::new(Text::from(visible_lines)).block(Block::default().borders(Borders::NONE));
 
     f.render_widget(Clear, log_area);
-    f.render_widget(log_paragraph, log_content_area);
+    if app.context_view.active {
+        render_context_view(f, app, log_area);
+    } else {
+        f.render_widget(log_paragraph, log_content_area);
+    }
     if let (Some(row), Some(identity)) = (chevron_row, hovered_identity) {
         let glyph = if app.log_view.expanded_blocks.contains(&identity) {
             "⌃"
@@ -2747,5 +2857,47 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
             }
         }
         println!();
+    }
+
+    #[test]
+    fn context_prompt_wraps_and_shows_unavailable_state() {
+        let lines = context_prompt_lines(Some("abcd\nefghij"), 4);
+        assert_eq!(
+            lines.iter().map(line_text).collect::<Vec<_>>(),
+            ["abcd", "efgh", "ij"]
+        );
+
+        let unavailable = context_prompt_lines(None, 20);
+        assert_eq!(
+            line_text(&unavailable[0]),
+            "System prompt is not loaded yet."
+        );
+        assert_eq!(context_view_max_scroll(6, 4), 2);
+        assert_eq!(context_view_max_scroll(2, 4), 0);
+    }
+
+    #[test]
+    fn context_reader_replaces_transcript_and_restores_chat_viewport_and_draft() {
+        let mut app = make_app();
+        app.agent_config.system_prompt =
+            Some("Available tools:\n- bash: run commands\n# AGENTS.md\nskill: plan".into());
+        app.textarea.insert_str("draft stays");
+        app.log_view.log_scroll = 5;
+        app.log_view.auto_scroll = false;
+        app.push_notice(Message::assistant("transcript-only"));
+        app.open_context_view();
+
+        let buffer = render_to_buffer(&mut app, 60, 14);
+        let lines = buffer_to_plain_lines(&buffer, 60, 14).join("\n");
+        assert!(lines.contains("System prompt"));
+        assert!(lines.contains("Available tools:"));
+        assert!(lines.contains("# AGENTS.md"));
+        assert!(lines.contains("skill: plan"));
+        assert!(!lines.contains("transcript-only"));
+
+        app.close_context_view();
+        assert_eq!(app.log_view.log_scroll, 5);
+        assert!(!app.log_view.auto_scroll);
+        assert_eq!(app.textarea.lines().join("\n"), "draft stays");
     }
 }

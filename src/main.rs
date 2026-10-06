@@ -32,6 +32,7 @@ mod commands;
 mod completion;
 mod completion_state;
 mod config;
+mod context_view_state;
 mod context_window;
 mod debug_log;
 mod desktop_notification;

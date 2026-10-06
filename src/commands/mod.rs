@@ -11,6 +11,12 @@ pub struct SlashCommand {
 /// All supported slash commands, in display order.
 pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
+        name: "context",
+        usage: "/context",
+        description: "View the current system prompt",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "new",
         usage: "/new",
         description: "Start a new conversation",
@@ -88,6 +94,7 @@ pub static COMMANDS: &[SlashCommand] = &[
 
 #[derive(Debug)]
 pub enum CommandAction {
+    Context,
     New,
     Quit,
     Reload,
@@ -149,6 +156,7 @@ pub fn parse(input: &str) -> Option<CommandAction> {
     }
 
     match name {
+        "context" if arg.is_empty() => Some(CommandAction::Context),
         "new" => Some(CommandAction::New),
         "quit" => Some(CommandAction::Quit),
         "reload" => Some(CommandAction::Reload),
@@ -179,6 +187,8 @@ mod tests {
 
     #[test]
     fn parse_recognizes_builtins_and_args() {
+        assert!(matches!(parse("/context"), Some(CommandAction::Context)));
+        assert!(parse("/context now").is_none());
         assert!(matches!(parse("/new"), Some(CommandAction::New)));
         assert!(matches!(parse("/quit"), Some(CommandAction::Quit)));
         assert!(matches!(parse("/reload"), Some(CommandAction::Reload)));

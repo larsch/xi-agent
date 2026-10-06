@@ -56,6 +56,7 @@
   - If later chunks introduce non-whitespace text that makes previously hidden whitespace interior, that whitespace is rendered as part of the block.
   - The same trimming/presentation rules apply during streaming and after commit.
 - User input is a text input field at the bottom of the screen, where users can type commands and submit them by pressing Enter.
+- `/context` or `F2` opens a system-prompt reader as an alternative view mode, temporarily replacing the transcript area. The reader displays the current generated system prompt (including its embedded tool/guideline, AGENTS.md, and available-skills sections), wrapped to terminal width. Up/Down and Page Up/Page Down scroll; Home/End jump to the start/end; Esc or F2 closes and restores the transcript scroll position and input draft. If the prompt has not loaded, show an explicit unavailable message. This reader does not add session events or alter the conversation.
 - `Ctrl+I` toggles a one-line info bar (provider, model, thinking level, and context window). When provider-reported token usage is available and the model context window is known, the context section shows utilization as `used / max (percent)`; otherwise it falls back to showing only max context (or `unknown`).
 - When automatic or manual compaction runs, the UI shows a visible `compacting…` status and then a `[compacted: Xk → Yk tokens]` marker in the session log.
 - Slash commands include `/compact [instructions]`, which triggers immediate context compaction and passes optional user guidance into the compaction summary prompt.

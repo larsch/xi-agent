@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyBindingId {
     ShowHelp,
+    ToggleContextView,
     Abort,
     Suspend,
     EndInput,
@@ -63,6 +64,12 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         shortcut: "F1",
         context: BindingContext::Global,
         description: "Show keyboard shortcuts",
+    },
+    KeyBinding {
+        id: Some(KeyBindingId::ToggleContextView),
+        shortcut: "F2",
+        context: BindingContext::Global,
+        description: "View the current system prompt (Esc or F2 to close)",
     },
     KeyBinding {
         id: Some(KeyBindingId::Cancel),
@@ -207,6 +214,7 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
 pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
     match id {
         KeyBindingId::ShowHelp => key.code == KeyCode::F(1) && key.modifiers.is_empty(),
+        KeyBindingId::ToggleContextView => key.code == KeyCode::F(2) && key.modifiers.is_empty(),
         KeyBindingId::Abort => {
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
@@ -278,6 +286,10 @@ mod tests {
             (
                 KeyBindingId::ShowHelp,
                 KeyEvent::new(KeyCode::F(1), KeyModifiers::empty()),
+            ),
+            (
+                KeyBindingId::ToggleContextView,
+                KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()),
             ),
             (
                 KeyBindingId::Abort,

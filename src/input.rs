@@ -182,6 +182,13 @@ pub(crate) fn handle_key_event(
         KeyDispatch::Return(result) => return Some(result),
     }
 
+    if app.context_view.active {
+        return match handle_context_view_key(app, key) {
+            KeyDispatch::NotHandled | KeyDispatch::Continue => None,
+            KeyDispatch::Return(result) => Some(result),
+        };
+    }
+
     if app.input_mode == InputMode::Shell {
         return match handle_shell_mode_key(
             app,
@@ -220,6 +227,11 @@ fn handle_global_key_shortcuts(
     key: KeyEvent,
     #[cfg(windows)] _last_key_at: &mut Option<std::time::Instant>,
 ) -> KeyDispatch {
+    if keybindings::matches(KeyBindingId::ToggleContextView, key) {
+        app.toggle_context_view();
+        return KeyDispatch::Continue;
+    }
+
     if keybindings::matches(KeyBindingId::ShowHelp, key) {
         if app.selection.kind == Some(crate::selection_state::SelectionKind::KeybindingHelp) {
             app.exit_selection_mode();
@@ -625,6 +637,28 @@ fn handle_selection_enter(app: &mut App) -> KeyDispatch {
     }
 }
 
+fn handle_context_view_key(app: &mut App, key: KeyEvent) -> KeyDispatch {
+    match key.code {
+        KeyCode::Esc => app.close_context_view(),
+        KeyCode::Up => app.context_view.scroll_up(1),
+        KeyCode::Down => app.context_view.scroll_down(1, app.context_view.max_scroll),
+        KeyCode::PageUp => app
+            .context_view
+            .scroll_up(app.log_view.last_log_height.saturating_sub(1).max(1)),
+        KeyCode::PageDown => app.context_view.scroll_down(
+            app.log_view.last_log_height.saturating_sub(1).max(1),
+            app.context_view.max_scroll,
+        ),
+        KeyCode::Home => app.context_view.jump_to_start(),
+        KeyCode::End => {
+            let max_scroll = app.context_view.max_scroll;
+            app.context_view.jump_to_end(max_scroll);
+        }
+        _ => {}
+    }
+    KeyDispatch::Continue
+}
+
 fn handle_chat_mode_key(
     app: &mut App,
     provider: &Arc<dyn LlmProvider + Send + Sync>,
@@ -878,6 +912,7 @@ fn handle_slash_submit(
     app.reset_textarea();
 
     match crate::commands::parse(&input) {
+        Some(CommandAction::Context) => app.open_context_view(),
         Some(CommandAction::New) => return KeyDispatch::Return(RunResult::NewSession),
         Some(CommandAction::Export(path)) => app.export_session_html(path.as_deref()),
         Some(CommandAction::Reload) => return KeyDispatch::Return(RunResult::ReloadContext),

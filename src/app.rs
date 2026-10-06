@@ -107,6 +107,8 @@ pub struct App {
     pub(crate) input_scroll: usize,
     /// Log pane scroll and cache state.
     pub(crate) log_view: LogViewState,
+    /// Deferred reader state for the current generated system prompt.
+    pub(crate) context_view: crate::context_view_state::ContextViewState,
     /// Active agent turn state: streaming status, throbber tick, last output time.
     pub(crate) agent_turn: AgentTurnState,
     /// All provider-related state: instances, active instance/model/thinking,
@@ -206,6 +208,7 @@ impl App {
             input_mode: InputMode::Chat,
             input_scroll: 0,
             log_view: LogViewState::new(),
+            context_view: crate::context_view_state::ContextViewState::new(),
             agent_turn: AgentTurnState::new(throbber.clone()),
             provider: ProviderManager::new(initial_instance, initial_model, initial_thinking),
             agent_config,
@@ -339,6 +342,31 @@ impl App {
     /// Toggle the info bar visibility.
     pub fn toggle_info(&mut self) {
         self.show_info = !self.show_info;
+    }
+
+    pub(crate) fn open_context_view(&mut self) {
+        self.context_view
+            .open(self.log_view.log_scroll, self.log_view.auto_scroll);
+    }
+
+    pub(crate) fn toggle_context_view(&mut self) {
+        if self.context_view.active {
+            if let Some((scroll, auto_scroll)) = self.context_view.close() {
+                self.log_view.log_scroll = scroll;
+                self.log_view.auto_scroll = auto_scroll;
+                self.log_view.invalidate();
+            }
+        } else {
+            self.open_context_view();
+        }
+    }
+
+    pub(crate) fn close_context_view(&mut self) {
+        if let Some((scroll, auto_scroll)) = self.context_view.close() {
+            self.log_view.log_scroll = scroll;
+            self.log_view.auto_scroll = auto_scroll;
+            self.log_view.invalidate();
+        }
     }
 
     // ── Agent switching ───────────────────────────────────────────────────────
@@ -2435,6 +2463,85 @@ mod tests {
         assert!(second.is_none());
         assert!(!app.selection.active, "second F1 should close help");
         assert_eq!(app.textarea.lines(), &["draft".to_string()]);
+    }
+
+    #[test]
+    fn f2_opens_and_closes_context_reader_without_clearing_draft() {
+        let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+            std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+        let mut app = make_app();
+        app.agent_config.system_prompt = Some("current prompt".into());
+        app.textarea = ratatui_textarea::TextArea::new(vec!["draft".to_string()]);
+        app.log_view.log_scroll = 7;
+        app.log_view.auto_scroll = false;
+
+        let f2 = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(2),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let esc = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        #[allow(unused_mut)]
+        let mut last_key_at: Option<std::time::Instant> = None;
+        let _ = &last_key_at;
+        let dispatch =
+            |app: &mut App, key, #[cfg(windows)] last_key_at: &mut Option<std::time::Instant>| {
+                crate::input::handle_key_event(
+                    app,
+                    &provider,
+                    &crate::config::XiConfig::default(),
+                    key,
+                    #[cfg(windows)]
+                    last_key_at,
+                )
+            };
+
+        assert!(
+            dispatch(
+                &mut app,
+                f2,
+                #[cfg(windows)]
+                &mut last_key_at
+            )
+            .is_none()
+        );
+        assert!(app.context_view.active);
+        assert!(
+            dispatch(
+                &mut app,
+                esc,
+                #[cfg(windows)]
+                &mut last_key_at
+            )
+            .is_none()
+        );
+        assert!(!app.context_view.active);
+        assert_eq!(app.log_view.log_scroll, 7);
+        assert!(!app.log_view.auto_scroll);
+        assert_eq!(app.textarea.lines(), &["draft".to_string()]);
+
+        assert!(
+            dispatch(
+                &mut app,
+                f2,
+                #[cfg(windows)]
+                &mut last_key_at
+            )
+            .is_none()
+        );
+        assert!(app.context_view.active);
+        assert!(
+            dispatch(
+                &mut app,
+                f2,
+                #[cfg(windows)]
+                &mut last_key_at
+            )
+            .is_none()
+        );
+        assert!(!app.context_view.active);
     }
 
     #[test]
