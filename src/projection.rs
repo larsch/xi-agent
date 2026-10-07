@@ -30,6 +30,15 @@ use crate::{
 
 // ── LLM projection ────────────────────────────────────────────────────────────
 
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// Build the message list to send to the LLM from a session event log.
 ///
 /// This is the replacement for `App::prepare_llm_messages`.  The system
@@ -142,6 +151,24 @@ fn push_llm_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
                 msgs.push(msg);
             }
         }
+        SessionEvent::EnvironmentNotification { changes, .. } => {
+            let mut content = String::from("<environment_notification>\n");
+            for change in changes {
+                content.push_str("  <change>\n");
+                content.push_str("    <path>");
+                content.push_str(&escape_xml(&change.path));
+                content.push_str("</path>\n");
+                content.push_str("    <baseline>last_");
+                content.push_str(change.baseline.as_str());
+                content.push_str("</baseline>\n");
+                content.push_str(
+                    "    <status>changed externally; previously observed contents may be stale.</status>\n",
+                );
+                content.push_str("  </change>\n");
+            }
+            content.push_str("</environment_notification>");
+            msgs.push(Message::user(content));
+        }
         // Not sent to the LLM.
         SessionEvent::TurnError { .. }
         | SessionEvent::CompactionSummary { .. }
@@ -224,6 +251,25 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
                 msg.hidden = true;
             }
             msg.include_in_llm = *include_in_llm;
+            msgs.push(msg);
+        }
+        SessionEvent::EnvironmentNotification { changes, .. } => {
+            let mut msg =
+                Message::assistant("Model notified of changes to these files:\n\n".to_string());
+            msg.content.push_str(
+                &changes
+                    .iter()
+                    .map(|change| {
+                        format!(
+                            "• {} — changed since the last {}",
+                            change.path,
+                            change.baseline.as_str()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            msg.include_in_llm = false;
             msgs.push(msg);
         }
         SessionEvent::TurnError { message, .. } => {
@@ -470,7 +516,7 @@ mod tests {
     use super::*;
     use crate::{
         llm::{AssistantPhase, DisplayRange, UsageStats},
-        session_event::{CompactionTrigger, SessionEvent},
+        session_event::{CompactionTrigger, EnvironmentChange, FileInteraction, SessionEvent},
         thinking::ThinkingLevel,
     };
 
@@ -544,6 +590,46 @@ mod tests {
         assert_eq!(msgs[0].content, "hello");
         assert_eq!(msgs[1].role, Role::Assistant);
         assert_eq!(msgs[1].content, "hi");
+    }
+
+    #[test]
+    fn llm_environment_notification_is_marked_and_diff_free() {
+        let events = vec![
+            user_ev("continue"),
+            SessionEvent::EnvironmentNotification {
+                changes: vec![EnvironmentChange {
+                    path: "src/main.rs".to_string(),
+                    baseline: FileInteraction::Read,
+                }],
+                timestamp: ts(),
+            },
+        ];
+        let msgs = project_llm_messages(&events);
+        assert_eq!(msgs[1].role, Role::User);
+        assert!(msgs[1].content.contains("<environment_notification>"));
+        assert!(msgs[1].content.contains("\n  <change>\n"));
+        assert!(msgs[1].content.contains("<path>src/main.rs</path>"));
+        assert!(msgs[1].content.contains("<baseline>last_read</baseline>"));
+        assert!(!msgs[1].content.contains("since the last read"));
+        assert!(!msgs[1].content.contains("\\n"));
+        assert!(!msgs[1].content.contains("diff"));
+    }
+
+    #[test]
+    fn display_environment_notification_reports_model_delivery() {
+        let events = vec![SessionEvent::EnvironmentNotification {
+            changes: vec![EnvironmentChange {
+                path: "src/main.rs".to_string(),
+                baseline: FileInteraction::Edit,
+            }],
+            timestamp: ts(),
+        }];
+        let msgs = project_display_messages(&events);
+        assert_eq!(
+            msgs[0].content,
+            "Model notified of changes to these files:\n\n• src/main.rs — changed since the last edit"
+        );
+        assert!(!msgs[0].include_in_llm);
     }
 
     #[test]

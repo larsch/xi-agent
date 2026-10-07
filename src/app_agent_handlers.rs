@@ -229,10 +229,9 @@ impl App {
             AgentEvent::ToolCallStart { id, name, args } => self.on_tool_call_start(id, name, args),
             AgentEvent::ToolOutputChunk { id, chunk } => self.on_tool_output_chunk(id, chunk),
             AgentEvent::ToolCallEnd { id, result } => self.on_tool_call_end(id, result),
-            AgentEvent::ExternalFileChange {
-                paths: _,
-                notification,
-            } => self.on_external_file_change(notification),
+            AgentEvent::ExternalFileChange { paths: _, changes } => {
+                self.on_external_file_change(changes)
+            }
             AgentEvent::TurnEnd => self.on_turn_end(),
             AgentEvent::FinalResponse { text } => {
                 crate::desktop_notification::notify_agent_loop_halt(&text, self.terminal_focused)
@@ -582,10 +581,11 @@ impl App {
         self.runtime.pending_shell_handle = None;
     }
 
-    fn on_external_file_change(&mut self, notification: String) {
-        // External file change notifications are user-visible context
-        // injected into the conversation — treat as UserMessage.
-        self.append_user_message(notification);
+    fn on_external_file_change(&mut self, changes: Vec<crate::session_event::EnvironmentChange>) {
+        self.append_event_immediate(SessionEvent::EnvironmentNotification {
+            changes,
+            timestamp: Self::now_ts(),
+        });
     }
 
     fn on_turn_start(&mut self, continuation: bool) {

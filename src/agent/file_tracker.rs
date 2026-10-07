@@ -5,27 +5,21 @@ use std::{
     time::SystemTime,
 };
 
+use crate::session_event::FileInteraction;
 use sha2::{Digest, Sha256};
-use similar::{ChangeTag, TextDiff};
-
-/// Maximum number of diff lines to inline in the notification message.
-/// If the diff exceeds this, only a warning (no diff) is included.
-pub const DIFF_INLINE_MAX_LINES: usize = 50;
 
 /// Snapshot of a file at the time the agent last touched it.
 #[derive(Clone)]
 struct FileSnapshot {
     mtime: SystemTime,
     hash: [u8; 32],
-    /// UTF-8 content of the file; used to produce diffs on change.
-    content: String,
+    interaction: FileInteraction,
 }
 
 /// A file that was modified externally since the agent last touched it.
 pub struct ChangedFile {
     pub path: PathBuf,
-    pub old_content: String,
-    pub new_content: String,
+    pub interaction: FileInteraction,
 }
 
 /// Outcome of checking whether a tracked file is stale relative to disk.
@@ -109,8 +103,13 @@ impl FileTracker {
     /// Non-UTF-8 files are silently skipped (binary files are not tracked).
     /// All paths are recorded regardless of exclusion settings — exclusions
     /// only affect change-notification scans (see [`check_modified`]).
+    #[cfg(test)]
     pub fn record(&mut self, path: &Path) {
-        match snapshot(path) {
+        self.record_with_interaction(path, FileInteraction::Read);
+    }
+
+    pub fn record_with_interaction(&mut self, path: &Path, interaction: FileInteraction) {
+        match snapshot(path, interaction) {
             Ok(snap) => {
                 log::info!(
                     "file_tracker: record({}) mtime={:?}",
@@ -233,7 +232,7 @@ impl FileTracker {
             // Only record if not already tracked — preserves snapshots
             // from the current session.
             if !self.files.contains_key(path) {
-                self.record(path);
+                self.record_with_interaction(path, FileInteraction::Read);
             }
         }
     }
@@ -279,7 +278,7 @@ impl FileTracker {
     /// do not reject files the agent was working on in the prior session.
     pub fn reset(&mut self) {
         for (path, snap) in &mut self.files {
-            match snapshot(path) {
+            match snapshot(path, snap.interaction) {
                 Ok(new_snap) => *snap = new_snap,
                 Err(e) => {
                     log::warn!(
@@ -324,7 +323,7 @@ impl FileTracker {
             }
 
             // mtime changed — re-read and re-hash to update the baseline.
-            match snapshot(path) {
+            match snapshot(path, snap.interaction) {
                 Ok(new_snap) => {
                     *snap = new_snap;
                 }
@@ -387,12 +386,9 @@ impl FileTracker {
                 continue;
             }
 
-            let old_content = snap.content.clone();
-
             changed.push(ChangedFile {
                 path: path.clone(),
-                old_content,
-                new_content,
+                interaction: snap.interaction,
             });
         }
 
@@ -404,7 +400,12 @@ impl FileTracker {
     /// changes you want to absorb.
     pub fn accept_changes(&mut self, paths: &[std::path::PathBuf]) {
         for path in paths {
-            match snapshot(path) {
+            let interaction = self
+                .files
+                .get(path)
+                .map(|snap| snap.interaction)
+                .unwrap_or(FileInteraction::Read);
+            match snapshot(path, interaction) {
                 Ok(new_snap) => {
                     log::info!(
                         "file_tracker: accept_change({}) mtime={:?}",
@@ -432,7 +433,7 @@ fn hash_content(content: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn snapshot(path: &Path) -> std::io::Result<FileSnapshot> {
+fn snapshot(path: &Path, interaction: FileInteraction) -> std::io::Result<FileSnapshot> {
     let content = std::fs::read_to_string(path)?;
     let meta = std::fs::metadata(path)?;
     let mtime = meta.modified()?;
@@ -440,7 +441,7 @@ fn snapshot(path: &Path) -> std::io::Result<FileSnapshot> {
     Ok(FileSnapshot {
         mtime,
         hash,
-        content,
+        interaction,
     })
 }
 
@@ -467,51 +468,6 @@ fn discover_git_root(dir: &Path) -> Option<PathBuf> {
     }
 
     Some(PathBuf::from(trimmed))
-}
-
-/// Build the notification message text for a set of changed files.
-///
-/// For each file, if the unified diff is ≤ [`DIFF_INLINE_MAX_LINES`] lines,
-/// the diff is inlined; otherwise a warn-only note is added.
-pub fn build_notification(changes: &[ChangedFile]) -> String {
-    let mut msg = String::from(
-        "⚠️ The following files were modified externally since you last read or wrote them:\n",
-    );
-
-    for change in changes {
-        let path_str = change.path.display();
-        let diff = TextDiff::from_lines(&change.old_content, &change.new_content);
-
-        let diff_lines: Vec<String> = diff
-            .unified_diff()
-            .context_radius(3)
-            .header(&format!("a/{path_str}"), &format!("b/{path_str}"))
-            .to_string()
-            .lines()
-            .map(|l| l.to_string())
-            .collect();
-
-        // Count only actual diff lines (exclude the --- / +++ header pair).
-        let changed_line_count = diff
-            .iter_all_changes()
-            .filter(|c| c.tag() != ChangeTag::Equal)
-            .count();
-
-        msg.push('\n');
-        if changed_line_count <= DIFF_INLINE_MAX_LINES {
-            msg.push_str(&format!(
-                "`{path_str}` was modified externally:\n```diff\n{}\n```\n",
-                diff_lines.join("\n")
-            ));
-        } else {
-            msg.push_str(&format!(
-                "`{path_str}` was modified externally (diff too large to inline; {changed_line_count} lines changed). \
-                 Re-read the file before making further edits.\n"
-            ));
-        }
-    }
-
-    msg
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -635,8 +591,7 @@ mod tests {
 
         let changed = tracker.check_modified();
         assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0].old_content, "hello\n");
-        assert_eq!(changed[0].new_content, "world\n");
+        assert_eq!(changed[0].interaction, FileInteraction::Read);
     }
 
     #[test]
@@ -718,34 +673,7 @@ mod tests {
             1,
             "user edit after refresh should be reported"
         );
-        assert_eq!(changed[0].new_content, "user-changed\n");
-    }
-
-    #[test]
-    fn build_notification_inlines_small_diff() {
-        let changes = vec![ChangedFile {
-            path: PathBuf::from("foo.rs"),
-            old_content: "fn main() {}\n".to_string(),
-            new_content: "fn main() { println!(\"hi\"); }\n".to_string(),
-        }];
-        let msg = build_notification(&changes);
-        assert!(msg.contains("```diff"), "expected inlined diff");
-        assert!(msg.contains("foo.rs"));
-    }
-
-    #[test]
-    fn build_notification_warn_only_for_large_diff() {
-        // Generate a diff with more than DIFF_INLINE_MAX_LINES changed lines.
-        let old: String = (0..100).map(|i| format!("old line {i}\n")).collect();
-        let new: String = (0..100).map(|i| format!("new line {i}\n")).collect();
-        let changes = vec![ChangedFile {
-            path: PathBuf::from("big.rs"),
-            old_content: old,
-            new_content: new,
-        }];
-        let msg = build_notification(&changes);
-        assert!(!msg.contains("```diff"), "should not inline large diff");
-        assert!(msg.contains("too large to inline"));
+        assert_eq!(changed[0].interaction, FileInteraction::Read);
     }
 
     // ── staleness tests ──────────────────────────────────────────────────────

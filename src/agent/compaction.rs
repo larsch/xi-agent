@@ -248,6 +248,7 @@ fn build_units(events: &[SessionEvent]) -> Vec<Unit> {
                 idx += 1;
             }
             SessionEvent::TurnError { .. }
+            | SessionEvent::EnvironmentNotification { .. }
             | SessionEvent::CompactionSummary { .. }
             | SessionEvent::ModelChanged { .. }
             | SessionEvent::ThinkingLevelChanged { .. } => {
@@ -403,6 +404,16 @@ fn serialize_events_for_summary(events: &[SessionEvent]) -> String {
                     out.push_str(content);
                     out.push_str("\n\n");
                 }
+            }
+            SessionEvent::EnvironmentNotification { changes, .. } => {
+                out.push_str("[environment-notification]\n");
+                for change in changes {
+                    out.push_str(&change.path);
+                    out.push_str(" changed externally since the last ");
+                    out.push_str(change.baseline.as_str());
+                    out.push_str(".\\n");
+                }
+                out.push_str("\\n");
             }
             SessionEvent::TurnError { message, .. } => {
                 out.push_str("[turn-error]\n");

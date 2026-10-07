@@ -52,6 +52,32 @@ use crate::{
     thinking::ThinkingLevel,
 };
 
+/// The last file operation that established an observation baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileInteraction {
+    Read,
+    Write,
+    Edit,
+}
+
+impl FileInteraction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Edit => "edit",
+        }
+    }
+}
+
+/// A file observed by the agent and subsequently changed outside the agent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentChange {
+    pub path: String,
+    pub baseline: FileInteraction,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -121,6 +147,12 @@ pub enum SessionEvent {
         /// commands that are visible in the session log but never sent to the model.
         #[serde(default = "default_true")]
         include_in_llm: bool,
+        timestamp: u64,
+    },
+
+    /// Files previously observed by the agent changed outside the agent.
+    EnvironmentNotification {
+        changes: Vec<EnvironmentChange>,
         timestamp: u64,
     },
 
@@ -206,6 +238,23 @@ mod tests {
     }
 
     // ── Round-trip serialization ──────────────────────────────────────────────
+
+    #[test]
+    fn environment_notification_round_trips() {
+        let ev = SessionEvent::EnvironmentNotification {
+            changes: vec![EnvironmentChange {
+                path: "src/main.rs".to_string(),
+                baseline: FileInteraction::Edit,
+            }],
+            timestamp: ts(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SessionEvent::EnvironmentNotification { changes, .. }
+            if changes[0].path == "src/main.rs" && changes[0].baseline == FileInteraction::Edit)
+        );
+    }
 
     #[test]
     fn user_message_round_trips() {

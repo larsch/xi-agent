@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::agent::events::{AgentEventSink, AppEventSink, send_agent_event};
-use crate::agent::file_tracker::build_notification;
 use crate::agent::runner::SteeringCommand;
 use crate::agent::{AgentActivity, AgentEvent, AgentLoopConfig, CancelLevel};
 use crate::agent::{compaction, lifecycle, loop_support, tool_batch, tool_defs, turn};
@@ -11,7 +10,7 @@ use crate::app_event::AppEvent;
 use crate::hooks::{HookPoint, empty_payload, ipc_external_change_payload};
 use crate::llm::{LlmProvider, Message};
 use crate::projection::LlmProjection;
-use crate::session_event::{CompactionTrigger, SessionEvent};
+use crate::session_event::{CompactionTrigger, EnvironmentChange, SessionEvent};
 
 // ── run_agent_loop ────────────────────────────────────────────────────────────
 
@@ -98,9 +97,15 @@ async fn run_agent_loop_inner(
         };
         if !changes.is_empty() {
             let paths: Vec<std::path::PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
-            let notification = build_notification(&changes);
-            session_events.push(SessionEvent::UserMessage {
-                content: notification.clone(),
+            let environment_changes = changes
+                .iter()
+                .map(|change| EnvironmentChange {
+                    path: change.path.display().to_string(),
+                    baseline: change.interaction,
+                })
+                .collect();
+            session_events.push(SessionEvent::EnvironmentNotification {
+                changes: environment_changes,
                 timestamp: 0,
             });
             config.hook_ipc.publish(
@@ -121,7 +126,13 @@ async fn run_agent_loop_inner(
                 sink,
                 AgentEvent::ExternalFileChange {
                     paths,
-                    notification,
+                    changes: changes
+                        .iter()
+                        .map(|change| EnvironmentChange {
+                            path: change.path.display().to_string(),
+                            baseline: change.interaction,
+                        })
+                        .collect(),
                 },
             );
         }

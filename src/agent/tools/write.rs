@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::agent::file_tracker::{FileTracker, Staleness};
 use crate::agent::tools::utf8::write_payload_file;
 use crate::agent::types::{Tool, ToolResult};
+use crate::session_event::FileInteraction;
 
 pub struct WriteTool {
     tracker: Arc<Mutex<FileTracker>>,
@@ -147,7 +148,7 @@ impl Tool for WriteTool {
             self.tracker
                 .lock()
                 .unwrap()
-                .record(std::path::Path::new(&path));
+                .record_with_interaction(std::path::Path::new(&path), FileInteraction::Write);
 
             let line_count = count_lines_any_ending(&content);
             ToolResult::ok_str(format!("Written {line_count} lines to {path}"))

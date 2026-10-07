@@ -554,11 +554,9 @@ pub enum AgentEvent {
     /// The agent is starting one model invocation.
     TurnStart { continuation: bool },
     /// One or more tracked files were modified externally before this turn.
-    /// `notification` is the pre-formatted user message text that was injected
-    /// into the conversation history; `paths` lists the affected files.
     ExternalFileChange {
         paths: Vec<std::path::PathBuf>,
-        notification: String,
+        changes: Vec<crate::session_event::EnvironmentChange>,
     },
     /// One LLM turn (assistant response + any tool calls) is complete.
     TurnEnd,

@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::agent::file_tracker::{FileTracker, Staleness};
 use crate::agent::types::{Tool, ToolResult};
+use crate::session_event::FileInteraction;
 
 pub struct EditTool {
     tracker: Arc<Mutex<FileTracker>>,
@@ -187,7 +188,7 @@ impl Tool for EditTool {
             self.tracker
                 .lock()
                 .unwrap()
-                .record(std::path::Path::new(&path));
+                .record_with_interaction(std::path::Path::new(&path), FileInteraction::Edit);
 
             ToolResult::ok_str(format!("Successfully edited {path}"))
         })

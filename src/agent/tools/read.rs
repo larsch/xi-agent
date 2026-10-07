@@ -7,6 +7,7 @@ use crate::agent::file_tracker::FileTracker;
 use crate::agent::tools::truncate::{TruncationResult, truncate_head_with_limits};
 use crate::agent::tools::utf8::read_utf8_payload_file;
 use crate::agent::types::{Tool, ToolResult};
+use crate::session_event::FileInteraction;
 
 pub struct ReadFileTool {
     tracker: Arc<Mutex<FileTracker>>,
@@ -158,7 +159,7 @@ impl Tool for ReadFileTool {
             self.tracker
                 .lock()
                 .unwrap()
-                .record(std::path::Path::new(&path));
+                .record_with_interaction(std::path::Path::new(&path), FileInteraction::Read);
 
             // Check for an image by magic bytes.
             if let Some(mime_type) = detect_image_mime_type(&raw_bytes) {
