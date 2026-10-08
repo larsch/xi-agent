@@ -267,9 +267,8 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
         "\n\
 \nThe following skills provide specialized instructions for specific tasks.\n\
 Each skill's description names the task type, problem domain, or situation it handles. \
-Load any skill whose description overlaps with what the user is asking about. \
-When multiple descriptions are relevant, load all of them.\n\
-Use the read_skill tool to load a skill's instructions by name.\n\
+Skills provide specialized instructions for particular kinds of work. When a task calls for a capability described by a skill, learn the relevant skill before applying it. Use what you learn when carrying out related work.\n\
+Use the learn tool to learn a skill's instructions by name.\n\
 When a skill file references a relative path, resolve it against the skill directory \
 (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
 \n<available_skills>\n{entries}\n</available_skills>"
@@ -443,10 +442,9 @@ mod tests {
             "Each skill's description names the task type, problem domain, or situation it handles."
         ));
         assert!(prompt.contains(
-            "Load any skill whose description overlaps with what the user is asking about."
+            "Skills provide specialized instructions for particular kinds of work. When a task calls for a capability described by a skill, learn the relevant skill before applying it. Use what you learn when carrying out related work."
         ));
-        assert!(prompt.contains("When multiple descriptions are relevant, load all of them."));
-        assert!(prompt.contains("Use the read_skill tool to load a skill's instructions by name."));
+        assert!(prompt.contains("Use the learn tool to learn a skill's instructions by name."));
     }
 
     #[test]

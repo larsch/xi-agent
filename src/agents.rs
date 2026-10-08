@@ -62,7 +62,7 @@ pub struct AgentMeta {
 // ── Always-present tools ──────────────────────────────────────────────────────
 
 /// Tools that are always available to every agent regardless of filter settings.
-pub const ALWAYS_PRESENT_TOOLS: &[&str] = &["ask_user", "read_skill", "agent_session"];
+pub const ALWAYS_PRESENT_TOOLS: &[&str] = &["ask_user", "learn", "agent_session"];
 
 // ── Agent discovery ───────────────────────────────────────────────────────────
 
@@ -719,7 +719,7 @@ No skills here.
 
     #[test]
     fn filter_tools_include_subset() {
-        let tools = test_registry(&["bash", "read_file", "write_file", "ask_user", "read_skill"]);
+        let tools = test_registry(&["bash", "read_file", "write_file", "ask_user", "learn"]);
         let filtered = filter_tools(&tools, &["read_file".into(), "find_files".into()], &[]);
         // read_file matches, find_files not in registry, always-present not excluded
         assert!(filtered.contains_key("read_file"));
@@ -727,7 +727,7 @@ No skills here.
         assert!(!filtered.contains_key("write_file"));
         // Always-present tools survive
         assert!(filtered.contains_key("ask_user"));
-        assert!(filtered.contains_key("read_skill"));
+        assert!(filtered.contains_key("learn"));
     }
 
     #[test]
@@ -740,15 +740,11 @@ No skills here.
 
     #[test]
     fn filter_tools_always_present_immune_to_exclude() {
-        let tools = test_registry(&["ask_user", "read_skill", "bash"]);
-        let filtered = filter_tools(
-            &tools,
-            &["*".into()],
-            &["ask_user".into(), "read_skill".into()],
-        );
+        let tools = test_registry(&["ask_user", "learn", "bash"]);
+        let filtered = filter_tools(&tools, &["*".into()], &["ask_user".into(), "learn".into()]);
         // Always-present tools survive even explicit exclusion
         assert!(filtered.contains_key("ask_user"));
-        assert!(filtered.contains_key("read_skill"));
+        assert!(filtered.contains_key("learn"));
         assert!(filtered.contains_key("bash"));
     }
 

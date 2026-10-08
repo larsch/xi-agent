@@ -160,12 +160,12 @@ pub mod edit;
 #[cfg(not(target_os = "windows"))]
 pub mod exec;
 pub mod find;
+pub mod learn;
 #[cfg(target_os = "windows")]
 pub mod powershell;
 pub mod python;
 pub mod python_repl;
 pub mod read;
-pub mod read_skill;
 #[cfg(all(feature = "restart", unix))]
 pub mod restart_host;
 pub mod subprocess;
@@ -184,12 +184,12 @@ use edit::EditTool;
 #[cfg(not(target_os = "windows"))]
 use exec::ExecTool;
 use find::FindTool;
+use learn::LearnTool;
 #[cfg(target_os = "windows")]
 use powershell::PowerShellTool;
 use python::PythonTool;
 use python_repl::PythonReplTool;
 use read::ReadFileTool;
-use read_skill::ReadSkillTool;
 #[cfg(all(feature = "restart", unix))]
 use restart_host::RestartHostTool;
 use write::WriteTool;
@@ -200,12 +200,12 @@ use crate::app_event::AppEventTx;
 ///
 /// `custom` tools are appended after built-ins; any custom tool whose name
 /// collides with a built-in is silently dropped (logged at debug).
-/// Replace the registry's `read_skill` tool with one restricted to the skills
+/// Replace the registry's `learn` tool with one restricted to the skills
 /// active for the current agent.
 pub fn set_active_skills(registry: &mut ToolRegistry, skills: Vec<crate::skills::SkillMeta>) {
     registry.insert(
-        "read_skill".to_string(),
-        Arc::new(ReadSkillTool::new(Arc::new(skills))),
+        "learn".to_string(),
+        Arc::new(LearnTool::new(Arc::new(skills))),
     );
 }
 
@@ -223,7 +223,7 @@ pub fn register_builtin_tools(
         Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
-        Arc::new(ReadSkillTool::new(Arc::clone(&skills))),
+        Arc::new(LearnTool::new(Arc::clone(&skills))),
         Arc::new(AskUserTool::new(
             app_event_tx,
             Some(Arc::clone(&file_tracker)),

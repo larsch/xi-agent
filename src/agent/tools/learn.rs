@@ -6,33 +6,33 @@ use serde_json::Value;
 use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 use crate::skills::SkillMeta;
 
-/// A built-in tool that loads a skill's body by name.
+/// A built-in tool that teaches the model a skill's instructions by name.
 ///
 /// Takes the skill name (as listed in the available-skills block) and returns
 /// the SKILL.md body with frontmatter stripped. Errors if the name is not
 /// found in the loaded skill registry.
-pub struct ReadSkillTool {
+pub struct LearnTool {
     skills: Arc<Vec<SkillMeta>>,
 }
 
-impl ReadSkillTool {
+impl LearnTool {
     pub fn new(skills: Arc<Vec<SkillMeta>>) -> Self {
         Self { skills }
     }
 }
 
 #[derive(serde::Deserialize)]
-struct ReadSkillArgs {
+struct LearnArgs {
     name: String,
 }
 
-impl Tool for ReadSkillTool {
+impl Tool for LearnTool {
     fn name(&self) -> &str {
-        "read_skill"
+        "learn"
     }
 
     fn description(&self) -> &str {
-        "Load a skill's instructions by name. Use the skill name exactly as listed in the available skills."
+        "Learn a skill's specialized instructions by name. Use the skill name exactly as listed in the available skills."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -58,7 +58,7 @@ impl Tool for ReadSkillTool {
         _ctx: ToolCallContext,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let ReadSkillArgs { name } = match super::parse_args(args) {
+            let LearnArgs { name } = match super::parse_args(args) {
                 Ok(a) => a,
                 Err(e) => return *e,
             };
@@ -141,8 +141,8 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
-    fn make_tool(skills: Vec<SkillMeta>) -> ReadSkillTool {
-        ReadSkillTool::new(Arc::new(skills))
+    fn make_tool(skills: Vec<SkillMeta>) -> LearnTool {
+        LearnTool::new(Arc::new(skills))
     }
 
     fn write_skill_file(dir: &std::path::Path, name: &str, body: &str) -> SkillMeta {

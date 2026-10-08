@@ -1513,8 +1513,8 @@ fn render_tool_result(
         return;
     }
 
-    // read_skill: show only the invocation label (already rendered), no body.
-    if prev_name == "read_skill" {
+    // learn: show only the invocation label (already rendered), no body.
+    if prev_name == "learn" {
         return;
     }
 

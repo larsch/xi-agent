@@ -435,7 +435,7 @@ active one. Both inline and block-style YAML string lists are accepted.
 
 ### Always-present tools
 
-`ask_user` and `read_skill` are always-present — they survive any filter and
+`ask_user` and `learn` are always-present — they survive any filter and
 are always available to every agent. Future subagent infrastructure (e.g.
 `spawn_subagent`) will also be always-present.
 

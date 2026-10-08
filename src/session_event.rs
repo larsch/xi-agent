@@ -82,6 +82,28 @@ fn default_true() -> bool {
     true
 }
 
+/// Translate the internal skill-learning tool name at the session-file
+/// compatibility boundary. The application uses `learn`, while the durable
+/// event format retains `read_skill`.
+fn serialize_tool_name<S>(name: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(if name == "learn" { "read_skill" } else { name })
+}
+
+fn deserialize_tool_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = <String as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(if name == "read_skill" {
+        "learn".to_string()
+    } else {
+        name
+    })
+}
+
 /// A single durable event in the session log.
 ///
 /// See the [module documentation](self) for serialization format and append
@@ -114,6 +136,10 @@ pub enum SessionEvent {
         /// Opaque identifier linking this call to its result.
         id: String,
         /// Name of the tool invoked.
+        #[serde(
+            serialize_with = "serialize_tool_name",
+            deserialize_with = "deserialize_tool_name"
+        )]
         name: String,
         /// Arguments passed to the tool (JSON object).
         args: serde_json::Value,
@@ -136,6 +162,10 @@ pub enum SessionEvent {
         /// [`ToolCall`]: SessionEvent::ToolCall
         id: String,
         /// Name of the tool that was invoked (denormalized for readability).
+        #[serde(
+            serialize_with = "serialize_tool_name",
+            deserialize_with = "deserialize_tool_name"
+        )]
         name: String,
         /// Output returned by the tool.
         content: String,
@@ -293,7 +323,7 @@ mod tests {
     fn tool_call_round_trips() {
         let ev = SessionEvent::ToolCall {
             id: "call_1".to_string(),
-            name: "read_file".to_string(),
+            name: "learn".to_string(),
             args: serde_json::json!({"path": "src/main.rs"}),
             include_in_llm: true,
             timestamp: ts(),
@@ -302,8 +332,16 @@ mod tests {
         let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
         assert!(
             matches!(decoded, SessionEvent::ToolCall { ref id, ref name, .. }
-            if id == "call_1" && name == "read_file")
+            if id == "call_1" && name == "learn")
         );
+        assert!(json.contains(r#""name":"read_skill""#));
+    }
+
+    #[test]
+    fn legacy_skill_tool_name_deserializes_to_learn() {
+        let json = r#"{"type":"tool_call","id":"call_1","name":"read_skill","args":{},"timestamp":1713000000}"#;
+        let decoded: SessionEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(decoded, SessionEvent::ToolCall { name, .. } if name == "learn"));
     }
 
     #[test]

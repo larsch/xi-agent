@@ -23,7 +23,7 @@ pub struct SkillMeta {
     pub path: PathBuf,
     /// Directory containing the `SKILL.md` file (base for relative references).
     pub base_dir: PathBuf,
-    /// For embedded skills: the skill body. When set, `read_skill` returns this
+    /// For embedded skills: the skill body. When set, `learn` returns this
     /// instead of reading from `path`.
     pub embedded_body: Option<String>,
 }
@@ -257,7 +257,7 @@ Scope indicators:
                 .to_string(),
         // Embedded edit skill is a standard skill available to every agent.
         scope: SkillScope::Standard,
-        // Dummy path — never read from disk; read_skill uses embedded_body.
+        // Dummy path — never read from disk; learn uses embedded_body.
         path: PathBuf::from("__embedded__/edit_skill/SKILL.md"),
         base_dir: PathBuf::from("__embedded__/edit_skill"),
         embedded_body: Some(body),

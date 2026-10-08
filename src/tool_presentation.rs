@@ -60,7 +60,7 @@ fn is_builtin_tool(name: &str) -> bool {
             | "find"
             | "find_files"
             | "ask_user"
-            | "read_skill"
+            | "learn"
             | "restart_host"
             | "local_shell"
     )
@@ -76,7 +76,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "run_python" | "python_repl_execute" => "🐍",
         "find" | "find_files" => "🔍",
         "ask_user" => "❓",
-        "read_skill" => "🎓",
+        "learn" => "🎓",
         "restart_host" => "🔄",
         _ => "🔧",
     }
@@ -95,7 +95,7 @@ pub fn tool_streaming_field(name: &str) -> Option<&'static str> {
         "write" | "write_file" => Some("path"),
         "edit" | "edit_file" => Some("path"),
         "find" | "find_files" => Some("pattern"),
-        "read_skill" => Some("name"),
+        "learn" => Some("name"),
         _ => None,
     }
 }
@@ -161,8 +161,8 @@ pub fn tool_invocation_label(
         return (format!("{emoji} {}", one_line(question)), false);
     }
 
-    // read_skill: just the skill name.
-    if name == "read_skill" {
+    // learn: just the skill name.
+    if name == "learn" {
         let skill_name = args
             .get("name")
             .and_then(|v| v.as_str())
@@ -354,7 +354,7 @@ mod tests {
             "write" | "write_file" => Some("path"),
             "edit" | "edit_file" => Some("path"),
             "find" | "find_files" => Some("pattern"),
-            "read_skill" => Some("name"),
+            "learn" => Some("name"),
             _ => None,
         }
     }
@@ -500,25 +500,25 @@ mod tests {
         assert_eq!(lbl, "🔍 finding…");
     }
 
-    // ── read_skill ────────────────────────────────────────────────────────────
+    // ── learn ────────────────────────────────────────────────────────────
 
     #[test]
-    fn read_skill_shows_name() {
-        let (lbl, ph) = label("read_skill", &json!({"name": "workflow"}));
+    fn learn_shows_name() {
+        let (lbl, ph) = label("learn", &json!({"name": "workflow"}));
         assert!(!ph);
         assert_eq!(lbl, "🎓 workflow");
     }
 
     #[test]
-    fn read_skill_trims_name() {
-        let (lbl, ph) = label("read_skill", &json!({"name": "\n workflow\n"}));
+    fn learn_trims_name() {
+        let (lbl, ph) = label("learn", &json!({"name": "\n workflow\n"}));
         assert!(!ph);
         assert_eq!(lbl, "🎓 workflow");
     }
 
     #[test]
-    fn read_skill_placeholder_when_name_empty() {
-        let (lbl, ph) = label("read_skill", &json!({"name": ""}));
+    fn learn_placeholder_when_name_empty() {
+        let (lbl, ph) = label("learn", &json!({"name": ""}));
         assert!(ph);
         assert_eq!(lbl, "🎓 working…");
     }
