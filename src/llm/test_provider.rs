@@ -169,7 +169,7 @@ The list below combines bullet items with fenced code blocks. This exercises the
 | `cmd <cmd>`             | shell command   | Execute a real cmd command and echo the result as a fenced code block       |
 | `exec <prog> [args…]`   | prog + args     | Execute a program via argv (shellword-split); no shell interpretation        |
 | `bash-background-job`   | —               | 4-step scripted loop: start sleep 60, check running, kill, confirm gone     |
-| `learn [name]`          | name            | Issue a learn tool call (defaults to edit_skill if no name given)      |
+| `learn [name]`          | name            | Issue a learn tool call (defaults to xi-skill-locations if no name given) |
 | `write`                 | —               | Issue a write_file tool call that writes a file to the system temp directory |
 | `write-edit`            | —               | Stream write_file then edit_file in streaming mode (~4-8 chars/chunk, 20 chunks/sec); uses 6 lines of context |
 
@@ -281,7 +281,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `long-lines` | 3-step sequence: write 10 very long lines (~200 chars each), grep all, read back (exercises wrapped-line limit in shell and read_file output) |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
-| `learn [name]` | Issue a `learn` tool call (defaults to `edit_skill` if no name given) |
+| `learn [name]` | Issue a `learn` tool call (defaults to `xi-skill-locations` if no name given) |
 | `find` | Issue a `find_files` tool call on the temp directory |
 | `edit` | Issue an `edit_file` tool call with short old/new text (use after `write`; exercises compact diff body) |
 | `edit-long` | Issue an `edit_file` tool call with 6 lines per side (exercises per-side truncation markers) |
@@ -1361,7 +1361,7 @@ impl super::LlmProvider for TestProvider {
 
             "learn" => {
                 let name = if rest.is_empty() {
-                    "edit_skill".to_string()
+                    "xi-skill-locations".to_string()
                 } else {
                     rest
                 };

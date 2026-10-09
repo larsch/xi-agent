@@ -36,10 +36,11 @@ pub struct SkillMeta {
 /// `~/.xi/skills`, `~/.agents/skills`, and Windows `%USERPROFILE%\\.agents\\skills`.
 /// Duplicate names within standard roots use the first matching root. Agent-local
 /// duplicates are retained for active-scope resolution after filters are applied.
-/// An embedded `edit_skill` is always added to the result.
+/// Also injects the embedded `xi-skill-locations` with technical guidance about
+/// skill discovery, file locations, and the supported format.
 pub fn load_skills_for_agents(agents: &[crate::agents::AgentMeta]) -> Vec<SkillMeta> {
     let mut skills = load_scoped_skills(skill_dirs(), agents);
-    skills.push(build_embedded_edit_skill(&skills, agents));
+    skills.push(build_embedded_skill_locations(&skills, agents));
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     skills
 }
@@ -63,11 +64,8 @@ fn load_scoped_skills(
     skills
 }
 
-/// Build the embedded `edit_skill` with a body that lists:
-/// - all loaded skill files with absolute paths
-/// - the skill root directories where xi searches
-/// - guidance for modifying existing skills and creating new ones
-fn build_embedded_edit_skill(
+/// Build technical guidance with the startup inventory and skill search roots.
+fn build_embedded_skill_locations(
     loaded: &[SkillMeta],
     agents: &[crate::agents::AgentMeta],
 ) -> SkillMeta {
@@ -87,8 +85,7 @@ fn build_embedded_edit_skill(
         })
     };
 
-    let (project_dirs, global_dirs): (Vec<&PathBuf>, Vec<&PathBuf>) =
-        dirs.iter().partition(|d| is_project(d));
+    let project_dirs: Vec<&PathBuf> = dirs.iter().filter(|d| is_project(d)).collect();
 
     // Classify each search directory by whether it contributed any skills.
     let classify_skill_root = |d: &PathBuf| -> bool {
@@ -104,49 +101,38 @@ fn build_embedded_edit_skill(
 
     let in_use: Vec<&PathBuf> = dirs.iter().filter(|d| classify_skill_root(d)).collect();
 
-    let dirs_section = {
-        let mut lines: Vec<String> = Vec::new();
-        if !global_dirs.is_empty() {
-            lines.push("Global (home directory):".to_string());
-            for d in &global_dirs {
-                let marker = if in_use.contains(d) {
-                    " ← in use"
-                } else {
-                    ""
-                };
-                lines.push(format!("  - `{}`{marker}", d.display()));
-            }
-        }
-        if !project_dirs.is_empty() {
-            lines.push(
-                "Project-local (current working directory through filesystem root):".to_string(),
-            );
-            for d in &project_dirs {
-                let marker = if in_use.contains(d) {
-                    " ← in use"
-                } else {
-                    ""
-                };
-                lines.push(format!("  - `{}`{marker}", d.display()));
-            }
-        }
-        if !agents.is_empty() {
-            lines.push("Agent-specific:".to_string());
-            for agent in agents {
-                let d = agent.base_dir.join("skills");
-                let marker = if loaded
-                    .iter()
-                    .any(|skill| skill.scope == SkillScope::Agent(agent.name.clone()))
-                {
-                    " ← in use"
-                } else {
-                    ""
-                };
-                lines.push(format!("  - `{}` ({}){marker}", d.display(), agent.name));
-            }
-        }
-        lines.join("\n")
-    };
+    let dirs_section = dirs
+        .iter()
+        .map(|d| {
+            let scope = if is_project(d) { "project" } else { "global" };
+            let marker = if in_use.contains(&d) {
+                " ← in use"
+            } else {
+                ""
+            };
+            format!("- `{}` [{scope}]{marker}", d.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let agent_dirs_section = agents
+        .iter()
+        .map(|agent| {
+            let marker = if loaded
+                .iter()
+                .any(|skill| skill.scope == SkillScope::Agent(agent.name.clone()))
+            {
+                " ← in use"
+            } else {
+                ""
+            };
+            format!(
+                "- `{}` [agent: {}]{marker}",
+                agent.base_dir.join("skills").display(),
+                agent.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let skills_section = if loaded.is_empty() {
         "(none loaded)\n".to_string()
@@ -154,13 +140,9 @@ fn build_embedded_edit_skill(
         loaded
             .iter()
             .map(|s| {
-                // Skip the embedded edit_skill itself.
-                if s.name == "edit_skill" {
-                    return String::new();
-                }
                 let scope = match &s.scope {
-                    SkillScope::Agent(agent) => format!(" [agent: {agent}]"),
-                    SkillScope::Standard if project_dirs.iter().any(|d| classify_skill_root(d)) => {
+                    SkillScope::Agent(agent) => format!("agent: {agent}"),
+                    SkillScope::Standard => {
                         let base = s
                             .base_dir
                             .canonicalize()
@@ -170,96 +152,113 @@ fn build_embedded_edit_skill(
                             base.starts_with(&d_canon)
                         });
                         if is_project_skill {
-                            " [project]".to_string()
+                            "project"
                         } else {
-                            " [global]".to_string()
+                            "global"
                         }
+                        .to_string()
                     }
-                    SkillScope::Standard => String::new(),
                 };
-                format!("- `{}`{} → {}", s.name, scope, s.path.display())
+                format!("- `{}` [{scope}] → {}", s.name, s.path.display())
             })
-            .filter(|l| !l.is_empty())
             .collect::<Vec<_>>()
             .join("\n")
     };
 
-    let create_section = if !in_use.is_empty() {
-        let preferred: Vec<_> = in_use
-            .iter()
-            .map(|d| format!("`{}`", d.display()))
-            .collect();
-        let preferred_list = preferred.join(" or ");
-        format!(
-            "Put new skills in an already-active directory: {preferred_list}.\n\
-             Create a new subdirectory there and write a `SKILL.md` inside it\n\
-             with the frontmatter shown above."
-        )
-    } else {
-        "No skill directories are currently in use. Pick one of the search\n\
-         directories above, create a new subdirectory, and write a `SKILL.md`\n\
-         inside it with the frontmatter shown above."
-            .to_string()
-    };
-
     let body = format!(
         "\
-# Edit Skill
+# xi skill locations
 
-## Skill search directories
+This built-in skill provides technical guidance about xi’s skill discovery,
+file locations, and supported format. It does not define skill-authoring
+policy or override user direction or applicable system, developer, or
+project instructions.
 
-xi searches these directories recursively for subdirectories containing
-`SKILL.md` files. Directories that don't exist are silently skipped.
-Directories marked \"← in use\" currently contain skill files.
+For authoring workflows and quality guidance, use applicable authoring
+skills when available.
+
+## Where this guidance lives
+
+xi generates this skill at startup. It has no `SKILL.md` file on disk.
+Its implementation lives in `src/skills.rs` in the xi source repository.
+
+## Search directories
+
+xi recursively searches these directories for subdirectories containing
+`SKILL.md`. Missing directories are skipped. Roots are listed in precedence
+order:
 
 {dirs_section}
 
-## Currently loaded skills
+When standard filesystem skills share a frontmatter name, the first search root
+containing that name takes precedence.
 
-These are the skill files xi found at startup (absolute paths):
+Agent-specific roots (separate from the standard-root precedence above):
+
+{agent_dirs_section}
+
+Agent-specific skills are discovered under each agent’s `skills/` directory.
+Availability and duplicate-name resolution depend on the active agent and
+its skill filters.
+
+Directories marked “in use” contributed skills to this startup’s discovery
+results. That marker is informational, not a recommendation about scope.
+
+## Discovered skill files
+
+These paths identify the filesystem skills xi discovered at startup:
 
 {skills_section}
 
-## How skills are structured
+- `[global]`: discovered under a home-directory skill root.
+- `[project]`: discovered under a skill root in the working directory or
+  an ancestor. An ancestor root may apply to multiple repositories.
+- `[agent: name]`: discovered under that agent’s `skills/` directory.
 
-Each skill lives in its own subdirectory under one of the search directories
-above. The directory name does not have to match the skill name — only the
-`name` field in the YAML frontmatter of `SKILL.md` determines the skill
-identity. A minimal `SKILL.md` looks like:
+This inventory is a startup snapshot, not a live filesystem listing.
+
+## File format
+
+Each filesystem skill lives in a subdirectory containing `SKILL.md`.
+The YAML frontmatter determines its identity; the directory name need not
+match.
 
 ```markdown
 ---
 name: my-skill
-description: when to use this skill
+description: Describes the capability and when to use it.
 ---
 
-# Skill body here
+# Skill instructions
 ```
 
-## Modifying an existing skill
+## Locating or modifying a skill
 
-Find the skill's absolute path in the list above and edit its `SKILL.md`.
+Use the listed absolute path to locate an existing skill. Read its current
+contents and applicable instructions before editing.
 
-Scope indicators:
-- `[global]` — lives under a home-directory skill root, shared across all projects.
-- `[project]` — lives under a project-local skill root in the current directory or an ancestor.
+## Choosing a location for a new skill
 
-## Creating a new skill
+Choose scope according to user intent and applicable guidance:
 
-{create_section}
+- Use a project root for repository- or subtree-specific guidance.
+- Use a global root for guidance intended to apply across projects.
+
+An existing active directory may be convenient within the chosen scope,
+but activity alone does not determine placement. A supported search
+directory need not already exist.
 ",
     );
 
     SkillMeta {
-        name: "edit_skill".to_string(),
+        name: "xi-skill-locations".to_string(),
         description:
-            "use when the user wants to edit, modify, create, or delete a skill. catch phrases: 'change the skill', 'update SKILL.md', 'add a new skill', 'where are skill files', 'create a skill'."
+            "Explains where xi discovers skills, locates loaded skill files, and describes the supported SKILL.md format. Use when locating skills or choosing where to store one."
                 .to_string(),
-        // Embedded edit skill is a standard skill available to every agent.
         scope: SkillScope::Standard,
         // Dummy path — never read from disk; learn uses embedded_body.
-        path: PathBuf::from("__embedded__/edit_skill/SKILL.md"),
-        base_dir: PathBuf::from("__embedded__/edit_skill"),
+        path: PathBuf::from("__embedded__/xi-skill-locations/SKILL.md"),
+        base_dir: PathBuf::from("__embedded__/xi-skill-locations"),
         embedded_body: Some(body),
     }
 }
@@ -512,8 +511,8 @@ fn strip_frontmatter(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        SkillScope, expand_skill, load_scoped_skills, load_skills_from_dirs, parse_skill_meta,
-        project_skill_dirs, strip_frontmatter,
+        SkillScope, build_embedded_skill_locations, expand_skill, load_scoped_skills,
+        load_skills_from_dirs, parse_skill_meta, project_skill_dirs, strip_frontmatter,
     };
     use std::path::{Path, PathBuf};
 
@@ -580,6 +579,56 @@ mod tests {
                 .iter()
                 .any(|s| s.name == "gamma" && s.scope == SkillScope::Agent("specialist".into()))
         );
+        let body = build_embedded_skill_locations(&loaded, &agents)
+            .embedded_body
+            .unwrap();
+        assert!(body.contains("`beta` [agent: default]"));
+        assert!(body.contains("`gamma` [agent: specialist]"));
+        assert!(body.contains(&default_dir.join("skills").display().to_string()));
+        assert!(body.contains("active agent and\nits skill filters"));
+    }
+
+    #[test]
+    fn embedded_skill_locations_explains_origin_and_authority() {
+        let skill = build_embedded_skill_locations(&[], &[]);
+        assert_eq!(skill.name, "xi-skill-locations");
+        assert_eq!(
+            skill.path,
+            PathBuf::from("__embedded__/xi-skill-locations/SKILL.md")
+        );
+        let body = skill.embedded_body.unwrap();
+        assert!(body.contains("It has no `SKILL.md` file on disk."));
+        assert!(body.contains("policy or override user direction"));
+        assert!(body.contains("activity alone does not determine placement"));
+        assert!(body.contains("(none loaded)"));
+        assert!(!body.contains("Put new skills in an already-active directory"));
+    }
+
+    #[test]
+    fn embedded_skill_locations_lists_files_even_with_old_builtin_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_skill(dir.path(), "custom", "edit_skill", "User guidance");
+        let loaded = load_skills_from_dirs(vec![dir.path().to_path_buf()]);
+        let body = build_embedded_skill_locations(&loaded, &[])
+            .embedded_body
+            .unwrap();
+        assert!(body.contains("`edit_skill` [global]"));
+        assert!(body.contains(&path.display().to_string()));
+        assert!(body.contains("startup snapshot, not a live filesystem listing"));
+    }
+
+    #[test]
+    fn embedded_skill_locations_preserves_search_precedence() {
+        let body = build_embedded_skill_locations(&[], &[])
+            .embedded_body
+            .unwrap();
+        let mut previous_end = 0;
+        for dir in super::skill_dirs() {
+            let entry = format!("- `{}` [", dir.display());
+            let offset = body[previous_end..].find(&entry).unwrap();
+            previous_end += offset + entry.len();
+        }
+        assert!(body.contains("first search root"));
     }
 
     #[test]
