@@ -329,8 +329,6 @@ pub fn build_system_prompt(
 Available tools:\n\
 {tool_list}\n\
 \n\
-In addition to the tools above, you may have access to other custom tools depending on the project.\n\
-\n\
 File paths are relative to the current working directory.\n\
 \n\
 Guidelines:\n\
