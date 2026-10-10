@@ -451,8 +451,12 @@ active one. Both inline and block-style YAML string lists are accepted.
 ### Always-present tools
 
 `ask_user` and `learn` are always-present — they survive any filter and
-are always available to every agent. Future subagent infrastructure (e.g.
-`spawn_subagent`) will also be always-present.
+are always available to every agent. `agent_session` is registered only when
+session IPC is enabled and survives tool filters while available. In that mode,
+the embedded `xi-subagent-sessions` skill is also loaded and survives agent
+skill filters; it explains how to launch and interact with separate xi sessions
+without defining delegation policy. Native subagent orchestration (e.g.
+`spawn_subagent`) remains future work.
 
 ### System prompt composition
 
