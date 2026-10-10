@@ -330,6 +330,21 @@ into the conversation history and mirrored to the UI via
 `Arc<Mutex<FileTracker>>` shared between `AgentLoopConfig` and the three
 file tools.
 
+## Session IPC
+
+On Unix, the enabled session-control IPC listener creates a socket under
+`$XDG_RUNTIME_DIR/xi/` when that runtime directory is owned by the current
+user. Otherwise xi uses `/tmp/xi-<uid>/`. The directory is private (mode 0700),
+and the socket filename is `s-` plus the lowercase SHA-256 digest of the
+canonical worktree path, prefixed with a versioned domain string. This keeps
+socket names fixed-size and avoids putting transient sockets in project trees.
+
+Clients resolve the same shared endpoint first and try the legacy
+`<worktree>/.xi/xi.sock` endpoint if it cannot be reached. This is a one-way
+upgrade compatibility path: new clients can control older running sessions,
+but older clients cannot discover servers using the shared endpoint. New
+servers never create the legacy socket.
+
 ## Context Compaction
 
 Tau now supports durable context compaction through the session event log.
