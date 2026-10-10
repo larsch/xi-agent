@@ -16,12 +16,6 @@ This repository is a AI agent harness for the terminal, built with Rust.
 - Ensure all tests pass before committing (`cargo test`).
 - Remove unused code rather than suppressing it. Only use `#[allow(dead_code)]` when the compiler cannot see a real use (e.g. serde-populated fields, test helpers that must live outside `#[cfg(test)]`). Always add a comment explaining why.
 
-## Working modes
-
-- Use the `fastpath` skill for trivial, clearly bounded changes when appropriate.
-- Use the `workflow` skill for non-trivial changes.
-- Follow the active skill for stage gates, acceptance handling, reconciliation, and any repository follow-through.
-
 ## Debugging
 
 - Debug logs are written to `~/.cache/xi`.
