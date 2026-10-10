@@ -233,19 +233,19 @@ pub fn build_system_prompt(
     let mut tool_names: Vec<&str> = tools.keys().map(String::as_str).collect();
     tool_names.sort_unstable();
 
-    let tool_list = if tool_names.is_empty() {
+    let tool_snippets: Vec<String> = tool_names
+        .iter()
+        .filter_map(|name| {
+            tools
+                .get(*name)
+                .and_then(|tool| tool.prompt_snippet())
+                .map(|snippet| format!("- {name}: {snippet}"))
+        })
+        .collect();
+    let tool_list = if tool_snippets.is_empty() {
         "(none)".to_string()
     } else {
-        tool_names
-            .iter()
-            .map(|name| {
-                let desc = tools.get(*name).map(|t| t.description()).unwrap_or(*name);
-                // Trim the description to its first sentence for brevity.
-                let short = first_sentence(desc);
-                format!("- {name}: {short}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        tool_snippets.join("\n")
     };
 
     // Build guidelines conditioned on which tools are present.
@@ -361,36 +361,6 @@ When a skill file references a relative path, resolve it against the skill direc
     )
 }
 
-/// Return the text up to and including the first `.`, `!`, or `?`,
-/// or the whole string if none is found. Strips leading/trailing whitespace.
-fn first_sentence(s: &str) -> &str {
-    // A sentence ends at the first `.`, `!`, or `?` that is followed by
-    // whitespace and then an uppercase letter (or the end of the string).
-    // This avoids truncating inside dotted paths (`…/.worktrees/…`) or
-    // abbreviations like `e.g.`.
-    let chars: Vec<(usize, char)> = s.char_indices().collect();
-
-    for (idx, &(byte, c)) in chars.iter().enumerate() {
-        if !matches!(c, '.' | '!' | '?') {
-            continue;
-        }
-
-        let mut next = idx + 1;
-        while next < chars.len() && chars[next].1.is_whitespace() {
-            next += 1;
-        }
-
-        let ends_string = next >= chars.len();
-        let starts_sentence = next < chars.len() && chars[next].1.is_uppercase();
-
-        if ends_string || starts_sentence {
-            return s[..byte + c.len_utf8()].trim();
-        }
-    }
-
-    s.trim()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -399,7 +369,7 @@ mod tests {
         sync::Arc,
     };
 
-    use super::{build_system_prompt, first_sentence, read_rules};
+    use super::{build_system_prompt, read_rules};
     use crate::{
         agent::types::{Tool, ToolRegistry},
         agents::AgentMeta,
@@ -409,6 +379,7 @@ mod tests {
     struct TestTool {
         name: &'static str,
         desc: &'static str,
+        snippet: Option<&'static str>,
     }
 
     impl Tool for TestTool {
@@ -418,6 +389,10 @@ mod tests {
 
         fn description(&self) -> &str {
             self.desc
+        }
+
+        fn prompt_snippet(&self) -> Option<&str> {
+            self.snippet
         }
 
         fn parameters_schema(&self) -> serde_json::Value {
@@ -436,11 +411,26 @@ mod tests {
     }
 
     fn registry(tool_defs: &[(&'static str, &'static str)]) -> ToolRegistry {
+        registry_with_snippets(
+            &tool_defs
+                .iter()
+                .map(|(name, desc)| (*name, *desc, None))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn registry_with_snippets(
+        tool_defs: &[(&'static str, &'static str, Option<&'static str>)],
+    ) -> ToolRegistry {
         let mut tools: ToolRegistry = HashMap::new();
-        for (name, desc) in tool_defs {
+        for (name, desc, snippet) in tool_defs {
             tools.insert(
                 (*name).to_string(),
-                Arc::new(TestTool { name, desc }) as Arc<dyn Tool>,
+                Arc::new(TestTool {
+                    name,
+                    desc,
+                    snippet: *snippet,
+                }) as Arc<dyn Tool>,
             );
         }
         tools
@@ -515,35 +505,56 @@ mod tests {
     }
 
     #[test]
-    fn first_sentence_handles_punctuation_and_trim() {
-        assert_eq!(first_sentence("  Hello world. More text"), "Hello world.");
-        assert_eq!(first_sentence("What now? Later"), "What now?");
-        assert_eq!(first_sentence("No punctuation"), "No punctuation");
+    fn prompt_tool_list_uses_explicit_snippets_and_omits_tools_without_them() {
+        let tools = registry_with_snippets(&[
+            (
+                "full_only",
+                "Full description with details. More details.",
+                None,
+            ),
+            (
+                "summarized",
+                "Full description. Additional details.",
+                Some("Short summary"),
+            ),
+        ]);
+
+        let prompt = build_system_prompt(&tools, "/tmp", &[], None);
+
+        assert!(prompt.contains("- summarized: Short summary"));
+        assert!(!prompt.contains("full_only"));
+        assert!(!prompt.contains("Full description"));
     }
 
     #[test]
-    fn first_sentence_does_not_split_dotted_paths_or_abbreviations() {
-        // A dotted path and an `e.g.` abbreviation must not end the sentence.
-        let desc = "Restart the host — re-execute its binary (/home/u/.worktrees/x/target/release/xi) from disk (e.g. after a rebuild) and resume. Takes no arguments.";
-        assert_eq!(
-            first_sentence(desc),
-            "Restart the host — re-execute its binary (/home/u/.worktrees/x/target/release/xi) from disk (e.g. after a rebuild) and resume."
+    fn prompt_tool_list_shows_none_when_no_snippets_exist() {
+        let prompt = build_system_prompt(
+            &registry(&[("bash", "Full shell description.")]),
+            "/tmp",
+            &[],
+            None,
         );
+        assert!(prompt.contains("Available tools:\n(none)"));
     }
 
     #[test]
     fn build_system_prompt_includes_tool_specific_guidelines() {
-        let tools = registry(&[
-            ("bash", "Run shell commands. With side effects."),
+        let tools = registry_with_snippets(&[
+            (
+                "bash",
+                "Run shell commands. With side effects.",
+                Some("Run shell commands"),
+            ),
             (
                 "exec",
                 "Execute a program directly with an argv-style argument list.",
+                Some("Execute a program"),
             ),
-            ("find_files", "Find files recursively."),
-            ("read_file", "Read files."),
-            ("edit_file", "Edit files."),
-            ("write_file", "Write files."),
-            ("ask_user", "Ask a question."),
+            ("find_files", "Find files recursively.", Some("Find files")),
+            ("read_file", "Read files.", Some("Read a file")),
+            ("edit_file", "Edit files.", Some("Edit a file")),
+            ("write_file", "Write files.", Some("Write a file")),
+            ("ask_user", "Ask a question.", Some("Ask a question.")),
         ]);
 
         let prompt = build_system_prompt(&tools, "/tmp", &[], None);
@@ -554,7 +565,7 @@ mod tests {
         assert!(prompt.contains("Use write_file only for new files or complete rewrites."));
         assert!(prompt.contains("Use ask_user when the task requires a user decision"));
         assert!(prompt.contains("- ask_user: Ask a question."));
-        assert!(prompt.contains("- bash: Run shell commands."));
+        assert!(prompt.contains("- bash: Run shell commands"));
         assert!(prompt.contains("Prefer exec over bash when arguments contain spaces"));
         assert!(prompt.contains("pass the payload through a file or stdin option"));
     }

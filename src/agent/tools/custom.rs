@@ -20,6 +20,7 @@ pub struct CustomTool {
     path: PathBuf,
     name: String,
     description: String,
+    prompt_snippet: Option<String>,
     schema: Value,
 }
 
@@ -30,6 +31,10 @@ impl Tool for CustomTool {
 
     fn description(&self) -> &str {
         &self.description
+    }
+
+    fn prompt_snippet(&self) -> Option<&str> {
+        self.prompt_snippet.as_deref()
     }
 
     fn parameters_schema(&self) -> Value {
@@ -182,6 +187,12 @@ fn load_tool_from_executable(path: &std::path::Path) -> Option<CustomTool> {
         .and_then(Value::as_str)?
         .trim()
         .to_string();
+    let prompt_snippet = json
+        .get("prompt_snippet")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|snippet| !snippet.is_empty())
+        .map(str::to_string);
     let schema = json
         .get("parameters_schema")
         .cloned()
@@ -199,6 +210,7 @@ fn load_tool_from_executable(path: &std::path::Path) -> Option<CustomTool> {
         path: path.to_path_buf(),
         name,
         description,
+        prompt_snippet,
         schema,
     })
 }
@@ -235,11 +247,14 @@ mod tests {
         std::fs::set_permissions(path, perms).unwrap();
     }
 
-    fn describe_script(name: &str, description: &str) -> String {
+    fn describe_script(name: &str, description: &str, prompt_snippet: Option<&str>) -> String {
+        let snippet_field = prompt_snippet
+            .map(|snippet| format!(r#","prompt_snippet":"{snippet}""#))
+            .unwrap_or_default();
         format!(
             r#"#!/bin/sh
 if [ "$1" = "--describe" ]; then
-  printf '{{"name":"{name}","description":"{description}","parameters_schema":{{"type":"object","properties":{{"input":{{"type":"string"}}}}}}}}'
+  printf '{{"name":"{name}","description":"{description}"{snippet_field},"parameters_schema":{{"type":"object","properties":{{"input":{{"type":"string"}}}}}}}}'
   exit 0
 fi
 input=$(cat)
@@ -252,12 +267,49 @@ printf "got: $input"
     fn loads_valid_tool_from_directory() {
         let dir = tempfile::tempdir().unwrap();
         let script_path = dir.path().join("my_tool");
-        write_script(&script_path, &describe_script("my_tool", "Does something."));
+        write_script(
+            &script_path,
+            &describe_script("my_tool", "Does something.", None),
+        );
 
         let tools = load_custom_tools(&[dir.path().to_path_buf()]);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "my_tool");
         assert_eq!(tools[0].description(), "Does something.");
+        assert_eq!(tools[0].prompt_snippet(), None);
+    }
+
+    #[test]
+    fn loads_and_trims_optional_prompt_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("snipped_tool");
+        write_script(
+            &script_path,
+            &describe_script(
+                "snipped_tool",
+                "Full description.",
+                Some("  Short prompt hint  "),
+            ),
+        );
+
+        let tools = load_custom_tools(&[dir.path().to_path_buf()]);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].description(), "Full description.");
+        assert_eq!(tools[0].prompt_snippet(), Some("Short prompt hint"));
+    }
+
+    #[test]
+    fn blank_optional_prompt_snippet_is_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("blank_snippet_tool");
+        write_script(
+            &script_path,
+            &describe_script("blank_snippet_tool", "Full description.", Some("   ")),
+        );
+
+        let tools = load_custom_tools(&[dir.path().to_path_buf()]);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].prompt_snippet(), None);
     }
 
     #[test]
@@ -304,7 +356,7 @@ printf "got: $input"
     fn deduplicates_same_directory_via_canonical_path() {
         let dir = tempfile::tempdir().unwrap();
         let script_path = dir.path().join("my_tool");
-        write_script(&script_path, &describe_script("my_tool", "Desc."));
+        write_script(&script_path, &describe_script("my_tool", "Desc.", None));
 
         // Pass the same directory twice (once as canonical, once as raw).
         let roots = vec![dir.path().to_path_buf(), dir.path().to_path_buf()];
@@ -329,7 +381,10 @@ printf "got: $input"
     async fn execute_passes_args_on_stdin_and_returns_stdout() {
         let dir = tempfile::tempdir().unwrap();
         let script_path = dir.path().join("echo_tool");
-        write_script(&script_path, &describe_script("echo_tool", "Echoes input."));
+        write_script(
+            &script_path,
+            &describe_script("echo_tool", "Echoes input.", None),
+        );
 
         let tools = load_custom_tools(&[dir.path().to_path_buf()]);
         assert_eq!(tools.len(), 1);

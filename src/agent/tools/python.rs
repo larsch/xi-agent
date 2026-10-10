@@ -179,6 +179,10 @@ impl Tool for PythonTool {
         &self.description
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Run a Python script")
+    }
+
     fn parameters_schema(&self) -> Value {
         self.schema.clone()
     }

@@ -53,6 +53,10 @@ impl Tool for AskUserTool {
         "Ask the user a question with optional multiple-choice answers. Use this only when you need user input to proceed."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Ask the user for input or a decision")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

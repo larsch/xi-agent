@@ -109,6 +109,10 @@ impl Tool for ReadFileTool {
          When the output is truncated a notice `[lines X-Y of Z. Use offset/limit parameters to read more.]` is appended."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Read text and image files")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

@@ -20,6 +20,10 @@ impl Tool for AgentSessionTool {
         "Interact with a live external xi session associated with another worktree. Use inspect to identify the session, state to check its runtime status, or post_prompt to ask it to act as a worker. This contacts a running session; it does not inspect source files. Returns unavailable when no live session owns the target directory."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Inspect, check, or prompt a live xi session in another worktree")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

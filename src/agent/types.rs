@@ -289,6 +289,10 @@ impl ToolCallContext {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+    /// Optional concise entry for the system prompt's available-tools list.
+    fn prompt_snippet(&self) -> Option<&str> {
+        None
+    }
     /// JSON Schema object describing the tool's input parameters.
     fn parameters_schema(&self) -> serde_json::Value;
     /// Execute the tool with the given arguments (JSON object).

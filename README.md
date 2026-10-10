@@ -134,13 +134,16 @@ Add custom tools by placing executable files in these directories (in this order
 
 Tools must respond to a `--describe` option and output a JSON description of the
 tool's interface, including its name, description, and expected input
-parameters. This allows the agent to understand how to use the tool effectively.
-For example:
+parameters. The full `description` is sent to the model with the tool
+interface. The optional `prompt_snippet` is a concise hint shown in the system
+prompt's available-tools list; if omitted or blank, the tool is left out of
+that list but remains available for use. For example:
 
 ```json
 {
   "name": "my_tool",
   "description": "A tool that does something useful",
+  "prompt_snippet": "Do something useful",
   "parameters_schema": {
     "type": "object",
     "properties": {

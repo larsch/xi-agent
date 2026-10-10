@@ -43,6 +43,10 @@ impl Tool for ExecTool {
          paths is appended."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Execute a program directly without shell parsing")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

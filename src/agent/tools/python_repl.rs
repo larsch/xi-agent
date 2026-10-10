@@ -96,6 +96,10 @@ impl Tool for PythonReplTool {
         &self.description
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Run Python code in a persistent REPL")
+    }
+
     fn parameters_schema(&self) -> Value {
         let mut properties = serde_json::json!({
             "code": { "type": "string", "description": "Python code to execute" },

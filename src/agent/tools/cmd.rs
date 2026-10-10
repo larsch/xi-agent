@@ -26,6 +26,10 @@ impl Tool for CmdTool {
          and a notice with the paths is appended. For rich or structured writes, create a UTF-8 no-BOM payload file and invoke the target CLI with its --patch-file, --fields-file, or stdin option rather than passing the payload inline."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Run Windows command prompt commands")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

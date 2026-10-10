@@ -35,6 +35,10 @@ impl Tool for LearnTool {
         "Learn a skill's specialized instructions by name. Use the skill name exactly as listed in the available skills."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Load specialized instructions for a skill")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

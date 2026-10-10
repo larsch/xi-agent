@@ -36,6 +36,10 @@ impl Tool for RestartHostTool {
         &self.description
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Restart xi from its rebuilt binary and resume this session")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

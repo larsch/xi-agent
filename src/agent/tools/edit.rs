@@ -66,6 +66,10 @@ impl Tool for EditTool {
          multiple matches are found."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Replace an exact text occurrence in a file")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

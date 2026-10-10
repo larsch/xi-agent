@@ -299,7 +299,10 @@ chat-completions and Anthropic-routed models do not currently map thinking).
 scans three directories in order: `~/.xi/tools/`, `./.xi/tools/` (project-
 local), and `ProjectDirs::config_dir()/tools/`. Each executable that responds
 to `--describe` with a valid JSON descriptor (`name`, `description`,
-`parameters_schema`) is registered as a `CustomTool`. At invocation, JSON
+`parameters_schema`) is registered as a `CustomTool`. The optional
+`prompt_snippet` field supplies a concise entry in the system prompt's available-
+tools list; absent or blank snippets are omitted there, while the full
+`description` remains in the provider tool definition. At invocation, JSON
 args are written to the process stdin; stdout is the result string; non-zero
 exit becomes `ToolResult::err`. Built-in tool names take precedence — a
 custom tool whose name collides with a built-in is silently dropped (logged

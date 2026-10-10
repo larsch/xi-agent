@@ -31,6 +31,10 @@ impl Tool for PowerShellTool {
          Avoid literal \\\" sequences in the final command string; PowerShell treats them as backslash+quote characters. For rich or structured writes, create a UTF-8 no-BOM payload file and pass it through a --patch-file, --fields-file, or stdin option. Do not embed payloads in native command-line arguments."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Run PowerShell commands")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

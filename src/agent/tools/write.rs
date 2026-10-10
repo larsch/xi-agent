@@ -68,6 +68,10 @@ impl Tool for WriteTool {
          as needed. Overwrites the file if it already exists."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Write content to a file")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

@@ -88,6 +88,10 @@ impl Tool for FindTool {
          the cap is reached."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Find files matching a glob pattern")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

@@ -26,6 +26,10 @@ impl Tool for BashTool {
          and a notice with the paths is appended."
     }
 
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Run shell commands")
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
