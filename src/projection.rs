@@ -173,7 +173,8 @@ fn push_llm_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
         SessionEvent::TurnError { .. }
         | SessionEvent::CompactionSummary { .. }
         | SessionEvent::ModelChanged { .. }
-        | SessionEvent::ThinkingLevelChanged { .. } => {}
+        | SessionEvent::ThinkingLevelChanged { .. }
+        | SessionEvent::AgentChanged { .. } => {}
     }
 }
 
@@ -310,6 +311,7 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
             msg.include_in_llm = false;
             msgs.push(msg);
         }
+        SessionEvent::AgentChanged { .. } => {}
     }
 }
 

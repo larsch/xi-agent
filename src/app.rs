@@ -373,7 +373,7 @@ impl App {
 
     /// Switch to the named agent, rebuilding tools, skills, and system prompt.
     /// Passing an empty string clears the active agent and restores defaults.
-    /// Persists the choice to config.toml.
+    /// Persists the choice in the active session, never in global config.
     pub fn switch_agent(&mut self, name: &str, cwd: &str) {
         if name.is_empty() {
             self.active_agent = None;
@@ -383,11 +383,11 @@ impl App {
             return; // unknown agent name — ignore
         }
         self.rebuild_agent_system_prompt(cwd);
-
-        // Persist to config
-        if let Ok(mut config) = crate::config::XiConfig::load() {
-            config.agent = self.active_agent.clone();
-            let _ = config.save();
+        if self.session.session_state.is_some() {
+            self.append_event_immediate(SessionEvent::AgentChanged {
+                agent: self.active_agent.clone().unwrap_or_default(),
+                timestamp: Self::now_ts(),
+            });
         }
     }
 
@@ -594,6 +594,16 @@ impl App {
                 // before moving the event log into session_state.
                 self.latest_usage = Self::find_last_usage_from_events(&log.events);
                 self.session.session_state = Some(SessionState::from_event_log(log));
+                if let Some(agent) = self
+                    .session
+                    .session_state
+                    .as_ref()
+                    .and_then(SessionState::agent_preference)
+                {
+                    self.active_agent = (!agent.is_empty()).then(|| agent.to_string());
+                    let cwd = self.session.current_cwd.clone();
+                    self.rebuild_agent_system_prompt(&cwd);
+                }
                 // Seed the file tracker with files the agent previously
                 // read or wrote so that write_file/edit_file staleness
                 // checks don't spuriously reject them as "never read".
@@ -3264,6 +3274,115 @@ mod tests {
         let combined = app.display_messages_combined();
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].content, "hello");
+    }
+
+    #[test]
+    fn switching_agent_records_preference_in_active_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        let mut app = make_app();
+        app.agents.push(crate::agents::AgentMeta {
+            name: "specialist".to_string(),
+            description: String::new(),
+            mode: crate::agents::AgentMode::Primary,
+            include_tools: vec!["*".to_string()],
+            exclude_tools: Vec::new(),
+            include_skills: vec!["*".to_string()],
+            exclude_skills: Vec::new(),
+            system_prompt: String::new(),
+            agents_md: None,
+            path: std::path::PathBuf::new(),
+            base_dir: std::path::PathBuf::new(),
+        });
+        app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
+            crate::event_log::EventLog::load(&path).expect("load session"),
+        ));
+
+        app.switch_agent("specialist", "/tmp");
+
+        assert_eq!(
+            app.session
+                .session_state
+                .as_ref()
+                .and_then(|state| state.agent_preference()),
+            Some("specialist")
+        );
+    }
+
+    #[test]
+    fn first_session_initializes_agent_preference_from_current_choice() {
+        let mut app = make_app();
+        app.active_agent = Some("explicit-choice".to_string());
+
+        app.ensure_event_log_for_submit();
+
+        let state = app.session.session_state.as_ref().expect("session state");
+        assert_eq!(state.agent_preference(), Some("explicit-choice"));
+    }
+
+    #[test]
+    fn resume_restores_session_agent_preference_and_legacy_keeps_startup_choice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().join("sessions"))
+            .expect("open session store");
+        let saved_id = store.create_session(&cwd).expect("create saved session");
+        let legacy_id = store.create_session(&cwd).expect("create legacy session");
+        let mut log = store.load_events(&saved_id).expect("load saved session");
+        log.append_batch(&[
+            crate::session_event::SessionEvent::AgentChanged {
+                agent: "specialist".to_string(),
+                timestamp: 1,
+            },
+            crate::session_event::SessionEvent::AgentChanged {
+                agent: String::new(),
+                timestamp: 2,
+            },
+            crate::session_event::SessionEvent::AgentChanged {
+                agent: "specialist".to_string(),
+                timestamp: 3,
+            },
+        ])
+        .expect("append agent preferences");
+
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.active_agent = Some("startup-choice".to_string());
+        app.resume_session_by_id(&saved_id);
+        assert_eq!(app.active_agent.as_deref(), Some("specialist"));
+
+        app.active_agent = Some("startup-choice".to_string());
+        app.resume_session_by_id(&legacy_id);
+        assert_eq!(app.active_agent.as_deref(), Some("startup-choice"));
+    }
+
+    #[test]
+    fn agent_picker_highlights_active_agent() {
+        let mut app = make_app();
+        app.agents = ["alpha", "specialist"]
+            .into_iter()
+            .map(|name| crate::agents::AgentMeta {
+                name: name.to_string(),
+                description: String::new(),
+                mode: crate::agents::AgentMode::Primary,
+                include_tools: vec!["*".to_string()],
+                exclude_tools: Vec::new(),
+                include_skills: vec!["*".to_string()],
+                exclude_skills: Vec::new(),
+                system_prompt: String::new(),
+                agents_md: None,
+                path: std::path::PathBuf::new(),
+                base_dir: std::path::PathBuf::new(),
+            })
+            .collect();
+        app.active_agent = Some("specialist".to_string());
+
+        app.enter_agent_selection_mode();
+
+        assert_eq!(
+            app.selection.items[app.selection.selected].label,
+            "specialist"
+        );
     }
 
     #[test]

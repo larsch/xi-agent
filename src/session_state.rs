@@ -66,6 +66,20 @@ impl SessionState {
         &self.event_log.events
     }
 
+    /// Return the latest explicit agent preference recorded for this session.
+    /// An empty name represents the default agent; `None` means the session
+    /// predates agent preference persistence.
+    pub fn agent_preference(&self) -> Option<&str> {
+        self.event_log
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                SessionEvent::AgentChanged { agent, .. } => Some(agent.as_str()),
+                _ => None,
+            })
+    }
+
     /// Append one complete, self-contained event (e.g. `UserMessage`,
     /// `ModelChanged`) and update read models incrementally.
     pub fn append_immediate(&mut self, ev: SessionEvent) -> anyhow::Result<()> {
@@ -180,6 +194,31 @@ mod tests {
             usage: None,
             timestamp: ts(),
         }
+    }
+
+    #[test]
+    fn session_state_returns_latest_agent_preference_and_distinguishes_default() {
+        let path = std::env::temp_dir().join(format!(
+            "xi-session-state-agent-preference-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut state = SessionState::from_event_log(EventLog::load(&path).unwrap());
+        assert_eq!(state.agent_preference(), None);
+        state
+            .append_immediate(SessionEvent::AgentChanged {
+                agent: "specialist".to_string(),
+                timestamp: ts(),
+            })
+            .unwrap();
+        assert_eq!(state.agent_preference(), Some("specialist"));
+        state
+            .append_immediate(SessionEvent::AgentChanged {
+                agent: String::new(),
+                timestamp: ts(),
+            })
+            .unwrap();
+        assert_eq!(state.agent_preference(), Some(""));
     }
 
     #[test]

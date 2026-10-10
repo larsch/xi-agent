@@ -241,6 +241,10 @@ pub enum SessionEvent {
         timestamp: u64,
     },
 
+    /// The active agent profile was changed during the session. An empty
+    /// name represents the default agent.
+    AgentChanged { agent: String, timestamp: u64 },
+
     /// The thinking level was changed during the session.
     ThinkingLevelChanged {
         level: ThinkingLevel,
@@ -390,6 +394,21 @@ mod tests {
             matches!(decoded, SessionEvent::ModelChanged { ref model, .. }
             if model == "claude-opus-4")
         );
+    }
+
+    #[test]
+    fn agent_changed_round_trips_including_default() {
+        for agent in ["specialist", ""] {
+            let ev = SessionEvent::AgentChanged {
+                agent: agent.to_string(),
+                timestamp: ts(),
+            };
+            let json = serde_json::to_string(&ev).unwrap();
+            let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(decoded, SessionEvent::AgentChanged { agent: decoded, .. } if decoded == agent)
+            );
+        }
     }
 
     #[test]

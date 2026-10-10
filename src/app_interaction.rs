@@ -32,13 +32,15 @@ impl App {
             Some(SelectionKind::Provider) => {
                 Some(format!("/provider {}", self.provider.current_instance.id))
             }
+            Some(SelectionKind::Agent) => self
+                .resolve_current_agent()
+                .map(|agent| format!("/agent {}", agent.name)),
             Some(SelectionKind::LoginProvider)
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
             | Some(SelectionKind::LoginAction)
             | Some(SelectionKind::ConfirmProviderRemoval)
             | Some(SelectionKind::ProviderApiType)
-            | Some(SelectionKind::Agent)
             | Some(SelectionKind::KeybindingHelp)
             | None => None,
         };
@@ -104,6 +106,7 @@ impl App {
         }
         self.selection
             .activate(SelectionKind::Agent, "  Select agent  ", items);
+        self.select_current_default();
     }
 
     /// Returns true when the active selection is the agent picker.
@@ -1028,6 +1031,16 @@ impl App {
     pub(crate) fn ensure_event_log_for_submit(&mut self) {
         let had_state = self.session.session_state.is_some();
         self.session.ensure_event_log_for_submit();
+        let needs_initial_agent_preference =
+            self.session.session_state.as_ref().is_some_and(|state| {
+                state.events().is_empty() && state.agent_preference().is_none()
+            });
+        if needs_initial_agent_preference {
+            self.append_event_immediate(crate::session_event::SessionEvent::AgentChanged {
+                agent: self.active_agent.clone().unwrap_or_default(),
+                timestamp: Self::now_ts(),
+            });
+        }
         // Seed the file tracker with files the agent previously read or
         // wrote so that write_file/edit_file staleness checks don't
         // spuriously reject them as "never read" after a session reload.

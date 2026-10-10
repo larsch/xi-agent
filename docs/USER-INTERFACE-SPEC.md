@@ -6,6 +6,7 @@
 - Support non-interactive mode with `-p/--print` flag, which prints the result of each command to stdout instead of rendering a UI.
 - In interactive mode, `--provider <name>` must exactly match one of the configured provider instance names shown by `/provider`, or `test`; unknown values are an error.
 - `--agent <name>` selects a discovered agent profile for the current invocation, overriding the agent configured in `config.toml`. The selected profile applies in interactive mode, `--print`, and `--print-system-prompt`; an unknown explicit name is an error. The CLI override is not persisted automatically.
+- Interactive agent changes are saved with the active session and restored when that session is resumed. They never update `config.agent`; that setting remains the initial preference for sessions without a saved agent choice. The agent picker highlights the active session's agent.
 - In non-interactive mode, `--print` requires `--provider <name>`.
 - In non-interactive mode, `--provider <name>` must exactly match one of the configured provider instance names shown by `/provider`, or `test`; unknown values are an error.
 - User-facing provider errors in both interactive and non-interactive modes should be rendered in natural English first, followed by the original provider message as supporting detail.
