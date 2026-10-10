@@ -2198,6 +2198,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_done_clears_pending_ask_ui_state() {
+        let mut app = make_app();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "What is your name?".to_string(),
+            context: None,
+            options: vec![],
+            allow_multiple: false,
+            allow_freeform: true,
+            reply: reply_tx,
+        });
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::Done);
+
+        assert!(!app.has_pending_ask());
+        assert!(!app.ask_user_freeform_mode());
+    }
+
     /// When ask_user has options and allow_freeform is true, the freeform
     /// sentinel should appear after the option items.
     #[test]

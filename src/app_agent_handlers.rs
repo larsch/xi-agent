@@ -637,6 +637,7 @@ impl App {
     }
 
     fn on_agent_done(&mut self) {
+        self.clear_pending_ask_after_agent_exit();
         self.publish_ipc_completion("success");
         self.end_agent_turn();
         self.runtime.clear_agent_handle();

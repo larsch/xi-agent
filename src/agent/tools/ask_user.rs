@@ -5,7 +5,9 @@ use serde_json::Value;
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::agent::file_tracker::FileTracker;
-use crate::agent::types::{AskRequest, AskUserOption, AskUserResponse, Tool, ToolResult};
+use crate::agent::types::{
+    AskRequest, AskUserOption, AskUserResponse, CancelLevel, Tool, ToolResult,
+};
 use crate::app_event::{AppEvent, AppEventTx};
 
 pub struct AskUserTool {
@@ -177,12 +179,53 @@ impl Tool for AskUserTool {
                 tracker.lock().unwrap().refresh_baselines();
             }
 
-            match reply_rx.await {
+            match wait_for_reply(reply_rx, ctx.cancel_rx).await {
                 Ok(AskUserResponse::Answer(answer)) => ToolResult::ok_str(answer),
                 Ok(AskUserResponse::Cancelled) => ToolResult::err("ask_user cancelled by user"),
-                Err(_) => ToolResult::err("ask_user failed: reply channel closed"),
+                Err(AskWaitError::Cancelled) => {
+                    ToolResult::err("ask_user cancelled by agent abort")
+                }
+                Err(AskWaitError::ReplyClosed) => {
+                    ToolResult::err("ask_user failed: reply channel closed")
+                }
             }
         })
+    }
+}
+
+enum AskWaitError {
+    Cancelled,
+    ReplyClosed,
+}
+
+async fn wait_for_reply(
+    mut reply_rx: oneshot::Receiver<AskUserResponse>,
+    cancel_rx: Option<tokio::sync::watch::Receiver<CancelLevel>>,
+) -> Result<AskUserResponse, AskWaitError> {
+    let mut cancel_rx = cancel_rx;
+
+    loop {
+        if cancel_rx
+            .as_ref()
+            .is_some_and(|rx| *rx.borrow() >= CancelLevel::HardAbort)
+        {
+            return Err(AskWaitError::Cancelled);
+        }
+
+        if let Some(rx) = &mut cancel_rx {
+            let cancel_channel_closed = tokio::select! {
+                response = &mut reply_rx => {
+                    return response.map_err(|_| AskWaitError::ReplyClosed);
+                }
+                changed = rx.changed() => changed.is_err(),
+            };
+            if cancel_channel_closed {
+                // A closed watch channel cannot signal future cancellation.
+                cancel_rx = None;
+            }
+        } else {
+            return reply_rx.await.map_err(|_| AskWaitError::ReplyClosed);
+        }
     }
 }
 
@@ -293,5 +336,52 @@ mod tests {
             .send(AskUserResponse::Cancelled)
             .expect("second reply");
         assert!(second.await.is_error);
+    }
+
+    async fn assert_pending_ask_cancels(args: Value, expected_options: usize) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tool = AskUserTool::new(Some(tx), None);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+        let ctx = ToolCallContext {
+            cancel_rx: Some(cancel_rx),
+            ..ToolCallContext::noop("cancel")
+        };
+
+        let run = tool.run(args, ctx);
+        tokio::pin!(run);
+        let request = tokio::select! {
+            result = &mut run => panic!("ask_user completed before cancellation: {:?}", result.content.as_text()),
+            event = rx.recv() => match event.expect("ask request") {
+                AppEvent::AskUser(request) => request,
+                other => panic!("unexpected event: {other:?}"),
+            },
+        };
+        assert_eq!(request.options.len(), expected_options);
+
+        cancel_tx
+            .send(CancelLevel::HardAbort)
+            .expect("send hard abort");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+            .await
+            .expect("ask_user should stop waiting after cancellation");
+        assert!(result.is_error);
+        assert_eq!(
+            result.content.as_text(),
+            "ask_user cancelled by agent abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_abort_cancels_pending_ask_without_options() {
+        assert_pending_ask_cancels(serde_json::json!({"question": "Name?"}), 0).await;
+    }
+
+    #[tokio::test]
+    async fn hard_abort_cancels_pending_ask_with_options() {
+        assert_pending_ask_cancels(
+            serde_json::json!({"question": "Continue?", "options": ["yes", "no"]}),
+            2,
+        )
+        .await;
     }
 }

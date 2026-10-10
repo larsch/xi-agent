@@ -904,6 +904,12 @@ impl App {
         self.abort_agent_loop();
     }
 
+    pub(crate) fn clear_pending_ask_after_agent_exit(&mut self) {
+        if self.ask_user.reply.is_some() {
+            self.finish_pending_ask(AskUserResponse::Cancelled);
+        }
+    }
+
     fn finish_pending_ask(&mut self, answer: AskUserResponse) {
         // Step mode with ask_user: commit the step branch with the answer
         // instead of sending it back to the agent (which isn't running).
