@@ -943,7 +943,7 @@ fn load_context(
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let custom_tool_count = custom_tools.len();
     let agents = load_agents();
-    let loaded_skills = Arc::new(skills::load_skills_for_agents(&agents));
+    let loaded_skills = Arc::new(skills::load_skills_for_agents(&agents, session_ipc_enabled));
     let tools = register_builtin_tools(
         app_event_tx,
         Arc::clone(file_tracker),

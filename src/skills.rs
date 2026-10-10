@@ -9,6 +9,8 @@ use std::{
 pub enum SkillScope {
     /// Discovered through a standard skill root; available to every agent.
     Standard,
+    /// Built in and available to every agent regardless of skill filters.
+    AlwaysPresent,
     /// Discovered under the named agent's `skills/` directory.
     Agent(String),
 }
@@ -16,7 +18,7 @@ pub enum SkillScope {
 #[derive(Debug, Clone)]
 pub struct SkillMeta {
     pub name: String,
-    /// Availability scope inferred from the skill's location, never its name.
+    /// Availability scope determined by how the skill is provided, never its name.
     pub scope: SkillScope,
     pub description: String,
     /// Absolute path to the `SKILL.md` file.
@@ -28,19 +30,36 @@ pub struct SkillMeta {
     pub embedded_body: Option<String>,
 }
 
-/// Scan all supported skill roots for subdirectories that contain a
-/// `SKILL.md` with YAML frontmatter.
+/// Name of the built-in skill that teaches session IPC worker mechanics.
+pub const SESSION_IPC_SKILL_NAME: &str = "xi-subagent-sessions";
+
+/// Scan supported skill roots and add built-in skills enabled for this session.
 ///
 /// Skill roots are searched in precedence order: project `.xi/skills` and
 /// `.agents/skills` roots from cwd to filesystem root, followed by global
 /// `~/.xi/skills`, `~/.agents/skills`, and Windows `%USERPROFILE%\\.agents\\skills`.
 /// Duplicate names within standard roots use the first matching root. Agent-local
 /// duplicates are retained for active-scope resolution after filters are applied.
-/// Also injects the embedded `xi-skill-locations` with technical guidance about
-/// skill discovery, file locations, and the supported format.
-pub fn load_skills_for_agents(agents: &[crate::agents::AgentMeta]) -> Vec<SkillMeta> {
-    let mut skills = load_scoped_skills(skill_dirs(), agents);
+/// `xi-skill-locations` is always embedded; session IPC guidance is embedded only
+/// when session IPC is enabled.
+pub fn load_skills_for_agents(
+    agents: &[crate::agents::AgentMeta],
+    session_ipc_enabled: bool,
+) -> Vec<SkillMeta> {
+    load_skills_for_agents_from_dirs(skill_dirs(), agents, session_ipc_enabled)
+}
+
+fn load_skills_for_agents_from_dirs(
+    standard_dirs: Vec<PathBuf>,
+    agents: &[crate::agents::AgentMeta],
+    session_ipc_enabled: bool,
+) -> Vec<SkillMeta> {
+    let mut skills = load_scoped_skills(standard_dirs, agents);
     skills.push(build_embedded_skill_locations(&skills, agents));
+    if session_ipc_enabled {
+        skills.retain(|skill| skill.name != SESSION_IPC_SKILL_NAME);
+        skills.push(build_embedded_session_ipc_skill());
+    }
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     skills
 }
@@ -142,6 +161,7 @@ fn build_embedded_skill_locations(
             .map(|s| {
                 let scope = match &s.scope {
                     SkillScope::Agent(agent) => format!("agent: {agent}"),
+                    SkillScope::AlwaysPresent => "built-in".to_string(),
                     SkillScope::Standard => {
                         let base = s
                             .base_dir
@@ -260,6 +280,17 @@ directory need not already exist.
         path: PathBuf::from("__embedded__/xi-skill-locations/SKILL.md"),
         base_dir: PathBuf::from("__embedded__/xi-skill-locations"),
         embedded_body: Some(body),
+    }
+}
+
+fn build_embedded_session_ipc_skill() -> SkillMeta {
+    SkillMeta {
+        name: SESSION_IPC_SKILL_NAME.to_string(),
+        scope: SkillScope::AlwaysPresent,
+        description: "Launching and controlling separate xi sessions over session IPC. Use when starting, contacting, or stopping an xi worker session.".to_string(),
+        path: PathBuf::from("__embedded__/xi-subagent-sessions/SKILL.md"),
+        base_dir: PathBuf::from("__embedded__/xi-subagent-sessions"),
+        embedded_body: Some(include_str!("builtin_skills/xi-subagent-sessions.md").to_string()),
     }
 }
 
@@ -445,14 +476,21 @@ fn parse_skill_meta(content: &str, path: PathBuf) -> Option<SkillMeta> {
 /// <skill name="{name}" location="{path}">
 /// References are relative to {base_dir}.
 ///
-/// {body — SKILL.md with frontmatter stripped}
+/// {body — embedded body, or SKILL.md with frontmatter stripped}
 /// </skill>
 ///
 /// {optional args}
 /// ```
 pub fn expand_skill(skill: &SkillMeta, args: &str) -> anyhow::Result<String> {
-    let content = fs::read_to_string(&skill.path)?;
-    let body = strip_frontmatter(&content).trim();
+    let content = match &skill.embedded_body {
+        Some(body) => body.clone(),
+        None => fs::read_to_string(&skill.path)?,
+    };
+    let body = if skill.embedded_body.is_some() {
+        content.trim()
+    } else {
+        strip_frontmatter(&content).trim()
+    };
 
     let skill_block = format!(
         "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
@@ -511,8 +549,9 @@ fn strip_frontmatter(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        SkillScope, build_embedded_skill_locations, expand_skill, load_scoped_skills,
-        load_skills_from_dirs, parse_skill_meta, project_skill_dirs, strip_frontmatter,
+        SESSION_IPC_SKILL_NAME, SkillScope, build_embedded_skill_locations, expand_skill,
+        load_scoped_skills, load_skills_for_agents_from_dirs, load_skills_from_dirs,
+        parse_skill_meta, project_skill_dirs, strip_frontmatter,
     };
     use std::path::{Path, PathBuf};
 
@@ -586,6 +625,41 @@ mod tests {
         assert!(body.contains("`gamma` [agent: specialist]"));
         assert!(body.contains(&default_dir.join("skills").display().to_string()));
         assert!(body.contains("active agent and\nits skill filters"));
+    }
+
+    #[test]
+    fn session_ipc_skill_is_conditionally_loaded_as_embedded_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let disabled =
+            load_skills_for_agents_from_dirs(vec![temp.path().to_path_buf()], &[], false);
+        assert!(
+            disabled
+                .iter()
+                .all(|skill| skill.name != SESSION_IPC_SKILL_NAME)
+        );
+
+        let enabled = load_skills_for_agents_from_dirs(vec![temp.path().to_path_buf()], &[], true);
+        let matches: Vec<_> = enabled
+            .iter()
+            .filter(|skill| skill.name == SESSION_IPC_SKILL_NAME)
+            .collect();
+        assert_eq!(matches.len(), 1);
+        let skill = matches[0];
+        assert_eq!(skill.scope, SkillScope::AlwaysPresent);
+        assert!(skill.embedded_body.is_some());
+        assert!(skill.embedded_body.as_ref().unwrap().contains("TMUX"));
+        assert!(
+            skill
+                .embedded_body
+                .as_ref()
+                .unwrap()
+                .contains("agent_session")
+        );
+        assert!(!skill.embedded_body.as_ref().unwrap().contains("xi.sock"));
+
+        let expanded = expand_skill(skill, "").expect("embedded skill should expand");
+        assert!(expanded.contains("# Working with separate xi sessions"));
+        assert!(!expanded.contains("---\nname:"));
     }
 
     #[test]

@@ -118,7 +118,7 @@ pub(crate) async fn run_print_mode(
     let custom_tools = load_custom_tools(&custom_tool_dirs());
     let headless_tracker = Arc::new(Mutex::new(build_file_tracker()));
     let discovered_agents = crate::agents::load_agents();
-    let loaded_skills = Arc::new(skills::load_skills_for_agents(&discovered_agents));
+    let loaded_skills = Arc::new(skills::load_skills_for_agents(&discovered_agents, false));
     let tools = register_builtin_tools(
         None,
         Arc::clone(&headless_tracker),

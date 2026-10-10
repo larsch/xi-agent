@@ -412,6 +412,7 @@ pub fn select_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<Ski
     let mut active: Vec<&SkillMeta> = skills
         .iter()
         .filter(|skill| match &skill.scope {
+            SkillScope::AlwaysPresent => true,
             SkillScope::Standard => {
                 !is_specialized
                     || exclude.is_empty()
@@ -435,6 +436,7 @@ pub fn select_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<Ski
     // never shadow an available broader-scope definition.
     active.sort_by(|a, b| {
         let rank = |skill: &SkillMeta| match &skill.scope {
+            SkillScope::AlwaysPresent => 3,
             SkillScope::Standard => 0,
             SkillScope::Agent(name) if name == selected_name => 2,
             SkillScope::Agent(_) => 1,
@@ -783,6 +785,18 @@ No skills here.
         agent.include_skills = include.iter().map(|s| s.to_string()).collect();
         agent.exclude_skills = exclude.iter().map(|s| s.to_string()).collect();
         agent
+    }
+
+    #[test]
+    fn always_present_skills_survive_specialized_include_and_exclude_filters() {
+        let skills = vec![
+            scoped_skill("xi-subagent-sessions", SkillScope::AlwaysPresent),
+            scoped_skill("ordinary", SkillScope::Standard),
+        ];
+        let agent = test_agent("specialist", &["only-this"], &["*"]);
+        let selected = select_skills(&skills, Some(&agent));
+        let names: Vec<_> = selected.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["xi-subagent-sessions"]);
     }
 
     #[test]
