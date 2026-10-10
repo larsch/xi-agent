@@ -288,7 +288,10 @@ pub fn build_system_prompt(
         guidelines.push("When summarizing your actions, output plain text directly — do NOT use bash or cat to display what you did.".to_string());
     }
     if has("ask_user") {
-        guidelines.push("Use ask_user only when the task requires a user decision or information you cannot infer.".to_string());
+        guidelines.push(
+            "Use ask_user when the task requires a user decision or information you cannot infer."
+                .to_string(),
+        );
         guidelines.push("Before calling ask_user, gather relevant context with your other tools and include a short summary in the context field.".to_string());
     }
     guidelines.push("For rich or structured writes, create a UTF-8 no-BOM payload file and pass it through a file/stdin option rather than embedding the payload in PowerShell or cmd command arguments.".to_string());
@@ -351,10 +354,7 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
 
     format!(
         "\n\
-\nThe following skills provide specialized instructions for specific tasks.\n\
-Each skill's description names the task type, problem domain, or situation it handles. \
-Skills provide specialized instructions for particular kinds of work. When a task calls for a capability described by a skill, learn the relevant skill before applying it. Use what you learn when carrying out related work.\n\
-Use the learn tool to learn a skill's instructions by name.\n\
+\nAvailable skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it.\n\
 When a skill file references a relative path, resolve it against the skill directory \
 (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
 \n<available_skills>\n{entries}\n</available_skills>"
@@ -552,7 +552,7 @@ mod tests {
         assert!(prompt.contains("Use read_file to examine files before editing."));
         assert!(prompt.contains("Use edit_file for precise changes"));
         assert!(prompt.contains("Use write_file only for new files or complete rewrites."));
-        assert!(prompt.contains("Use ask_user only when the task requires a user decision"));
+        assert!(prompt.contains("Use ask_user when the task requires a user decision"));
         assert!(prompt.contains("- ask_user: Ask a question."));
         assert!(prompt.contains("- bash: Run shell commands."));
         assert!(prompt.contains("Prefer exec over bash when arguments contain spaces"));
@@ -593,12 +593,8 @@ mod tests {
             "location should not appear in listing"
         );
         assert!(prompt.contains(
-            "Each skill's description names the task type, problem domain, or situation it handles."
+            "Available skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it."
         ));
-        assert!(prompt.contains(
-            "Skills provide specialized instructions for particular kinds of work. When a task calls for a capability described by a skill, learn the relevant skill before applying it. Use what you learn when carrying out related work."
-        ));
-        assert!(prompt.contains("Use the learn tool to learn a skill's instructions by name."));
     }
 
     #[test]
