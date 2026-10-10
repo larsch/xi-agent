@@ -355,8 +355,6 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
     format!(
         "\n\
 \nAvailable skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it.\n\
-When a skill file references a relative path, resolve it against the skill directory \
-(parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\
 \n<available_skills>\n{entries}\n</available_skills>"
     )
 }

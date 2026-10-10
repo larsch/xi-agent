@@ -98,7 +98,12 @@ impl Tool for LearnTool {
             };
 
             let body = strip_frontmatter(&content).trim().to_string();
-            ToolResult::ok_str(body)
+            let response = if skill.embedded_body.is_none() {
+                format!("{body}\n\nSkill directory: {}", skill.base_dir.display())
+            } else {
+                body
+            };
+            ToolResult::ok_str(response)
         })
     }
 }
@@ -173,6 +178,7 @@ mod tests {
     async fn loads_skill_body_strips_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
         let skill = write_skill_file(dir.path(), "brainstorm", "# Brainstorm\nDo the thing.");
+        let base_dir = skill.base_dir.clone();
         let tool = make_tool(vec![skill]);
 
         let result = tool
@@ -186,6 +192,10 @@ mod tests {
         let text = result.content.as_text();
         assert!(text.contains("# Brainstorm"), "missing body: {text}");
         assert!(text.contains("Do the thing."), "missing body: {text}");
+        assert!(
+            text.contains(&format!("Skill directory: {}", base_dir.display())),
+            "missing skill directory: {text}"
+        );
         assert!(!text.contains("---"), "frontmatter not stripped: {text}");
         assert!(
             !text.contains("description:"),
