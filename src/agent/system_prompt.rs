@@ -1,5 +1,8 @@
 use directories::BaseDirs;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::agent::types::ToolRegistry;
 use crate::agents::AgentMeta;
@@ -105,6 +108,87 @@ pub fn read_agents_md(
     }
 
     entries
+}
+
+/// Read all Markdown rule files from project and home rule directories.
+///
+/// Project directories are searched from `cwd` to the filesystem root, with
+/// `.xi/rules` before `.agents/rules` at each level. Home rule directories are
+/// searched afterward. If filenames collide, the first (narrowest) file wins.
+fn read_rules(cwd: &str, test_home: Option<&Path>) -> Vec<(std::path::PathBuf, String)> {
+    let mut global_dirs = Vec::new();
+    if let Some(home) = test_home.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }) {
+        global_dirs.push(home.join(".xi/rules"));
+        global_dirs.push(home.join(".agents/rules"));
+    }
+    if cfg!(windows)
+        && let Some(user_profile) = std::env::var_os("USERPROFILE").filter(|s| !s.is_empty())
+    {
+        global_dirs.push(PathBuf::from(user_profile).join(".agents/rules"));
+    }
+
+    let mut dirs = Vec::new();
+    let mut current_dir = Path::new(cwd).to_path_buf();
+    loop {
+        for config_dir in [".xi", ".agents"] {
+            let dir = current_dir.join(config_dir).join("rules");
+            if !global_dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        match current_dir.parent() {
+            Some(parent) if parent != current_dir => current_dir = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    dirs.extend(global_dirs);
+
+    let mut seen_names = std::collections::HashSet::new();
+    let mut rules = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut files: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        files.sort();
+        for path in files {
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            if seen_names.contains(name) {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path) {
+                seen_names.insert(name.to_os_string());
+                rules.push((path, content));
+            }
+        }
+    }
+    rules
+}
+
+/// Render loaded rule files into a system prompt section.
+fn render_rules_section(rules: &[(std::path::PathBuf, String)]) -> String {
+    if rules.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("\n\n# Rules\n\n");
+    section.push_str("The following rule files are available as instructions.\n\n");
+    for (path, content) in rules {
+        section.push_str(&format!("## {}\n\n", path.display()));
+        section.push_str(content);
+        section.push('\n');
+    }
+    section
 }
 
 /// Render collected AGENTS.md entries into a system prompt section.
@@ -222,6 +306,8 @@ pub fn build_system_prompt(
     let agent_agents_md = agent.and_then(|a| a.agents_md.as_deref());
     let agents_entries = read_agents_md(cwd, None, agent_agents_md);
     let agents_section = render_agents_section(&agents_entries);
+    let rules = read_rules(cwd, None);
+    let rules_section = render_rules_section(&rules);
 
     let skills_section = render_skills_block(skills);
 
@@ -245,7 +331,7 @@ In addition to the tools above, you may have access to other custom tools depend
 File paths are relative to the current working directory.\n\
 \n\
 Guidelines:\n\
-{guidelines_text}{agents_section}{skills_section}
+{guidelines_text}{agents_section}{rules_section}{skills_section}
 Current working directory: {cwd}"
     )
 }
@@ -313,7 +399,7 @@ mod tests {
         sync::Arc,
     };
 
-    use super::{build_system_prompt, first_sentence};
+    use super::{build_system_prompt, first_sentence, read_rules};
     use crate::{
         agent::types::{Tool, ToolRegistry},
         agents::AgentMeta,
@@ -358,6 +444,74 @@ mod tests {
             );
         }
         tools
+    }
+
+    #[test]
+    fn read_rules_loads_all_markdown_and_prefers_nearest_duplicate() {
+        use std::fs;
+
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let nested = project.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+
+        let nested_xi = nested.join(".xi/rules");
+        fs::create_dir_all(&nested_xi).unwrap();
+        fs::write(nested_xi.join("personal.md"), "same-level xi wins").unwrap();
+
+        let nested_agents = nested.join(".agents/rules");
+        fs::create_dir_all(&nested_agents).unwrap();
+        fs::write(nested_agents.join("personal.md"), "same-level duplicate").unwrap();
+        fs::write(nested_agents.join("extra.md"), "nested extra").unwrap();
+        fs::write(nested_agents.join("ignored.txt"), "not a rule").unwrap();
+
+        let project_xi = project.join(".xi/rules");
+        fs::create_dir_all(&project_xi).unwrap();
+        fs::write(project_xi.join("personal.md"), "parent duplicate").unwrap();
+        fs::write(project_xi.join("parent.md"), "parent rule").unwrap();
+
+        let home_xi = home.path().join(".xi/rules");
+        fs::create_dir_all(&home_xi).unwrap();
+        fs::write(home_xi.join("personal.md"), "global duplicate").unwrap();
+        fs::write(home_xi.join("global.md"), "global rule").unwrap();
+
+        let rules = read_rules(&nested.display().to_string(), Some(home.path()));
+        let contents: Vec<_> = rules.iter().map(|(_, content)| content.as_str()).collect();
+        assert_eq!(
+            contents,
+            [
+                "same-level xi wins",
+                "nested extra",
+                "parent rule",
+                "global rule"
+            ]
+        );
+        assert!(rules[0].0.starts_with(&nested_xi));
+        assert!(rules[1].0.starts_with(&nested_agents));
+        assert!(rules[2].0.starts_with(&project_xi));
+        assert!(rules[3].0.starts_with(&home_xi));
+    }
+
+    #[test]
+    fn build_system_prompt_renders_rules() {
+        use std::fs;
+
+        let _home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let rule_dir = cwd.path().join(".agents/rules");
+        fs::create_dir_all(&rule_dir).unwrap();
+        fs::write(
+            rule_dir.join("personal.md"),
+            "Personal issue routing instruction.",
+        )
+        .unwrap();
+
+        let prompt =
+            build_system_prompt(&registry(&[]), &cwd.path().display().to_string(), &[], None);
+        assert!(prompt.contains("# Rules"));
+        assert!(prompt.contains("personal.md"));
+        assert!(prompt.contains("Personal issue routing instruction."));
     }
 
     #[test]

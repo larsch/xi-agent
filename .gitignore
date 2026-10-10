@@ -27,7 +27,7 @@ perf.data.old
 flamegraph.svg
 log
 .agents/skills/gitea-issue-status
-.agents/skills/xi-agent-planning/
+.agents/rules/xi-agent-planning.md
 
 # Session exports
 tau-session-*.html

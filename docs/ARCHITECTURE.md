@@ -43,7 +43,7 @@ src/
   agent/
     mod.rs             — run_agent_loop: the multi-turn agentic loop
     types.rs           — Tool trait, ToolRegistry, AgentEvent, AgentLoopConfig
-    system_prompt.rs   — build_system_prompt: dynamic system prompt, accepts optional AgentMeta
+    system_prompt.rs   — build_system_prompt: dynamic system prompt, AGENTS.md and rules discovery
     file_tracker.rs    — FileTracker: mtime+hash snapshot, external-change detection, diff generation
     tools/
       mod.rs           — register_builtin_tools() (built-ins + custom tools)
@@ -445,6 +445,10 @@ When an agent is active:
 - The agent's `SYSTEM.md` body replaces the default identity paragraph.
 - The agent's `AGENTS.md` (if present) replaces the global AGENTS.md
   instructions; project-local AGENTS.md files are still appended.
+- Rule files from `.xi/rules` and `.agents/rules` directories from cwd to root,
+  then user-level rule directories, are included in the prompt. All Markdown
+  files load in search order; the first (narrowest) file wins filename
+  collisions.
 - Tools and skills in the prompt are filtered according to the agent's
   include/exclude rules.
 
