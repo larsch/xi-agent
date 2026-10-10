@@ -232,6 +232,17 @@ fn handle_global_key_shortcuts(
         return KeyDispatch::Continue;
     }
 
+    if keybindings::matches(KeyBindingId::ToggleInventoryView, key) {
+        if app.context_view.active
+            && app.context_view.kind == crate::context_view_state::ContextViewKind::Inventory
+        {
+            app.close_context_view();
+        } else {
+            app.open_inventory_view();
+        }
+        return KeyDispatch::Continue;
+    }
+
     if keybindings::matches(KeyBindingId::ShowHelp, key) {
         if app.selection.kind == Some(crate::selection_state::SelectionKind::KeybindingHelp) {
             app.exit_selection_mode();

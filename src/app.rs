@@ -345,12 +345,26 @@ impl App {
     }
 
     pub(crate) fn open_context_view(&mut self) {
+        self.open_context_view_kind(crate::context_view_state::ContextViewKind::Prompt);
+    }
+
+    pub(crate) fn open_inventory_view(&mut self) {
+        self.open_context_view_kind(crate::context_view_state::ContextViewKind::Inventory);
+    }
+
+    fn open_context_view_kind(&mut self, kind: crate::context_view_state::ContextViewKind) {
         self.context_view
-            .open(self.log_view.log_scroll, self.log_view.auto_scroll);
+            .open(self.log_view.log_scroll, self.log_view.auto_scroll, kind);
     }
 
     pub(crate) fn toggle_context_view(&mut self) {
-        if self.context_view.active {
+        if self.context_view.active
+            && self.context_view.kind == crate::context_view_state::ContextViewKind::Inventory
+        {
+            self.context_view.kind = crate::context_view_state::ContextViewKind::Prompt;
+            self.context_view.scroll = 0;
+            self.context_view.max_scroll = 0;
+        } else if self.context_view.active {
             if let Some((scroll, auto_scroll)) = self.context_view.close() {
                 self.log_view.log_scroll = scroll;
                 self.log_view.auto_scroll = auto_scroll;

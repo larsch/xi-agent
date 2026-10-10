@@ -115,7 +115,7 @@ pub fn read_agents_md(
 /// Project directories are searched from `cwd` to the filesystem root, with
 /// `.xi/rules` before `.agents/rules` at each level. Home rule directories are
 /// searched afterward. If filenames collide, the first (narrowest) file wins.
-fn read_rules(cwd: &str, test_home: Option<&Path>) -> Vec<(std::path::PathBuf, String)> {
+pub fn read_rules(cwd: &str, test_home: Option<&Path>) -> Vec<(std::path::PathBuf, String)> {
     let mut global_dirs = Vec::new();
     if let Some(home) = test_home.map(Path::to_path_buf).or_else(|| {
         std::env::var_os("HOME")

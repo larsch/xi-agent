@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(crate) enum KeyBindingId {
     ShowHelp,
     ToggleContextView,
+    ToggleInventoryView,
     Abort,
     Suspend,
     EndInput,
@@ -71,6 +72,12 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         shortcut: "F2",
         context: BindingContext::Global,
         description: "View the current system prompt (Esc or F2 to close)",
+    },
+    KeyBinding {
+        id: Some(KeyBindingId::ToggleInventoryView),
+        shortcut: "F3",
+        context: BindingContext::Global,
+        description: "Inspect instruction, rule, and skill files",
     },
     KeyBinding {
         id: Some(KeyBindingId::Cancel),
@@ -222,6 +229,7 @@ pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
     match id {
         KeyBindingId::ShowHelp => key.code == KeyCode::F(1) && key.modifiers.is_empty(),
         KeyBindingId::ToggleContextView => key.code == KeyCode::F(2) && key.modifiers.is_empty(),
+        KeyBindingId::ToggleInventoryView => key.code == KeyCode::F(3) && key.modifiers.is_empty(),
         KeyBindingId::Abort => {
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
@@ -301,6 +309,10 @@ mod tests {
             (
                 KeyBindingId::ToggleContextView,
                 KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()),
+            ),
+            (
+                KeyBindingId::ToggleInventoryView,
+                KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()),
             ),
             (
                 KeyBindingId::Abort,

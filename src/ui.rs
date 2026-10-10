@@ -71,9 +71,189 @@ fn context_view_max_scroll(line_count: usize, viewport_height: usize) -> usize {
     line_count.saturating_sub(viewport_height)
 }
 
+fn inventory_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    use std::{collections::HashSet, fs, path::Path};
+
+    let cwd = &app.session.current_cwd;
+    let agent = app.resolve_current_agent();
+    let mut entries: Vec<(String, bool, String)> = Vec::new();
+    let active_skills = crate::agents::select_skills(&app.loaded_skills, agent);
+    let active_skill_paths: HashSet<_> = active_skills.iter().map(|s| s.path.clone()).collect();
+    for skill in &app.loaded_skills {
+        let active = active_skill_paths.contains(&skill.path);
+        let reason = if active {
+            String::new()
+        } else {
+            "excluded by selected agent or shadowed by a higher-precedence skill".into()
+        };
+        entries.push((format!("skill  {}", skill.path.display()), active, reason));
+    }
+
+    let active_rules = crate::agent::system_prompt::read_rules(cwd, None);
+    let active_rule_paths: HashSet<_> = active_rules.iter().map(|(p, _)| p.clone()).collect();
+    let mut rule_roots = Vec::new();
+    let mut dir = Path::new(cwd).to_path_buf();
+    loop {
+        rule_roots.push(dir.join(".xi/rules"));
+        rule_roots.push(dir.join(".agents/rules"));
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    if let Some(home) = directories::BaseDirs::new() {
+        rule_roots.push(home.home_dir().join(".xi/rules"));
+        rule_roots.push(home.home_dir().join(".agents/rules"));
+    }
+    let mut seen_rule_paths = HashSet::new();
+    for root in rule_roots {
+        let Ok(files) = fs::read_dir(&root) else {
+            continue;
+        };
+        let mut files: Vec<_> = files
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        files.sort();
+        for path in files {
+            if !seen_rule_paths.insert(path.clone()) {
+                continue;
+            }
+            let active = active_rule_paths.contains(&path);
+            let reason = if active {
+                String::new()
+            } else if active_rule_paths
+                .iter()
+                .any(|active_path| active_path.file_name() == path.file_name())
+            {
+                "shadowed by a nearer rule with the same filename".into()
+            } else {
+                "not included by the rule loader".into()
+            };
+            entries.push((format!("rule    {}", path.display()), active, reason));
+        }
+    }
+
+    let active_agent_entries = crate::agent::system_prompt::read_agents_md(
+        cwd,
+        None,
+        agent.and_then(|a| a.agents_md.as_deref()),
+    );
+    let mut active_agent_paths: HashSet<_> = active_agent_entries
+        .iter()
+        .filter(|e| e.path.as_os_str() != "(agent AGENTS.md)")
+        .map(|e| e.path.clone())
+        .collect();
+    if let Some(agent) = agent.filter(|a| a.agents_md.is_some()) {
+        active_agent_paths.insert(agent.base_dir.join("AGENTS.md"));
+    }
+    let mut instruction_candidates = Vec::new();
+    if let Some(home) = directories::BaseDirs::new() {
+        instruction_candidates.push(home.home_dir().to_path_buf());
+    }
+    let mut dir = Path::new(cwd).to_path_buf();
+    loop {
+        instruction_candidates.push(dir.clone());
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    instruction_candidates.extend(
+        app.agents
+            .iter()
+            .map(|candidate| candidate.base_dir.clone()),
+    );
+    let mut seen_instructions = HashSet::new();
+    for base in instruction_candidates {
+        for rel in [".xi/AGENTS.md", ".agents/AGENTS.md", "AGENTS.md"] {
+            let path = base.join(rel);
+            if !path.is_file() || !seen_instructions.insert(path.clone()) {
+                continue;
+            }
+            let active = active_agent_paths.contains(&path);
+            let reason = if active {
+                String::new()
+            } else if app
+                .agents
+                .iter()
+                .any(|candidate| candidate.base_dir.join("AGENTS.md") == path)
+            {
+                "instructions for an unselected agent".into()
+            } else if agent.is_some_and(|a| a.agents_md.is_some())
+                && directories::BaseDirs::new().is_some_and(|h| path.starts_with(h.home_dir()))
+            {
+                "replaced by selected agent instructions".into()
+            } else {
+                "lower-precedence AGENTS.md in this directory".into()
+            };
+            entries.push((format!("instruction  {}", path.display()), active, reason));
+        }
+    }
+    for candidate in &app.agents {
+        let active = agent.is_some_and(|a| a.name == candidate.name);
+        entries.push((
+            format!("agent  {}", candidate.path.display()),
+            active,
+            if active {
+                String::new()
+            } else {
+                "not selected".into()
+            },
+        ));
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if entries.is_empty() {
+        return vec![Line::from(Span::styled(
+            "No instruction, rule, or skill files discovered.",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+    entries
+        .into_iter()
+        .flat_map(|(path, active, reason)| {
+            let (status, color) = if active {
+                ("ACTIVE", Color::Green)
+            } else {
+                ("inactive", Color::DarkGray)
+            };
+            let suffix = if reason.is_empty() {
+                String::new()
+            } else {
+                format!("  ({reason})")
+            };
+            let wrapped = wrap_str(&format!("{path}{suffix}"), width.saturating_sub(9).max(1));
+            wrapped.into_iter().enumerate().map(move |(i, text)| {
+                let mut spans = Vec::new();
+                if i == 0 {
+                    spans.push(Span::styled(
+                        format!("{status:<8} "),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::raw("         "));
+                }
+                spans.push(Span::raw(text));
+                Line::from(spans)
+            })
+        })
+        .collect()
+}
+
 fn render_context_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    const TITLE: &str = "  System prompt  ";
-    const HINTS: &str = "↑↓ / PgUp/PgDn scroll   Home/End jump   Esc/F2 close  ";
+    let inventory = app.context_view.kind == crate::context_view_state::ContextViewKind::Inventory;
+    let title = if inventory {
+        "  Context files  "
+    } else {
+        "  System prompt  "
+    };
+    let hints = if inventory {
+        "↑↓ / PgUp/PgDn scroll   Home/End jump   Esc/F3 close  "
+    } else {
+        "↑↓ / PgUp/PgDn scroll   Home/End jump   Esc/F2 close  "
+    };
     let header_bg = app
         .theme
         .menu
@@ -81,10 +261,10 @@ fn render_context_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .header
         .bg
         .unwrap_or(Color::Rgb(20, 45, 20));
-    let gap = (area.width as usize).saturating_sub(TITLE.width() + HINTS.width());
+    let gap = (area.width as usize).saturating_sub(title.width() + hints.width());
     let header = Line::from(vec![
         Span::styled(
-            TITLE,
+            title,
             Style::default()
                 .fg(Color::White)
                 .bg(header_bg)
@@ -92,7 +272,7 @@ fn render_context_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         ),
         Span::styled(" ".repeat(gap), Style::default().bg(header_bg)),
         Span::styled(
-            HINTS,
+            hints,
             Style::default().bg(header_bg).add_modifier(Modifier::DIM),
         ),
     ]);
@@ -114,10 +294,14 @@ fn render_context_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         width: area.width,
         height: area.height - 1,
     });
-    let prompt_lines = context_prompt_lines(
-        app.agent_config.system_prompt.as_deref(),
-        content_area.width as usize,
-    );
+    let prompt_lines = if inventory {
+        inventory_lines(app, content_area.width as usize)
+    } else {
+        context_prompt_lines(
+            app.agent_config.system_prompt.as_deref(),
+            content_area.width as usize,
+        )
+    };
     let viewport_height = content_area.height as usize;
     let max_scroll = context_view_max_scroll(prompt_lines.len(), viewport_height);
     app.context_view.clamp_scroll(max_scroll);

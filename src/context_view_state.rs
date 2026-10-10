@@ -1,11 +1,20 @@
-/// State for the deferred system-prompt reader.
+/// The temporary context inspector currently shown over the chat log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ContextViewKind {
+    #[default]
+    Prompt,
+    Inventory,
+}
+
+/// State for the deferred context inspector.
 ///
 /// The chat log remains owned by `LogViewState`; this type only saves the
-/// viewport position needed to return to it and tracks reader scrolling.
+/// viewport position needed to return to it and tracks inspector scrolling.
 pub(crate) struct ContextViewState {
     pub(crate) active: bool,
     pub(crate) scroll: usize,
     pub(crate) max_scroll: usize,
+    pub(crate) kind: ContextViewKind,
     saved_log_position: Option<(usize, bool)>,
 }
 
@@ -15,16 +24,21 @@ impl ContextViewState {
             active: false,
             scroll: 0,
             max_scroll: 0,
+            kind: ContextViewKind::Prompt,
             saved_log_position: None,
         }
     }
 
-    pub(crate) fn open(&mut self, log_scroll: usize, auto_scroll: bool) {
+    pub(crate) fn open(&mut self, log_scroll: usize, auto_scroll: bool, kind: ContextViewKind) {
         if self.active {
+            self.kind = kind;
+            self.scroll = 0;
+            self.max_scroll = 0;
             return;
         }
         self.saved_log_position = Some((log_scroll, auto_scroll));
         self.active = true;
+        self.kind = kind;
         self.scroll = 0;
         self.max_scroll = 0;
     }
@@ -36,6 +50,7 @@ impl ContextViewState {
         self.active = false;
         self.scroll = 0;
         self.max_scroll = 0;
+        self.kind = ContextViewKind::Prompt;
         self.saved_log_position.take()
     }
 
@@ -71,15 +86,17 @@ impl Default for ContextViewState {
 
 #[cfg(test)]
 mod tests {
-    use super::ContextViewState;
+    use super::{ContextViewKind, ContextViewState};
 
     #[test]
     fn open_close_preserves_chat_position_and_resets_reader_scroll() {
         let mut state = ContextViewState::new();
-        state.open(42, false);
+        state.open(42, false, ContextViewKind::Prompt);
         state.scroll_down(10, 20);
-        state.open(9, true); // Reopening an active view must not replace saved state.
+        state.open(9, true, ContextViewKind::Inventory); // Reopening an active view must not replace saved state.
+        assert_eq!(state.kind, ContextViewKind::Inventory);
         assert_eq!(state.close(), Some((42, false)));
+        assert_eq!(state.kind, ContextViewKind::Prompt);
         assert!(!state.active);
         assert_eq!(state.scroll, 0);
         assert_eq!(state.close(), None);
