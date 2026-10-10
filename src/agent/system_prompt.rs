@@ -175,43 +175,62 @@ fn read_rules(cwd: &str, test_home: Option<&Path>) -> Vec<(std::path::PathBuf, S
     rules
 }
 
-/// Render loaded rule files into a system prompt section.
+/// Escape a value for use in a double-quoted XML-style attribute.
+fn escape_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Render loaded rule files as bounded instruction documents.
 fn render_rules_section(rules: &[(std::path::PathBuf, String)]) -> String {
     if rules.is_empty() {
         return String::new();
     }
 
-    let mut section = String::from("\n\n# Rules\n\n");
-    section.push_str("The following rule files are available as instructions.\n\n");
+    let mut section = String::from(
+        "\n\n<rules>\nFollow the instructions in these rule files. Each file is a separate document; its headings belong to that document.\n",
+    );
     for (path, content) in rules {
-        section.push_str(&format!("## {}\n\n", path.display()));
+        section.push_str(&format!(
+            "<rule_file path=\"{}\">\n",
+            escape_attribute(&path.display().to_string())
+        ));
         section.push_str(content);
-        section.push('\n');
+        section.push_str("\n</rule_file>\n");
     }
+    section.push_str("</rules>");
     section
 }
 
-/// Render collected AGENTS.md entries into a system prompt section.
+/// Render collected AGENTS.md entries as bounded instruction documents.
 fn render_agents_section(entries: &[AgentsEntry]) -> String {
     if entries.is_empty() {
         return String::new();
     }
 
-    let mut section = String::from("\n\n# AGENTS.md\n\n");
-    section.push_str("The following was read from AGENTS.md files and is already available to you — you do not need to read them again.\n\n");
+    let mut section = String::from(
+        "\n\n<project_instructions>\nFollow the instructions in these AGENTS.md files. Each file is a separate document; its headings belong to that document.\n",
+    );
 
     for entry in entries {
-        let label = match entry.kind {
-            AgentsKind::Agent => "Agent Instructions",
-            AgentsKind::Global => "Global Instructions",
-            AgentsKind::Local => "Local Instructions",
+        let source = match entry.kind {
+            AgentsKind::Agent => "agent",
+            AgentsKind::Global => "global",
+            AgentsKind::Local => "local",
         };
-        let path_display = entry.path.display();
-        section.push_str(&format!("## {label} ({path_display})\n\n"));
+        section.push_str(&format!(
+            "<agents_file source=\"{source}\" path=\"{}\">\n",
+            escape_attribute(&entry.path.display().to_string())
+        ));
         section.push_str(&entry.content);
-        section.push('\n');
+        section.push_str("\n</agents_file>\n");
     }
 
+    section.push_str("</project_instructions>");
     section
 }
 
@@ -221,8 +240,8 @@ fn render_agents_section(entries: &[AgentsEntry]) -> String {
 /// paragraph and the caller is expected to pass pre-filtered `tools` and
 /// `skills`.  When `None`, the default identity is used.
 ///
-/// Structure: identity, tool list, tool-aware guidelines, project context
-/// (AGENTS.md), skills, then cwd.
+/// Structure: identity, tool guidance, environment guidance, guidelines,
+/// bounded instruction documents, available skills, then environment context.
 pub fn build_system_prompt(
     tools: &ToolRegistry,
     cwd: &str,
@@ -324,16 +343,11 @@ pub fn build_system_prompt(
     };
 
     format!(
-        "{identity}\n\
-\n\
-Available tools:\n\
-{tool_list}\n\
-\n\
-File paths are relative to the current working directory.\n\
-\n\
-Guidelines:\n\
-{guidelines_text}{agents_section}{rules_section}{skills_section}
-Current working directory: {cwd}"
+        "<identity>\n{identity}\n</identity>\n\
+<available_tool_guidance>\nAvailable tools:\n{tool_list}\n</available_tool_guidance>\n\
+<environment_guidance>\nFile paths are relative to the current working directory.\n</environment_guidance>\n\
+<guidelines>\n{guidelines_text}\n</guidelines>{agents_section}{rules_section}{skills_section}\n\
+<environment>\nCurrent working directory: {cwd}\n</environment>"
     )
 }
 
@@ -352,8 +366,8 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
 
     format!(
         "\n\
-\nAvailable skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it.\n\
-\n<available_skills>\n{entries}\n</available_skills>"
+<skills>\nAvailable skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it.\n\
+<available_skills>\n{entries}\n</available_skills>\n</skills>"
     )
 }
 
@@ -365,7 +379,10 @@ mod tests {
         sync::Arc,
     };
 
-    use super::{build_system_prompt, read_rules};
+    use super::{
+        AgentsEntry, AgentsKind, build_system_prompt, read_rules, render_agents_section,
+        render_rules_section,
+    };
     use crate::{
         agent::types::{Tool, ToolRegistry},
         agents::AgentMeta,
@@ -495,9 +512,43 @@ mod tests {
 
         let prompt =
             build_system_prompt(&registry(&[]), &cwd.path().display().to_string(), &[], None);
-        assert!(prompt.contains("# Rules"));
+        assert!(prompt.contains("<rules>"));
+        assert!(prompt.contains("<rule_file path=\""));
         assert!(prompt.contains("personal.md"));
         assert!(prompt.contains("Personal issue routing instruction."));
+        assert!(prompt.contains("</rule_file>"));
+    }
+
+    #[test]
+    fn instruction_documents_are_wrapped_without_rewriting_headings() {
+        let agents = vec![AgentsEntry {
+            kind: AgentsKind::Global,
+            path: PathBuf::from("/home/user/AGENTS.md"),
+            content: "# AGENTS.md\n\nFollow these instructions.".to_string(),
+        }];
+        let agents_section = render_agents_section(&agents);
+        assert!(agents_section.contains("<agents_file source=\"global\""));
+        assert!(agents_section.contains("# AGENTS.md\n\nFollow these instructions."));
+        assert!(agents_section.contains("</agents_file>"));
+        assert!(agents_section.contains("</project_instructions>"));
+
+        let rules = vec![(
+            PathBuf::from("/project/.agents/rules/test.md"),
+            "# Rule heading\n\nRule content.".to_string(),
+        )];
+        let rules_section = render_rules_section(&rules);
+        assert!(rules_section.contains("<rule_file path=\"/project/.agents/rules/test.md\">"));
+        assert!(rules_section.contains("# Rule heading\n\nRule content."));
+        assert!(rules_section.contains("</rule_file>"));
+        assert!(rules_section.contains("</rules>"));
+    }
+
+    #[test]
+    fn instruction_document_attributes_escape_xml_special_characters() {
+        assert_eq!(
+            super::escape_attribute("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
     }
 
     #[test]
@@ -657,7 +708,7 @@ mod tests {
         let prompt = build_system_prompt(&tools, "/tmp", &skills, Some(&agent));
 
         assert!(
-            prompt.starts_with("You are a test-only agent."),
+            prompt.starts_with("<identity>\nYou are a test-only agent."),
             "should start with agent body: {prompt}"
         );
         assert!(
@@ -692,7 +743,7 @@ mod tests {
         let prompt = build_system_prompt(&tools, "/tmp", &[], Some(&agent));
 
         assert!(
-            prompt.starts_with("You are a multi-purpose assistant"),
+            prompt.starts_with("<identity>\nYou are a multi-purpose assistant"),
             "should fall back to default identity: {prompt}"
         );
     }
