@@ -28,6 +28,7 @@ flamegraph.svg
 log
 .agents/skills/gitea-issue-status
 .agents/rules/xi-agent-planning.md
+.agents/rules/release-build-background.md
 
 # Session exports
 tau-session-*.html
