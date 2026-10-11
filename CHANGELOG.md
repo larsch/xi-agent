@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.9.0 — 2026-10-11
+
+### Added
+
+- **Steering and draft navigation**: steering messages and draft prompts now share unified navigation.
+- **F3 context file inspector**: inspect files included in the current context.
+- **Shift+Tab @-file completion**: complete @-file paths without injecting them into the prompt.
+- **Session IPC guidance**: skill guidance is included conditionally for sessions using IPC.
+- **Structured environment notifications**: environment changes are surfaced as structured notifications.
+- **Project rule files**: load project-specific rule files.
+- **Agent selection**: choose an agent with a CLI option.
+- **System prompt context reader**: inspect system prompt context from the UI.
+- **Generic tool presentation**: UI shows generic tool names and parameters.
+
+### Changed
+
+- **Local work timing**: the UI displays elapsed runtime for local work.
+- **Skill loading**: the `learn` tool includes the skill directory, discovers skills in ancestor and home directories, and scopes skills to agent paths.
+- **Session preferences**: agent preferences are persisted per session.
+- **Default agent guidance**: tool-writing guidance is platform-neutral and the default prompt is streamlined.
+- **Session IPC**: IPC uses shared runtime sockets, avoids duplicate agent runners during handoff, and improves Codex summaries.
+- **Provider behavior**: print mode defaults to the configured provider; Copilot GPT models use the Responses API; Codex models can be discovered.
+- **Prompt and input handling**: system prompt sections are delimited, pending steering is recalled, and multiline prompts are preserved in history navigation.
+
+### Fixed
+
+- **Ask-user cancellation**: cancellation is honored while awaiting input.
+- **File writes**: successful file writes are trusted.
+- **File search cancellation**: `find_files` responds cooperatively and promptly to cancellation.
+- **Windows subprocess cancellation** and IPC warnings.
+- **Windows CI**: unused test-variable warnings are silenced.
+- **Model refresh**: avoid a retry loop during model refresh.
+- **Focused-terminal notifications**: suppress notifications while the terminal is focused.
+
+### Internal
+
+- **Agent loop**: modularize the agent loop and runner lifecycle.
+- **Documentation**: document the IPC worker skill and clarify tool and skill guidance.
+
 ## v0.8.0 — 2026-09-05
 
 ### Added
