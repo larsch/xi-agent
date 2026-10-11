@@ -189,6 +189,7 @@ pub struct App {
 
 // Convenience alias used throughout this module.
 pub(crate) type DynProvider = Arc<dyn LlmProvider + Send + Sync + 'static>;
+type QueuePreviewSide = Vec<(String, bool)>;
 
 impl App {
     pub fn new(
@@ -328,15 +329,65 @@ impl App {
         self.ask_user.freeform_mode
     }
 
-    /// Pending steering messages still visible in the queue. Messages recalled
-    /// for editing are hidden, but retained internally for Alt+Down navigation
-    /// until the user submits or leaves recall mode.
+    /// Pending steering messages still in the runner queue.
     pub fn queued_steering(&self) -> &[String] {
-        let visible_len = self
-            .runtime
-            .steering_cursor
-            .unwrap_or(self.runtime.queued_steering.len());
-        &self.runtime.queued_steering[..visible_len]
+        &self.runtime.queued_steering
+    }
+
+    /// Preview queue entries around the current selection/composer boundary.
+    pub(crate) fn queue_preview(&self) -> (QueuePreviewSide, QueuePreviewSide) {
+        let all_steering = &self.runtime.queued_steering;
+        let steering_len = all_steering.len();
+        let mut entries = all_steering
+            .iter()
+            .map(|text| (text.clone(), false))
+            .collect::<Vec<_>>();
+        entries.extend(self.session.drafts.iter().map(|text| (text.clone(), true)));
+        let selected = match self.runtime.queue_selection.as_ref() {
+            Some(crate::agent_runtime::QueueSelection::PendingSteering { .. }) => steering_len,
+            Some(crate::agent_runtime::QueueSelection::StashedDraft(cursor)) => {
+                steering_len + cursor
+            }
+            None => steering_len,
+        };
+        let before_end = selected.min(entries.len());
+        let before_start = before_end.saturating_sub(2);
+        let mut before = Vec::new();
+        if before_start > 0 {
+            before.push((
+                format!("{} more...", before_start),
+                entries[before_start - 1].1,
+            ));
+        }
+        before.extend(entries[before_start..before_end].iter().cloned());
+
+        let after_start = match self.runtime.queue_selection.as_ref() {
+            Some(crate::agent_runtime::QueueSelection::PendingSteering { .. }) => {
+                steering_len.min(entries.len())
+            }
+            Some(crate::agent_runtime::QueueSelection::StashedDraft(_)) => {
+                selected.saturating_add(1).min(entries.len())
+            }
+            None => selected.min(entries.len()),
+        };
+        let remaining = entries.len().saturating_sub(after_start);
+        let after_end = after_start + remaining.min(2);
+        let mut after = entries[after_start..after_end].to_vec();
+        if remaining > 2 {
+            after.push((
+                format!("{} more...", remaining - 2),
+                entries[after_end - 1].1,
+            ));
+        }
+        (before, after)
+    }
+
+    pub(crate) fn queue_preview_above_line_count(&self) -> usize {
+        self.queue_preview().0.len()
+    }
+
+    pub(crate) fn queue_preview_below_line_count(&self) -> usize {
+        self.queue_preview().1.len()
     }
 
     /// Toggle the info bar visibility.
@@ -602,8 +653,11 @@ impl App {
         let Some(store) = self.session.session_store.as_ref() else {
             return;
         };
-        match store.load_events(session_id) {
-            Ok(log) => {
+        let loaded = store
+            .load_events(session_id)
+            .map(|log| (log, store.load_stash_for_session(session_id)));
+        match loaded {
+            Ok((log, stash_result)) => {
                 // Capture last known token usage from the loaded events
                 // before moving the event log into session_state.
                 self.latest_usage = Self::find_last_usage_from_events(&log.events);
@@ -628,8 +682,25 @@ impl App {
                         .unwrap()
                         .seed_from_events(ss.events());
                 }
+                let stash_load_failed = stash_result.is_err();
+                let drafts = match stash_result {
+                    Ok(drafts) => drafts,
+                    Err(error) => {
+                        self.session
+                            .live_turn
+                            .notices
+                            .push(Message::assistant(format!(
+                                "[failed to load saved drafts: {error}]"
+                            )));
+                        Vec::new()
+                    }
+                };
                 self.session.live_turn.clear_all();
                 self.session.current_session_id = Some(session_id.to_string());
+                self.session.drafts = drafts;
+                self.session.stash_load_failed = stash_load_failed;
+                self.runtime.queue_selection = None;
+                self.runtime.queue_saved_input = None;
                 self.log_view.reset_for_session();
             }
             Err(e) => {
@@ -4294,6 +4365,33 @@ mod tests {
     }
 
     #[test]
+    fn queue_down_while_history_stepping_discards_edits_and_restores_composer() {
+        let composer = "my original composer text";
+        let mut app = make_app_with_events(vec![
+            user_ev("older history"),
+            assistant_ev("older reply"),
+            user_ev("historical message"),
+            assistant_ev("reply"),
+        ]);
+        app.textarea = ratatui_textarea::TextArea::new(vec![composer.to_string()]);
+
+        app.step_back();
+        assert_eq!(app.textarea.lines().join("\n"), "historical message");
+        app.textarea = ratatui_textarea::TextArea::new(vec!["edited history text".to_string()]);
+        app.navigate_queue_up();
+        assert_eq!(app.textarea.lines().join("\n"), "older history");
+        assert!(app.session.drafts.is_empty());
+        app.textarea = ratatui_textarea::TextArea::new(vec!["edited older history".to_string()]);
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "historical message");
+        app.navigate_queue_down();
+
+        assert_eq!(app.textarea.lines().join("\n"), composer);
+        assert!(app.step_back.cursor.is_none());
+        assert!(app.session.drafts.is_empty());
+    }
+
+    #[test]
     fn step_forward_restores_and_clears_at_end() {
         let mut app = make_app_with_events(vec![
             user_ev("first"),
@@ -4338,25 +4436,303 @@ mod tests {
     }
 
     #[test]
-    fn steering_recall_navigates_pending_messages_and_restores_draft() {
+    fn draft_stash_persists_and_navigates_in_stable_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
         let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.textarea.insert_str("older draft");
+        assert!(app.stash_input());
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "older draft");
+        app.navigate_queue_up();
+        assert!(app.runtime.queue_selection.is_none());
+        assert!(app.textarea.lines().join("\n").is_empty());
+        app.textarea.insert_str("newer draft");
+        assert!(app.stash_input());
+        assert_eq!(app.session.drafts, ["newer draft", "older draft"]);
+        let session_id = app
+            .session
+            .current_session_id
+            .clone()
+            .expect("session created");
+        assert_eq!(
+            app.session
+                .session_store
+                .as_ref()
+                .unwrap()
+                .load_stash("/repo", &session_id)
+                .unwrap(),
+            ["newer draft", "older draft"]
+        );
+
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "newer draft");
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "older draft");
+        app.textarea = ratatui_textarea::TextArea::new(vec!["edited older".to_string()]);
+        app.navigate_queue_up();
+        assert_eq!(app.textarea.lines().join("\n"), "newer draft");
+        assert_eq!(app.session.drafts, ["newer draft", "edited older"]);
+        app.navigate_queue_up();
+        assert!(app.runtime.queue_selection.is_none());
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "newer draft");
+        app.reset_textarea();
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "edited older");
+        app.reset_textarea();
+        app.navigate_queue_down();
+        assert!(app.session.drafts.is_empty());
+        assert!(app.runtime.queue_selection.is_none());
+        assert!(
+            app.session
+                .session_store
+                .as_ref()
+                .unwrap()
+                .load_stash("/repo", &session_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn selected_draft_submission_rotates_remaining_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        let session_id = app.session.ensure_persistent_session_id().unwrap();
+        app.session.drafts = vec!["newer".into(), "selected".into(), "older".into()];
+        app.session
+            .session_store
+            .as_ref()
+            .unwrap()
+            .save_stash("/repo", &session_id, &app.session.drafts)
+            .unwrap();
+        app.runtime.queue_selection = Some(crate::agent_runtime::QueueSelection::StashedDraft(1));
+        app.textarea.insert_str("selected");
+        app.provider.provider_selected = true;
+        let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
+            std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
+
+        assert!(app.submit_selected_queue_item(&provider));
+        assert_eq!(app.session.drafts, ["older", "newer"]);
+        assert!(app.runtime.queue_selection.is_none());
+        assert!(app.runtime.pending_finalize);
+    }
+
+    #[test]
+    fn resuming_session_restores_draft_stash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let session_id = store.create_session("/repo").expect("create session");
+        store
+            .save_stash("/repo", &session_id, &["saved draft".into()])
+            .expect("save stash");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.resume_session_by_id(&session_id);
+        assert_eq!(app.session.drafts, ["saved draft"]);
+    }
+
+    #[test]
+    fn preview_limits_each_side_and_marks_saved_drafts() {
+        let mut app = make_app();
+        app.runtime.queued_steering = vec!["s1".into(), "s2".into(), "s3".into()];
+        app.session.drafts = vec!["d1".into(), "d2".into(), "d3".into()];
+        app.runtime.queue_selection = Some(crate::agent_runtime::QueueSelection::StashedDraft(1));
+        let (before, after) = app.queue_preview();
+        assert_eq!(before.len(), 3);
+        assert_eq!(before[0].0, "2 more...");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].0, "d3");
+        assert!(after[0].1);
+    }
+
+    #[test]
+    fn draft_stash_failure_keeps_composer_text() {
+        let mut app = make_app();
+        app.textarea.insert_str("must remain available");
+        assert!(!app.stash_input());
+        assert_eq!(app.textarea.lines().join("\n"), "must remain available");
+    }
+
+    #[tokio::test]
+    async fn interrupt_while_editing_popped_steering_stashes_it_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.begin_agent_turn();
+        app.runtime.queued_steering = vec!["older pending".into()];
+        app.runtime.queue_selection = Some(crate::agent_runtime::QueueSelection::PendingSteering {
+            text: "selected original".into(),
+            consumed: false,
+        });
+        app.textarea = ratatui_textarea::TextArea::new(vec!["edited selection".to_string()]);
+        install_test_agent_task(&mut app);
+
+        app.abort_agent_loop();
+
+        assert_eq!(app.session.drafts, ["older pending", "edited selection"]);
+        assert!(app.runtime.queued_steering.is_empty());
+        assert_eq!(
+            app.runtime.withdrawn_steering,
+            ["older pending", "selected original"]
+        );
+        let session_id = app.session.current_session_id.as_deref().unwrap();
+        assert_eq!(
+            app.session
+                .session_store
+                .as_ref()
+                .unwrap()
+                .load_stash("/repo", session_id)
+                .unwrap(),
+            ["older pending", "edited selection"]
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_runner_error_recovers_unconsumed_steering() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.begin_agent_turn();
+        install_test_agent_task(&mut app);
+        app.runtime.abort_stage = crate::agent::CancelLevel::HardAbort;
+        app.runtime.queued_steering = vec!["queued before error".into()];
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::Error(
+            ProviderError::other("test", "cancelled"),
+        ));
+
+        assert_eq!(app.session.drafts, ["queued before error"]);
+        assert!(app.runtime.queued_steering.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_runner_done_recovers_unconsumed_steering() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.begin_agent_turn();
+        install_test_agent_task(&mut app);
+        app.runtime.abort_stage = crate::agent::CancelLevel::SoftStop;
+        app.runtime.queued_steering = vec!["first queued".into(), "second queued".into()];
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::Done);
+
+        assert_eq!(app.session.drafts, ["first queued", "second queued"]);
+        assert!(app.runtime.queued_steering.is_empty());
+        let session_id = app.session.current_session_id.as_deref().unwrap();
+        assert_eq!(
+            app.session
+                .session_store
+                .as_ref()
+                .unwrap()
+                .load_stash("/repo", session_id)
+                .unwrap(),
+            ["first queued", "second queued"]
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_recovers_pending_steering_and_delayed_consumption_removes_it_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.begin_agent_turn();
+        install_test_agent_task(&mut app);
+        app.runtime.queued_steering = vec!["same".into(), "same".into(), "later".into()];
+        app.abort_agent_loop();
+        assert!(app.runtime.queued_steering.is_empty());
+        assert_eq!(app.session.drafts, ["same", "same", "later"]);
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::SteeringConsumed {
+            text: "same".into(),
+        });
+        assert_eq!(app.session.drafts, ["same", "later"]);
+        assert_eq!(app.runtime.withdrawn_steering, ["same", "later"]);
+        let events = app.session.session_state.as_ref().unwrap().events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SessionEvent::UserMessage { content, .. } if content == "same"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn alt_down_from_steering_moves_it_to_stash_not_back_to_runner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.begin_agent_turn();
+        app.runtime.queued_steering = vec!["pending note".into()];
+
+        app.navigate_queue_up();
+        assert_eq!(app.textarea.lines().join("\n"), "pending note");
+        assert!(app.runtime.queued_steering.is_empty());
+        app.navigate_queue_down();
+
+        assert!(app.textarea.lines().join("\n").is_empty());
+        assert_eq!(app.session.drafts, ["pending note"]);
+        assert!(app.runtime.queued_steering.is_empty());
+        assert!(app.runtime.queue_selection.is_none());
+    }
+
+    #[test]
+    fn unified_navigation_moves_steering_to_front_of_stash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        let session_id = app.session.ensure_persistent_session_id().unwrap();
+        app.session
+            .session_store
+            .as_ref()
+            .unwrap()
+            .save_stash("/repo", &session_id, &["older stash".into()])
+            .unwrap();
         app.begin_agent_turn();
         app.runtime.queued_steering = vec!["A".into(), "B".into(), "C".into()];
-        app.textarea.insert_str("draft");
+        app.session.drafts = vec!["older stash".into()];
 
-        app.recall_previous_steering();
+        app.navigate_queue_up();
         assert_eq!(app.textarea.lines().join("\n"), "C");
         assert_eq!(app.queued_steering(), ["A", "B"]);
-        app.recall_previous_steering();
+        app.navigate_queue_up();
         assert_eq!(app.textarea.lines().join("\n"), "B");
+        assert_eq!(app.session.drafts, ["C", "older stash"]);
         assert_eq!(app.queued_steering(), ["A"]);
-        app.recall_next_steering();
+        app.navigate_queue_down();
         assert_eq!(app.textarea.lines().join("\n"), "C");
-        assert_eq!(app.queued_steering(), ["A", "B"]);
-        app.recall_next_steering();
-
-        assert_eq!(app.textarea.lines().join("\n"), "draft");
-        assert!(app.runtime.steering_cursor.is_none());
+        assert_eq!(app.session.drafts, ["B", "C", "older stash"]);
+        assert_eq!(app.queued_steering(), ["A"]);
     }
 
     // ── commit_step_branch ask_user preservation ───────────────────────────

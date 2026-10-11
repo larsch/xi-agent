@@ -161,7 +161,7 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         id: Some(KeyBindingId::StepBack),
         shortcut: "Alt+Up / Alt+Down",
         context: BindingContext::Chat,
-        description: "Browse session history when idle, or pending steering while looping",
+        description: "Browse pending steering, the composer, saved drafts, and session history",
     },
     KeyBinding {
         id: Some(KeyBindingId::ApplyCompletion),

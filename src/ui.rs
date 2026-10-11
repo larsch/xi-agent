@@ -325,7 +325,11 @@ fn render_context_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn split_panel(area: Rect, heights: layout::PanelHeights) -> Vec<Rect> {
+fn split_panel(
+    area: Rect,
+    heights: layout::PanelHeights,
+    below_input_preview_height: usize,
+) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -341,6 +345,7 @@ fn split_panel(area: Rect, heights: layout::PanelHeights) -> Vec<Rect> {
             Constraint::Length(heights.halfblock_height),
             Constraint::Length(heights.input_height),
             Constraint::Length(heights.halfblock_height),
+            Constraint::Length(below_input_preview_height as u16),
             Constraint::Length(heights.info_height),
         ])
         .split(area)
@@ -510,6 +515,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     let input_line_count = input_visual_line_count(active_lines, width);
     let display = app.display.clone();
+    let below_input_preview_height = app.queue_preview_below_line_count();
 
     let ask_user_header_lines = if app.selection.active { 1 } else { 0 };
 
@@ -538,10 +544,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         has_login_code: app.login.code.is_some(),
         has_activity: app.log_view.full_output,
         has_provider_status: app.provider_status_visible(),
-        queued_steering_len: app.queued_steering().len(),
+        queued_steering_len: app.queue_preview_above_line_count(),
     });
 
-    let mut chunks = split_panel(f.area(), layout);
+    let mut chunks = split_panel(f.area(), layout, below_input_preview_height);
 
     let mut log_area = chunks[0];
     let mut activity_area = chunks[1];
@@ -555,7 +561,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let mut top_hb_area = chunks[9];
     let mut input_area = chunks[10];
     let mut bot_hb_area = chunks[11];
-    let mut info_area = chunks[12];
+    let mut pending_below_area = chunks[12];
+    let mut info_area = chunks[13];
 
     let mut inner_height = log_area.height as usize;
     let (mut log_content_area, mut log_scrollbar_area) = split_scrollbar_column(log_area);
@@ -612,11 +619,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         has_login_code: app.login.code.is_some(),
         has_activity: final_has_activity,
         has_provider_status: app.provider_status_visible(),
-        queued_steering_len: app.queued_steering().len(),
+        queued_steering_len: app.queue_preview_above_line_count(),
     });
     if final_layout != layout {
         layout = final_layout;
-        chunks = split_panel(f.area(), layout);
+        chunks = split_panel(f.area(), layout, below_input_preview_height);
         log_area = chunks[0];
         activity_area = chunks[1];
         pending_messages_area = chunks[2];
@@ -629,7 +636,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         top_hb_area = chunks[9];
         input_area = chunks[10];
         bot_hb_area = chunks[11];
-        info_area = chunks[12];
+        pending_below_area = chunks[12];
+        info_area = chunks[13];
         inner_height = log_area.height as usize;
         (log_content_area, log_scrollbar_area) = split_scrollbar_column(log_area);
         log_width = log_content_area.width as usize;
@@ -1023,7 +1031,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     if layout.pending_messages_height > 0 {
-        pending::render(f, pending_messages_area, app);
+        pending::render_before(f, pending_messages_area, app);
     }
 
     if layout.provider_status_height > 0 {
@@ -1044,6 +1052,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             app.theme.input.normal.bg.unwrap_or(Color::Rgb(30, 30, 40))
         };
         render_input_panel(f, input_area, app, panel_bg);
+    }
+
+    if below_input_preview_height > 0 {
+        pending::render_after(f, pending_below_area, app);
     }
 
     if app.show_info {
@@ -1293,6 +1305,61 @@ mod tests {
                 .iter()
                 .any(|cell| { cell.symbol() == "s" && cell.style().bg == Some(Color::Red) })
         );
+    }
+
+    #[test]
+    fn stashed_draft_preview_renders_below_composer() {
+        let mut app = make_app();
+        app.textarea.insert_str("composer marker");
+        app.session.drafts.push("first stashed draft".to_string());
+
+        let lines = render_to_plain_lines(&mut app, 80, 20);
+        let composer_row = lines
+            .iter()
+            .position(|line| line.contains("composer marker"))
+            .expect("composer is visible");
+        let draft_row = lines
+            .iter()
+            .position(|line| line.contains("first stashed draft"))
+            .expect("draft preview is visible");
+        let separator_row = lines
+            .iter()
+            .position(|line| line.contains('▀'))
+            .expect("lower separator is visible");
+        assert_eq!(separator_row, composer_row + 1);
+        assert!(draft_row > separator_row, "stash preview follows separator");
+    }
+
+    #[test]
+    fn pending_steering_and_stashed_draft_use_distinct_icons() {
+        let mut app = make_app();
+        app.runtime
+            .queued_steering
+            .push("pending steering".to_string());
+        app.session.drafts = vec![
+            "saved for later".to_string(),
+            "older draft one".to_string(),
+            "older draft two".to_string(),
+            "older draft three".to_string(),
+        ];
+        let lines = render_to_plain_lines(&mut app, 80, 20);
+
+        let pending = lines
+            .iter()
+            .find(|line| line.contains("pending steering"))
+            .expect("pending steering preview is visible");
+        let stashed = lines
+            .iter()
+            .find(|line| line.contains("saved for later"))
+            .expect("stashed draft preview is visible");
+        assert!(pending.contains("📣"));
+        assert!(stashed.contains("📌"));
+        assert!(!stashed.contains("stashed"));
+        let hidden_stash = lines
+            .iter()
+            .find(|line| line.contains("2 more..."))
+            .expect("hidden stash count is visible");
+        assert!(hidden_stash.contains("📌"));
     }
 
     #[test]

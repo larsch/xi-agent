@@ -133,8 +133,8 @@ impl App {
             session_id: session_id.clone(),
         };
         self.runtime.queued_steering.clear();
-        self.runtime.steering_cursor = None;
-        self.runtime.steering_saved_input = None;
+        self.runtime.queue_selection = None;
+        self.runtime.queue_saved_input = None;
 
         let provider = Arc::clone(provider);
         let tx = self.app_event_tx();
@@ -164,91 +164,343 @@ impl App {
         self.start_agent_task(provider);
     }
 
-    /// Recall an older pending steering message into the input field.
-    pub(crate) fn recall_previous_steering(&mut self) {
-        if !self.streaming() || self.runtime.queued_steering.is_empty() {
-            return;
+    fn persist_drafts(&mut self, drafts: Vec<String>) -> bool {
+        if self.session.stash_load_failed {
+            self.push_notice(Message::assistant(
+                "[draft stash was unreadable; refusing to overwrite saved data]",
+            ));
+            return false;
         }
-        let next = match self.runtime.steering_cursor {
-            Some(0) => return,
-            Some(idx) => idx - 1,
-            None => {
-                self.runtime.steering_saved_input = Some(self.textarea.lines().join("\n"));
-                self.runtime.queued_steering.len() - 1
+        let session_id = match self.session.ensure_persistent_session_id() {
+            Ok(id) => id,
+            Err(error) => {
+                log::warn!("could not create session for draft stash: {error}");
+                self.push_notice(Message::assistant(format!("[draft not saved: {error}]")));
+                return false;
             }
         };
-        // Remove the recalled message and every newer one from the runner
-        // immediately. Waiting for Enter here leaves a race where the runner
-        // can consume B/C while the user is editing B.
-        if let Some(tx) = self.runtime.steering_tx()
-            && tx
-                .send(SteeringCommand::ReplacePending(
-                    self.runtime.queued_steering[..next].to_vec(),
-                ))
-                .is_err()
-        {
-            return;
+        let Some(store) = self.session.session_store.as_ref() else {
+            return false;
+        };
+        if let Err(error) = store.save_stash_for_session(&session_id, &drafts) {
+            log::warn!("could not persist draft stash: {error}");
+            self.push_notice(Message::assistant(format!("[draft not saved: {error}]")));
+            return false;
         }
-        self.runtime.steering_cursor = Some(next);
-        self.textarea = crate::app::App::make_textarea();
-        self.textarea
-            .insert_str(&self.runtime.queued_steering[next]);
+        self.session.drafts = drafts;
+        self.session.refresh_resume_availability();
+        true
     }
 
-    /// Move toward newer pending steering, restoring pre-recall input after
-    /// the newest message.
-    pub(crate) fn recall_next_steering(&mut self) {
-        let Some(current) = self.runtime.steering_cursor else {
-            return;
+    /// Stash ordinary composer content at the front without adding it to history.
+    pub(crate) fn stash_input(&mut self) -> bool {
+        let text = self.textarea.lines().join("\n");
+        if text.trim().is_empty() {
+            return false;
+        }
+        let mut drafts = self.session.drafts.clone();
+        drafts.insert(0, text);
+        if !self.persist_drafts(drafts) {
+            return false;
+        }
+        self.reset_textarea();
+        self.runtime.queue_selection = None;
+        self.runtime.queue_saved_input = None;
+        true
+    }
+
+    fn save_selected_stash_edit(&mut self) -> Option<usize> {
+        let Some(crate::agent_runtime::QueueSelection::StashedDraft(index)) =
+            self.runtime.queue_selection.clone()
+        else {
+            return None;
         };
-        if current + 1 < self.runtime.queued_steering.len() {
-            let next = current + 1;
-            self.runtime.steering_cursor = Some(next);
-            self.textarea = crate::app::App::make_textarea();
-            self.textarea
-                .insert_str(&self.runtime.queued_steering[next]);
-        } else {
-            let saved = self.runtime.steering_saved_input.take().unwrap_or_default();
-            self.runtime.steering_cursor = None;
-            self.textarea = crate::app::App::make_textarea();
-            self.textarea.insert_str(&saved);
+        let mut drafts = self.session.drafts.clone();
+        if index >= drafts.len() {
+            return Some(index);
+        }
+        let edited = self.textarea.lines().join("\n");
+        if edited.trim().is_empty() {
+            drafts.remove(index);
+            if !self.persist_drafts(drafts) {
+                return None;
+            }
+            return Some(index);
+        }
+        drafts[index] = edited;
+        self.persist_drafts(drafts).then_some(index)
+    }
+
+    fn recover_orphaned_steering(&mut self) -> bool {
+        if self.streaming() {
+            return true;
+        }
+        let mut recovered = self.runtime.queued_steering.clone();
+        let mut withdrawn = self.runtime.queued_steering.clone();
+        if let Some(crate::agent_runtime::QueueSelection::PendingSteering {
+            text,
+            consumed: false,
+        }) = self.runtime.queue_selection.as_ref()
+        {
+            withdrawn.push(text.clone());
+            let edited = self.textarea.lines().join("\n");
+            if !edited.trim().is_empty() {
+                recovered.push(edited);
+            }
+        }
+        if recovered.is_empty() {
+            return true;
+        }
+        let mut drafts = recovered;
+        drafts.extend(self.session.drafts.iter().cloned());
+        if !self.persist_drafts(drafts) {
+            return false;
+        }
+        self.runtime.withdrawn_steering.extend(withdrawn);
+        self.runtime.queued_steering.clear();
+        self.runtime.queue_selection = None;
+        self.runtime.queue_saved_input = None;
+        true
+    }
+
+    fn pop_latest_steering(&mut self) -> bool {
+        let Some(text) = self.runtime.queued_steering.pop() else {
+            return false;
+        };
+        let remaining = self.runtime.queued_steering.clone();
+        if let Some(tx) = self.runtime.steering_tx()
+            && tx.send(SteeringCommand::ReplacePending(remaining)).is_err()
+        {
+            self.runtime.queued_steering.push(text);
+            return false;
+        }
+        if self.runtime.queue_saved_input.is_none() {
+            self.runtime.queue_saved_input = Some(self.textarea.lines().join("\n"));
+        }
+        self.runtime.queue_selection =
+            Some(crate::agent_runtime::QueueSelection::PendingSteering {
+                text: text.clone(),
+                consumed: false,
+            });
+        self.textarea = crate::app::App::make_textarea();
+        self.textarea.insert_str(&text);
+        self.completion.clear();
+        true
+    }
+
+    fn select_stashed_draft(&mut self, index: usize) -> bool {
+        let Some(text) = self.session.drafts.get(index) else {
+            return false;
+        };
+        if self.runtime.queue_saved_input.is_none() {
+            self.runtime.queue_saved_input = Some(self.textarea.lines().join("\n"));
+        }
+        self.runtime.queue_selection =
+            Some(crate::agent_runtime::QueueSelection::StashedDraft(index));
+        self.textarea = crate::app::App::make_textarea();
+        self.textarea.insert_str(text);
+        self.completion.clear();
+        true
+    }
+
+    fn restore_queue_composer(&mut self) {
+        let saved = self.runtime.queue_saved_input.take().unwrap_or_default();
+        self.runtime.queue_selection = None;
+        self.textarea = crate::app::App::make_textarea();
+        self.textarea.insert_str(&saved);
+        self.completion.clear();
+    }
+
+    fn save_pending_selection_to_stash(&mut self) -> Option<bool> {
+        let Some(crate::agent_runtime::QueueSelection::PendingSteering { text, consumed }) =
+            self.runtime.queue_selection.clone()
+        else {
+            return None;
+        };
+        let edited = self.textarea.lines().join("\n");
+        if edited.trim().is_empty() || (consumed && edited == text) {
+            self.runtime.queue_selection = None;
+            return Some(false);
+        }
+        let mut drafts = self.session.drafts.clone();
+        drafts.insert(0, edited);
+        if !self.persist_drafts(drafts) {
+            return None;
+        }
+        if !consumed {
+            self.runtime.withdrawn_steering.push(text);
+        }
+        self.runtime.queue_selection = None;
+        Some(true)
+    }
+
+    /// Move one item toward the oldest pending steering / composer boundary.
+    pub(crate) fn navigate_queue_up(&mut self) {
+        if !self.streaming() && self.is_stepping() {
+            self.step_back();
+            return;
+        }
+        if !self.recover_orphaned_steering() {
+            return;
+        }
+        match self.runtime.queue_selection.clone() {
+            Some(crate::agent_runtime::QueueSelection::PendingSteering { .. }) => {
+                if self.save_pending_selection_to_stash().is_none() {
+                    return;
+                }
+                if !self.pop_latest_steering() {
+                    self.restore_queue_composer();
+                }
+            }
+            Some(crate::agent_runtime::QueueSelection::StashedDraft(index)) => {
+                let saved_index = match self.save_selected_stash_edit() {
+                    Some(index) => index,
+                    None => return,
+                };
+                if saved_index > 0 {
+                    self.select_stashed_draft(saved_index - 1);
+                } else {
+                    self.restore_queue_composer();
+                }
+                let _ = index;
+            }
+            None => {
+                let text = self.textarea.lines().join("\n");
+                if !text.trim().is_empty() {
+                    let _ = self.stash_input();
+                } else if self.streaming() {
+                    let _ = self.pop_latest_steering();
+                } else {
+                    self.step_back();
+                }
+            }
+        }
+    }
+
+    /// Move one item toward the stash end; pending steering is never re-enqueued.
+    pub(crate) fn navigate_queue_down(&mut self) {
+        if !self.streaming() && self.is_stepping() {
+            self.step_forward();
+            return;
+        }
+        if !self.recover_orphaned_steering() {
+            return;
+        }
+        match self.runtime.queue_selection.clone() {
+            Some(crate::agent_runtime::QueueSelection::PendingSteering { .. }) => {
+                let old_stash_len = self.session.drafts.len();
+                if self.save_pending_selection_to_stash().is_none() {
+                    return;
+                }
+                let next_index = if self.session.drafts.len() > old_stash_len {
+                    1
+                } else {
+                    0
+                };
+                if !self.select_stashed_draft(next_index) {
+                    self.restore_queue_composer();
+                }
+            }
+            Some(crate::agent_runtime::QueueSelection::StashedDraft(_)) => {
+                let deleted = self.textarea.lines().join("\n").trim().is_empty();
+                let index = match self.save_selected_stash_edit() {
+                    Some(index) => index,
+                    None => return,
+                };
+                let next_index = if deleted { index } else { index + 1 };
+                if !self.select_stashed_draft(next_index) && deleted {
+                    self.restore_queue_composer();
+                }
+            }
+            None => {
+                if self.textarea.lines().join("\n").trim().is_empty()
+                    && !self.select_stashed_draft(0)
+                    && !self.streaming()
+                {
+                    self.step_forward();
+                }
+            }
+        }
+    }
+
+    /// Submit the current unified-queue selection.
+    pub(crate) fn submit_selected_queue_item(&mut self, provider: &DynProvider) -> bool {
+        let text = self.textarea.lines().join("\n");
+        let Some(selection) = self.runtime.queue_selection.clone() else {
+            return false;
+        };
+        if text.trim().is_empty() {
+            return false;
+        }
+        if !self.provider.provider_selected || self.login.active {
+            return false;
+        }
+        match selection {
+            crate::agent_runtime::QueueSelection::PendingSteering { .. } => {
+                if self.streaming() {
+                    self.enqueue_steering_from_input()
+                } else {
+                    self.runtime.queue_selection = None;
+                    self.runtime.queue_saved_input = None;
+                    self.submit_chat_message(provider);
+                    true
+                }
+            }
+            crate::agent_runtime::QueueSelection::StashedDraft(index) => {
+                if index >= self.session.drafts.len() {
+                    return false;
+                }
+                let original_drafts = self.session.drafts.clone();
+                let mut remaining = original_drafts.clone();
+                remaining.remove(index);
+                let mut reordered = remaining.split_off(index.min(remaining.len()));
+                reordered.extend(remaining);
+                if !self.persist_drafts(reordered) {
+                    return false;
+                }
+                if self.streaming() {
+                    if self.enqueue_steering_from_input() {
+                        true
+                    } else {
+                        let _ = self.persist_drafts(original_drafts);
+                        false
+                    }
+                } else {
+                    self.runtime.queue_selection = None;
+                    self.runtime.queue_saved_input = None;
+                    self.submit_chat_message(provider);
+                    true
+                }
+            }
         }
     }
 
     /// Queue a user steering message while the agent loop is running.
-    pub fn enqueue_steering_from_input(&mut self) {
+    pub fn enqueue_steering_from_input(&mut self) -> bool {
         if self.streaming() && self.runtime.abort_stage >= CancelLevel::HardAbort {
             self.show_abort_pending_notice();
-            return;
+            return false;
         }
         let text = self.textarea.lines().join("\n");
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() || !self.streaming() || self.login.active {
-            return;
+            return false;
         }
 
-        let command = if let Some(cursor) = self.runtime.steering_cursor {
-            let mut replacement = self.runtime.queued_steering[..=cursor].to_vec();
-            replacement[cursor] = trimmed.clone();
-            SteeringCommand::ReplacePending(replacement)
-        } else {
-            SteeringCommand::Enqueue(trimmed.clone())
-        };
+        let command = SteeringCommand::Enqueue(trimmed.clone());
         let Some(tx) = self.runtime.steering_tx() else {
-            return;
+            return false;
         };
 
         if tx.send(command).is_ok() {
-            if let Some(cursor) = self.runtime.steering_cursor {
-                self.runtime.queued_steering.truncate(cursor + 1);
-                self.runtime.queued_steering[cursor] = trimmed;
-            } else {
-                self.runtime.queued_steering.push(trimmed);
-            }
-            self.runtime.steering_cursor = None;
-            self.runtime.steering_saved_input = None;
+            self.runtime.queued_steering.push(trimmed);
+            self.runtime.queue_selection = None;
+            self.runtime.queue_saved_input = None;
             self.reset_textarea();
             self.log_view.auto_scroll = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -535,6 +787,71 @@ impl App {
         }
     }
 
+    pub(crate) fn preserve_queued_steering(&mut self) -> bool {
+        let restore_input = self
+            .runtime
+            .queue_selection
+            .as_ref()
+            .map(|_| self.runtime.queue_saved_input.clone().unwrap_or_default());
+        if matches!(
+            self.runtime.queue_selection,
+            Some(crate::agent_runtime::QueueSelection::StashedDraft(_))
+        ) {
+            if self.save_selected_stash_edit().is_none() {
+                return false;
+            }
+            self.runtime.queue_selection = None;
+        }
+        let pending_selection = matches!(
+            self.runtime.queue_selection,
+            Some(crate::agent_runtime::QueueSelection::PendingSteering {
+                consumed: false,
+                ..
+            })
+        );
+        if self.runtime.queued_steering.is_empty() && !pending_selection {
+            self.runtime.queue_selection = None;
+            self.runtime.queue_saved_input = None;
+            if let Some(saved) = restore_input {
+                self.textarea = crate::app::App::make_textarea();
+                self.textarea.insert_str(&saved);
+            }
+            return true;
+        }
+        let mut recovered = self.runtime.queued_steering.clone();
+        let mut withdrawn = self.runtime.queued_steering.clone();
+        if let Some(crate::agent_runtime::QueueSelection::PendingSteering {
+            text,
+            consumed: false,
+        }) = self.runtime.queue_selection.as_ref()
+        {
+            withdrawn.push(text.clone());
+            let edited = self.textarea.lines().join("\n");
+            if !edited.trim().is_empty() {
+                recovered.push(edited);
+            }
+        }
+        if !recovered.is_empty() {
+            let mut drafts = recovered.clone();
+            drafts.extend(self.session.drafts.iter().cloned());
+            if !self.persist_drafts(drafts) {
+                self.push_notice(Message::assistant(
+                    "[pending steering remains available; draft recovery could not be saved]",
+                ));
+                return false;
+            }
+        }
+        self.runtime.withdrawn_steering.extend(withdrawn);
+        self.runtime.queued_steering.clear();
+        self.runtime.queue_selection = None;
+        self.runtime.queue_saved_input = None;
+        if let Some(saved) = restore_input {
+            self.textarea = crate::app::App::make_textarea();
+            self.textarea.insert_str(&saved);
+        }
+        true
+    }
+
     pub fn abort_agent_loop(&mut self) {
         if let Some(handle) = self.runtime.take_agent_handle() {
             // Signal cooperative cancellation; hard-abort as fallback.
@@ -545,7 +862,7 @@ impl App {
                     "[agent loop aborted]".to_string(),
                 )));
             self.agent_turn.holdoff_started_at = None;
-            self.runtime.queued_steering.clear();
+            self.preserve_queued_steering();
             self.append_abort_results_for_pending_tool_calls();
             self.finalise_assistant_turn_event();
             self.flush_turn_events();

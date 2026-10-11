@@ -21,6 +21,12 @@ pub(crate) struct SessionManager {
     /// created or resumed.
     pub current_session_id: Option<String>,
 
+    /// Drafts saved for the active session, newest first.
+    pub drafts: Vec<String>,
+
+    /// Prevent overwriting an unreadable stash sidecar after a load failure.
+    pub stash_load_failed: bool,
+
     /// Working directory this session is associated with.
     pub current_cwd: String,
 
@@ -53,6 +59,8 @@ impl SessionManager {
         Self {
             session_store: None,
             current_session_id: None,
+            drafts: Vec::new(),
+            stash_load_failed: false,
             current_cwd: String::new(),
             resume_available_for_cwd: false,
             session_state: None,
@@ -92,6 +100,20 @@ impl SessionManager {
         let id = ephemeral_session_id();
         self.current_session_id = Some(id.clone());
         id
+    }
+
+    /// Ensure a persistent session ID exists before saving session sidecar data.
+    pub fn ensure_persistent_session_id(&mut self) -> anyhow::Result<String> {
+        if let Some(id) = &self.current_session_id {
+            return Ok(id.clone());
+        }
+        let store = self
+            .session_store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("session persistence is unavailable"))?;
+        let id = store.create_session(&self.current_cwd)?;
+        self.current_session_id = Some(id.clone());
+        Ok(id)
     }
 
     /// Ensure a `SessionState` exists for the current session before submitting

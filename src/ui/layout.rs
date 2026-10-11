@@ -71,7 +71,7 @@ pub(super) fn compute_panel_heights(input: PanelInputs<'_>) -> PanelHeights {
     };
 
     let pending_messages_height: u16 = if input.queued_steering_len > 0 {
-        input.queued_steering_len.min(3) as u16
+        input.queued_steering_len.min(6) as u16
     } else {
         0
     };

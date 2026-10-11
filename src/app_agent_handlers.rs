@@ -9,7 +9,7 @@ use crate::app::{App, RetryTarget, StreamingStatus};
 use crate::app_event::AppEvent;
 use crate::context_window::context_window_for_model;
 use crate::live_turn::{LiveToolEntry, LiveToolResult};
-use crate::llm::{AssistantPhase, DisplayRange, UsageStats};
+use crate::llm::{AssistantPhase, DisplayRange, Message, UsageStats};
 use crate::provider_manager::{active_provider_display_name, format_provider_error_for_display};
 use crate::session_event::SessionEvent;
 use crate::session_ipc::{CompletionPublisher, ErrorBody, IpcCommand};
@@ -331,18 +331,42 @@ impl App {
     }
 
     fn on_steering_consumed(&mut self, text: String) {
+        if let Some(crate::agent_runtime::QueueSelection::PendingSteering {
+            text: selected,
+            consumed,
+        }) = self.runtime.queue_selection.as_mut()
+            && selected == &text
+        {
+            *consumed = true;
+        }
+        if let Some(pos) = self
+            .runtime
+            .withdrawn_steering
+            .iter()
+            .position(|m| m == &text)
+        {
+            self.runtime.withdrawn_steering.remove(pos);
+            if let Some(stash_pos) = self.session.drafts.iter().position(|m| m == &text) {
+                let mut drafts = self.session.drafts.clone();
+                drafts.remove(stash_pos);
+                let session_id = self.session.current_session_id.clone();
+                if let (Some(store), Some(session_id)) =
+                    (self.session.session_store.as_ref(), session_id.as_deref())
+                    && store.save_stash_for_session(session_id, &drafts).is_ok()
+                {
+                    self.session.drafts = drafts;
+                    self.session.refresh_resume_availability();
+                } else {
+                    self.push_notice(Message::assistant(
+                        "[consumed steering could not be removed from the saved draft stash]",
+                    ));
+                }
+            }
+            self.append_user_message(text);
+            return;
+        }
         if let Some(pos) = self.runtime.queued_steering.iter().position(|m| m == &text) {
             self.runtime.queued_steering.remove(pos);
-            match self.runtime.steering_cursor {
-                Some(cursor) if pos < cursor => self.runtime.steering_cursor = Some(cursor - 1),
-                // The selected message has just become unavailable. Keep its
-                // text in the editor, but submit it as a new steering message.
-                Some(cursor) if pos == cursor => {
-                    self.runtime.steering_cursor = None;
-                    self.runtime.steering_saved_input = None;
-                }
-                _ => {}
-            }
         }
         // Flush any buffered assistant turn events first so the assistant
         // response appears before the steering message in the conversation log.
@@ -637,13 +661,19 @@ impl App {
     }
 
     fn on_agent_done(&mut self) {
+        let interrupted = self.runtime.abort_stage >= crate::agent::types::CancelLevel::SoftStop;
+        let steering_preserved = !interrupted || self.preserve_queued_steering();
         self.clear_pending_ask_after_agent_exit();
         self.publish_ipc_completion("success");
         self.end_agent_turn();
         self.runtime.clear_agent_handle();
-        self.runtime.queued_steering.clear();
-        self.runtime.steering_cursor = None;
-        self.runtime.steering_saved_input = None;
+        if !interrupted {
+            self.runtime.queued_steering.clear();
+        }
+        if steering_preserved {
+            self.runtime.queue_selection = None;
+            self.runtime.queue_saved_input = None;
+        }
         // The final TurnEnd already flushed the turn buffer.
         // Done only cleans up live streaming state.
         self.persist_messages();
@@ -685,7 +715,6 @@ impl App {
     fn on_agent_error(&mut self, e: crate::llm::ProviderError) {
         self.end_agent_turn();
         self.runtime.clear_agent_handle();
-        self.runtime.queued_steering.clear();
 
         let is_unauthorized = e.kind == crate::llm::ProviderErrorKind::Unauthorized;
 
@@ -693,6 +722,9 @@ impl App {
             && self.login.auth_retry_budget > 0
             && self.trigger_auth_refresh(RetryTarget::AgentTurn)
         {
+            self.runtime.queued_steering.clear();
+            self.runtime.queue_selection = None;
+            self.runtime.queue_saved_input = None;
             log::debug!(
                 "received 401, refresh triggered: provider={} remaining_budget= {}",
                 self.provider.current_instance.id,
@@ -705,6 +737,13 @@ impl App {
             self.session.pending_turn_events.clear();
             self.session.live_turn.clear_turn();
         } else {
+            if self.runtime.abort_stage >= crate::agent::types::CancelLevel::SoftStop {
+                self.preserve_queued_steering();
+            } else {
+                self.runtime.queued_steering.clear();
+                self.runtime.queue_selection = None;
+                self.runtime.queue_saved_input = None;
+            }
             self.publish_ipc_completion("error");
             let provider_label = active_provider_display_name(
                 &self.provider.current_instance.id,

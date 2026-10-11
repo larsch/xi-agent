@@ -730,7 +730,10 @@ fn render_message_blocks(
 ) -> Vec<LogBlock> {
     let msg = messages[idx];
     let is_last = idx == messages.len() - 1;
-    let msg_streaming = streaming && is_last && !is_static_assistant_notice(msg);
+    let msg_streaming = streaming
+        && is_last
+        && !is_static_assistant_notice(msg)
+        && matches!(msg.role, Role::Assistant | Role::ToolCall);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
@@ -907,7 +910,10 @@ fn render_message_blocks(
                 && next.role == Role::ToolResult
             {
                 let body_prev = lines.len();
-                let result_streaming = streaming && (idx + 1 == messages.len() - 1);
+                // Tool results are emitted only when complete. The agent loop
+                // may continue after this result, but that does not make this
+                // already-finished block a streaming (non-foldable) row.
+                let result_streaming = false;
                 render_tool_result(
                     messages,
                     idx + 1,
@@ -2772,6 +2778,69 @@ mod tests {
             })
             .collect();
         assert!(text.last().unwrap().contains("20 total lines"));
+    }
+
+    #[test]
+    fn completed_truncated_tool_result_is_foldable_while_loop_is_running() {
+        let call = Message::tool_call(
+            "active-tool",
+            "read_file",
+            serde_json::json!({"path": "foo.rs"}),
+        );
+        let content = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("active-tool", &content, false);
+        let mut cache = LogBlockCache::default();
+        let collapsed = build_log_layout_with_expansion(
+            &[],
+            &[call.clone(), result.clone()],
+            0,
+            true,
+            120,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+            &std::collections::HashSet::new(),
+            &mut cache,
+        );
+        let block = collapsed
+            .blocks
+            .iter()
+            .find(|block| block.identity.as_ref() == "message:0:tool")
+            .expect("paired tool block");
+        assert!(block.foldable);
+        assert!(block.sources.iter().all(|source| !source.streaming));
+        assert!(block.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("total lines"))
+        }));
+
+        let mut expanded_blocks = std::collections::HashSet::new();
+        expanded_blocks.insert("message:0:tool".to_string());
+        let expanded = build_log_layout_with_expansion(
+            &[],
+            &[call, result],
+            0,
+            true,
+            120,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+            &expanded_blocks,
+            &mut LogBlockCache::default(),
+        );
+        let expanded_text = expanded
+            .blocks
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(expanded_text.contains("line20"));
+        assert!(!expanded_text.contains("total lines"));
     }
 
     #[test]

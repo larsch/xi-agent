@@ -2,6 +2,12 @@ use crate::agent::runner::{AgentHandle, SteeringCommand};
 use crate::agent::types::CancelLevel;
 use crate::app_event::{AppEvent, AppEventTx};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QueueSelection {
+    PendingSteering { text: String, consumed: bool },
+    StashedDraft(usize),
+}
+
 /// Owns application event delivery and the active agent runner, while keeping
 /// UI-only steering display and abort state separate from runner lifecycle.
 pub(crate) struct AgentRuntime {
@@ -10,11 +16,12 @@ pub(crate) struct AgentRuntime {
     pub(crate) agent_handle: Option<AgentHandle>,
     /// Steering messages not yet reported as consumed by the runner.
     pub(crate) queued_steering: Vec<String>,
-    /// Selected pending steering message while recalling with Alt+Up/Down.
-    pub(crate) steering_cursor: Option<usize>,
-    /// Input present before steering recall began, restored after moving past
-    /// the newest pending message.
-    pub(crate) steering_saved_input: Option<String>,
+    /// Current selection in the unified pending-steering/composer/stash sequence.
+    pub(crate) queue_selection: Option<QueueSelection>,
+    /// Composer content saved before moving away from the boundary.
+    pub(crate) queue_saved_input: Option<String>,
+    /// Recovered drafts awaiting a possibly delayed SteeringConsumed event.
+    pub(crate) withdrawn_steering: Vec<String>,
     pub(crate) abort_stage: CancelLevel,
     pub(crate) ctrl_d_last_press: Option<std::time::Instant>,
     pub(crate) pending_graceful_quit: bool,
@@ -30,8 +37,9 @@ impl AgentRuntime {
             app_event_tx,
             agent_handle: None,
             queued_steering: Vec::new(),
-            steering_cursor: None,
-            steering_saved_input: None,
+            queue_selection: None,
+            queue_saved_input: None,
+            withdrawn_steering: Vec::new(),
             abort_stage: CancelLevel::None,
             ctrl_d_last_press: None,
             pending_graceful_quit: false,

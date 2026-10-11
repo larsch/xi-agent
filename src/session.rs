@@ -77,8 +77,17 @@ impl SessionStore {
                     continue;
                 }
             };
+            let cwd_value = cwd.as_deref().unwrap_or_default();
+            let has_stash = self.stash_file_path(cwd_value, &id).exists();
+            if message_count == 0 && !has_stash {
+                continue;
+            }
 
-            let file_updated_at_ms = file_modified_at_ms(&path);
+            let file_updated_at_ms = file_modified_at_ms(&path).max(
+                has_stash
+                    .then(|| file_modified_at_ms(&self.stash_file_path(cwd_value, &id)))
+                    .flatten(),
+            );
             let session_created_at_ms = session_id_created_at_ms(&id);
             let updated_at_ms = file_updated_at_ms
                 .zip(session_created_at_ms)
@@ -112,6 +121,64 @@ impl SessionStore {
         sessions
     }
 
+    /// Load the per-session draft stash. A missing sidecar means an empty stash.
+    pub fn load_stash(&self, cwd: &str, session_id: &str) -> anyhow::Result<Vec<String>> {
+        let path = self.stash_file_path(cwd, session_id);
+        match fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents)
+                .with_context(|| format!("Failed to parse draft stash: {}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error)
+                .with_context(|| format!("Failed to read draft stash: {}", path.display())),
+        }
+    }
+
+    /// Load a stash by session ID, resolving its stored working directory.
+    pub fn load_stash_for_session(&self, session_id: &str) -> anyhow::Result<Vec<String>> {
+        let cwd = self.cwd_for_session(session_id)?;
+        self.load_stash(&cwd, session_id)
+    }
+
+    fn cwd_for_session(&self, session_id: &str) -> anyhow::Result<String> {
+        let path = self
+            .find_session_file_by_id(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("no session file found for session {session_id}"))?;
+        let key = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid session path for session {session_id}"))?;
+        decode_cwd_key(key)
+            .ok_or_else(|| anyhow::anyhow!("invalid session working directory for {session_id}"))
+    }
+
+    /// Save a stash by session ID using its recorded working directory.
+    pub fn save_stash_for_session(
+        &self,
+        session_id: &str,
+        drafts: &[String],
+    ) -> anyhow::Result<()> {
+        let cwd = self.cwd_for_session(session_id)?;
+        self.save_stash(&cwd, session_id, drafts)
+    }
+
+    /// Durably replace the per-session draft stash, removing its sidecar when empty.
+    pub fn save_stash(&self, cwd: &str, session_id: &str, drafts: &[String]) -> anyhow::Result<()> {
+        let path = self.stash_file_path(cwd, session_id);
+        if drafts.is_empty() {
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error)
+                    .with_context(|| format!("Failed to remove draft stash: {}", path.display())),
+            }
+        } else {
+            let contents = serde_json::to_string(drafts)?;
+            crate::atomic_file::save_atomic(&path, &contents)
+                .with_context(|| format!("Failed to save draft stash: {}", path.display()))
+        }
+    }
+
     pub fn latest_for_cwd(&self, cwd: &str) -> Option<SessionMeta> {
         let needle = normalize_cwd_for_match(cwd);
 
@@ -130,16 +197,21 @@ impl SessionStore {
             if normalize_cwd_for_match(&decoded_cwd) != needle {
                 continue;
             }
-            let Ok(metadata) = fs::metadata(&path) else {
-                continue;
-            };
-            if metadata.len() == 0 {
-                continue;
-            }
             let Some(id) = session_id_from_path(&path) else {
                 continue;
             };
-            let file_updated = file_modified_at_ms(&path);
+            let has_stash = self.stash_file_path(&decoded_cwd, &id).exists();
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.len() == 0 && !has_stash {
+                continue;
+            }
+            let file_updated = file_modified_at_ms(&path).max(
+                has_stash
+                    .then(|| file_modified_at_ms(&self.stash_file_path(&decoded_cwd, &id)))
+                    .flatten(),
+            );
             let created = session_id_created_at_ms(&id);
             let updated = file_updated
                 .zip(created)
@@ -194,6 +266,12 @@ impl SessionStore {
         self.sessions_dir
             .join(cwd_key(cwd))
             .join(format!("{session_id}.jsonl"))
+    }
+
+    fn stash_file_path(&self, cwd: &str, session_id: &str) -> PathBuf {
+        self.sessions_dir
+            .join(cwd_key(cwd))
+            .join(format!("{session_id}.stash.json"))
     }
 
     /// Resolve the JSONL path for a session's event log.
@@ -427,6 +505,45 @@ mod tests {
         let latest = store.latest_for_cwd(cwd_a).expect("latest for cwd a");
         assert_eq!(latest.id, "20260328T120200-cccccccc");
         assert_eq!(latest.cwd, cwd_a);
+    }
+
+    #[test]
+    fn stash_sidecar_round_trips_and_is_removed_when_empty() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+        let id = store.create_session("/repo").expect("create session");
+        let drafts = vec!["draft one".to_string(), "draft two".to_string()];
+        store.save_stash("/repo", &id, &drafts).expect("save stash");
+        assert_eq!(store.load_stash("/repo", &id).unwrap(), drafts);
+        store.save_stash("/repo", &id, &[]).expect("remove stash");
+        assert!(store.load_stash("/repo", &id).unwrap().is_empty());
+        assert!(!store.stash_file_path("/repo", &id).exists());
+    }
+
+    #[test]
+    fn stash_only_session_is_listed_and_latest_for_cwd() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+        let id = store.create_session("/repo").expect("create session");
+        store
+            .save_stash("/repo", &id, &["recover me".to_string()])
+            .expect("save stash");
+        let session = store
+            .list_sessions()
+            .into_iter()
+            .find(|meta| meta.id == id)
+            .expect("stash-only session listed");
+        assert_eq!(session.message_count, 0);
+        assert_eq!(store.latest_for_cwd("/repo").unwrap().id, id);
+    }
+
+    #[test]
+    fn malformed_stash_is_reported() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+        let id = store.create_session("/repo").expect("create session");
+        fs::write(store.stash_file_path("/repo", &id), "not json").unwrap();
+        assert!(store.load_stash("/repo", &id).is_err());
     }
 
     #[test]

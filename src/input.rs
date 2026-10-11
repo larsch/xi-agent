@@ -444,11 +444,7 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
     match key.code {
         KeyCode::Up => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                if app.streaming() {
-                    app.recall_previous_steering();
-                } else {
-                    app.step_back();
-                }
+                app.navigate_queue_up();
                 return KeyDispatch::Continue;
             }
             app.selection_select_prev();
@@ -456,11 +452,7 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
         }
         KeyCode::Down => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                if app.streaming() {
-                    app.recall_next_steering();
-                } else {
-                    app.step_forward();
-                }
+                app.navigate_queue_down();
                 return KeyDispatch::Continue;
             }
             app.selection_select_next();
@@ -706,11 +698,7 @@ fn handle_chat_mode_key(
         KeyCode::PageDown => app.scroll_down(),
         KeyCode::Up => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                if app.streaming() {
-                    app.recall_previous_steering();
-                } else {
-                    app.step_back();
-                }
+                app.navigate_queue_up();
                 return KeyDispatch::Continue;
             }
             if !app.completion.completions.is_empty() {
@@ -721,11 +709,7 @@ fn handle_chat_mode_key(
         }
         KeyCode::Down => {
             if key.modifiers.contains(KeyModifiers::ALT) {
-                if app.streaming() {
-                    app.recall_next_steering();
-                } else {
-                    app.step_forward();
-                }
+                app.navigate_queue_down();
                 return KeyDispatch::Continue;
             }
             if !app.completion.completions.is_empty() {
@@ -902,6 +886,11 @@ fn handle_chat_submit(
         return handle_slash_submit(app, provider, config);
     }
 
+    if app.runtime.queue_selection.is_some() {
+        app.submit_selected_queue_item(provider);
+        return KeyDispatch::Continue;
+    }
+
     if app.is_stepping() {
         // Commit the branch: create a new session from the kept events and
         // the (possibly edited) message, then submit normally.
@@ -912,7 +901,7 @@ fn handle_chat_submit(
     }
 
     if app.streaming() {
-        app.enqueue_steering_from_input();
+        let _ = app.enqueue_steering_from_input();
     } else {
         app.submit_chat_message(provider);
     }
