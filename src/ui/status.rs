@@ -109,7 +109,33 @@ pub(super) fn throbber_line(app: &App) -> Line<'static> {
             .add_modifier(Modifier::DIM),
     };
     let frame = throbber_frame(app.agent_turn.activity, app.agent_turn.tick as usize);
-    Line::from(Span::styled(frame, throbber_style))
+    let mut spans = vec![Span::styled(frame, throbber_style)];
+    if let Some(elapsed) = app.agent_turn.local_work_elapsed(std::time::Instant::now())
+        && let Some(runtime) = format_runtime(elapsed.as_secs())
+    {
+        spans.push(Span::styled(format!(" {runtime}"), throbber_style));
+    }
+    Line::from(spans)
+}
+
+fn format_runtime(elapsed_secs: u64) -> Option<String> {
+    if elapsed_secs < 10 {
+        return None;
+    }
+    if elapsed_secs < 60 {
+        return Some(format!("{elapsed_secs}s"));
+    }
+    if elapsed_secs < 600 {
+        let elapsed_secs = elapsed_secs / 5 * 5;
+        let minutes = elapsed_secs / 60;
+        let seconds = elapsed_secs % 60;
+        return Some(if seconds == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m {seconds}s")
+        });
+    }
+    Some(format!("{}m", elapsed_secs / 60))
 }
 
 pub(super) fn render_activity(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -193,5 +219,20 @@ mod tests {
             throbber_frame(AgentActivity::LocalWork, 0),
             line_writer_frame(0)
         );
+    }
+
+    #[test]
+    fn runtime_display_follows_requested_cadence() {
+        assert_eq!(format_runtime(9), None);
+        assert_eq!(format_runtime(10).as_deref(), Some("10s"));
+        assert_eq!(format_runtime(59).as_deref(), Some("59s"));
+        assert_eq!(format_runtime(60).as_deref(), Some("1m"));
+        assert_eq!(format_runtime(64).as_deref(), Some("1m"));
+        assert_eq!(format_runtime(65).as_deref(), Some("1m 5s"));
+        assert_eq!(format_runtime(85).as_deref(), Some("1m 25s"));
+        assert_eq!(format_runtime(599).as_deref(), Some("9m 55s"));
+        assert_eq!(format_runtime(600).as_deref(), Some("10m"));
+        assert_eq!(format_runtime(659).as_deref(), Some("10m"));
+        assert_eq!(format_runtime(660).as_deref(), Some("11m"));
     }
 }

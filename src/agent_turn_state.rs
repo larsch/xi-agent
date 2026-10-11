@@ -34,6 +34,8 @@ pub(crate) struct AgentTurnState {
     config: ThrobberConfig,
     expected_interval_ms: f64,
     last_growth_at: Option<Instant>,
+    /// Start of the current LocalWork phase, used to display long-running work.
+    local_work_started_at: Option<Instant>,
     /// Generation of the current agent turn.
     turn_generation: u64,
     /// Track the last reported visible state so we only log transitions.
@@ -51,6 +53,7 @@ impl AgentTurnState {
             holdoff_started_at: None,
             expected_interval_ms: config.low_confidence_target_ms as f64,
             last_growth_at: None,
+            local_work_started_at: None,
             config,
             turn_generation: 0,
             last_reported_visible: Cell::new(None),
@@ -67,7 +70,20 @@ impl AgentTurnState {
 
     /// Set the agent-loop activity used to select throbber visuals.
     pub(crate) fn set_activity(&mut self, activity: AgentActivity) {
+        if activity != self.activity {
+            self.local_work_started_at = (activity == AgentActivity::LocalWork).then(Instant::now);
+        }
         self.activity = activity;
+    }
+
+    /// Elapsed duration of the current LocalWork phase, if one is active.
+    pub(crate) fn local_work_elapsed(&self, now: Instant) -> Option<std::time::Duration> {
+        (self.activity == AgentActivity::LocalWork)
+            .then(|| {
+                self.local_work_started_at
+                    .map(|started| now.duration_since(started))
+            })
+            .flatten()
     }
 
     pub(crate) fn turn_generation(&self) -> u64 {
@@ -78,6 +94,7 @@ impl AgentTurnState {
     pub(crate) fn start(&mut self) {
         self.turn_generation = self.turn_generation.wrapping_add(1);
         self.activity = AgentActivity::ModelRequest;
+        self.local_work_started_at = None;
         self.status = Some(StreamingStatus::Waiting);
         self.activity_visible = true;
         self.holdoff_started_at = None;
@@ -92,6 +109,7 @@ impl AgentTurnState {
     pub(crate) fn continue_turn(&mut self) {
         self.turn_generation = self.turn_generation.wrapping_add(1);
         self.activity = AgentActivity::ModelRequest;
+        self.local_work_started_at = None;
         if !self.is_active() {
             self.status = Some(StreamingStatus::Waiting);
             self.activity_visible = true;
@@ -110,6 +128,7 @@ impl AgentTurnState {
     pub(crate) fn end(&mut self) {
         self.status = None;
         self.activity = AgentActivity::ModelRequest;
+        self.local_work_started_at = None;
         self.activity_visible = false;
         self.holdoff_started_at = None;
     }
@@ -268,6 +287,26 @@ mod tests {
         state.set_activity(crate::agent::types::AgentActivity::LocalWork);
         state.update_visual_state(Some(VisualUpdate::Delta(0)), visible_at);
         assert!(state.throbber_visible(false));
+    }
+
+    #[test]
+    fn local_work_runtime_tracks_activity_phase() {
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
+        let before = Instant::now();
+        assert_eq!(state.local_work_elapsed(before), None);
+
+        state.set_activity(crate::agent::types::AgentActivity::LocalWork);
+        let started = Instant::now();
+        assert!(state.local_work_elapsed(started).is_some());
+        assert!(
+            state
+                .local_work_elapsed(started + Duration::from_secs(2))
+                .unwrap()
+                >= Duration::from_secs(2)
+        );
+
+        state.set_activity(crate::agent::types::AgentActivity::ModelRequest);
+        assert_eq!(state.local_work_elapsed(Instant::now()), None);
     }
 
     #[test]
