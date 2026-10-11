@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.9.1 — 2026-10-11
+
+### Changed
+
+- **Dependencies**: update locked dependencies to the latest compatible versions, including `chacha20` v0.10.2.
+
 ## v0.9.0 — 2026-10-11
 
 ### Added
