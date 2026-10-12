@@ -983,7 +983,13 @@ fn render_message_blocks(
     // (the tool call + result pairing above produces two such ranges).
     let mut blocks: Vec<LogBlock> = Vec::new();
     for (start, end, kind, identity) in ranges {
-        let foldable = !sources[start].streaming;
+        // A completed block is clickable only when its rendered preview shows a
+        // truncation marker.  Without this check, clicking any completed block
+        // toggles expansion state (and can adjust the viewport) even though its
+        // visual content cannot change.
+        let foldable = !sources[start].streaming
+            && (expanded_blocks.contains(&identity)
+                || lines[start..end].iter().any(is_truncation_marker));
         let truncation = TruncationMetadata {
             limit: None,
             total: None,
@@ -2015,6 +2021,12 @@ fn tool_result_line_subdued(
         Span::styled(format!(" {} ", marker), marker_style),
         Span::styled(content.into(), content_style),
     ])
+}
+
+fn is_truncation_marker(line: &Line<'static>) -> bool {
+    line.spans
+        .first()
+        .is_some_and(|span| span.content.as_ref() == " ┆ ")
 }
 
 /// Build a truncation/context placeholder line with a `┆` margin marker at
