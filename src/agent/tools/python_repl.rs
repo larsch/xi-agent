@@ -63,9 +63,13 @@ impl PythonReplTool {
             ""
         };
         let description = format!(
-            "Execute Python {} code in a persistent REPL scoped to the current agent loop. \
-             Variables and imports persist between calls. The final expression is returned. \
-             Set reset=true to discard existing state before execution. Top-level await is supported.{dependency_description}",
+            "Run Python {} in a persistent interactive workspace, like a Python REPL. \
+             You can assign variables, inspect their values, define helpers, and build on previous invocations. \
+             Variables, imports, functions, and in-memory objects survive between invocations. \
+             Use it for explorative investigations to avoid starting over at every step. \
+             The workspace lasts until your final response or until reset, interruption, or process exit. \
+             The final expression is returned. Top-level await is supported. \
+             Use run_python for one-shot scripts.{dependency_description}",
             runtime.version()
         );
         Self {
