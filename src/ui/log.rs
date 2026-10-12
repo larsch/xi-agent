@@ -44,7 +44,7 @@ impl Default for ToolBodyConfig {
             full_output: false,
             head_lines: 8,
             tail_lines: 8,
-            diff_lines: 4,
+            diff_lines: 5,
         }
     }
 }
@@ -1650,12 +1650,15 @@ fn render_head_truncated_body(
     let wrapped = wrap_content(content, content_width);
     let total_wrapped = wrapped.len();
 
-    let limit = if full_output {
-        total_wrapped
-    } else {
-        max_lines
-    };
     let truncated = !full_output && total_wrapped > max_lines;
+    // The truncation marker occupies a visual row of its own.  Reserve that
+    // row rather than appending it to a full preview, so expansion always
+    // increases the block height when content is actually omitted.
+    let limit = if truncated {
+        max_lines.saturating_sub(1)
+    } else {
+        total_wrapped
+    };
     let shown = trim_empty_edges(&wrapped[..limit.min(total_wrapped)], |wl| {
         wl.text.is_empty()
     });
@@ -1757,10 +1760,16 @@ fn render_tail_truncated_body(
             color,
         ));
     }
-    let start = if full_output || total_wrapped <= max_lines {
+    // The truncation marker consumes one visual row of the preview.
+    let visible_limit = if truncated {
+        max_lines.saturating_sub(1)
+    } else {
+        max_lines
+    };
+    let start = if full_output || total_wrapped <= visible_limit {
         0
     } else {
-        total_wrapped - max_lines
+        total_wrapped - visible_limit
     };
     let shown = trim_empty_edges(&wrapped[start..], |wl| wl.text.is_empty());
 
@@ -1850,6 +1859,17 @@ fn render_diff_body(
     let is_pure_removal = new_total == 0;
 
     let content_width = width.saturating_sub(3).max(1);
+    let wrapped_line_count = |diff_lines: &[&str]| {
+        diff_lines
+            .iter()
+            .map(|line| {
+                let normalized = normalize_terminal_segment(line, 3);
+                wrap_str(&normalized, content_width).len()
+            })
+            .sum::<usize>()
+    };
+    let old_visual_total = wrapped_line_count(old_diff);
+    let new_visual_total = wrapped_line_count(new_diff);
 
     // Helper: push a combined "total + common" filler when both apply.
     let push_total_common =
@@ -1913,12 +1933,21 @@ fn render_diff_body(
                 removed_color,
             ));
         }
+        let truncated = !full_output && old_visual_total > max_lines_per_side;
         if full_output {
             render_diff_block(out, old_diff, removed_color);
         } else {
-            render_diff_block_limited(out, old_diff, max_lines_per_side, removed_color);
+            render_diff_block_limited(
+                out,
+                old_diff,
+                if truncated {
+                    max_lines_per_side.saturating_sub(1)
+                } else {
+                    max_lines_per_side
+                },
+                removed_color,
+            );
         }
-        let truncated = !full_output && old_total > max_lines_per_side;
         let total_filler = if truncated { old_total } else { 0 };
         let common_filler = if common_tail > 0 && !is_pure_removal {
             common_tail
@@ -1936,12 +1965,21 @@ fn render_diff_body(
                 added_color,
             ));
         }
+        let truncated = !full_output && new_visual_total > max_lines_per_side;
         if full_output {
             render_diff_block(out, new_diff, added_color);
         } else {
-            render_diff_block_limited(out, new_diff, max_lines_per_side, added_color);
+            render_diff_block_limited(
+                out,
+                new_diff,
+                if truncated {
+                    max_lines_per_side.saturating_sub(1)
+                } else {
+                    max_lines_per_side
+                },
+                added_color,
+            );
         }
-        let truncated = !full_output && new_total > max_lines_per_side;
         let total_filler = if truncated { new_total } else { 0 };
         let common_filler = if common_tail > 0 && !is_pure_addition {
             common_tail
@@ -2766,8 +2804,8 @@ mod tests {
         )
         .flatten()
         .0;
-        // 8 content lines + 1 marker = 9 body lines, plus 1 intent line = 10 total
-        assert_eq!(lines.len(), 10);
+        // 7 content lines + 1 marker = 8 body lines, plus 1 intent line = 9 total
+        assert_eq!(lines.len(), 9);
         let text: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -3679,9 +3717,8 @@ mod tests {
     #[test]
     fn diff_body_removed_block_limited_by_wrapped_lines() {
         // old_text has one very long line that wraps many times at width 20.
-        // diff_lines default = 4; should limit to 4 wrapped visual lines.
-        // There's only 1 logical line, so no logical truncation marker is
-        // expected — but the visual display is still bounded.
+        // diff_lines default = 5; truncation reserves one row for its marker,
+        // so only 4 wrapped visual lines are shown.
         let old_long = "r".repeat(200);
         let new = "a";
         let call = Message::tool_call(
@@ -3702,7 +3739,8 @@ mod tests {
         .0;
         let body_text = lines_text_joined(&lines);
         // Count how many body lines contain the removed marker pattern " │ r".
-        // Should be exactly 4 (diff_lines limit), not ~12 (the full wrapped count).
+        // Should be exactly 4 (5-line threshold minus the marker row), not ~12
+        // (the full wrapped count).
         let removed_line_count = body_text.lines().filter(|l| l.contains("│ rrr")).count();
         assert_eq!(
             removed_line_count, 4,

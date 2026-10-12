@@ -69,7 +69,7 @@ The source of the tool body depends on the tool:
 
 ### Truncation
 
-When a tool body is truncated, the truncated lines are replaced with a `... (N lines total)` line. The position of this line depends on the truncation direction:
+When a tool body is truncated, the truncated lines are replaced with a `... (N lines total)` line. The marker consumes one visual row of the preview: it is shown only when the omitted content cannot fit in that row. The position of this line depends on the truncation direction:
 
 - **Head-truncated**: `... (N lines total)` appears as the last line, after the shown content.
 - **Tail-truncated**: `... (N lines total)` appears as the first line, before the shown content.
@@ -98,7 +98,7 @@ Truncated logical blocks are independently unfoldable with the mouse:
 #### `edit_file`
 
 - Intent: `📝 <path>` — at minimum shows `📝 edit_file` until the `path` argument is available.
-- Body: a compact diff showing up to 4 lines of search text (red, `-` prefix) and up to 4 lines of replacement text (green, `+` prefix). Each side is independently truncated with `... (N lines total)` when it exceeds 4 lines. Streams in progressively as the LLM generates `old_text` and `new_text`, sourced from `tool_partial_args` during streaming and from `tool_args` once finalized.
+- Body: a compact diff showing up to 5 visual lines of search text (red, `-` prefix) and up to 5 visual lines of replacement text (green, `+` prefix). When a side exceeds 5 visual lines, it shows 4 lines plus a truncation marker; the marker consumes one visual row. Streams in progressively as the LLM generates `old_text` and `new_text`, sourced from `tool_partial_args` during streaming and from `tool_args` once finalized.
 
 #### `find_files`
 
