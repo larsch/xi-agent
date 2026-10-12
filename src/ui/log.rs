@@ -746,7 +746,9 @@ fn render_message_blocks(
             }
             let user_bg = theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64));
             let prev = lines.len();
-            append_message_markdown(&mut lines, &msg.content, width, user_bg, &theme.markdown);
+            let notification = tool_presentation::session_notification_display(&msg.content);
+            let content = notification.as_deref().unwrap_or(&msg.content);
+            append_message_markdown(&mut lines, content, width, user_bg, &theme.markdown);
             push_sources(
                 &mut sources,
                 &mut ranges,
@@ -1406,6 +1408,43 @@ fn render_tool_result(
             &msg.content,
             width,
             theme.log.user.bg.unwrap_or(Color::Rgb(50, 50, 64)),
+        );
+        return;
+    }
+
+    if prev_name == "agent_session" {
+        let action = prev
+            .and_then(|p| p.tool_args.as_ref())
+            .and_then(|a| a.get("action"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let summary = tool_presentation::session_result_summary(action, &msg.content, msg.is_error);
+        let content = if cfg.full_output {
+            let details = serde_json::from_str::<serde_json::Value>(&msg.content)
+                .ok()
+                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                .unwrap_or_else(|| msg.content.clone());
+            format!("{summary}\n\nDetails:\n{details}")
+        } else {
+            summary
+        };
+        let color = if msg.is_error {
+            theme.log.diff.removed.fg.unwrap_or(Color::Red)
+        } else {
+            theme
+                .tools
+                .get(prev_name)
+                .body_color()
+                .unwrap_or(Color::Green)
+        };
+        render_head_truncated_body(
+            out,
+            &sanitize_for_display(&content),
+            cfg.head_lines,
+            cfg.full_output,
+            color,
+            width,
+            streaming,
         );
         return;
     }
@@ -2392,7 +2431,7 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
 mod tests {
     use super::{
         LogBlockCache, LogLayout, ToolBodyConfig, build_log_layout,
-        build_log_layout_with_expansion, dim_lines, message_render_fingerprint,
+        build_log_layout_with_expansion, dim_lines, message_render_fingerprint, render_tool_result,
         trim_assistant_block_edges,
     };
     use crate::{
@@ -3298,6 +3337,94 @@ mod tests {
     }
 
     // ── ask_user ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn session_tool_renders_summary_and_expanded_details_without_changing_result() {
+        let call = Message::tool_call(
+            "c1",
+            "agent_session",
+            serde_json::json!({"action": "post_prompt", "cwd": "/work/worker", "prompt": "Review changes"}),
+        );
+        let raw = r#"{"accepted":true,"mode":"prompt","turn_id":"secret"}"#;
+        let result = Message::tool_result("c1", raw, false);
+        let messages = [&call, &result];
+        let theme = Theme::default();
+        let display = DisplayConfig::default();
+        let text = |lines: Vec<Line<'static>>| {
+            lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut lines = Vec::new();
+        render_tool_result(
+            &messages,
+            1,
+            100,
+            &cfg(),
+            &theme,
+            &display,
+            &mut lines,
+            false,
+        );
+        let compact = text(lines);
+        assert!(compact.contains("Accepted · started a new task"));
+        assert!(!compact.contains("secret"));
+        let mut expanded_cfg = cfg();
+        expanded_cfg.full_output = true;
+        let mut lines = Vec::new();
+        render_tool_result(
+            &messages,
+            1,
+            100,
+            &expanded_cfg,
+            &theme,
+            &display,
+            &mut lines,
+            false,
+        );
+        let expanded = text(lines);
+        assert!(expanded.contains("Accepted · started a new task"));
+        assert!(expanded.contains("secret"));
+        assert_eq!(result.content, raw);
+    }
+
+    #[test]
+    fn session_notification_renders_markdown_without_turn_metadata() {
+        let raw = "External worker completed (success).\nWorkspace: /work/worker\nTurn: secret\n\n**Worker answer**";
+        let msg = Message::user(raw);
+        let lines = build_log_layout(
+            std::slice::from_ref(&msg),
+            false,
+            100,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("✅ Worker finished · /work/worker"));
+        assert!(text.contains("Worker answer"));
+        assert!(!text.contains("secret"));
+        assert!(!text.contains("**"));
+        assert_eq!(msg.content, raw);
+    }
 
     #[test]
     fn ask_user_renders_while_pending() {

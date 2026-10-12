@@ -29,6 +29,8 @@ fn render_side(f: &mut ratatui::Frame, area: Rect, app: &App, entries: Vec<(Stri
         .into_iter()
         .map(|(text, stashed)| {
             let icon = if stashed { "📌 " } else { prefix };
+            let notification = crate::tool_presentation::session_notification_display(&text);
+            let text = notification.as_deref().unwrap_or(&text);
             let text = text.lines().next().unwrap_or_default().replace('\t', " ");
             let available = (area.width as usize).saturating_sub(icon.width());
             Line::from(vec![

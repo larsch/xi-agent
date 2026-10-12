@@ -23,6 +23,7 @@ pub fn tool_pending_label(name: &str) -> String {
         "edit" | "edit_file" => "editing…",
         "find" | "find_files" => "finding…",
         "restart_host" => "restarting…",
+        "agent_session" => "contacting worker…",
         _ if !is_builtin_tool(name) => return format!("{emoji} {name} · working…"),
         _ => "working…",
     };
@@ -63,6 +64,7 @@ fn is_builtin_tool(name: &str) -> bool {
             | "learn"
             | "restart_host"
             | "local_shell"
+            | "agent_session"
     )
 }
 
@@ -78,6 +80,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "ask_user" => "❓",
         "learn" => "🎓",
         "restart_host" => "🔄",
+        "agent_session" => "🤝",
         _ => "🔧",
     }
 }
@@ -141,6 +144,30 @@ pub fn tool_invocation_label(
         }
         let detail = multiline_head_truncated(text, display);
         return (format!("{emoji} {detail}"), false);
+    }
+
+    if name == "agent_session" {
+        let action = match args.get("action").and_then(Value::as_str) {
+            Some("inspect") => "Inspect worker",
+            Some("state") => "Check worker",
+            Some("post_prompt") => "Send task",
+            Some(_) => "Contact worker",
+            None => return (tool_pending_label(name), true),
+        };
+        let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
+        if cwd.is_empty() {
+            return (format!("{emoji} {action}…"), true);
+        }
+        let mut label = format!(
+            "{emoji} {action} · {}",
+            crate::session_ipc::display_path(cwd)
+        );
+        if let Some(prompt) = args.get("prompt").and_then(Value::as_str)
+            && !prompt.trim().is_empty()
+        {
+            label.push_str(&format!("\n{}", compact(prompt, display)));
+        }
+        return (label, false);
     }
 
     // exec: full shell-quoted command (program + args).
@@ -228,6 +255,131 @@ pub fn tool_invocation_label_from_partial(
         None => return (tool_pending_label(name), true),
     };
     tool_invocation_label(name, &args, streaming_field, display)
+}
+
+/// Summarize session results without changing the model-visible tool output.
+/// Unknown responses fall back to the original text rather than hiding information.
+pub fn session_result_summary(action: &str, content: &str, is_error: bool) -> String {
+    if is_error {
+        let (code, _) = content.split_once(':').unwrap_or(("", content));
+        let message = match code {
+            "unavailable" => "No running worker found in this workspace",
+            "timeout" => "No acknowledgement · the instruction may have been accepted; not retried",
+            "connection_timeout" => "Timed out connecting to the worker",
+            "permission_denied" => "Permission denied connecting to the worker",
+            "connection_error" => "Could not connect to the worker",
+            "control_owned" => "Worker is controlled by another client · instruction not accepted",
+            _ => return content.to_string(),
+        };
+        return message.to_string();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(content) else {
+        return content.to_string();
+    };
+    match action {
+        "inspect" if value.get("session_id").is_some() => {
+            let mut summary = "Connected".to_string();
+            if let Some(capabilities) = value.get("capabilities").and_then(Value::as_array) {
+                let mut features = Vec::new();
+                for (capability, label) in [
+                    ("get_state", "status checks"),
+                    ("post_prompt", "delegated prompts"),
+                    ("completion_events", "completion notifications"),
+                ] {
+                    if capabilities.iter().any(|v| v.as_str() == Some(capability)) {
+                        features.push(label);
+                    }
+                }
+                if !features.is_empty() {
+                    summary.push_str(&format!(" · supports {}", features.join(", ")));
+                }
+            }
+            summary
+        }
+        "state" => {
+            let status = match value.get("status").and_then(Value::as_str) {
+                Some("idle") => "Idle",
+                Some("looping") => "Working",
+                _ => return content.to_string(),
+            };
+            let mut parts = vec![status.to_string()];
+            if value.get("pending_ask").and_then(Value::as_bool) == Some(true) {
+                parts.push("waiting for user input".to_string());
+            } else if let Some(activity) = value.get("activity").and_then(Value::as_str) {
+                parts.push(match activity {
+                    "modelrequest" => "waiting for model".to_string(),
+                    "localwork" => "executing tools".to_string(),
+                    other => one_line(other),
+                });
+            }
+            if let Some(count) = value.get("queued_steering_count").and_then(Value::as_u64)
+                && count > 0
+            {
+                parts.push(format!(
+                    "{count} queued instruction{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            parts.join(" · ")
+        }
+        "post_prompt" => match value.get("accepted").and_then(Value::as_bool) {
+            Some(false) => "Instruction not accepted".to_string(),
+            Some(true) => match value.get("mode").and_then(Value::as_str) {
+                Some("prompt") => "Accepted · started a new task".to_string(),
+                Some("steering") => {
+                    "Accepted · queued instruction for the current task".to_string()
+                }
+                _ => "Instruction accepted".to_string(),
+            },
+            None => content.to_string(),
+        },
+        _ => content.to_string(),
+    }
+}
+
+/// Format the existing IPC input envelope for display only. The original input
+/// retains its turn identifier and payload for model correlation and persistence.
+/// ponytail: recognizes the current text envelope; switch to structured display
+/// metadata if IPC notifications gain another envelope or need richer interaction.
+pub fn session_notification_display(content: &str) -> Option<String> {
+    let (header, rest) = content.split_once('\n')?;
+    let rest = rest.strip_prefix("Workspace: ")?;
+    let (cwd, rest) = rest.split_once("\nTurn: ")?;
+    let (_, body) = rest.split_once('\n')?;
+    if header == "External worker event: control.revoked." {
+        let payload: Value = serde_json::from_str(body.strip_prefix("Details: ")?).ok()?;
+        let reason = match payload.get("reason").and_then(Value::as_str) {
+            Some("user_took_control") => "🔔 Worker control returned to the user",
+            _ => "🔔 Worker control revoked",
+        };
+        let mut text = format!("{reason} · {cwd}");
+        if payload
+            .get("pending_input_dropped")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            text.push_str("\n\nPending delegated input was dropped.");
+        }
+        return Some(text);
+    }
+    if let Some(status) = header
+        .strip_prefix("External worker completed (")?
+        .strip_suffix(").")
+    {
+        let label = match status {
+            "success" => "✅ Worker finished",
+            "interrupted" => "🔔 Worker interrupted",
+            "error" => "🔔 Worker failed",
+            _ => {
+                return Some(format!(
+                    "🔔 Worker ended ({status}) · {cwd}\n\n{}",
+                    body.trim_start()
+                ));
+            }
+        };
+        return Some(format!("{label} · {cwd}\n\n{}", body.trim_start()));
+    }
+    None
 }
 
 // ── Private formatting helpers ────────────────────────────────────────────────
@@ -341,6 +493,134 @@ fn exec_command_detail(args: &Value, display: &DisplayConfig) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_intents_are_readable_and_stream_incrementally() {
+        let display = DisplayConfig::default();
+        assert_eq!(tool_pending_label("agent_session"), "🤝 contacting worker…");
+        for (action, verb) in [
+            ("inspect", "Inspect worker"),
+            ("state", "Check worker"),
+            ("post_prompt", "Send task"),
+        ] {
+            let (label, placeholder) = tool_invocation_label(
+                "agent_session",
+                &json!({"action": action, "cwd": "D:\\work\\worker", "prompt": "Review\nthe changes"}),
+                None,
+                &display,
+            );
+            assert!(!placeholder);
+            assert!(label.starts_with(&format!("🤝 {verb} · D:\\work\\worker")));
+            assert!(label.ends_with("Review the changes"));
+            assert!(!label.contains("agent_session"));
+        }
+        let (label, placeholder) = tool_invocation_label_from_partial(
+            "agent_session",
+            r#"{"action":"post_prompt","cwd":"/work/worker","prompt":"Review"#,
+            None,
+            &display,
+        );
+        assert!(!placeholder);
+        assert!(label.contains("Send task · /work/worker"));
+        assert!(label.contains("Review"));
+    }
+
+    #[test]
+    fn session_results_distinguish_acceptance_state_and_errors() {
+        for (action, value, expected) in [
+            (
+                "inspect",
+                json!({"session_id": "secret", "pid": 1, "capabilities": ["get_state", "post_prompt"]}),
+                "Connected · supports status checks, delegated prompts",
+            ),
+            (
+                "state",
+                json!({"status": "idle", "activity": null, "pending_ask": false}),
+                "Idle",
+            ),
+            (
+                "state",
+                json!({"status": "looping", "activity": "localwork", "pending_ask": false, "queued_steering_count": 1}),
+                "Working · executing tools · 1 queued instruction",
+            ),
+            (
+                "state",
+                json!({"status": "looping", "activity": "modelrequest", "pending_ask": true}),
+                "Working · waiting for user input",
+            ),
+            (
+                "post_prompt",
+                json!({"accepted": true, "mode": "prompt", "turn_id": "secret"}),
+                "Accepted · started a new task",
+            ),
+            (
+                "post_prompt",
+                json!({"accepted": true, "mode": "steering"}),
+                "Accepted · queued instruction for the current task",
+            ),
+            (
+                "post_prompt",
+                json!({"accepted": false}),
+                "Instruction not accepted",
+            ),
+        ] {
+            assert_eq!(
+                session_result_summary(action, &value.to_string(), false),
+                expected
+            );
+        }
+        assert_eq!(
+            session_result_summary("inspect", "unavailable: secret pipe", true),
+            "No running worker found in this workspace"
+        );
+        assert!(
+            session_result_summary("post_prompt", "timeout: raw", true)
+                .contains("may have been accepted")
+        );
+        assert_eq!(
+            session_result_summary("state", "not JSON", false),
+            "not JSON"
+        );
+        assert_eq!(
+            session_result_summary("state", r#"{"status":"new"}"#, false),
+            r#"{"status":"new"}"#
+        );
+        assert_eq!(
+            session_result_summary("inspect", "unexpected failure", true),
+            "unexpected failure"
+        );
+    }
+
+    #[test]
+    fn session_notifications_hide_metadata_but_keep_answers_and_failure_status() {
+        for (status, label) in [
+            ("success", "✅ Worker finished"),
+            ("error", "🔔 Worker failed"),
+            ("interrupted", "🔔 Worker interrupted"),
+        ] {
+            let raw = format!(
+                "External worker completed ({status}).\nWorkspace: /work/worker\nTurn: secret\n\n**Answer**"
+            );
+            let shown = session_notification_display(&raw).unwrap();
+            assert_eq!(shown, format!("{label} · /work/worker\n\n**Answer**"));
+            assert!(raw.contains("secret"));
+        }
+        let raw = "External worker event: control.revoked.\nWorkspace: /work/worker\nTurn: secret\nDetails: {\"reason\":\"user_took_control\",\"pending_input_dropped\":true}";
+        assert_eq!(
+            session_notification_display(raw).unwrap(),
+            "🔔 Worker control returned to the user · /work/worker\n\nPending delegated input was dropped."
+        );
+        assert!(session_notification_display("ordinary user input").is_none());
+        assert!(session_notification_display("External worker event: unknown.\nWorkspace: /work/worker\nTurn: secret\nDetails: {}").is_none());
+    }
+
+    #[test]
+    fn session_icons_have_two_column_width() {
+        use unicode_width::UnicodeWidthStr;
+        for icon in ["🤝", "🔔", "✅"] {
+            assert_eq!(icon.width(), 2);
+        }
+    }
 
     fn sf(name: &str) -> Option<&'static str> {
         // streaming_field per tool, matching Tool implementations
