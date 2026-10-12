@@ -11,7 +11,9 @@ use crate::app_event::AppEventTx;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
@@ -242,6 +244,7 @@ fn legacy_socket_path(cwd: &Path) -> PathBuf {
 }
 
 pub struct IpcServer {
+    #[cfg(unix)]
     pub socket_path: PathBuf,
     #[cfg(unix)]
     socket_identity: (u64, u64),
