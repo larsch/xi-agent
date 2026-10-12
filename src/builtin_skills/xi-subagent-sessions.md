@@ -22,7 +22,7 @@ xi --enable-session-ipc
 
 Adapt the command and working-directory setup to the chosen launcher. Starting a process in another terminal, tab, pane, or service is launcher-specific; do not assume one command works everywhere.
 
-The current session-IPC transport is Unix-only. A launcher choice does not make session IPC available on an unsupported platform.
+Session IPC supports Unix sockets and native Windows named pipes, restricted to the current user. Windows and WSL sessions are separate; there is no automatic bridge. On Windows, verify `wt.exe` and the xi binary before opening a new Windows Terminal tab with its starting directory set to the worker workspace.
 
 ## Connect and interact
 
@@ -32,7 +32,7 @@ Use the `agent_session` tool with the worker worktree's **absolute path** as `cw
 - `state` reports whether it is idle or working.
 - `post_prompt` submits a prompt.
 
-A successful `post_prompt` response means the prompt was accepted; it is not the worker's final answer. The worker reports completion later through an event surfaced by the tool.
+A successful `post_prompt` response reports whether the prompt was accepted and its `turn_id`; it is not the worker's final answer. Completion or control-revocation events identify the same turn. Steering input belongs to the existing active turn. A response timeout does not prove the prompt was rejected: inspect the session before deciding what to do, and do not blindly resubmit it.
 
 If the session is unavailable, check that the worktree path is correct, the worker is running there, session IPC was enabled, and the platform supports IPC. Do not infer that the worker failed or start duplicate workers without checking.
 

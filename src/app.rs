@@ -170,6 +170,7 @@ pub struct App {
     /// Clients subscribed to connection-lifetime completion notifications.
     pub(crate) ipc_subscribers: Vec<(u64, crate::session_ipc::CompletionPublisher)>,
     pub(crate) ipc_owner: Option<u64>,
+    pub(crate) ipc_turn: Option<(String, usize)>,
     pub(crate) user_owned: bool,
     pub(crate) ipc_prompt: Option<crate::session_ipc::PendingPrompt>,
     pub(crate) ipc_notifications: Vec<String>,
@@ -234,6 +235,7 @@ impl App {
             pending_restart_continue: false,
             ipc_subscribers: Vec::new(),
             ipc_owner: None,
+            ipc_turn: None,
             user_owned: false,
             ipc_prompt: None,
             ipc_notifications: Vec::new(),
@@ -1766,6 +1768,148 @@ mod tests {
                 cancel_tx,
             ));
         cancel_rx
+    }
+
+    #[test]
+    fn ipc_inspect_without_conversation_has_null_identifiers() {
+        let mut app = make_app();
+        let (reply, mut rx) = tokio::sync::oneshot::channel();
+        app.apply_app_event(AppEvent::Ipc(crate::session_ipc::IpcCommand::Request {
+            connection_id: 1,
+            op: "inspect_session".into(),
+            params: serde_json::json!({}),
+            reply,
+        }));
+        let result = rx.try_recv().unwrap().unwrap();
+        assert!(result["session_id"].is_null());
+        assert!(result["log_path"].is_null());
+    }
+
+    #[test]
+    fn ipc_disconnected_prompts_never_submit_or_retain_control() {
+        use crate::session_ipc::IpcCommand;
+        let mut app = make_app();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        drop(rx);
+        app.apply_app_event(AppEvent::Ipc(IpcCommand::Request {
+            connection_id: 7,
+            op: "post_prompt".into(),
+            params: serde_json::json!({"text":"hello"}),
+            reply,
+        }));
+        assert!(app.ipc_owner.is_none());
+        assert!(app.ipc_prompt.is_none());
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        app.apply_app_event(AppEvent::Ipc(IpcCommand::Request {
+            connection_id: 7,
+            op: "post_prompt".into(),
+            params: serde_json::json!({"text":"hello"}),
+            reply,
+        }));
+        assert_eq!(app.ipc_owner, Some(7));
+        drop(rx);
+        assert!(app.take_ipc_prompt().is_none());
+        assert!(app.ipc_owner.is_none());
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        app.apply_app_event(AppEvent::Ipc(IpcCommand::Request {
+            connection_id: 8,
+            op: "post_prompt".into(),
+            params: serde_json::json!({"text":"hello"}),
+            reply,
+        }));
+        app.apply_app_event(AppEvent::Ipc(IpcCommand::Disconnect { connection_id: 8 }));
+        assert!(app.ipc_prompt.is_none());
+        assert!(app.ipc_owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn ipc_user_takeover_preserves_active_work_and_revokes_only_owner() {
+        let mut app = make_app();
+        app.begin_agent_turn();
+        let _cancel_rx = install_test_agent_task(&mut app);
+        app.ipc_owner = Some(7);
+        app.ipc_turn = Some(("turn-7".into(), 0));
+        app.runtime
+            .queued_steering
+            .push("unapplied steering".into());
+        let (owner_tx, mut owner_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (other_tx, mut other_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.ipc_subscribers.push((
+            7,
+            crate::session_ipc::CompletionPublisher::from_sender(owner_tx),
+        ));
+        app.ipc_subscribers.push((
+            8,
+            crate::session_ipc::CompletionPublisher::from_sender(other_tx),
+        ));
+        app.textarea.insert_str("user takes over");
+        app.take_ipc_control_for_user();
+        assert!(app.streaming());
+        assert!(app.runtime.is_running());
+        assert!(app.user_owned);
+        assert!(app.ipc_owner.is_none());
+        assert!(app.ipc_turn.is_none());
+        assert!(app.runtime.queued_steering.is_empty());
+        let event: serde_json::Value = serde_json::from_str(&owner_rx.try_recv().unwrap()).unwrap();
+        assert_eq!(event["event"], "control.revoked");
+        assert_eq!(event["payload"]["turn_id"], "turn-7");
+        assert!(other_rx.try_recv().is_err());
+        app.apply_agent_event(crate::agent::types::AgentEvent::Done);
+        assert!(
+            owner_rx.try_recv().is_err(),
+            "former owner must not receive completion"
+        );
+    }
+
+    #[test]
+    fn ipc_user_takeover_discards_pending_prompt_with_explicit_error() {
+        let mut app = make_app();
+        let (reply, mut reply_rx) = tokio::sync::oneshot::channel();
+        app.apply_app_event(AppEvent::Ipc(crate::session_ipc::IpcCommand::Request {
+            connection_id: 7,
+            op: "post_prompt".into(),
+            params: serde_json::json!({"text":"unsubmitted prompt"}),
+            reply,
+        }));
+        app.textarea.insert_str("user input");
+        app.take_ipc_control_for_user();
+        assert!(app.take_ipc_prompt().is_none());
+        assert!(app.ipc_owner.is_none());
+        assert_eq!(
+            reply_rx.try_recv().unwrap().unwrap_err().code,
+            "control_revoked"
+        );
+    }
+
+    #[test]
+    fn ipc_completion_does_not_reuse_previous_answer() {
+        let mut app = make_app_with_events(vec![assistant_ev("old answer")]);
+        app.ipc_owner = Some(9);
+        app.ipc_turn = Some(("turn-9".into(), 1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.ipc_subscribers
+            .push((9, crate::session_ipc::CompletionPublisher::from_sender(tx)));
+        app.apply_agent_event(crate::agent::types::AgentEvent::Done);
+        let event: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(event["payload"]["response"].is_null());
+        assert_eq!(event["payload"]["turn_id"], "turn-9");
+    }
+
+    #[test]
+    fn ipc_completion_notification_is_concise_and_omits_reasoning() {
+        let mut app = make_app();
+        app.apply_app_event(AppEvent::IpcNotification {
+            cwd: r"\\?\C:\repo".into(),
+            event: serde_json::json!({"event":"agent.completed", "payload": {
+                "turn_id":"turn-1", "status":"success", "response": {"content":"answer", "thinking":"private reasoning"}, "log_path":"noisy log"
+            }}),
+        });
+        let message = &app.ipc_notifications[0];
+        assert!(message.contains("Workspace: C:\\repo"));
+        assert!(message.contains("turn-1"));
+        assert!(message.contains("answer"));
+        assert!(!message.contains("private reasoning"));
+        assert!(!message.contains("noisy log"));
     }
 
     #[test]

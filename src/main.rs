@@ -869,9 +869,13 @@ async fn run(
                     app.submit_with_text(text, provider);
                 }
                 if let Some((_connection_id, text, reply)) = app.take_ipc_prompt() {
+                    let turn_id = crate::session_ipc::new_turn_id();
+                    let event_start = app.session.session_state.as_ref().map_or(0, |state| state.events().len());
+                    app.ipc_turn = Some((turn_id.clone(), event_start));
                     app.submit_with_text(text, provider);
                     let accepted = app.runtime.pending_finalize;
-                    let _ = reply.send(Ok(serde_json::json!({"accepted": accepted, "mode": "prompt"})));
+                    if !accepted { app.ipc_turn = None; app.ipc_owner = None; }
+                    let _ = reply.send(Ok(serde_json::json!({"accepted": accepted, "mode": "prompt", "turn_id": accepted.then_some(turn_id)})));
                 }
                 if app.login.needs_rebuild {
                     app.login.needs_rebuild = false;

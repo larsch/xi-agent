@@ -37,7 +37,11 @@ impl App {
             }));
         }
         let session_id = self.session.current_session_id.clone().unwrap_or_default();
-        let event = crate::session_ipc::control_revoked_event(&session_id);
+        let turn = self.ipc_turn.take();
+        let event = crate::session_ipc::control_revoked_event(
+            &session_id,
+            turn.as_ref().map(|(id, _)| id.as_str()),
+        );
         for (id, publisher) in &self.ipc_subscribers {
             if *id == owner {
                 publisher.publish(event.clone());

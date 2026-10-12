@@ -3,32 +3,62 @@
 //! Unix sockets are stored in a private per-user runtime directory. Their
 //! fixed-length names are SHA-256 digests of canonical worktree paths. Clients
 //! also try the legacy `.xi/xi.sock` endpoint for upgrade compatibility.
+//! Windows uses local-only named pipes protected by a current-user DACL, with
+//! names derived from the user SID and volume/directory file identity.
 
-#[cfg(unix)]
-use crate::app_event::AppEvent;
-use crate::app_event::AppEventTx;
+use crate::app_event::{AppEvent, AppEventTx};
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
 use std::collections::HashMap;
-use std::path::Path;
-#[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
+
+#[cfg(unix)]
+type IpcStream = tokio::net::UnixStream;
+#[cfg(unix)]
+type IpcWriteHalf = tokio::net::unix::OwnedWriteHalf;
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{
+    PipeListenerOptions,
+    pipe_mode::Bytes,
+    tokio::{DuplexPipeStream, PipeListener, SendPipeStream},
+};
+#[cfg(windows)]
+type IpcStream = DuplexPipeStream<Bytes>;
+#[cfg(windows)]
+type IpcWriteHalf = SendPipeStream<Bytes>;
+
+fn split_stream(stream: IpcStream) -> (impl tokio::io::AsyncRead + Unpin + Send, IpcWriteHalf) {
+    #[cfg(unix)]
+    {
+        stream.into_split()
+    }
+    #[cfg(windows)]
+    {
+        stream.split()
+    }
+}
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub type IpcReply = oneshot::Sender<Result<serde_json::Value, ErrorBody>>;
 pub type PendingPrompt = (u64, String, IpcReply);
 
-#[cfg(unix)]
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[cfg(unix)]
+pub fn new_turn_id() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct Request {
     id: serde_json::Value,
@@ -37,7 +67,6 @@ struct Request {
     params: serde_json::Value,
 }
 
-#[cfg(unix)]
 #[derive(Debug, serde::Serialize)]
 struct Response {
     version: u32,
@@ -55,9 +84,6 @@ pub struct ErrorBody {
     pub message: String,
 }
 
-// Constructed by the Unix IPC transport; retained on other platforms so App
-// can use one platform-independent event handler.
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub enum IpcCommand {
     Request {
@@ -228,7 +254,6 @@ fn socket_path_for(cwd: &Path, runtime: &Path, fallback: &Path) -> std::io::Resu
     Ok(fallback_path)
 }
 
-#[cfg(unix)]
 fn hex_digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut value = String::with_capacity(bytes.len() * 2);
@@ -243,7 +268,16 @@ fn legacy_socket_path(cwd: &Path) -> PathBuf {
     cwd.join(".xi/xi.sock")
 }
 
+#[cfg(test)]
+mod protocol_tests;
+#[cfg(windows)]
+mod windows;
+#[cfg(all(test, windows))]
+mod windows_tests;
+
 pub struct IpcServer {
+    #[cfg(windows)]
+    accept_task: tokio::task::JoinHandle<()>,
     #[cfg(unix)]
     pub socket_path: PathBuf,
     #[cfg(unix)]
@@ -302,14 +336,40 @@ impl IpcServer {
         }
     }
 
-    #[cfg(not(unix))]
-    pub fn bind(_cwd: &Path, _command_tx: AppEventTx) -> std::io::Result<Option<Self>> {
-        Ok(None)
+    #[cfg(windows)]
+    pub fn bind(cwd: &Path, command_tx: AppEventTx) -> std::io::Result<Option<Self>> {
+        let endpoint = windows::endpoint(cwd)?;
+        let mut options = PipeListenerOptions::new().path(endpoint.as_str());
+        options.security_descriptor = Some(windows::security_descriptor()?);
+        options.accept_remote = false;
+        let listener = match options.create_tokio_duplex::<Bytes>() {
+            Ok(listener) => listener,
+            Err(error) if error.raw_os_error() == Some(5) => {
+                // First-instance collisions also report access denied. A
+                // nonwaiting probe distinguishes an accessible/busy owner from
+                // an actual permission failure; it never waits inside bind().
+                use interprocess::os::windows::named_pipe::DuplexPipeStream;
+                match DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+                    endpoint.as_str(),
+                    interprocess::ConnectWaitMode::Timeout(std::time::Duration::ZERO),
+                ) {
+                    Ok(_) => return Ok(None),
+                    Err(probe) if probe.kind() == std::io::ErrorKind::TimedOut => return Ok(None),
+                    Err(_) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Some(Self {
+            accept_task: tokio::spawn(accept_pipe_loop(listener, command_tx)),
+        }))
     }
 }
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.accept_task.abort();
         #[cfg(unix)]
         if socket_identity(&self.socket_path).ok() == Some(self.socket_identity) {
             let _ = std::fs::remove_file(&self.socket_path);
@@ -328,41 +388,115 @@ async fn accept_loop(listener: tokio::net::UnixListener, command_tx: AppEventTx)
     }
 }
 
-#[cfg(unix)]
-async fn connection(stream: tokio::net::UnixStream, command_tx: AppEventTx, connection_id: u64) {
+#[cfg(windows)]
+async fn accept_pipe_loop(listener: PipeListener<Bytes, Bytes>, command_tx: AppEventTx) {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        let stream = match listener.accept().await {
+            Ok(stream) => stream,
+            Err(error) => {
+                log::debug!("session IPC accept failed: {error}");
+                break;
+            }
+        };
+        let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+        connections.spawn(connection(stream, command_tx.clone(), connection_id));
+        while connections.try_join_next().is_some() {}
+    }
+}
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct DisconnectGuard {
+    command_tx: AppEventTx,
+    connection_id: u64,
+}
+
+impl Drop for DisconnectGuard {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(AppEvent::Ipc(IpcCommand::Disconnect {
+            connection_id: self.connection_id,
+        }));
+    }
+}
+
+async fn connection(stream: IpcStream, command_tx: AppEventTx, connection_id: u64) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let (read, mut write) = stream.into_split();
-    let mut reader = BufReader::new(read);
-    let mut line = String::new();
+    let (read, mut write) = split_stream(stream);
+    let _disconnect = DisconnectGuard {
+        command_tx: command_tx.clone(),
+        connection_id,
+    };
+    let (frames_tx, mut frames_rx) = mpsc::unbounded_channel();
+    let read_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(read);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    let _ = frames_tx.send(Err("peer disconnected".to_string()));
+                    break;
+                }
+                Ok(_) => {
+                    if frames_tx.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = frames_tx.send(Err(format!("read failed: {error}")));
+                    break;
+                }
+            }
+        }
+    });
+    let _read_task = AbortOnDrop(read_task.abort_handle());
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<String>();
     let _ = command_tx.send(AppEvent::Ipc(IpcCommand::Subscribe {
         connection_id,
         events: event_tx.clone(),
     }));
+    let mut pending = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
-            result = reader.read_line(&mut line) => {
-                let Ok(size) = result else { break };
-                if size == 0 { break; }
-                let response = match serde_json::from_str::<Request>(line.trim()) {
-                    Ok(request) => dispatch(request, &command_tx, connection_id).await,
-                    Err(error) => Response { version: PROTOCOL_VERSION, id: serde_json::Value::Null, ok: false, result: None, error: Some(ErrorBody { code: "invalid_request".into(), message: error.to_string() }) },
+            frame = frames_rx.recv() => {
+                let line = match frame {
+                    Some(Ok(line)) => line,
+                    Some(Err(reason)) => { log::debug!("IPC connection {connection_id}: {reason}"); break; }
+                    None => break,
                 };
-                line.clear();
-                let Ok(mut data) = serde_json::to_vec(&response) else { break };
+                let tx = command_tx.clone();
+                pending.spawn(async move {
+                    match serde_json::from_str::<Request>(line.trim()) {
+                        Ok(request) => dispatch(request, &tx, connection_id).await,
+                        Err(error) => error_response(serde_json::Value::Null, "invalid_request", &error.to_string()),
+                    }
+                });
+            }
+            Some(result) = pending.join_next(), if !pending.is_empty() => {
+                let response = match result {
+                    Ok(response) => response,
+                    Err(error) => { log::error!("IPC dispatch failed: {error}"); break; }
+                };
+                let mut data = serde_json::to_vec(&response).expect("IPC response is serializable");
                 data.push(b'\n');
-                if write.write_all(&data).await.is_err() { break; }
+                if let Err(error) = write.write_all(&data).await { log::debug!("IPC response write failed: {error}"); break; }
             }
             Some(event) = event_rx.recv() => {
-                if write.write_all(event.as_bytes()).await.is_err() { break; }
-                if write.write_all(b"\n").await.is_err() { break; }
+                if let Err(error) = write.write_all(format!("{event}\n").as_bytes()).await { log::debug!("IPC event write failed: {error}"); break; }
             }
         }
     }
-    let _ = command_tx.send(AppEvent::Ipc(IpcCommand::Disconnect { connection_id }));
+    pending.abort_all();
+    while pending.join_next().await.is_some() {}
+    // Dropping pending dispatches closes their reply receivers. DisconnectGuard
+    // releases ownership and discards any prompt not yet submitted by the UI.
 }
 
-#[cfg(unix)]
 async fn dispatch(request: Request, tx: &AppEventTx, connection_id: u64) -> Response {
     let id = request.id.clone();
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -394,7 +528,6 @@ async fn dispatch(request: Request, tx: &AppEventTx, connection_id: u64) -> Resp
     }
 }
 
-#[cfg(unix)]
 fn error_response(id: serde_json::Value, code: &str, message: &str) -> Response {
     Response {
         version: PROTOCOL_VERSION,
@@ -408,14 +541,14 @@ fn error_response(id: serde_json::Value, code: &str, message: &str) -> Response 
     }
 }
 
-pub fn control_revoked_event(session_id: &str) -> String {
+pub fn control_revoked_event(session_id: &str, turn_id: Option<&str>) -> String {
     serde_json::json!({
         "version": PROTOCOL_VERSION,
-        "seq": 0,
+        "seq": NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed),
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "session_id": session_id,
         "event": "control.revoked",
-        "payload": { "reason": "user_took_control", "pending_input_dropped": true }
+        "payload": { "reason": "user_took_control", "pending_input_dropped": true, "turn_id": turn_id }
     })
     .to_string()
 }
@@ -426,6 +559,7 @@ pub fn completion_event(
     status: &str,
     log_path: &Path,
     response: Option<&crate::session_event::SessionEvent>,
+    error: Option<&str>,
 ) -> String {
     let response = response.and_then(|event| match event {
         crate::session_event::SessionEvent::AssistantMessage {
@@ -444,7 +578,7 @@ pub fn completion_event(
     });
     serde_json::json!({
         "version": PROTOCOL_VERSION,
-        "seq": 0,
+        "seq": NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed),
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "session_id": session_id,
         "event": "agent.completed",
@@ -453,6 +587,7 @@ pub fn completion_event(
             "status": status,
             "log_path": log_path,
             "response": response,
+            "error": error,
         }
     })
     .to_string()
@@ -476,65 +611,119 @@ async fn connect_session(cwd: &str) -> Result<tokio::net::UnixStream, String> {
     }
 }
 
+#[cfg(windows)]
+async fn connect_session(cwd: &str) -> Result<IpcStream, String> {
+    let endpoint = windows::endpoint(Path::new(cwd)).map_err(|e| e.to_string())?;
+    IpcStream::connect_by_path_with_wait_mode(
+        endpoint.as_str(),
+        interprocess::ConnectWaitMode::Timeout(std::time::Duration::from_secs(2)),
+    )
+    .await
+    .map_err(|e| {
+        let code = match e.kind() {
+            std::io::ErrorKind::PermissionDenied => "permission_denied",
+            std::io::ErrorKind::TimedOut => "connection_timeout",
+            std::io::ErrorKind::NotFound => "unavailable",
+            _ => "connection_error",
+        };
+        format!("{code}: cannot connect to xi session at {endpoint}: {e}")
+    })
+}
+
+#[cfg(unix)]
+fn client_key(cwd: &Path) -> std::io::Result<PathBuf> {
+    canonical_worktree(cwd)
+}
+
+#[cfg(windows)]
+fn client_key(cwd: &Path) -> std::io::Result<PathBuf> {
+    windows::endpoint(cwd).map(PathBuf::from)
+}
+
 /// Send one request to a running worktree session.
 pub async fn client_call(
     cwd: &str,
     op: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    #[cfg(unix)]
     {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let stream = connect_session(cwd).await?;
-        let (read, mut write) = stream.into_split();
+        let (read, mut write) = split_stream(stream);
         let request = serde_json::json!({"id": 1, "op": op, "params": params});
         write
             .write_all(format!("{}\n", request).as_bytes())
             .await
             .map_err(|e| e.to_string())?;
         let mut line = String::new();
-        BufReader::new(read)
-            .read_line(&mut line)
+        tokio::time::timeout(RESPONSE_TIMEOUT, BufReader::new(read).read_line(&mut line))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| {
+                "timeout: IPC response timed out; request may have been accepted".to_string()
+            })?
+            .map_err(|e| format!("connection_error: {e}"))?;
         let response: serde_json::Value =
             serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
-        if response.get("ok") == Some(&serde_json::Value::Bool(true)) {
-            Ok(response
-                .get("result")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null))
-        } else {
-            Err(response
-                .pointer("/error/message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("IPC request failed")
-                .to_string())
-        }
+        response_result(&response)
     }
-    #[cfg(not(unix))]
+}
+
+pub fn display_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\")
+        && drive.as_bytes().get(1) == Some(&b':')
     {
-        let _ = (cwd, op, params);
-        Err("unavailable: session IPC is not supported on this platform".into())
+        return drive.to_owned();
+    }
+    path.to_owned()
+}
+
+fn response_result(response: &serde_json::Value) -> Result<serde_json::Value, String> {
+    if response.get("version").and_then(serde_json::Value::as_u64) != Some(PROTOCOL_VERSION.into())
+    {
+        return Err("protocol_error: unsupported or missing IPC protocol version".into());
+    }
+    if response.get("ok") == Some(&serde_json::Value::Bool(true)) {
+        Ok(response
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    } else {
+        let code = response
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ipc_error");
+        let message = response
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("IPC request failed");
+        Err(format!("{code}: {message}"))
     }
 }
 
-#[cfg(unix)]
 struct PersistentClient {
-    writer: tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>,
-    incoming: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>,
+    accepted_turn_id: Mutex<Option<String>>,
+    closed: std::sync::atomic::AtomicBool,
+    reader_task: Mutex<Option<tokio::task::AbortHandle>>,
+    exchange: tokio::sync::Mutex<()>,
+    writer: tokio::sync::Mutex<Option<IpcWriteHalf>>,
+    incoming:
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<serde_json::Value, String>>>,
+    notification_tx: AppEventTx,
+    cwd: String,
 }
 
-#[cfg(unix)]
 static CLIENTS: OnceLock<Mutex<HashMap<PathBuf, Arc<PersistentClient>>>> = OnceLock::new();
 
-#[cfg(unix)]
 async fn get_persistent_client(
     cwd: &str,
     app_event_tx: &AppEventTx,
 ) -> Result<Arc<PersistentClient>, String> {
     let clients = CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let canonical_cwd = canonical_worktree(Path::new(cwd)).map_err(|error| error.to_string())?;
+    let canonical_cwd = client_key(Path::new(cwd)).map_err(|error| error.to_string())?;
+    let notification_cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
     if let Some(client) = clients
         .lock()
         .expect("IPC client map poisoned")
@@ -544,93 +733,226 @@ async fn get_persistent_client(
         return Ok(client);
     }
     let stream = connect_session(cwd).await?;
-    let (read, writer) = stream.into_split();
+    let (read, writer) = split_stream(stream);
     let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
     let event_tx = app_event_tx.clone();
     let event_cwd = canonical_cwd.clone();
-    tokio::spawn(async move {
+    let client = Arc::new(PersistentClient {
+        accepted_turn_id: Mutex::new(None),
+        closed: std::sync::atomic::AtomicBool::new(false),
+        reader_task: Mutex::new(None),
+        exchange: tokio::sync::Mutex::new(()),
+        writer: tokio::sync::Mutex::new(Some(writer)),
+        incoming: tokio::sync::Mutex::new(incoming_rx),
+        notification_tx: app_event_tx.clone(),
+        cwd: notification_cwd.to_string_lossy().into_owned(),
+    });
+    clients
+        .lock()
+        .expect("IPC client map poisoned")
+        .insert(canonical_cwd, Arc::clone(&client));
+    let reader_client = Arc::downgrade(&client);
+    let reader_task = tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut reader = BufReader::new(read);
         let mut line = String::new();
-        while reader
-            .read_line(&mut line)
-            .await
-            .ok()
-            .filter(|n| *n > 0)
-            .is_some()
-        {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+        let failure = loop {
+            match reader.read_line(&mut line).await {
+                Ok(0) => break Some("connection_error: session disconnected before completion; accepted work may still be running".to_string()),
+                Ok(_) => {},
+                Err(error) => break Some(format!("connection_error: IPC read failed: {error}")),
+            }
+            let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
+                Ok(value) => value,
+                Err(error) => break Some(format!("protocol_error: invalid IPC response: {error}")),
+            };
+            {
                 if value.get("event").is_some() {
                     let terminal = matches!(
                         value.get("event").and_then(serde_json::Value::as_str),
                         Some("agent.completed" | "control.revoked")
                     );
                     let _ = event_tx.send(AppEvent::IpcNotification {
-                        cwd: event_cwd.to_string_lossy().into_owned(),
+                        cwd: notification_cwd.to_string_lossy().into_owned(),
                         event: value,
                     });
                     if terminal {
-                        if let Some(clients) = CLIENTS.get() {
-                            clients
-                                .lock()
-                                .expect("IPC client map poisoned")
-                                .remove(Path::new(&event_cwd));
-                        }
-                        break;
+                        break None;
                     }
                 } else {
-                    let _ = incoming_tx.send(value);
+                    // Record correlation before forwarding the reply: EOF may
+                    // follow immediately, before the requesting task resumes.
+                    if value.get("ok") == Some(&serde_json::Value::Bool(true))
+                        && value.pointer("/result/accepted") == Some(&serde_json::Value::Bool(true))
+                        && let Some(turn_id) = value
+                            .pointer("/result/turn_id")
+                            .and_then(serde_json::Value::as_str)
+                        && let Some(client) = reader_client.upgrade()
+                    {
+                        *client
+                            .accepted_turn_id
+                            .lock()
+                            .expect("IPC turn ID poisoned") = Some(turn_id.to_owned());
+                    }
+                    let _ = incoming_tx.send(Ok(value));
                 }
             }
             line.clear();
+        };
+        if let Some(reason) = failure {
+            let _ = incoming_tx.send(Err(reason.clone()));
+            if let Some(client) = reader_client.upgrade() {
+                report_connection_failure(&client, &reason);
+            }
+        }
+        if let Some(client) = reader_client.upgrade() {
+            client.closed.store(true, Ordering::Relaxed);
+            client.writer.lock().await.take();
+        }
+        // EOF, read errors and terminal events all invalidate the cached client.
+        // An old reader must not evict a newer connection for the same endpoint.
+        if let Some(clients) = CLIENTS.get() {
+            let mut clients = clients.lock().expect("IPC client map poisoned");
+            if clients
+                .get(&event_cwd)
+                .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), reader_client.as_ptr()))
+            {
+                clients.remove(&event_cwd);
+            }
         }
     });
-    let client = Arc::new(PersistentClient {
-        writer: tokio::sync::Mutex::new(writer),
-        incoming: tokio::sync::Mutex::new(incoming_rx),
-    });
-    clients
-        .lock()
-        .expect("IPC client map poisoned")
-        .insert(canonical_cwd, Arc::clone(&client));
+    *client.reader_task.lock().expect("IPC reader task poisoned") =
+        Some(reader_task.abort_handle());
     Ok(client)
 }
 
-#[cfg(unix)]
+fn report_connection_failure(client: &PersistentClient, reason: &str) {
+    log::warn!("IPC {}: {reason}", display_path(&client.cwd));
+    let _ = client.notification_tx.send(AppEvent::IpcNotification {
+        cwd: client.cwd.clone(),
+        event: serde_json::json!({"event":"connection.failed", "payload": {"turn_id":client.accepted_turn_id.lock().expect("IPC turn ID poisoned").clone(), "error":reason, "accepted_work_may_continue":true}}),
+    });
+}
+
+struct ExchangeGuard<'a> {
+    client: &'a Arc<PersistentClient>,
+    armed: bool,
+}
+impl Drop for ExchangeGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            report_connection_failure(
+                self.client,
+                "cancelled: IPC exchange cancelled; acceptance is unknown; not retried",
+            );
+            invalidate_client(self.client);
+        }
+    }
+}
+
+fn invalidate_client(client: &Arc<PersistentClient>) {
+    client.closed.store(true, Ordering::Relaxed);
+    // Cancellation drops the exchange future's writer lock before this guard.
+    // If another owner briefly holds it, arrange closure rather than retaining
+    // a live controller connection in a closed client object.
+    if let Ok(mut writer) = client.writer.try_lock() {
+        writer.take();
+    } else {
+        let client = Arc::clone(client);
+        tokio::spawn(async move {
+            client.writer.lock().await.take();
+        });
+    }
+    if let Some(task) = client
+        .reader_task
+        .lock()
+        .expect("IPC reader task poisoned")
+        .take()
+    {
+        task.abort();
+    }
+    if let Some(clients) = CLIENTS.get() {
+        clients
+            .lock()
+            .expect("IPC client map poisoned")
+            .retain(|_, cached| !Arc::ptr_eq(cached, client));
+    }
+}
+
 async fn persistent_request(
     client: &Arc<PersistentClient>,
     op: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    use tokio::io::AsyncWriteExt;
-    let request = serde_json::json!({"id": 1, "op": op, "params": params});
-    client
-        .writer
-        .lock()
-        .await
-        .write_all(format!("{}\n", request).as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    loop {
-        let mut incoming = client.incoming.lock().await;
-        let Some(value) = incoming.recv().await else {
-            return Err("IPC controller connection closed".into());
-        };
-        drop(incoming);
-        if value.get("id") == Some(&serde_json::json!(1)) {
-            if value.get("ok") == Some(&serde_json::Value::Bool(true)) {
-                return Ok(value
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null));
-            }
-            return Err(value
-                .pointer("/error/message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("IPC request failed")
-                .to_string());
+    persistent_request_with_timeout(client, op, params, RESPONSE_TIMEOUT).await
+}
+
+async fn persistent_request_with_timeout(
+    client: &Arc<PersistentClient>,
+    op: &str,
+    params: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value, String> {
+    let _exchange = client.exchange.lock().await;
+    if client.closed.load(Ordering::Relaxed) {
+        return Err("connection_error: IPC connection is closed".into());
+    }
+    let mut cancellation = ExchangeGuard {
+        client,
+        armed: true,
+    };
+    let result = tokio::time::timeout(timeout, persistent_exchange(client, op, params)).await;
+    cancellation.armed = false;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            report_connection_failure(
+                client,
+                "timeout: IPC response timed out; acceptance is unknown; not retried",
+            );
+            invalidate_client(client);
+            Err(
+                "timeout: IPC response timed out; request may have been accepted; not retried"
+                    .into(),
+            )
         }
     }
+}
+
+async fn persistent_exchange(
+    client: &Arc<PersistentClient>,
+    op: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::AsyncWriteExt;
+    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let request = serde_json::json!({"id": id, "op": op, "params": params});
+    let write_result = {
+        let mut writer = client.writer.lock().await;
+        let writer = writer
+            .as_mut()
+            .ok_or("connection_error: IPC writer is closed")?;
+        writer.write_all(format!("{}\n", request).as_bytes()).await
+    };
+    if let Err(error) = write_result {
+        let reason = format!("connection_error: IPC write failed: {error}; acceptance is unknown");
+        report_connection_failure(client, &reason);
+        invalidate_client(client);
+        return Err(reason);
+    }
+    let mut incoming = client.incoming.lock().await;
+    let Some(value) = incoming.recv().await else {
+        return Err("connection_error: IPC controller connection closed before reply; acceptance is unknown".into());
+    };
+    drop(incoming);
+    let value = value?;
+    if value.get("id") != Some(&serde_json::json!(id)) {
+        let reason = "protocol_error: unexpected IPC reply ID; connection invalidated";
+        report_connection_failure(client, reason);
+        invalidate_client(client);
+        return Err(reason.into());
+    }
+    response_result(&value)
 }
 
 #[cfg(all(test, unix))]
@@ -761,18 +1083,10 @@ pub async fn client_post_prompt(
     text: &str,
     app_event_tx: AppEventTx,
 ) -> Result<serde_json::Value, String> {
-    #[cfg(unix)]
-    {
-        persistent_request(
-            &get_persistent_client(cwd, &app_event_tx).await?,
-            "post_prompt",
-            serde_json::json!({"text": text}),
-        )
-        .await
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (cwd, text, app_event_tx);
-        Err("unavailable: session IPC is not supported on this platform".into())
-    }
+    persistent_request(
+        &get_persistent_client(cwd, &app_event_tx).await?,
+        "post_prompt",
+        serde_json::json!({"text": text}),
+    )
+    .await
 }

@@ -69,6 +69,38 @@ cargo install --path .
 | `-h` | `--help` | Print help |
 | `-V` | `--version` | Print version |
 
+## Session IPC
+
+Start an interactive session with `--enable-session-ipc` (or set
+`enable_session_ipc = true` in config) to enable the `agent_session` tool for
+contacting another opted-in session by its worktree directory. It supports
+inspection, runtime state, prompt submission, and completion notifications.
+The first opted-in instance in a worktree owns its endpoint.
+
+Before a conversation exists, inspection returns null session/log identifiers.
+Accepted prompts return a `turn_id`, echoed in completion and control-revocation
+notifications; steering belongs to the active turn. Event sequence numbers are
+monotonic within the server process. Notifications summarize the final answer
+without forwarding reasoning or usage metadata to the controller's prompt.
+Request/reply exchanges are serialized per connection and time out after 30
+seconds. A timeout does not mean the prompt was rejected; it is never
+replayed automatically. Inspect the session before resubmitting.
+Cancellation invalidates and closes the controller connection. Disconnects release
+control and discard input that has not yet been submitted; already-started agent
+work continues. Unexpected connection loss is surfaced as `connection.failed`,
+not silently treated as completion. Requests have unique IDs so a late reply
+cannot be consumed by a later exchange.
+
+Unix uses sockets in a private per-user runtime directory, with a client fallback
+to the legacy `.xi/xi.sock` endpoint. Native Windows uses asynchronous duplex
+named pipes restricted to the current Windows user; remote clients are rejected.
+Directory identity keeps Windows path aliases associated with the same endpoint.
+Windows and WSL sessions remain separate; there is no cross-environment bridge.
+
+IPC access permits submitting instructions to the agent, not just reading its
+state. Enable it only when you want other processes running as your user to
+control the session.
+
 ## Keybindings
 
 | Key             | Action                          |
