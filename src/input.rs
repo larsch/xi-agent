@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui_textarea::CursorMove;
 
 use crate::{
     agent::types::CancelLevel,
@@ -111,6 +112,29 @@ fn thinking_supported_for_current_provider(app: &App, config: &XiConfig) -> bool
                 == ThinkingSupport::Applied
         })
         .unwrap_or(false)
+}
+
+fn should_insert_markdown_code_fence(textarea: &ratatui_textarea::TextArea<'_>) -> bool {
+    let cursor = textarea.cursor();
+    let row = cursor.0;
+    let col = cursor.1;
+    let Some(line) = textarea.lines().get(row) else {
+        return false;
+    };
+    let prefix: String = line.chars().take(col).collect();
+    prefix.ends_with("```")
+        && prefix
+            .chars()
+            .nth_back(3)
+            .is_none_or(|character| character != '`')
+}
+
+fn insert_markdown_code_fence(textarea: &mut ratatui_textarea::TextArea<'_>) {
+    textarea.insert_str("\n\n```");
+    // Leave the cursor on the blank line between the opening and closing fences.
+    for _ in 0..4 {
+        textarea.move_cursor(CursorMove::Back);
+    }
 }
 
 pub(crate) fn cancel_ask_freeform_if_off_sentinel(app: &mut App) {
@@ -477,6 +501,9 @@ fn handle_selection_mode_key(app: &mut App, config: &XiConfig, key: KeyEvent) ->
             if app.pending_ask_allows_freeform() {
                 app.begin_ask_freeform_typing();
                 app.textarea.insert_char(c);
+                if c == '`' && should_insert_markdown_code_fence(&app.textarea) {
+                    insert_markdown_code_fence(&mut app.textarea);
+                }
             } else {
                 app.selection_add_char(c);
             }
@@ -745,7 +772,13 @@ fn handle_chat_mode_key(
             app.update_completions();
         }
         _ => {
+            let typed_backtick = key.code == KeyCode::Char('`')
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT);
             app.textarea.input(Event::Key(key));
+            if typed_backtick && should_insert_markdown_code_fence(&app.textarea) {
+                insert_markdown_code_fence(&mut app.textarea);
+            }
             if app.ipc_owner.is_some() {
                 let status = if app.streaming() {
                     "IPC control active — submitting will take control and steer the agent"
