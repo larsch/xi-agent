@@ -1,0 +1,17 @@
+[config]
+reduce_output = true
+
+[tasks.precommit]
+dependencies = ["fmt-check", "clippy", "test"]
+
+[tasks.fmt-check]
+command = "cargo"
+args = ["fmt", "--check", "--quiet"]
+
+[tasks.clippy]
+command = "cargo"
+args = ["clippy", "--quiet", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+[tasks.test]
+command = "cargo"
+args = ["test", "--all-features", "--quiet"]
