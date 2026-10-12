@@ -738,6 +738,7 @@ fn render_message_blocks(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
     let mut ranges: Vec<(usize, usize, LogBlockKind, String)> = Vec::new();
+    let mut truncated_thinking_blocks = HashSet::new();
 
     match msg.role {
         Role::User => {
@@ -787,6 +788,9 @@ fn render_message_blocks(
                     } else {
                         wrapped.len().saturating_sub(5)
                     };
+                    if wrapped.len() > 5 {
+                        truncated_thinking_blocks.insert(thinking_id);
+                    }
                     let shown = trim_empty_edges(&wrapped[skip..], |s| s.is_empty());
                     shown.join("\n")
                 };
@@ -991,6 +995,7 @@ fn render_message_blocks(
         // visual content cannot change.
         let foldable = !sources[start].streaming
             && (expanded_blocks.contains(&identity)
+                || truncated_thinking_blocks.contains(&identity)
                 || lines[start..end].iter().any(is_truncation_marker));
         let truncation = TruncationMetadata {
             limit: None,
@@ -2430,10 +2435,12 @@ pub(super) fn sanitize_for_display(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LogBlockCache, LogLayout, ToolBodyConfig, build_log_layout,
+        LogBlockCache, LogBlockKind, LogLayout, ToolBodyConfig, build_log_layout,
         build_log_layout_with_expansion, dim_lines, message_render_fingerprint, render_tool_result,
         trim_assistant_block_edges,
     };
+    use std::collections::HashSet;
+
     use crate::{
         config::DisplayConfig,
         llm::{AssistantPhase, DisplayRange, Message, Role},
@@ -2801,6 +2808,47 @@ mod tests {
         .flatten()
         .0;
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn thinking_block_is_foldable_only_when_truncated() {
+        let render = |thinking: String| {
+            let mut msg = Message::assistant("answer".to_string());
+            msg.thinking = Some(thinking);
+            build_log_layout_with_expansion(
+                &[],
+                &[msg],
+                0,
+                false,
+                80,
+                &cfg(),
+                &crate::theme::Theme::default(),
+                &crate::config::DisplayConfig::default(),
+                &HashSet::new(),
+                &mut LogBlockCache::default(),
+            )
+        };
+
+        let short = render("thought1\nthought2".to_string());
+        let short_thinking = short
+            .blocks
+            .iter()
+            .find(|block| block.kind == LogBlockKind::AssistantThinking)
+            .unwrap();
+        assert!(!short_thinking.foldable);
+
+        let long = render(
+            (1..=8)
+                .map(|i| format!("thought{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let long_thinking = long
+            .blocks
+            .iter()
+            .find(|block| block.kind == LogBlockKind::AssistantThinking)
+            .unwrap();
+        assert!(long_thinking.foldable);
     }
 
     #[test]
