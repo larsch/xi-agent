@@ -806,15 +806,16 @@ async fn run(
                                                 .saturating_sub(app.mouse_select.log_area_top)
                                                 as usize;
                                         let block_top = app
-                                            .mouse_select
-                                            .hit_map
-                                            .iter()
-                                            .position(|source| {
-                                                source.block_identity.as_ref() == Some(&identity)
+                                            .log_view
+                                            .log_cache
+                                            .cached_layout
+                                            .as_ref()
+                                            .and_then(|(_, _, _, layout)| {
+                                                layout.block_start_line(&identity)
                                             })
                                             .unwrap_or(line_idx);
-                                        let block_screen_top =
-                                            block_top.saturating_sub(app.mouse_select.log_scroll);
+                                        let block_screen_top = block_top as isize
+                                            - app.mouse_select.log_scroll as isize;
                                         app.log_view.pending_anchor =
                                             Some((identity.clone(), block_screen_top));
                                     }

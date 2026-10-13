@@ -500,6 +500,23 @@ fn build_log_layout_cached(
         .total_lines()
 }
 
+fn anchored_block_scroll(
+    block_top: usize,
+    block_len: usize,
+    old_screen_top: isize,
+    viewport_height: usize,
+) -> usize {
+    let anchored_scroll = if old_screen_top < 0 {
+        block_top
+    } else {
+        block_top.saturating_sub(old_screen_top as usize)
+    };
+    let bottom_visible_scroll = block_top
+        .saturating_add(block_len)
+        .saturating_sub(viewport_height);
+    anchored_scroll.max(bottom_visible_scroll).min(block_top)
+}
+
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     style_textarea(app);
 
@@ -653,16 +670,27 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     } else {
         content_len + usize::from(throbber_visible)
     };
-    if let Some((identity, block_screen_top)) = app.log_view.pending_anchor.take()
+    if let Some((identity, old_screen_top)) = app.log_view.pending_anchor.take()
         && !app.log_view.auto_scroll
-        && let Some(new_top) = app
-            .log_view
-            .log_cache
-            .cached_layout
-            .as_ref()
-            .and_then(|(_, _, _, layout)| layout.block_start_line(&identity))
+        && let Some((new_top, new_len)) =
+            app.log_view
+                .log_cache
+                .cached_layout
+                .as_ref()
+                .and_then(|(_, _, _, layout)| {
+                    let mut offset = 0;
+                    for block in &layout.blocks {
+                        let start = offset;
+                        offset += block.lines.len();
+                        if block.identity.as_ref() == identity.as_str() {
+                            return Some((start, block.lines.len()));
+                        }
+                    }
+                    None
+                })
     {
-        app.log_view.log_scroll = new_top.saturating_sub(block_screen_top);
+        app.log_view.log_scroll =
+            anchored_block_scroll(new_top, new_len, old_screen_top, inner_height);
     }
     let max_scroll = total_lines.saturating_sub(inner_height);
 
@@ -1171,6 +1199,26 @@ fn apply_mouse_highlight(mut lines: Vec<Line<'static>>, app: &App) -> Vec<Line<'
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    #[test]
+    fn anchored_block_scroll_preserves_visible_top() {
+        assert_eq!(anchored_block_scroll(30, 5, 4, 20), 26);
+    }
+
+    #[test]
+    fn anchored_block_scroll_moves_above_view_block_to_top() {
+        assert_eq!(anchored_block_scroll(10, 5, -3, 20), 10);
+    }
+
+    #[test]
+    fn anchored_block_scroll_reveals_expanded_bottom_without_losing_top() {
+        assert_eq!(anchored_block_scroll(30, 18, 4, 20), 28);
+    }
+
+    #[test]
+    fn anchored_block_scroll_keeps_tall_block_top_aligned() {
+        assert_eq!(anchored_block_scroll(30, 30, 4, 20), 30);
+    }
 
     use super::*;
     use crate::ui::log::append_tool_result_block;

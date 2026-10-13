@@ -52,7 +52,7 @@ pub struct LogViewState {
     pub(crate) last_log_width: usize,
     pub(crate) full_output: bool,
     pub(crate) expanded_blocks: HashSet<String>,
-    pub(crate) pending_anchor: Option<(String, usize)>,
+    pub(crate) pending_anchor: Option<(String, isize)>,
     pub(crate) last_block_padding: Option<PaddingState>,
     pub(crate) turn_generation: Option<u64>,
     pub(crate) visual_baseline: Option<Vec<(Arc<str>, usize)>>,
