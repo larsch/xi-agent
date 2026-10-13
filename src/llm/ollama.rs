@@ -143,6 +143,7 @@ struct PsModel {
 struct ChatRequest {
     model: String,
     messages: Vec<serde_json::Value>,
+    think: bool,
     stream: bool,
 }
 
@@ -151,6 +152,7 @@ struct ChatRequestWithTools {
     model: String,
     messages: Vec<serde_json::Value>,
     tools: Vec<OllamaToolDef>,
+    think: bool,
     stream: bool,
 }
 
@@ -302,6 +304,7 @@ impl LlmProvider for OllamaProvider {
             let body = ChatRequest {
                 model,
                 messages: to_ollama_wire(&messages),
+                think: true,
                 stream: true,
             };
 
@@ -371,6 +374,7 @@ impl LlmProvider for OllamaProvider {
                 model,
                 messages: to_ollama_wire(&messages),
                 tools: ollama_tools,
+                think: true,
                 stream: true,
             };
 
