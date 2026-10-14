@@ -169,6 +169,8 @@ pub mod read;
 #[cfg(all(feature = "restart", unix))]
 pub mod restart_host;
 pub mod subprocess;
+#[cfg(unix)]
+pub mod sudo;
 pub mod terminal;
 pub mod truncate;
 pub mod utf8;
@@ -192,6 +194,8 @@ use python_repl::PythonReplTool;
 use read::ReadFileTool;
 #[cfg(all(feature = "restart", unix))]
 use restart_host::RestartHostTool;
+#[cfg(unix)]
+use sudo::SudoTool;
 use write::WriteTool;
 
 use crate::app_event::AppEventTx;
@@ -209,6 +213,22 @@ pub fn set_active_skills(registry: &mut ToolRegistry, skills: Vec<crate::skills:
     );
 }
 
+#[cfg(unix)]
+fn sudo_command_available() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| {
+        let candidate = directory.join("sudo");
+        std::fs::metadata(&candidate)
+            .map(|metadata| {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+            .unwrap_or(false)
+    })
+}
+
 pub fn register_builtin_tools(
     app_event_tx: Option<AppEventTx>,
     file_tracker: Arc<Mutex<FileTracker>>,
@@ -218,6 +238,8 @@ pub fn register_builtin_tools(
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
+    #[cfg(unix)]
+    let sudo_available = app_event_tx.is_some() && sudo_command_available();
     let mut tools: Vec<Arc<dyn crate::agent::types::Tool>> = vec![
         Arc::new(ReadFileTool::new(Arc::clone(&file_tracker))),
         Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
@@ -225,7 +247,7 @@ pub fn register_builtin_tools(
         Arc::new(FindTool),
         Arc::new(LearnTool::new(Arc::clone(&skills))),
         Arc::new(AskUserTool::new(
-            app_event_tx,
+            app_event_tx.clone(),
             Some(Arc::clone(&file_tracker)),
         )),
     ];
@@ -244,6 +266,10 @@ pub fn register_builtin_tools(
     {
         tools.push(Arc::new(BashTool));
         tools.push(Arc::new(ExecTool));
+        #[cfg(unix)]
+        if sudo_available {
+            tools.push(Arc::new(SudoTool));
+        }
     }
 
     #[cfg(all(feature = "restart", unix))]

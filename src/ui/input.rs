@@ -308,6 +308,13 @@ pub(super) fn render_input_panel(
             prefix,
             (app.shell.available.len() > 1).then_some("Ctrl+S switch".to_string()),
         )
+    } else if app.sudo_password_entry() {
+        (
+            app.textarea.lines().to_vec(),
+            app.textarea.cursor(),
+            "sudo password: ".to_string(),
+            Some("Enter submit  Esc deny".to_string()),
+        )
     } else if app.provider.setup_step != ProviderSetupStep::Idle {
         let instance = app.pending_provider_instance();
         let kind = match &app.provider.setup_step {
@@ -330,6 +337,16 @@ pub(super) fn render_input_panel(
             None,
         )
     };
+
+    // The input panel uses a custom renderer rather than the textarea widget,
+    // so apply password masking here as well. `TextArea::set_mask_char` alone
+    // does not protect this rendering path.
+    if app.sudo_password_entry() {
+        input_lines = input_lines
+            .iter()
+            .map(|line| "•".repeat(line.chars().count()))
+            .collect();
+    }
 
     // ── Selection filter mirror ───────────────────────────────────────────
     // When the selection menu is active and supports filtering, show the

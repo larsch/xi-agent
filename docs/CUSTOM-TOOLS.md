@@ -91,3 +91,19 @@ well-documented file or stdin interface instead.
 Custom tools are executable code and run with the permissions of the xi
 process. xi does not request confirmation before invoking them. Install only
 tools you trust and consider what filesystem and network access they need.
+
+## Built-in sudo tool (Unix)
+
+Interactive Unix sessions also provide a built-in `sudo` tool. It accepts a
+single `command` string and runs it through `sudo -A /bin/sh -c`. The parent xi
+process displays an approval menu only when sudo requests a password:
+
+- **Deny** (the default)
+- **Approve once**
+- **Approve once, save password**
+- **Approve all in this session**
+
+Passwords are entered in a masked transient prompt and are held only in
+memory. They are never included in tool output, conversation history, logs, or
+session files. Exiting xi clears saved approval and password state. The sudo
+tool is unavailable in non-interactive print mode and is Unix-only.

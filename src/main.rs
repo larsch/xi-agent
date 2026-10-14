@@ -69,6 +69,10 @@ mod shell;
 mod shell_state;
 mod skills;
 mod step_back_state;
+#[cfg(unix)]
+mod sudo_ipc;
+#[cfg(unix)]
+mod sudo_state;
 mod terminal;
 mod theme;
 mod theme_demo;
@@ -253,6 +257,15 @@ impl StartupTimer {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(context) = sudo_ipc::helper_context() {
+        let context = context.map_err(io::Error::other)?;
+        let prompt = std::env::args_os()
+            .nth(1)
+            .map(|value| value.to_string_lossy().into_owned());
+        return context.run(prompt).await;
+    }
+
     let mut timer = StartupTimer::new();
     migrate::run();
     timer.mark("migrate::run");
@@ -424,6 +437,14 @@ async fn main() -> io::Result<()> {
     app.theme = theme;
 
     let app_event_tx = app.app_event_tx();
+    #[cfg(unix)]
+    let _sudo_server = match sudo_ipc::Server::bind(app_event_tx.clone()) {
+        Ok(server) => Some(server),
+        Err(error) => {
+            log::debug!("sudo IPC unavailable: {error}");
+            None
+        }
+    };
 
     // Record the desired agent now; the actual system-prompt rebuild happens
     // once the context (tools, skills, agents) has been loaded, either by the
@@ -556,7 +577,11 @@ async fn main() -> io::Result<()> {
         }
 
         match run(&mut terminal, &mut app, &provider, &config, &mut timer).await {
-            Ok(RunResult::Quit) | Err(_) => break,
+            Ok(RunResult::Quit) | Err(_) => {
+                #[cfg(unix)]
+                app.sudo.shutdown();
+                break;
+            }
 
             #[cfg(all(feature = "restart", unix))]
             Ok(RunResult::Restart) => {

@@ -65,6 +65,8 @@ pub enum SelectionResult {
     ResumeSession(String),
     AskOption(String),
     AskFreeform,
+    #[cfg(unix)]
+    SudoApproval(crate::sudo_state::ApprovalMode),
     /// A login-panel action was selected.
     LoginAction(LoginActionKind),
     /// The user cancelled a pending provider removal confirmation.
@@ -163,6 +165,8 @@ pub struct App {
 
     // ── Ask-user interaction state ──────────────────────────────────────────
     pub(crate) ask_user: AskUserState,
+    #[cfg(unix)]
+    pub(crate) sudo: crate::sudo_state::SudoState,
 
     // ── Runtime/task state ───────────────────────────────────────────────────
     pub(crate) runtime: AgentRuntime,
@@ -228,6 +232,8 @@ impl App {
             login: LoginState::new(),
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
+            #[cfg(unix)]
+            sudo: crate::sudo_state::SudoState::new(),
             runtime: AgentRuntime::new(),
             #[cfg(all(feature = "restart", unix))]
             pending_restart: false,
@@ -310,10 +316,17 @@ impl App {
     /// - Token refresh in progress: throbber visible regardless of turn state,
     ///   so the user sees activity during the ~500ms refresh window.
     pub fn throbber_visible(&self) -> bool {
+        #[cfg(unix)]
+        let sudo_waiting_for_user = self.selection.kind
+            == Some(crate::selection_state::SelectionKind::SudoApproval)
+            || self.sudo.password_entry;
+        #[cfg(not(unix))]
+        let sudo_waiting_for_user = false;
+
         self.login.refresh_in_progress
-            || self
-                .agent_turn
-                .throbber_visible(self.has_pending_ask() || self.ask_user_freeform_mode())
+            || self.agent_turn.throbber_visible(
+                self.has_pending_ask() || self.ask_user_freeform_mode() || sudo_waiting_for_user,
+            )
     }
 
     /// Returns true when provider/system status text should be visible.
@@ -1005,8 +1018,59 @@ impl App {
         self.completion.clear();
     }
 
+    #[cfg(unix)]
+    pub(crate) fn submit_sudo_password(&mut self) {
+        if !self.sudo.password_entry {
+            return;
+        }
+        let password = self.textarea.lines().join("\n");
+        self.reset_textarea();
+        self.sudo.password_entry = false;
+        if let Some(active) = self.sudo.active.take() {
+            let _ = active
+                .request
+                .reply
+                .send(crate::sudo_ipc::Response::password(
+                    active.request.id,
+                    password.clone(),
+                ));
+        }
+        if matches!(
+            self.sudo.mode,
+            Some(
+                crate::sudo_state::ApprovalMode::OnceSavePassword
+                    | crate::sudo_state::ApprovalMode::AllSession
+            )
+        ) {
+            self.sudo.password = Some(password);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn deny_sudo_password(&mut self) {
+        if let Some(active) = self.sudo.active.take() {
+            let _ = active
+                .request
+                .reply
+                .send(crate::sudo_ipc::Response::denied(active.request.id));
+        }
+        self.sudo.password_entry = false;
+        self.reset_textarea();
+    }
+
     pub fn shell_input_is_empty(&self) -> bool {
         self.shell.input_is_empty()
+    }
+
+    pub(crate) fn sudo_password_entry(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.sudo.password_entry
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     pub fn enter_shell_mode(&mut self) {

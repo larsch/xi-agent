@@ -27,6 +27,8 @@ src/
   selection_state.rs   — SelectionState, SelectionKind, MAX_SELECTION_VISIBLE
   login_state.rs       — LoginState, LoginActionKind: auth panel state, login action menu enum, and all login-flow methods (start_login, cancel_login, enter_login_selection_mode, enter_login_action_menu, apply_login_action, apply_login_event, clipboard_set)
   ask_user_state.rs    — AskUserState, PendingAsk: pending agent ask-user request state
+  sudo_state.rs        — transient sudo approval queue, modes, and in-memory password state (Unix)
+  sudo_ipc.rs          — dedicated Unix askpass socket, protocol, token registry, and helper mode
   agent_runtime.rs     — AgentRuntime: agent task handle, event channels, steering queue, cancellation
   agents.rs            — AgentMeta, load_agents(), filter_tools/filter_skills, /agent command support
   config.rs            — config.toml loading (XDG + HOME fallback)

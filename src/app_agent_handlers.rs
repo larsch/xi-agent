@@ -53,12 +53,65 @@ impl App {
             AppEvent::ModelsReady(result) => self.apply_model_list(result),
             AppEvent::Login(ev) => self.apply_login_event(ev),
             AppEvent::AskUser(req) => self.receive_ask_request(req),
+            #[cfg(unix)]
+            AppEvent::SudoAskpass(request) => self.receive_sudo_askpass(request),
+            #[cfg(unix)]
+            AppEvent::SudoComplete(token) => self.complete_sudo(&token),
             AppEvent::ShellComplete { call_id, result } => self.on_shell_complete(call_id, result),
             AppEvent::ContextLoaded(ctx) => self.apply_loaded_context(ctx),
             #[cfg(all(feature = "restart", unix))]
             AppEvent::Restart => self.on_restart_requested(),
             AppEvent::Ipc(command) => self.handle_ipc_command(command),
             AppEvent::IpcNotification { cwd, event } => self.handle_ipc_notification(cwd, event),
+        }
+    }
+
+    #[cfg(unix)]
+    fn receive_sudo_askpass(&mut self, request: crate::sudo_ipc::AskpassRequest) {
+        let Some(state) = crate::sudo_ipc::note_askpass(&request.token) else {
+            let _ = request
+                .reply
+                .send(crate::sudo_ipc::Response::denied(request.id));
+            return;
+        };
+        if state.askpass_count == 1
+            && self.sudo.mode == Some(crate::sudo_state::ApprovalMode::AllSession)
+            && let Some(password) = self.sudo.password.clone()
+        {
+            let _ = request
+                .reply
+                .send(crate::sudo_ipc::Response::password(request.id, password));
+            return;
+        }
+        if state.askpass_count > 1 {
+            self.sudo.clear_password();
+        }
+        self.sudo.prompt = request.prompt.clone();
+        self.sudo.enqueue(request, state.command);
+        self.sudo.activate_next();
+        if self.sudo.active.is_some() && !self.selection.active {
+            if state.askpass_count > 1
+                || self.sudo.mode == Some(crate::sudo_state::ApprovalMode::AllSession)
+            {
+                self.sudo.password_entry = true;
+                self.reset_textarea();
+                self.textarea.set_mask_char('•');
+            } else {
+                self.enter_sudo_approval_mode();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn complete_sudo(&mut self, _token: &str) {
+        if matches!(self.sudo.mode, Some(crate::sudo_state::ApprovalMode::Once)) {
+            self.sudo.mode = None;
+            self.sudo.clear_password();
+        }
+        self.sudo.active = None;
+        self.sudo.activate_next();
+        if self.sudo.active.is_some() && !self.selection.active {
+            self.enter_sudo_approval_mode();
         }
     }
 

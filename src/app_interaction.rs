@@ -38,6 +38,7 @@ impl App {
             Some(SelectionKind::LoginProvider)
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
+            | Some(SelectionKind::SudoApproval)
             | Some(SelectionKind::LoginAction)
             | Some(SelectionKind::ConfirmProviderRemoval)
             | Some(SelectionKind::ProviderApiType)
@@ -567,7 +568,21 @@ impl App {
     /// Confirm the currently highlighted selection.
     pub fn apply_selection(&mut self) -> Option<SelectionResult> {
         let item = self.selection.items.get(self.selection.selected)?;
-        if item.loading || item.complete_to.is_empty() {
+        if item.loading {
+            return None;
+        }
+        #[cfg(unix)]
+        if self.selection.kind == Some(SelectionKind::SudoApproval) && item.complete_to.is_empty() {
+            if let Some(active) = self.sudo.active.take() {
+                let _ = active
+                    .request
+                    .reply
+                    .send(crate::sudo_ipc::Response::denied(active.request.id));
+            }
+            self.exit_selection_mode();
+            return None;
+        }
+        if item.complete_to.is_empty() {
             return None;
         }
 
@@ -632,6 +647,19 @@ impl App {
                     (item.complete_to == "/ask_user_freeform")
                         .then_some(SelectionResult::AskFreeform)
                 }),
+            #[cfg(unix)]
+            Some(SelectionKind::SudoApproval) => match item.complete_to.as_str() {
+                "/sudo_once" => Some(SelectionResult::SudoApproval(
+                    crate::sudo_state::ApprovalMode::Once,
+                )),
+                "/sudo_save" => Some(SelectionResult::SudoApproval(
+                    crate::sudo_state::ApprovalMode::OnceSavePassword,
+                )),
+                "/sudo_all" => Some(SelectionResult::SudoApproval(
+                    crate::sudo_state::ApprovalMode::AllSession,
+                )),
+                _ => None,
+            },
             Some(SelectionKind::LoginAction) => match item.complete_to.as_str() {
                 crate::login_state::LOGIN_ACTION_OPEN_BROWSER => {
                     Some(SelectionResult::LoginAction(LoginActionKind::OpenBrowser))
@@ -657,6 +685,75 @@ impl App {
 
         self.exit_selection_mode();
         Some(result)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn enter_sudo_approval_mode(&mut self) {
+        let Some(active) = self.sudo.active.as_ref() else {
+            return;
+        };
+        let items = vec![
+            CompletionItem {
+                label: "Deny".into(),
+                detail: "Reject this request".into(),
+                complete_to: String::new(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+            CompletionItem {
+                label: "Approve once".into(),
+                detail: active.command.clone(),
+                complete_to: "/sudo_once".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+            CompletionItem {
+                label: "Approve once, save password".into(),
+                detail: "Remember the password, but ask approval again next time".into(),
+                complete_to: "/sudo_save".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+            CompletionItem {
+                label: "Approve all in this session".into(),
+                detail: "Remember approval and password until xi exits".into(),
+                complete_to: "/sudo_all".into(),
+                loading: false,
+                error: false,
+                hint: false,
+                match_range: None,
+            },
+        ];
+        self.selection
+            .activate(SelectionKind::SudoApproval, "  Sudo approval  ", items);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn apply_sudo_approval(&mut self, mode: crate::sudo_state::ApprovalMode) {
+        self.sudo.mode = Some(mode);
+        self.exit_selection_mode();
+        if let Some(password) = self.sudo.password.take() {
+            if let Some(active) = self.sudo.active.take() {
+                let _ = active
+                    .request
+                    .reply
+                    .send(crate::sudo_ipc::Response::password(
+                        active.request.id,
+                        password.clone(),
+                    ));
+                self.sudo.password = Some(password);
+            }
+        } else {
+            self.sudo.password_entry = true;
+            self.reset_textarea();
+            self.textarea.set_mask_char('•');
+        }
     }
 
     pub fn has_pending_ask(&self) -> bool {

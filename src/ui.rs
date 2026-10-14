@@ -947,7 +947,22 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             } else {
                 "↑↓ navigate   Enter select   Esc cancel  "
             };
-            let title = app.selection.title;
+            let sudo_prompt = if app.selection.kind == Some(SelectionKind::SudoApproval) {
+                app.sudo
+                    .prompt
+                    .as_deref()
+                    .map(|prompt| {
+                        let prompt: String = prompt
+                            .chars()
+                            .map(|ch| if ch.is_control() { ' ' } else { ch })
+                            .collect();
+                        format!(" — {prompt}")
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let title = format!("{}{}", app.selection.title, sudo_prompt);
             let gap = width.saturating_sub(title.width() + hints.width());
             let header_line = Line::from(vec![
                 Span::styled(

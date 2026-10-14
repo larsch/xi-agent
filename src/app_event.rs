@@ -15,6 +15,10 @@ pub enum AppEvent {
     ModelsReady(Result<Vec<String>, ProviderError>),
     Login(LoginEvent),
     AskUser(AskRequest),
+    #[cfg(unix)]
+    SudoAskpass(crate::sudo_ipc::AskpassRequest),
+    #[cfg(unix)]
+    SudoComplete(String),
     /// A local shell command subprocess has finished.
     ShellComplete {
         call_id: String,

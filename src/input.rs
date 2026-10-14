@@ -213,6 +213,18 @@ pub(crate) fn handle_key_event(
         };
     }
 
+    #[cfg(unix)]
+    if app.sudo.password_entry {
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => app.submit_sudo_password(),
+            KeyCode::Esc => app.deny_sudo_password(),
+            _ => {
+                app.textarea.input(Event::Key(key));
+            }
+        }
+        return None;
+    }
+
     if app.input_mode == InputMode::Shell {
         return match handle_shell_mode_key(
             app,
@@ -649,6 +661,11 @@ fn handle_selection_enter(app: &mut App) -> KeyDispatch {
         }
         Some(SelectionResult::AskOption(answer)) => {
             app.select_pending_ask_option(answer);
+            KeyDispatch::Continue
+        }
+        #[cfg(unix)]
+        Some(SelectionResult::SudoApproval(mode)) => {
+            app.apply_sudo_approval(mode);
             KeyDispatch::Continue
         }
         Some(SelectionResult::AskFreeform) => {
