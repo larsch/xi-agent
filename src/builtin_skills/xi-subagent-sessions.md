@@ -22,11 +22,11 @@ xi --enable-session-ipc
 
 Adapt the command and working-directory setup to the chosen launcher. Starting a process in another terminal, tab, pane, or service is launcher-specific; do not assume one command works everywhere.
 
-Session IPC supports Unix sockets and native Windows named pipes, restricted to the current user. Windows and WSL sessions are separate; there is no automatic bridge. On Windows, verify `wt.exe` and the xi binary before opening a new Windows Terminal tab with its starting directory set to the worker workspace.
+Session IPC supports Unix sockets and native Windows named pipes, restricted to the current user. On Windows, a WSL2 worker can be contacted through a WSL UNC worktree path; the client launches `wsl.exe` and requires `socat` installed in that distro. On Windows, verify `wt.exe` and the xi binary before opening a new Windows Terminal tab with its starting directory set to the worker workspace.
 
 ## Connect and interact
 
-Use the `agent_session` tool with the worker worktree's **absolute path** as `cwd`. The tool handles the IPC connection; do not try to locate or connect to an IPC endpoint directly.
+Use the `agent_session` tool with the worker worktree's **absolute path** as `cwd`. The tool handles the IPC connection; do not try to locate or connect to an IPC endpoint directly. **When running on Windows and contacting a WSL2 worker**, use the worktree's UNC path, e.g. `\\wsl$\Ubuntu\home\user\repo` (or `\\wsl.localhost\Ubuntu\home\user\repo`), not a Windows drive path or a Linux `/home/...` path. Install `socat` in the named distro; xi resolves the socket inside WSL. The worker must run under the same WSL user that `wsl.exe --distribution <distro>` starts by default.
 
 - `inspect` identifies the session and reports its capabilities.
 - `state` reports whether it is idle or working.

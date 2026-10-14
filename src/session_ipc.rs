@@ -23,21 +23,33 @@ type IpcWriteHalf = tokio::net::unix::OwnedWriteHalf;
 use interprocess::os::windows::named_pipe::{
     PipeListenerOptions,
     pipe_mode::Bytes,
-    tokio::{DuplexPipeStream, PipeListener, SendPipeStream},
+    tokio::{DuplexPipeStream, PipeListener},
 };
 #[cfg(windows)]
-type IpcStream = DuplexPipeStream<Bytes>;
+#[derive(Debug)]
+enum IpcStream {
+    Pipe(DuplexPipeStream<Bytes>),
+    Wsl(tokio::io::DuplexStream),
+}
 #[cfg(windows)]
-type IpcWriteHalf = SendPipeStream<Bytes>;
+type IpcWriteHalf = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
+#[cfg(unix)]
 fn split_stream(stream: IpcStream) -> (impl tokio::io::AsyncRead + Unpin + Send, IpcWriteHalf) {
-    #[cfg(unix)]
-    {
-        stream.into_split()
-    }
-    #[cfg(windows)]
-    {
-        stream.split()
+    stream.into_split()
+}
+
+#[cfg(windows)]
+fn split_stream(stream: IpcStream) -> (Box<dyn tokio::io::AsyncRead + Unpin + Send>, IpcWriteHalf) {
+    match stream {
+        IpcStream::Pipe(stream) => {
+            let (read, write) = stream.split();
+            (Box::new(read), Box::new(write))
+        }
+        IpcStream::Wsl(stream) => {
+            let (read, write) = tokio::io::split(stream);
+            (Box::new(read), Box::new(write))
+        }
     }
 }
 
@@ -274,6 +286,8 @@ mod protocol_tests;
 mod windows;
 #[cfg(all(test, windows))]
 mod windows_tests;
+#[cfg(windows)]
+mod wsl;
 
 pub struct IpcServer {
     #[cfg(windows)]
@@ -400,7 +414,11 @@ async fn accept_pipe_loop(listener: PipeListener<Bytes, Bytes>, command_tx: AppE
             }
         };
         let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
-        connections.spawn(connection(stream, command_tx.clone(), connection_id));
+        connections.spawn(connection(
+            IpcStream::Pipe(stream),
+            command_tx.clone(),
+            connection_id,
+        ));
         while connections.try_join_next().is_some() {}
     }
 }
@@ -613,8 +631,11 @@ async fn connect_session(cwd: &str) -> Result<tokio::net::UnixStream, String> {
 
 #[cfg(windows)]
 async fn connect_session(cwd: &str) -> Result<IpcStream, String> {
+    if let Some(target) = wsl::parse_target(cwd)? {
+        return wsl::connect(target).await.map(IpcStream::Wsl);
+    }
     let endpoint = windows::endpoint(Path::new(cwd)).map_err(|e| e.to_string())?;
-    IpcStream::connect_by_path_with_wait_mode(
+    DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
         endpoint.as_str(),
         interprocess::ConnectWaitMode::Timeout(std::time::Duration::from_secs(2)),
     )
@@ -628,6 +649,7 @@ async fn connect_session(cwd: &str) -> Result<IpcStream, String> {
         };
         format!("{code}: cannot connect to xi session at {endpoint}: {e}")
     })
+    .map(IpcStream::Pipe)
 }
 
 #[cfg(unix)]
@@ -637,6 +659,13 @@ fn client_key(cwd: &Path) -> std::io::Result<PathBuf> {
 
 #[cfg(windows)]
 fn client_key(cwd: &Path) -> std::io::Result<PathBuf> {
+    let path = cwd.to_string_lossy();
+    if let Some(target) = wsl::parse_target(&path).map_err(std::io::Error::other)? {
+        return Ok(PathBuf::from(format!(
+            "wsl:{}:{}",
+            target.distro, target.workdir
+        )));
+    }
     windows::endpoint(cwd).map(PathBuf::from)
 }
 
@@ -656,12 +685,16 @@ pub async fn client_call(
             .await
             .map_err(|e| e.to_string())?;
         let mut line = String::new();
-        tokio::time::timeout(RESPONSE_TIMEOUT, BufReader::new(read).read_line(&mut line))
-            .await
-            .map_err(|_| {
-                "timeout: IPC response timed out; request may have been accepted".to_string()
-            })?
-            .map_err(|e| format!("connection_error: {e}"))?;
+        let bytes =
+            tokio::time::timeout(RESPONSE_TIMEOUT, BufReader::new(read).read_line(&mut line))
+                .await
+                .map_err(|_| {
+                    "timeout: IPC response timed out; request may have been accepted".to_string()
+                })?
+                .map_err(|e| format!("connection_error: {e}"))?;
+        if bytes == 0 {
+            return Err("unavailable: session disconnected before reply (check WSL distro, worktree, and socat if using WSL)".into());
+        }
         let response: serde_json::Value =
             serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
         response_result(&response)
