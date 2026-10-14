@@ -708,6 +708,13 @@ fn handle_chat_mode_key(
         return KeyDispatch::Continue;
     }
 
+    if keybindings::matches(KeyBindingId::Undo, key) {
+        if app.textarea.undo() {
+            app.update_completions();
+        }
+        return KeyDispatch::Continue;
+    }
+
     if keybindings::matches(KeyBindingId::EnterShellMode, key) {
         let chat_input_is_empty = app
             .textarea

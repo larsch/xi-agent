@@ -14,6 +14,7 @@ pub(crate) enum KeyBindingId {
     ToggleFullOutput,
     RefreshScreen,
     ResumeLatestSession,
+    Undo,
     CycleShell,
     EditProvider,
     RemoveProvider,
@@ -140,6 +141,12 @@ pub(crate) const KEYBINDINGS: &[KeyBinding] = &[
         description: "Resume the latest session for the current folder",
     },
     KeyBinding {
+        id: Some(KeyBindingId::Undo),
+        shortcut: "Ctrl+_ / Ctrl+/",
+        context: BindingContext::Chat,
+        description: "Undo the last edit in the chat input",
+    },
+    KeyBinding {
         id: Some(KeyBindingId::EnterShellMode),
         shortcut: "!",
         context: BindingContext::Chat,
@@ -257,6 +264,12 @@ pub(crate) fn matches(id: KeyBindingId, key: KeyEvent) -> bool {
         KeyBindingId::ResumeLatestSession => {
             key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
+        KeyBindingId::Undo => {
+            (matches!(
+                key.code,
+                KeyCode::Char('_') | KeyCode::Char('/') | KeyCode::Char('7')
+            ) && key.modifiers.contains(KeyModifiers::CONTROL))
+        }
         KeyBindingId::CycleShell => {
             key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL)
         }
@@ -349,6 +362,18 @@ mod tests {
             (
                 KeyBindingId::ResumeLatestSession,
                 KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            ),
+            (
+                KeyBindingId::Undo,
+                KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL),
+            ),
+            (
+                KeyBindingId::Undo,
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL),
+            ),
+            (
+                KeyBindingId::Undo,
+                KeyEvent::new(KeyCode::Char('7'), KeyModifiers::CONTROL),
             ),
             (
                 KeyBindingId::CycleShell,
