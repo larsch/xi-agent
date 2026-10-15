@@ -1696,10 +1696,12 @@ impl App {
             self.session.pending_turn_events.clear();
         }
 
-        // Clear step state
+        // The branch is a new display projection whose generation counter
+        // starts over. Reset the per-message render cache as well as the
+        // layout cache; otherwise entries from the old session can be reused
+        // when their message indices and generation values happen to match.
         self.step_back.clear();
-        self.log_view.auto_scroll = true;
-        self.log_view.invalidate();
+        self.log_view.reset_for_session();
 
         Some(new_content)
     }
@@ -4997,10 +4999,17 @@ mod tests {
         app.step_back(); // -> ask_user ToolResult (6)
         assert_eq!(app.step_back.cursor, Some(6));
 
-        // Set a new answer and commit the branch.
+        // Set a new answer and commit the branch. A fresh projection starts
+        // its display-generation counter over, so old per-message render
+        // cache entries must not survive the session switch.
+        app.log_view
+            .expanded_blocks
+            .insert("old-session-block".into());
         app.textarea = ratatui_textarea::TextArea::new(vec!["new answer".to_string()]);
         let committed = app.commit_step_branch();
         assert!(committed.is_some());
+        assert!(app.log_view.expanded_blocks.is_empty());
+        assert!(app.log_view.visual_baseline.is_none());
 
         let ss = app.session.session_state.as_ref().unwrap();
         // Events: user(0), asst(1), bash_call(2), bash_result(3),
