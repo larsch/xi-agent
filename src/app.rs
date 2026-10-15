@@ -3169,6 +3169,7 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.begin_agent_turn();
+            app.agent_turn.set_activity(crate::agent::AgentActivity::LocalWork);
             let cancel_rx = install_test_agent_task(&mut app);
             app.session.live_turn.tool_entries.push(crate::live_turn::LiveToolEntry {
                 id: "call_1".to_string(),
@@ -3302,6 +3303,8 @@ mod tests {
         rt.block_on(async {
             let mut app = make_app();
             app.begin_agent_turn();
+            app.agent_turn
+                .set_activity(crate::agent::AgentActivity::LocalWork);
             install_test_agent_task(&mut app);
             app.session
                 .live_turn
@@ -3367,6 +3370,23 @@ mod tests {
             app.session.live_turn.assistant_content = "partial".to_string();
             app.begin_agent_turn();
             install_test_agent_task(&mut app);
+            // A streamed tool intent is not a running tool; a stalled model
+            // response must still be abortable immediately.
+            app.session
+                .live_turn
+                .tool_entries
+                .push(crate::live_turn::LiveToolEntry {
+                    id: "call_pending".to_string(),
+                    name: "bash".to_string(),
+                    args: serde_json::json!({}),
+                    partial_args: String::new(),
+                    partial_snapshot: None,
+                    streaming_field: None,
+                    running_output: String::new(),
+                    running_output_line_count: 0,
+                    last_output_line_count: 0,
+                    result: None,
+                });
             let (cancel_tx, _cancel_rx) =
                 tokio::sync::watch::channel(crate::agent::CancelLevel::None);
             let _ = cancel_tx;

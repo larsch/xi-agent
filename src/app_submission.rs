@@ -903,12 +903,16 @@ impl App {
             let _ = tx.send(CancelLevel::HardAbort);
         }
 
-        let tool_running = self
-            .session
-            .live_turn
-            .tool_entries
-            .iter()
-            .any(|entry| entry.result.is_none());
+        // An unfinished entry can be a tool intent emitted while the model
+        // response is still streaming. Defer hard abort only while the loop is
+        // actually executing local work, not merely because an intent exists.
+        let tool_running = self.agent_turn.activity == crate::agent::AgentActivity::LocalWork
+            && self
+                .session
+                .live_turn
+                .tool_entries
+                .iter()
+                .any(|entry| entry.result.is_none());
 
         if tool_running {
             self.agent_turn.set_status(Some(StreamingStatus::Message(
