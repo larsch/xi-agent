@@ -428,6 +428,13 @@ fn build_log_layout_cached(
         let previous = if app.log_view.visual_baseline_width == Some(width) {
             app.log_view.take_visual_baseline()
         } else {
+            ::log::debug!(
+                target: "throbber.trace",
+                "visual baseline dropped on width change: old_width={:?} new_width={width} baseline_present={} padding_remaining={:?}",
+                app.log_view.visual_baseline_width,
+                app.log_view.visual_baseline.is_some(),
+                app.log_view.last_block_padding.map(|padding| padding.remaining),
+            );
             app.log_view.visual_baseline_width = Some(width);
             None
         };
@@ -454,11 +461,11 @@ fn build_log_layout_cached(
             app.log_view.log_cache.revision,
             width,
         );
-        let anchor_padding = app
+        let padding_before = app
             .log_view
             .last_block_padding
-            .as_ref()
-            .map_or(0, |padding| padding.remaining.max(0) as usize);
+            .map(|padding| padding.remaining);
+        let anchor_padding = padding_before.map_or(0, |remaining| remaining.max(0) as usize);
         app.log_view.set_visual_baseline(baseline);
         app.agent_turn.update_visual_state_with_padding(
             Some(update),
@@ -473,6 +480,14 @@ fn build_log_layout_cached(
                 padding.remaining = 0;
             }
         }
+        let padding_after = app
+            .log_view
+            .last_block_padding
+            .map(|padding| padding.remaining);
+        ::log::debug!(
+            target: "throbber.trace",
+            "layout anchor padding: update={update:?} before={padding_before:?} after={padding_after:?} streaming={streaming}",
+        );
         let content_len = layout.total_lines();
 
         // The initial total is the anchor. Subsequent positive visual deltas

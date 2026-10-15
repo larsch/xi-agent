@@ -33,6 +33,12 @@ pub struct TestProvider {
     /// When true, the write-edit sequence will delay 4s after the edit
     /// result before emitting the summary — enough to trigger the throbber.
     write_edit_throbber: Arc<std::sync::atomic::AtomicBool>,
+    /// Tracks the edit-padding repro: 0 = idle, 1 = waiting for write result,
+    /// 2 = waiting for read result, 3 = waiting for edit result,
+    /// 4 = waiting for sleep result.
+    edit_padding_step: Arc<AtomicU8>,
+    /// Unique temp file path used by the edit-padding repro.
+    edit_padding_path: Arc<std::sync::Mutex<String>>,
 }
 
 impl TestProvider {
@@ -45,6 +51,8 @@ impl TestProvider {
             long_lines_step: Arc::new(AtomicU8::new(0)),
             long_lines_path: Arc::new(std::sync::Mutex::new(String::new())),
             write_edit_throbber: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            edit_padding_step: Arc::new(AtomicU8::new(0)),
+            edit_padding_path: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 }
@@ -278,6 +286,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `write` | Issue a `write_file` tool call to the system temp directory |
 | `write-edit` | Stream `write_file` then `edit_file` (~4–8 chars/chunk at 20 chunks/sec); edit uses 6 lines of context each side |
 | `write-edit-throbber` | Same as `write-edit` but waits 4 s after edit result before summary — exercises throbber-after-shrink rendering |
+| `edit-padding-repro` | Write/read an 8-line fixture, replace it with the same 8 lines plus a blank line, then run Python sleep 10 s |
 | `long-lines` | 3-step sequence: write 10 very long lines (~200 chars each), grep all, read back (exercises wrapped-line limit in shell and read_file output) |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
@@ -558,6 +567,79 @@ context line 10: judge my vow\n\
 context line 11: Waltz nymph for quick\n\
 context line 12: jigs vex bud\n\
 ";
+
+/// Fixture for the edit-padding repro: eight prefix/context lines followed by
+/// eight target lines that are replaced by themselves plus one blank line.
+const EDIT_PADDING_PREFIX: &str = "\
+prefix line 1\nprefix line 2\nprefix line 3\nprefix line 4\nprefix line 5\nprefix line 6\nprefix line 7\nprefix line 8\n";
+const EDIT_PADDING_TARGET: &str = "\
+target line 1\ntarget line 2\ntarget line 3\ntarget line 4\ntarget line 5\ntarget line 6\ntarget line 7\ntarget line 8\n";
+
+/// Build the initial write call for the edit-padding repro.
+fn edit_padding_write_stream(path: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "write_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "write_file".to_string(),
+            args: serde_json::json!({
+                "path": path,
+                "content": format!("{EDIT_PADDING_PREFIX}{EDIT_PADDING_TARGET}"),
+            }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Read the file before editing to satisfy the edit tool's freshness guard.
+fn edit_padding_read_stream(path: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({ "path": path }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Replace the eight target lines with themselves plus a trailing blank line,
+/// including the eight prefix lines in the edit arguments as leading context.
+/// Stream the arguments slowly enough to make the in-progress intent visible.
+fn edit_padding_edit_stream(path: String) -> LlmStream {
+    let old_text = format!("{EDIT_PADDING_PREFIX}{EDIT_PADDING_TARGET}");
+    let new_text = format!("{old_text}\n");
+    streaming_tool_call(
+        "edit_file".to_string(),
+        serde_json::json!({ "path": path, "old_text": old_text, "new_text": new_text }),
+        100,
+    )
+}
+
+/// Run Python after the edit so its output log remains visible during inspection.
+fn edit_padding_sleep_stream() -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "run_python".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "run_python".to_string(),
+            args: serde_json::json!({
+                "script": "import time\ntime.sleep(10)\nprint('edit-padding repro complete')\n",
+            }),
+        };
+        yield LlmEvent::Done;
+    })
+}
 
 /// Build a write_file streaming tool call for the write-edit command.
 fn write_edit_write_stream(path: String) -> LlmStream {
@@ -969,6 +1051,28 @@ impl super::LlmProvider for TestProvider {
         if let Some(last) = messages.last()
             && last.role == Role::ToolResult
         {
+            let ep_step = self.edit_padding_step.load(Ordering::SeqCst);
+            if ep_step == 1 {
+                self.edit_padding_step.store(2, Ordering::SeqCst);
+                let path = self.edit_padding_path.lock().unwrap().clone();
+                return edit_padding_read_stream(path);
+            }
+            if ep_step == 2 {
+                self.edit_padding_step.store(3, Ordering::SeqCst);
+                let path = self.edit_padding_path.lock().unwrap().clone();
+                return edit_padding_edit_stream(path);
+            }
+            if ep_step == 3 {
+                self.edit_padding_step.store(4, Ordering::SeqCst);
+                return edit_padding_sleep_stream();
+            }
+            if ep_step == 4 {
+                self.edit_padding_step.store(0, Ordering::SeqCst);
+                return stream_owned(
+                    "Edit-padding repro complete: the file was rewritten with one extra blank line, then Python slept for 10 seconds.\n".to_string(),
+                );
+            }
+
             // Check write-edit sequence first.
             let we_step = self.write_edit_step.load(Ordering::SeqCst);
             if we_step == 1 {
@@ -1315,6 +1419,25 @@ impl super::LlmProvider for TestProvider {
                 write_edit_write_stream(path)
             }
 
+            "edit-padding-repro" => {
+                // Write fixture, perform an identity edit plus one blank line,
+                // then run Python sleep so the completed output stays visible.
+                let fname = format!(
+                    "xi-test-edit-padding-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0)
+                );
+                let path = std::env::temp_dir()
+                    .join(fname)
+                    .to_string_lossy()
+                    .into_owned();
+                *self.edit_padding_path.lock().unwrap() = path.clone();
+                self.edit_padding_step.store(1, Ordering::SeqCst);
+                edit_padding_write_stream(path)
+            }
+
             "write-edit-throbber" => {
                 // Same as write-edit but inserts a 4 s delay after the edit
                 // result so the throbber appears while the bottom gap is visible.
@@ -1435,6 +1558,89 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(ASK_CONTEXT_QUESTION)
         );
+    }
+
+    #[tokio::test]
+    async fn edit_padding_repro_emits_write_edit_and_python_sleep() {
+        let provider = TestProvider::new();
+        let initial: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![Message::user("edit-padding-repro")],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+        let write_args = initial
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::ToolCall { name, args, .. } if name == "write_file" => Some(args),
+                _ => None,
+            })
+            .expect("expected initial write_file call");
+        let original = format!("{EDIT_PADDING_PREFIX}{EDIT_PADDING_TARGET}");
+        assert_eq!(write_args["content"].as_str(), Some(original.as_str()));
+        let path = write_args["path"].as_str().unwrap().to_string();
+
+        let read: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![
+                    Message::user("edit-padding-repro"),
+                    Message::tool_result("test-1", "written", false),
+                ],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+        assert!(read.iter().any(|event| matches!(
+            event,
+            LlmEvent::ToolCall { name, .. } if name == "read_file"
+        )));
+
+        let edited: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![
+                    Message::user("edit-padding-repro"),
+                    Message::tool_result("test-1", "written", false),
+                    Message::tool_result("test-1", "read", false),
+                ],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+        let edit_args = edited
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::ToolCall { name, args, .. } if name == "edit_file" => Some(args),
+                _ => None,
+            })
+            .expect("expected edit_file call");
+        assert_eq!(edit_args["path"].as_str(), Some(path.as_str()));
+        assert_eq!(edit_args["old_text"].as_str(), Some(original.as_str()));
+        let edited_text = format!("{original}\n");
+        assert_eq!(edit_args["new_text"].as_str(), Some(edited_text.as_str()));
+
+        let slept: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![
+                    Message::user("edit-padding-repro"),
+                    Message::tool_result("test-1", "written", false),
+                    Message::tool_result("test-1", "read", false),
+                    Message::tool_result("test-1", "edited", false),
+                ],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+        let script = slept
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::ToolCall { name, args, .. } if name == "run_python" => {
+                    args["script"].as_str()
+                }
+                _ => None,
+            })
+            .expect("expected Python sleep call");
+        assert!(script.contains("time.sleep(10)"));
     }
 
     #[tokio::test]

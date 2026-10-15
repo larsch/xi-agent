@@ -86,6 +86,13 @@ impl LogViewState {
     }
 
     pub fn begin_turn(&mut self, generation: u64) {
+        ::log::debug!(
+            target: "throbber.trace",
+            "log view begin turn: generation={generation} baseline_present={} baseline_width={:?} padding_remaining={:?}",
+            self.visual_baseline.is_some(),
+            self.visual_baseline_width,
+            self.last_block_padding.map(|padding| padding.remaining),
+        );
         self.turn_generation = Some(generation);
         self.visual_baseline = None;
         self.visual_baseline_width = None;
@@ -94,6 +101,13 @@ impl LogViewState {
     }
 
     pub fn clear_turn_baseline(&mut self) {
+        ::log::debug!(
+            target: "throbber.trace",
+            "log view clear turn baseline: generation={:?} baseline_present={} padding_remaining={:?}",
+            self.turn_generation,
+            self.visual_baseline.is_some(),
+            self.last_block_padding.map(|padding| padding.remaining),
+        );
         self.turn_generation = None;
         self.visual_baseline = None;
         self.visual_baseline_width = None;
@@ -102,10 +116,22 @@ impl LogViewState {
         self.clear_padding();
     }
 
-    /// Reset visual comparison state after a tool batch is committed while
-    /// preserving the active turn's activity-row state.
+    /// Invalidate rendered layout after a tool batch is committed while
+    /// preserving the visual baseline so the next streaming frame can compare
+    /// against the previous frame and anchor any shrinkage.
     pub(crate) fn begin_tool_continuation(&mut self) {
-        self.reset_visual_comparison();
+        ::log::debug!(
+            target: "throbber.trace",
+            "log view begin tool continuation: generation={:?} baseline_present={} baseline_width={:?} padding_remaining={:?}",
+            self.turn_generation,
+            self.visual_baseline.is_some(),
+            self.visual_baseline_width,
+            self.last_block_padding.map(|padding| padding.remaining),
+        );
+        self.invalidate();
+        // The committed session and live overlay may have changed, so discard
+        // cached blocks, but retain visual_baseline for shrink detection.
+        self.block_cache.clear();
     }
 
     /// Invalidate the rendered log and drop any pending visual comparison
@@ -257,15 +283,22 @@ mod tests {
     }
 
     #[test]
-    fn anchor_padding_survives_agent_loop_updates() {
+    fn anchor_padding_and_visual_baseline_survive_tool_continuation() {
         let mut state = LogViewState::new();
         set_anchor_padding(&mut state);
 
         state.begin_turn(1);
         assert!(state.last_block_padding.is_some());
+        state.set_visual_baseline(vec![("message:0:tool".into(), 12)]);
+        state.visual_baseline_width = Some(80);
 
         state.begin_tool_continuation();
         assert!(state.last_block_padding.is_some());
+        assert_eq!(
+            state.take_visual_baseline(),
+            Some(vec![("message:0:tool".into(), 12)])
+        );
+        assert_eq!(state.visual_baseline_width, Some(80));
 
         state.toggle_full_output();
         state.toggle_expanded("block:1".into());
