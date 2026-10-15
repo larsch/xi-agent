@@ -142,12 +142,14 @@ fn push_llm_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
             content,
             is_error,
             display_range,
+            image_data,
             include_in_llm,
             ..
         } => {
             if *include_in_llm {
                 let mut msg = Message::tool_result(id.clone(), content.clone(), *is_error);
                 msg.display_range = display_range.clone();
+                msg.image_data = image_data.clone();
                 msgs.push(msg);
             }
         }
@@ -243,11 +245,13 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
             content,
             is_error,
             display_range,
+            image_data,
             include_in_llm,
             ..
         } => {
             let mut msg = Message::tool_result(id.clone(), content.clone(), *is_error);
             msg.display_range = display_range.clone();
+            msg.image_data = image_data.clone();
             if id.starts_with("attach_") {
                 msg.hidden = true;
             }
@@ -558,6 +562,7 @@ mod tests {
             id: id.to_string(),
             name: "read_file".to_string(),
             content: content.to_string(),
+            image_data: None,
             is_error: false,
             display_range: None,
             include_in_llm: true,
@@ -796,6 +801,7 @@ mod tests {
             id: "c1".to_string(),
             name: "read_file".to_string(),
             content: "content".to_string(),
+            image_data: None,
             is_error: false,
             display_range: Some(DisplayRange {
                 first_line: 1,
@@ -807,6 +813,30 @@ mod tests {
         }];
         let msgs = project_llm_messages(&events);
         assert!(msgs[0].display_range.is_some());
+    }
+
+    #[test]
+    fn llm_image_data_is_preserved_from_tool_result_event() {
+        let image_data = crate::llm::ImageData {
+            base64: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+        let events = vec![SessionEvent::ToolResult {
+            id: "c1".to_string(),
+            name: "read_file".to_string(),
+            content: "[image]".to_string(),
+            image_data: Some(image_data.clone()),
+            is_error: false,
+            display_range: None,
+            include_in_llm: true,
+            timestamp: ts(),
+        }];
+        let msgs = project_llm_messages(&events);
+        assert_eq!(
+            msgs[0].image_data.as_ref().unwrap().base64,
+            image_data.base64
+        );
+        assert_eq!(msgs[0].image_data.as_ref().unwrap().mime_type, "image/png");
     }
 
     // ── compaction boundary ───────────────────────────────────────────────────

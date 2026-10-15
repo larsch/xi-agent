@@ -641,6 +641,12 @@ impl App {
                 id,
                 name,
                 content: result.content.as_text().to_string(),
+                image_data: result.content.image_base64().map(|(mime, base64)| {
+                    crate::llm::ImageData {
+                        base64,
+                        mime_type: mime.to_string(),
+                    }
+                }),
                 is_error: result.is_error,
                 display_range,
                 include_in_llm: true,
@@ -694,6 +700,7 @@ impl App {
             id: call_id.clone(),
             name: "local_shell".to_string(),
             content,
+            image_data: None,
             is_error: result.is_error,
             display_range: None,
             include_in_llm: false,

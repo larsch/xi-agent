@@ -240,6 +240,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
             content: "fn main() {}".to_string(),
+            image_data: None,
             is_error: false,
             display_range: None,
             include_in_llm: true,

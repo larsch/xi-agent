@@ -167,8 +167,12 @@ pub enum SessionEvent {
             deserialize_with = "deserialize_tool_name"
         )]
         name: String,
-        /// Output returned by the tool.
+        /// Output returned by the tool (text placeholder for image results).
         content: String,
+        /// Optional image payload returned by the tool. Older session events
+        /// omit this field and remain text-only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_data: Option<crate::llm::ImageData>,
         /// True when the tool returned an error.
         is_error: bool,
         /// Line-range metadata when only a window of a file was returned.
@@ -354,6 +358,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
             content: "fn main() {}".to_string(),
+            image_data: None,
             is_error: false,
             display_range: None,
             include_in_llm: true,
@@ -365,6 +370,39 @@ mod tests {
             matches!(decoded, SessionEvent::ToolResult { ref content, is_error, .. }
                 if content == "fn main() {}" && !is_error)
         );
+    }
+
+    #[test]
+    fn tool_result_image_data_round_trips_and_legacy_event_loads() {
+        let ev = SessionEvent::ToolResult {
+            id: "call_img".to_string(),
+            name: "read_file".to_string(),
+            content: "[image]".to_string(),
+            image_data: Some(crate::llm::ImageData {
+                base64: "aW1hZ2U=".to_string(),
+                mime_type: "image/png".to_string(),
+            }),
+            is_error: false,
+            display_range: None,
+            include_in_llm: true,
+            timestamp: ts(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SessionEvent::ToolResult { image_data: Some(img), .. }
+            if img.base64 == "aW1hZ2U=" && img.mime_type == "image/png")
+        );
+
+        let legacy = r#"{"type":"tool_result","id":"call_old","name":"read_file","content":"[image]","is_error":false,"display_range":null,"timestamp":1}"#;
+        let decoded: SessionEvent = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            decoded,
+            SessionEvent::ToolResult {
+                image_data: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -498,6 +536,7 @@ mod tests {
                     id: String::new(),
                     name: String::new(),
                     content: String::new(),
+                    image_data: None,
                     is_error: false,
                     display_range: None,
                     include_in_llm: true,

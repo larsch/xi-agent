@@ -18,7 +18,7 @@
 //! |-------------------------------|--------|-----------|--------|-------|--------|
 //! | System messages               | kept   | skipped†  | skipped† | skipped† | kept |
 //! | Tool-call arguments encoding  | string | object    | object | string | object |
-//! | Image in tool result          | `image_url` block | `image` block | — | — | `image_url` block |
+//! | Image in tool result          | following user turn | `image` block (success); follow-up for errors | Gemini 3+: `functionResponse.parts`; older: follow-up turn | `input_image` in output | following user turn (`images`) |
 //! | Thinking/reasoning echoed as  | `reasoning_content` | — | — | — | `thinking` |
 //! | Standalone ToolCall fallback  | yes    | yes       | n/a‡   | n/a‡  | yes    |
 //! | Standalone ToolResult fallback| yes    | yes       | n/a‡   | n/a‡  | yes    |
@@ -124,20 +124,17 @@ fn group_messages(messages: &[Message]) -> Vec<Turn<'_>> {
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-/// Build the `content` value for an OpenAI-style tool result message.
-///
-/// When the message carries image data, the content is a two-element array:
-/// a text block with the placeholder and an `image_url` block using a
-/// `data:` URI.  Otherwise the content is the plain text string.
+/// Tool-result images are sent in a following user message for Chat
+/// Completions and Ollama. Their tool-result messages remain text-only.
 fn openai_tool_result_content(tr: &Message) -> serde_json::Value {
-    if let Some(ImageData { base64, mime_type }) = &tr.image_data {
-        serde_json::json!([
-            { "type": "text", "text": &tr.content },
-            { "type": "image_url", "image_url": { "url": format!("data:{mime_type};base64,{base64}") } }
-        ])
-    } else {
-        serde_json::Value::String(tr.content.clone())
-    }
+    serde_json::Value::String(tr.content.clone())
+}
+
+fn openai_tool_result_image_part(image: &ImageData) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{};base64,{}", image.mime_type, image.base64) }
+    })
 }
 
 /// Build the `content` array for an Anthropic tool result message.
@@ -146,6 +143,9 @@ fn openai_tool_result_content(tr: &Message) -> serde_json::Value {
 /// and an `image` block with base64 data.  For text results it is a single
 /// `text` block.
 fn anthropic_tool_result_content(tr: &Message) -> serde_json::Value {
+    if tr.is_error {
+        return serde_json::Value::String(tr.content.clone());
+    }
     if let Some(ImageData { base64, mime_type }) = &tr.image_data {
         serde_json::json!([
             { "type": "text", "text": &tr.content },
@@ -193,6 +193,8 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
 
+                let mut tool_result_images: Vec<serde_json::Value> = Vec::new();
+
                 for (call_idx, (tc, tr_opt)) in tool_pairs.iter().enumerate() {
                     tool_calls.push(serde_json::json!({
                         "id": tc.tool_call_id.clone().unwrap_or_else(|| format!("call_{call_idx}")),
@@ -209,6 +211,9 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                             "content": tr_content,
                             "tool_call_id": tr.tool_call_id,
                         }));
+                        if let Some(image) = &tr.image_data {
+                            tool_result_images.push(openai_tool_result_image_part(image));
+                        }
                     }
                 }
 
@@ -241,6 +246,14 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     }
                     result.push(entry);
                     result.extend(tool_results);
+                    if !tool_result_images.is_empty() {
+                        let mut parts = vec![serde_json::json!({
+                            "type": "text",
+                            "text": "Attached image(s) from tool result:",
+                        })];
+                        parts.extend(tool_result_images);
+                        result.push(serde_json::json!({ "role": "user", "content": parts }));
+                    }
                 }
             }
             Turn::StandaloneToolCall(tc) => {
@@ -265,6 +278,15 @@ pub fn to_openai_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     "content": tr_content,
                     "tool_call_id": tr.tool_call_id,
                 }));
+                if let Some(image) = &tr.image_data {
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "Attached image from tool result:" },
+                            openai_tool_result_image_part(image),
+                        ],
+                    }));
+                }
             }
         }
     }
@@ -303,6 +325,7 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                 }
 
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
+                let mut error_images: Vec<serde_json::Value> = Vec::new();
                 for (tc, tr_opt) in &tool_pairs {
                     content.push(serde_json::json!({
                         "type": "tool_use",
@@ -318,6 +341,14 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                             "content": tr_content,
                             "is_error": tr.is_error,
                         }));
+                        if tr.is_error
+                            && let Some(ImageData { base64, mime_type }) = &tr.image_data
+                        {
+                            error_images.push(serde_json::json!({
+                                "type": "image",
+                                "source": { "type": "base64", "media_type": mime_type, "data": base64 }
+                            }));
+                        }
                     }
                 }
 
@@ -331,6 +362,7 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                 }));
 
                 if !tool_results.is_empty() {
+                    tool_results.extend(error_images);
                     result.push(serde_json::json!({
                         "role": "user",
                         "content": tool_results,
@@ -359,6 +391,17 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         "is_error": tr.is_error,
                     }],
                 }));
+                if tr.is_error
+                    && let Some(ImageData { base64, mime_type }) = &tr.image_data
+                {
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "Image from error tool result:" },
+                            { "type": "image", "source": { "type": "base64", "media_type": mime_type, "data": base64 } }
+                        ],
+                    }));
+                }
             }
         }
     }
@@ -367,6 +410,15 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 }
 
 // ── Google Gemini ─────────────────────────────────────────────────────────────
+
+fn gemini_supports_multimodal_function_response(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    let version = lower
+        .strip_prefix("gemini-")
+        .and_then(|suffix| suffix.split(['-', '.']).next())
+        .and_then(|major| major.parse::<u32>().ok());
+    version.is_none_or(|major| major >= 3)
+}
 
 /// Convert a xi-agent `Message` history to the Gemini `contents` array wire format.
 ///
@@ -378,7 +430,7 @@ pub fn to_anthropic_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 ///
 /// Gemini iterates messages individually (flat model) rather than grouping
 /// assistant turns — see the deviation table in the module doc.
-pub fn to_gemini_wire(messages: &[Message]) -> Vec<serde_json::Value> {
+pub fn to_gemini_wire(messages: &[Message], model: &str) -> Vec<serde_json::Value> {
     let mut contents = Vec::new();
     let mut tool_names_by_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -448,6 +500,26 @@ pub fn to_gemini_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                         }
                     }],
                 }));
+                if let Some(ImageData { base64, mime_type }) = &msg.image_data {
+                    let image_part = serde_json::json!({
+                        "inlineData": { "mimeType": mime_type, "data": base64 }
+                    });
+                    if gemini_supports_multimodal_function_response(model) {
+                        let response_parts = &mut contents
+                            .last_mut()
+                            .expect("function response was just appended")["parts"];
+                        response_parts[0]["functionResponse"]["parts"] =
+                            serde_json::json!([image_part]);
+                    } else {
+                        contents.push(serde_json::json!({
+                            "role": "user",
+                            "parts": [
+                                { "text": "Tool result image:" },
+                                image_part
+                            ],
+                        }));
+                    }
+                }
             }
         }
     }
@@ -512,10 +584,18 @@ pub fn to_codex_wire(messages: &[Message]) -> Vec<serde_json::Value> {
 
             Role::ToolResult => {
                 let call_id = msg.tool_call_id.as_deref().unwrap_or("call_0");
+                let output = if let Some(ImageData { base64, mime_type }) = &msg.image_data {
+                    serde_json::json!([
+                        { "type": "input_text", "text": msg.content },
+                        { "type": "input_image", "detail": "auto", "image_url": format!("data:{mime_type};base64,{base64}") }
+                    ])
+                } else {
+                    serde_json::Value::String(msg.content.clone())
+                };
                 out.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": msg.content,
+                    "output": output,
                 }));
             }
         }
@@ -553,6 +633,7 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
             Turn::Assistant { msg, tool_pairs } => {
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
+                let mut tool_result_images: Vec<String> = Vec::new();
 
                 for (call_idx, (tc, tr_opt)) in tool_pairs.iter().enumerate() {
                     tool_calls.push(serde_json::json!({
@@ -571,6 +652,9 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                             "content": tr_content,
                             "tool_call_id": tr.tool_call_id,
                         }));
+                        if let Some(ImageData { base64, .. }) = &tr.image_data {
+                            tool_result_images.push(base64.clone());
+                        }
                     }
                 }
 
@@ -597,6 +681,13 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     }
                     result.push(entry);
                     result.extend(tool_results);
+                    if !tool_result_images.is_empty() {
+                        result.push(serde_json::json!({
+                            "role": "user",
+                            "content": "Attached image(s) from tool result:",
+                            "images": tool_result_images,
+                        }));
+                    }
                 }
             }
             Turn::StandaloneToolCall(tc) => {
@@ -620,6 +711,13 @@ pub fn to_ollama_wire(messages: &[Message]) -> Vec<serde_json::Value> {
                     "content": tr_content,
                     "tool_call_id": tr.tool_call_id,
                 }));
+                if let Some(ImageData { base64, .. }) = &tr.image_data {
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": "Attached image from tool result:",
+                        "images": [base64],
+                    }));
+                }
             }
         }
     }
@@ -664,6 +762,28 @@ mod tests {
     }
 
     #[test]
+    fn openai_tool_result_image_moves_to_following_user_message() {
+        let mut result = Message::tool_result("id-1", "[image]", false);
+        result.image_data = Some(ImageData {
+            base64: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let wire = to_openai_wire(&[
+            Message::assistant(""),
+            Message::tool_call("id-1", "read_file", serde_json::json!({})),
+            result,
+        ]);
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[1]["content"], "[image]");
+        assert_eq!(wire[2]["role"], "user");
+        assert_eq!(wire[2]["content"][1]["type"], "image_url");
+        assert_eq!(
+            wire[2]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aW1n"
+        );
+    }
+
+    #[test]
     fn openai_wire_reasoning_content_echoed_when_present() {
         let mut msg = Message::assistant("answer");
         msg.thinking = Some("chain of thought".to_string());
@@ -696,6 +816,39 @@ mod tests {
     }
 
     // ── to_anthropic_wire ─────────────────────────────────────────────────────
+
+    #[test]
+    fn anthropic_wire_keeps_image_in_successful_tool_result() {
+        let mut result = Message::tool_result("id-1", "[image]", false);
+        result.image_data = Some(ImageData {
+            base64: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let wire = to_anthropic_wire(&[
+            Message::assistant(""),
+            Message::tool_call("id-1", "read_file", serde_json::json!({})),
+            result,
+        ]);
+        assert_eq!(wire[1]["content"][0]["type"], "tool_result");
+        assert_eq!(wire[1]["content"][0]["content"][1]["type"], "image");
+    }
+
+    #[test]
+    fn anthropic_wire_moves_error_result_image_after_tool_result() {
+        let mut result = Message::tool_result("id-1", "failed", true);
+        result.image_data = Some(ImageData {
+            base64: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let wire = to_anthropic_wire(&[
+            Message::assistant(""),
+            Message::tool_call("id-1", "read_file", serde_json::json!({})),
+            result,
+        ]);
+        assert_eq!(wire[1]["content"][0]["type"], "tool_result");
+        assert_eq!(wire[1]["content"][0]["content"], "failed");
+        assert_eq!(wire[1]["content"][1]["type"], "image");
+    }
 
     #[test]
     fn anthropic_wire_normalizes_emoji_tool_name() {
@@ -776,16 +929,41 @@ mod tests {
     // ── to_gemini_wire ────────────────────────────────────────────────────────
 
     #[test]
+    fn gemini_wire_attaches_image_after_function_response() {
+        let mut result = Message::tool_result("id-1", "[image]", false);
+        result.image_data = Some(ImageData {
+            base64: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let wire = to_gemini_wire(
+            &[
+                Message::tool_call("id-1", "read_file", serde_json::json!({})),
+                result,
+            ],
+            "gemini-3.0-flash",
+        );
+        assert!(wire[1]["parts"][0]["functionResponse"].is_object());
+        assert_eq!(
+            wire[1]["parts"][0]["functionResponse"]["parts"][0]["inlineData"]["mimeType"],
+            "image/png"
+        );
+        assert_eq!(
+            wire[1]["parts"][0]["functionResponse"]["parts"][0]["inlineData"]["data"],
+            "aW1n"
+        );
+    }
+
+    #[test]
     fn gemini_wire_normalizes_emoji_tool_name() {
         let messages = vec![Message::tool_call("id-1", "📝", serde_json::json!({}))];
-        let wire = to_gemini_wire(&messages);
+        let wire = to_gemini_wire(&messages, "gemini-2.0-flash");
         assert_eq!(wire[0]["parts"][0]["functionCall"]["name"], "edit_file");
     }
 
     #[test]
     fn gemini_wire_skips_system_messages() {
         let messages = vec![Message::system("instructions"), Message::user("hi")];
-        let wire = to_gemini_wire(&messages);
+        let wire = to_gemini_wire(&messages, "gemini-2.0-flash");
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
     }
@@ -796,11 +974,27 @@ mod tests {
             Message::tool_call("id-1", "bash", serde_json::json!({})),
             Message::tool_result("id-1", "output", false),
         ];
-        let wire = to_gemini_wire(&messages);
+        let wire = to_gemini_wire(&messages, "gemini-2.0-flash");
         assert_eq!(wire[1]["parts"][0]["functionResponse"]["name"], "bash");
     }
 
     // ── to_codex_wire ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn codex_wire_includes_image_in_function_call_output() {
+        let mut result = Message::tool_result("id-1", "[image]", false);
+        result.image_data = Some(ImageData {
+            base64: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let wire = to_codex_wire(&[result]);
+        assert_eq!(wire[0]["output"][0]["type"], "input_text");
+        assert_eq!(wire[0]["output"][1]["type"], "input_image");
+        assert_eq!(
+            wire[0]["output"][1]["image_url"],
+            "data:image/png;base64,aW1n"
+        );
+    }
 
     #[test]
     fn codex_wire_normalizes_emoji_tool_name() {
@@ -826,6 +1020,23 @@ mod tests {
     }
 
     // ── to_ollama_wire ────────────────────────────────────────────────────────
+
+    #[test]
+    fn ollama_wire_attaches_image_in_following_user_message() {
+        let mut result = Message::tool_result("id-1", "[image]", false);
+        result.image_data = Some(ImageData {
+            base64: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let wire = to_ollama_wire(&[
+            Message::assistant(""),
+            Message::tool_call("id-1", "read_file", serde_json::json!({})),
+            result,
+        ]);
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[2]["role"], "user");
+        assert_eq!(wire[2]["images"][0], "aW1n");
+    }
 
     #[test]
     fn ollama_wire_normalizes_emoji_tool_name() {

@@ -32,6 +32,13 @@ fn record_tool_call_result(
         id: id.to_string(),
         name: name.to_string(),
         content: result.content.as_text().to_string(),
+        image_data: result
+            .content
+            .image_base64()
+            .map(|(mime, base64)| crate::llm::ImageData {
+                base64,
+                mime_type: mime.to_string(),
+            }),
         is_error: result.is_error,
         display_range: None,
         include_in_llm: true,

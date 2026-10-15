@@ -568,6 +568,7 @@ impl App {
                             id: call_id,
                             name: "read_file".to_string(),
                             content: content.clone(),
+                            image_data: None,
                             is_error: false,
                             display_range: None,
                             include_in_llm: true,
@@ -589,17 +590,18 @@ impl App {
                         include_in_llm: true,
                         timestamp: ts,
                     });
-                    // Inline the image as a data URI directly in the content
-                    // text so it works with any provider (some OpenAI-compatible
-                    // backends don't accept structured content arrays in tool
-                    // results).
-                    let data_uri = format!("data:{mime_type};base64,{base64}");
-                    let content = format!("![{path}]({data_uri})\n\n[Image: {path}]");
+                    // Keep the transcript readable; the actual image travels
+                    // as structured payload alongside the text placeholder.
+                    let content = format!("[Image: {path}]");
                     self.session
                         .append_event_immediate(SessionEvent::ToolResult {
                             id: call_id,
                             name: "read_file".to_string(),
                             content,
+                            image_data: Some(crate::llm::ImageData {
+                                base64: base64.clone(),
+                                mime_type: mime_type.clone(),
+                            }),
                             is_error: false,
                             display_range: None,
                             include_in_llm: true,
@@ -767,6 +769,7 @@ impl App {
                     id,
                     name,
                     content: "Interrupted by user".to_string(),
+                    image_data: None,
                     is_error: true,
                     display_range: None,
                     include_in_llm: true,

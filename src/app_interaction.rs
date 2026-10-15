@@ -1054,6 +1054,7 @@ impl App {
                                 id,
                                 name: "ask_user".to_string(),
                                 content: text,
+                                image_data: None,
                                 is_error: false,
                                 display_range: None,
                                 include_in_llm: true,

@@ -489,7 +489,7 @@ fn build_request(
         })
     });
 
-    let contents = to_gemini_wire(messages);
+    let contents = to_gemini_wire(messages, model);
 
     let mut request = serde_json::json!({
         "project": project_id,
@@ -784,7 +784,7 @@ mod tests {
             Message::tool_call("call_1", "read_file", serde_json::json!({"path":"a.txt"})),
             Message::tool_result("call_1", "ok", false),
         ];
-        let contents = to_gemini_wire(&messages);
+        let contents = to_gemini_wire(&messages, "gemini-2.5-pro");
         assert_eq!(
             contents[1]["parts"][0]["functionResponse"]["name"],
             "read_file"

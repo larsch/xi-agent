@@ -547,6 +547,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "read_file".to_string(),
                 content: "content".to_string(),
+                image_data: None,
                 is_error: false,
                 display_range: Some(DisplayRange {
                     first_line: 1,
