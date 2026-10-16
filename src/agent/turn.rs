@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use tokio::sync::watch;
 
 use crate::agent::compaction;
 use crate::agent::events::{AgentEventSink, send_agent_event};
 use crate::agent::loop_support::HookDispatchContext;
-use crate::agent::types::AgentEvent;
+use crate::agent::types::{AgentEvent, CancelLevel};
 use crate::hooks::{
     HookPoint, empty_payload, ipc_status_update_payload, ipc_tool_intent_payload, maybe_run_hook,
 };
@@ -40,6 +41,9 @@ pub(crate) enum TurnOutcome {
     /// The model indicated a tool call was coming but no call arrived
     /// (e.g. truncated by max_tokens).
     ToolIntentWithNoCall,
+    /// The provider stream was cancelled. Partial content has already been
+    /// emitted to the event sink; incomplete tool calls must not be executed.
+    Cancelled,
 }
 
 // ── stream_assistant_turn ─────────────────────────────────────────────────────
@@ -55,12 +59,17 @@ pub(crate) async fn stream_assistant_turn(
     sink: &dyn AgentEventSink,
     overflow_retry_remaining: usize,
     hook_ctx: HookDispatchContext<'_>,
+    cancel_rx: &mut watch::Receiver<CancelLevel>,
 ) -> TurnOutcome {
     // Build a lookup from tool name → streaming_field for intent events.
     let streaming_fields: std::collections::HashMap<String, Option<String>> = tool_defs
         .iter()
         .map(|t| (t.name.clone(), t.streaming_field.clone()))
         .collect();
+
+    if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+        return TurnOutcome::Cancelled;
+    }
 
     let mut stream = provider.stream_chat_with_tools(
         messages,
@@ -78,8 +87,28 @@ pub(crate) async fn stream_assistant_turn(
     let mut latest_usage = None;
     let mut first_thinking_token = true;
     let mut first_text_token = true;
+    let mut cancel_open = true;
 
-    while let Some(ev) = stream.next().await {
+    loop {
+        let next_event = tokio::select! {
+            biased;
+            changed = cancel_rx.changed(), if cancel_open => {
+                match changed {
+                    Ok(()) if *cancel_rx.borrow() >= CancelLevel::HardAbort => {
+                        return TurnOutcome::Cancelled;
+                    }
+                    Ok(()) => continue,
+                    Err(_) => {
+                        cancel_open = false;
+                        continue;
+                    }
+                }
+            }
+            event = stream.next() => event,
+        };
+        let Some(ev) = next_event else {
+            break;
+        };
         match ev {
             LlmEvent::Token { text, phase } => {
                 if first_text_token {

@@ -8,7 +8,6 @@ use crate::agent::types::CancelLevel;
 use crate::agent::{AgentLoopConfig, ToolOutputLog};
 use crate::app::{App, DynProvider, RetryTarget, StreamingStatus};
 use crate::at_file::{AtFileResult, parse_at_tokens, resolve_at_tokens};
-use crate::live_turn::LiveToolResult;
 use crate::llm::{Message, Role};
 use crate::session_event::SessionEvent;
 impl App {
@@ -716,69 +715,9 @@ impl App {
         self.launch_turn(provider);
     }
 
-    fn append_abort_results_for_pending_tool_calls(&mut self) {
-        // Find tool call IDs in the pending turn buffer that haven't been
-        // completed with a ToolResult yet.
-        let mut pending_ids: Vec<String> = Vec::new();
-        for ev in &self.session.pending_turn_events {
-            match ev {
-                SessionEvent::ToolCall { id, .. } if !pending_ids.iter().any(|p| p == id) => {
-                    pending_ids.push(id.clone());
-                }
-                SessionEvent::ToolResult { id, .. } => {
-                    pending_ids.retain(|p| p != id);
-                }
-                _ => {}
-            }
-        }
-
-        for id in pending_ids {
-            if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id)
-                && entry.result.is_none()
-            {
-                entry.result = Some(LiveToolResult {
-                    content: "Interrupted by user".to_string(),
-                    is_error: true,
-                    display_range: None,
-                    image_data: None,
-                });
-            }
-
-            // Insert the abort result immediately after its own intent so the
-            // ToolCall/ToolResult pairing stays intact (parallel batches emit
-            // all intents before any result).
-            let call_pos =
-                self.session.pending_turn_events.iter().rposition(
-                    |e| matches!(e, SessionEvent::ToolCall { id: cid, .. } if cid == &id),
-                );
-            let name = call_pos
-                .and_then(|pos| match &self.session.pending_turn_events[pos] {
-                    SessionEvent::ToolCall { name, .. } => Some(name.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let insert_at = call_pos
-                .map(|pos| pos + 1)
-                .unwrap_or(self.session.pending_turn_events.len());
-
-            self.session.pending_turn_events.insert(
-                insert_at,
-                SessionEvent::ToolResult {
-                    id,
-                    name,
-                    content: "Interrupted by user".to_string(),
-                    is_error: true,
-                    display_range: None,
-                    include_in_llm: true,
-                    timestamp: Self::now_ts(),
-                },
-            );
-        }
-    }
-
     pub(crate) fn show_abort_pending_notice(&mut self) {
         self.agent_turn.set_status(Some(StreamingStatus::Message(
-            "[Aborting current tool; wait for it to finish before submitting]".to_string(),
+            "[Abort requested; wait for the agent to stop before submitting]".to_string(),
         )));
     }
 
@@ -856,24 +795,6 @@ impl App {
         true
     }
 
-    pub fn abort_agent_loop(&mut self) {
-        if let Some(handle) = self.runtime.take_agent_handle() {
-            // Signal cooperative cancellation; hard-abort as fallback.
-            let _ = handle.cancel_sender().send(CancelLevel::HardAbort);
-            handle.task.abort();
-            self.agent_turn
-                .set_status(Some(StreamingStatus::CompletedMessage(
-                    "[agent loop aborted]".to_string(),
-                )));
-            self.agent_turn.holdoff_started_at = None;
-            self.preserve_queued_steering();
-            self.append_abort_results_for_pending_tool_calls();
-            self.finalise_assistant_turn_event();
-            self.flush_turn_events();
-            self.persist_messages();
-        }
-    }
-
     /// Stage 1: request the agent loop to stop after the current turn completes.
     /// The turn finishes normally — model response + tool batch — but no new
     /// turn is started.
@@ -890,10 +811,8 @@ impl App {
         )));
     }
 
-    /// Stage 2: abort the current model request and send SIGTERM to the
-    /// current subprocess tool. When a tool is currently executing, keep the
-    /// agent task alive so the tool can observe the cancel level and exit
-    /// cooperatively. When no tool is running, abort immediately.
+    /// Stage 2: request hard cancellation from the runner. The runner stops
+    /// model streaming promptly or lets active tools finish cooperatively.
     pub fn request_hard_abort(&mut self) {
         if !self.runtime.is_running() {
             return;
@@ -903,32 +822,9 @@ impl App {
             let _ = tx.send(CancelLevel::HardAbort);
         }
 
-        // An unfinished entry can be a tool intent emitted while the model
-        // response is still streaming. Defer hard abort only while the loop is
-        // actually executing local work, not merely because an intent exists.
-        let tool_running = self.agent_turn.activity == crate::agent::AgentActivity::LocalWork
-            && self
-                .session
-                .live_turn
-                .tool_entries
-                .iter()
-                .any(|entry| entry.result.is_none());
-
-        if tool_running {
-            self.agent_turn.set_status(Some(StreamingStatus::Message(
-                "[Aborting… Press Ctrl-C again to force kill]".to_string(),
-            )));
-            return;
-        }
-
-        // No tool is currently running, so abort the task immediately to stop
-        // model streaming and commit the partial turn.
-        self.abort_agent_loop();
-        self.runtime.abort_stage = CancelLevel::HardAbort;
-        self.agent_turn
-            .set_status(Some(StreamingStatus::CompletedMessage(
-                "[agent loop aborted]".to_string(),
-            )));
+        self.agent_turn.set_status(Some(StreamingStatus::Message(
+            "[Aborting… Press Ctrl-C again to force kill]".to_string(),
+        )));
     }
 
     /// Stage 3: send SIGKILL to the current subprocess tool immediately.

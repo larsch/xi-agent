@@ -337,6 +337,7 @@ impl App {
                 crate::desktop_notification::notify_agent_loop_halt(&text, self.terminal_focused)
             }
             AgentEvent::Done => self.on_agent_done(),
+            AgentEvent::Cancelled => self.on_agent_cancelled(),
             AgentEvent::Error(e) => self.on_agent_error(e),
         }
     }
@@ -758,6 +759,24 @@ impl App {
             crate::llm::ollama::fetch_and_cache_running_contexts(&base_url, api_key.as_deref())
                 .await;
         });
+    }
+
+    fn on_agent_cancelled(&mut self) {
+        let steering_preserved = self.preserve_queued_steering();
+        self.clear_pending_ask_after_agent_exit();
+        self.publish_ipc_completion("interrupted", None);
+        self.end_agent_turn();
+        self.runtime.clear_agent_handle();
+        if steering_preserved {
+            self.runtime.queue_selection = None;
+            self.runtime.queue_saved_input = None;
+        }
+        self.agent_turn
+            .set_status(Some(StreamingStatus::CompletedMessage(
+                "[agent loop aborted]".to_string(),
+            )));
+        self.agent_turn.holdoff_started_at = None;
+        self.persist_messages();
     }
 
     fn on_agent_done(&mut self) {

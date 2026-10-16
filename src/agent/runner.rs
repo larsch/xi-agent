@@ -25,7 +25,7 @@ pub(crate) enum SteeringCommand {
 pub(crate) struct AgentHandle {
     pub(crate) steering_tx: mpsc::UnboundedSender<SteeringCommand>,
     pub(crate) cancel_tx: watch::Sender<CancelLevel>,
-    pub(crate) task: JoinHandle<()>,
+    pub(crate) _task: JoinHandle<()>,
 }
 
 impl AgentHandle {
@@ -44,7 +44,7 @@ impl AgentHandle {
         Self {
             steering_tx,
             cancel_tx,
-            task,
+            _task: task,
         }
     }
 
@@ -74,7 +74,7 @@ impl AgentHandle {
         Self {
             steering_tx,
             cancel_tx,
-            task,
+            _task: task,
         }
     }
 }

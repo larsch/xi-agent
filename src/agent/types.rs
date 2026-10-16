@@ -220,8 +220,9 @@ impl ToolResult {
 
 /// Progressive cancellation level sent from the UI to the agent loop.
 ///
-/// Ordered: `SoftStop` < `HardAbort` < `ForceKill`.  The agent loop checks
-/// this at turn boundaries and tools check it mid-execution.
+/// Ordered: `SoftStop` < `HardAbort` < `ForceKill`. The runner observes hard
+/// abort during model streaming and at turn boundaries; tools observe it during
+/// execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum CancelLevel {
     /// No cancellation requested.
@@ -230,8 +231,8 @@ pub enum CancelLevel {
     /// Stop after the current turn completes (finish model response + tool
     /// batch, log results, but do not invoke the model again).
     SoftStop,
-    /// Abort the current model request (if streaming), send SIGTERM to the
-    /// current subprocess tool, and wait for it to exit.
+    /// Abort the current model request if streaming, or ask active tools to
+    /// stop and wait for them to exit cooperatively.
     HardAbort,
     /// Send SIGKILL to the current subprocess tool immediately.
     ForceKill,
@@ -568,6 +569,9 @@ pub enum AgentEvent {
     FinalResponse { text: String },
     /// The agent loop finished successfully.
     Done,
+    /// The agent loop stopped cooperatively in response to hard abort.
+    /// The preceding `TurnEnd`, when present, commits any partial turn.
+    Cancelled,
     /// The agent loop encountered a fatal error from the LLM provider.
     Error(crate::llm::ProviderError),
 }

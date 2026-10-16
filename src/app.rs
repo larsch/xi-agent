@@ -2938,189 +2938,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_agent_loop_appends_error_result_for_pending_tool_call() {
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        rt.block_on(async {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let path = tmp.path().join("session.jsonl");
-
-            let mut app = make_app();
-            app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
-                crate::event_log::EventLog::load(&path).expect("load event log"),
-            ));
-            app.begin_agent_turn();
-            install_test_agent_task(&mut app);
-            // Simulate an in-flight tool call via pending_turn_events.
-            app.session
-                .pending_turn_events
-                .push(crate::session_event::SessionEvent::ToolCall {
-                    id: "call_1".to_string(),
-                    name: "powershell".to_string(),
-                    args: serde_json::json!({"command": "git diff"}),
-                    include_in_llm: true,
-                    timestamp: 1,
-                });
-            app.session
-                .live_turn
-                .tool_entries
-                .push(crate::live_turn::LiveToolEntry {
-                    id: "call_1".to_string(),
-                    name: "powershell".to_string(),
-                    args: serde_json::json!({"command": "git diff"}),
-                    partial_args: String::new(),
-                    partial_snapshot: None,
-                    streaming_field: None,
-                    running_output: String::new(),
-                    running_output_line_count: 0,
-                    last_output_line_count: 0,
-                    result: None,
-                });
-
-            app.abort_agent_loop();
-
-            let tool_result = app
-                .session
-                .session_state
-                .as_ref()
-                .expect("session state")
-                .display_messages()
-                .iter()
-                .find(|m| m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1"))
-                .expect("expected abort tool result");
-            assert!(tool_result.is_error, "abort tool result should be an error");
-            assert_eq!(tool_result.content, "Interrupted by user");
-        });
-    }
-
-    #[test]
-    fn abort_agent_loop_flushes_error_result_for_pending_tool_call_to_event_log() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("session.jsonl");
-
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        rt.block_on(async {
-            let mut app = make_app();
-            app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
-                crate::event_log::EventLog::load(&path).expect("load event log"),
-            ));
-            app.begin_agent_turn();
-            install_test_agent_task(&mut app);
-            app.session
-                .pending_turn_events
-                .push(crate::session_event::SessionEvent::ToolCall {
-                    id: "call_1".to_string(),
-                    name: "ask_user".to_string(),
-                    args: serde_json::json!({"question": "Continue?"}),
-                    include_in_llm: true,
-                    timestamp: 1,
-                });
-            app.session
-                .live_turn
-                .tool_entries
-                .push(crate::live_turn::LiveToolEntry {
-                    id: "call_1".to_string(),
-                    name: "ask_user".to_string(),
-                    args: serde_json::json!({"question": "Continue?"}),
-                    partial_args: String::new(),
-                    partial_snapshot: None,
-                    streaming_field: None,
-                    running_output: String::new(),
-                    running_output_line_count: 0,
-                    last_output_line_count: 0,
-                    result: None,
-                });
-
-            app.abort_agent_loop();
-
-            let events = app
-                .session
-                .session_state
-                .as_ref()
-                .expect("session state")
-                .events();
-            let tool_results: Vec<_> = events
-                .iter()
-                .filter_map(|event| match event {
-                    crate::session_event::SessionEvent::ToolResult {
-                        id,
-                        name,
-                        content,
-                        is_error,
-                        ..
-                    } if id == "call_1" => Some((name.clone(), content.clone(), *is_error)),
-                    _ => None,
-                })
-                .collect();
-
-            assert_eq!(tool_results.len(), 1, "expected exactly one tool result");
-            assert_eq!(
-                tool_results[0],
-                (
-                    "ask_user".to_string(),
-                    "Interrupted by user".to_string(),
-                    true
-                )
-            );
-        });
-    }
-
-    #[test]
-    fn abort_agent_loop_does_not_duplicate_existing_tool_result() {
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        rt.block_on(async {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let path = tmp.path().join("session.jsonl");
-
-            let mut app = make_app();
-            app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
-                crate::event_log::EventLog::load(&path).expect("load event log"),
-            ));
-            app.begin_agent_turn();
-            install_test_agent_task(&mut app);
-            // Simulate a ToolCall with its result already in pending_turn_events.
-            app.session
-                .pending_turn_events
-                .push(crate::session_event::SessionEvent::ToolCall {
-                    id: "call_1".to_string(),
-                    name: "powershell".to_string(),
-                    args: serde_json::json!({"command": "git diff"}),
-                    include_in_llm: true,
-                    timestamp: 1,
-                });
-            app.session
-                .pending_turn_events
-                .push(crate::session_event::SessionEvent::ToolResult {
-                    id: "call_1".to_string(),
-                    name: "powershell".to_string(),
-                    content: "done".to_string(),
-                    is_error: false,
-                    display_range: None,
-                    include_in_llm: true,
-                    timestamp: 1,
-                });
-
-            app.abort_agent_loop();
-
-            let matching_results = app
-                .session
-                .session_state
-                .as_ref()
-                .expect("session state")
-                .display_messages()
-                .iter()
-                .filter(|m| {
-                    m.role == Role::ToolResult && m.tool_call_id.as_deref() == Some("call_1")
-                })
-                .count();
-            assert_eq!(
-                matching_results, 1,
-                "should not append abort result for already-completed tool call"
-            );
-        });
-    }
-
-    #[test]
-    fn abort_agent_loop_commits_partial_turn_and_next_turn_clears_abort_status() {
+    fn runner_cancellation_commits_partial_turn_and_next_turn_clears_abort_status() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -3134,7 +2952,8 @@ mod tests {
             app.begin_agent_turn();
             install_test_agent_task(&mut app);
 
-            app.abort_agent_loop();
+            app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+            app.apply_agent_event(crate::agent::types::AgentEvent::Cancelled);
 
             let display = app
                 .session
@@ -3155,7 +2974,6 @@ mod tests {
             let provider: std::sync::Arc<dyn crate::llm::LlmProvider + Send + Sync> =
                 std::sync::Arc::new(crate::llm::test_provider::TestProvider::new());
             app.launch_turn(&provider);
-
             assert!(matches!(
                 app.agent_turn.status,
                 Some(StreamingStatus::Waiting)
@@ -3164,17 +2982,16 @@ mod tests {
     }
 
     #[test]
-    fn request_hard_abort_keeps_running_tool_alive_for_cooperative_cancel() {
+    fn hard_abort_requests_runner_cancellation_without_using_activity_state() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let mut app = make_app();
             app.begin_agent_turn();
-            app.agent_turn.set_activity(crate::agent::AgentActivity::LocalWork);
             let cancel_rx = install_test_agent_task(&mut app);
             app.session.live_turn.tool_entries.push(crate::live_turn::LiveToolEntry {
-                id: "call_1".to_string(),
+                id: "call_pending".to_string(),
                 name: "bash".to_string(),
-                args: serde_json::json!({"command": "sleep 10"}),
+                args: serde_json::json!({}),
                 partial_args: String::new(),
                 partial_snapshot: None,
                 streaming_field: None,
@@ -3186,14 +3003,13 @@ mod tests {
 
             app.request_hard_abort();
 
-            assert!(app.runtime.is_running(), "tool-phase hard abort should keep agent task alive");
+            assert!(app.runtime.is_running(), "hard abort must leave termination to the runner");
             assert_eq!(app.runtime.abort_stage, crate::agent::CancelLevel::HardAbort);
             assert_eq!(*cancel_rx.borrow(), crate::agent::CancelLevel::HardAbort);
             assert!(matches!(
                 app.agent_turn.status,
                 Some(StreamingStatus::Message(ref s)) if s == "[Aborting… Press Ctrl-C again to force kill]"
             ));
-
             if let Some(handle) = app.runtime.take_agent_task() {
                 handle.abort();
             }
@@ -3288,7 +3104,7 @@ mod tests {
             assert!(matches!(
                 app.agent_turn.status,
                 Some(StreamingStatus::Message(ref s))
-                    if s == "[Aborting current tool; wait for it to finish before submitting]"
+                    if s == "[Abort requested; wait for the agent to stop before submitting]"
             ));
 
             if let Some(handle) = app.runtime.take_agent_task() {
@@ -3348,7 +3164,7 @@ mod tests {
                 crate::agent::CancelLevel::HardAbort
             );
 
-            app.apply_agent_event(crate::agent::types::AgentEvent::Done);
+            app.apply_agent_event(crate::agent::types::AgentEvent::Cancelled);
             assert!(!app.runtime.is_running());
             assert!(app.runtime.pending_graceful_quit);
 
@@ -3357,50 +3173,25 @@ mod tests {
     }
 
     #[test]
-    fn request_hard_abort_without_running_tool_aborts_immediately() {
+    fn request_hard_abort_without_running_tool_leaves_cleanup_to_runner() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let path = tmp.path().join("session.jsonl");
-
             let mut app = make_app();
-            app.session.session_state = Some(crate::session_state::SessionState::from_event_log(
-                crate::event_log::EventLog::load(&path).expect("load event log"),
-            ));
             app.session.live_turn.assistant_content = "partial".to_string();
             app.begin_agent_turn();
-            install_test_agent_task(&mut app);
-            // A streamed tool intent is not a running tool; a stalled model
-            // response must still be abortable immediately.
-            app.session
-                .live_turn
-                .tool_entries
-                .push(crate::live_turn::LiveToolEntry {
-                    id: "call_pending".to_string(),
-                    name: "bash".to_string(),
-                    args: serde_json::json!({}),
-                    partial_args: String::new(),
-                    partial_snapshot: None,
-                    streaming_field: None,
-                    running_output: String::new(),
-                    running_output_line_count: 0,
-                    last_output_line_count: 0,
-                    result: None,
-                });
-            let (cancel_tx, _cancel_rx) =
-                tokio::sync::watch::channel(crate::agent::CancelLevel::None);
-            let _ = cancel_tx;
+            let cancel_rx = install_test_agent_task(&mut app);
 
             app.request_hard_abort();
 
-            assert!(
-                !app.runtime.is_running(),
-                "model-phase hard abort should stop the task immediately"
-            );
+            assert!(app.runtime.is_running(), "runner owns task termination");
+            assert_eq!(*cancel_rx.borrow(), crate::agent::CancelLevel::HardAbort);
             assert!(matches!(
                 app.agent_turn.status,
-                Some(StreamingStatus::CompletedMessage(ref s)) if s == "[agent loop aborted]"
+                Some(StreamingStatus::Message(ref s)) if s == "[Aborting… Press Ctrl-C again to force kill]"
             ));
+            if let Some(handle) = app.runtime.take_agent_task() {
+                handle.abort();
+            }
         });
     }
 
@@ -4809,7 +4600,8 @@ mod tests {
         app.textarea = ratatui_textarea::TextArea::new(vec!["edited selection".to_string()]);
         install_test_agent_task(&mut app);
 
-        app.abort_agent_loop();
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+        app.apply_agent_event(crate::agent::types::AgentEvent::Cancelled);
 
         assert_eq!(app.session.drafts, ["older pending", "edited selection"]);
         assert!(app.runtime.queued_steering.is_empty());
@@ -4890,7 +4682,8 @@ mod tests {
         app.begin_agent_turn();
         install_test_agent_task(&mut app);
         app.runtime.queued_steering = vec!["same".into(), "same".into(), "later".into()];
-        app.abort_agent_loop();
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+        app.apply_agent_event(crate::agent::types::AgentEvent::Cancelled);
         assert!(app.runtime.queued_steering.is_empty());
         assert_eq!(app.session.drafts, ["same", "same", "later"]);
 

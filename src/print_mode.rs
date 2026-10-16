@@ -256,7 +256,7 @@ async fn run_print_mode_loop(
             AgentEvent::FinalResponse { .. } => {
                 // Desktop notifications are only emitted by the interactive UI.
             }
-            AgentEvent::Done => {
+            AgentEvent::Done | AgentEvent::Cancelled => {
                 println!(); // final newline after streamed output
                 return 0;
             }
@@ -421,7 +421,7 @@ async fn run_print_mode_loop_inner(
                 }
             }
             AgentEvent::FinalResponse { .. } => {}
-            AgentEvent::Done => {
+            AgentEvent::Done | AgentEvent::Cancelled => {
                 println!();
                 return 0;
             }

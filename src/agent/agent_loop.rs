@@ -14,6 +14,11 @@ use crate::session_event::{CompactionTrigger, EnvironmentChange, SessionEvent};
 
 // ── run_agent_loop ────────────────────────────────────────────────────────────
 
+async fn finish_cancelled_loop(config: &AgentLoopConfig, sink: &dyn AgentEventSink) {
+    lifecycle::on_cancel_and_idle(config).await;
+    send_agent_event(sink, AgentEvent::Cancelled);
+}
+
 /// Run the agent loop: call the LLM, execute tool calls, repeat until the
 /// model gives a final text answer.
 ///
@@ -36,7 +41,7 @@ async fn run_agent_loop_inner(
     tx: UnboundedSender<AppEvent>,
     sink: &dyn AgentEventSink,
     mut steering_rx: UnboundedReceiver<SteeringCommand>,
-    cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
+    mut cancel_rx: tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
 ) {
     let tool_defs = tool_defs::build_sorted_tool_defs(&config.tools);
 
@@ -53,11 +58,20 @@ async fn run_agent_loop_inner(
             config,
             CompactionTrigger::Threshold,
             config.manual_compaction_instructions.clone(),
+            &mut cancel_rx,
         )
         .await
         {
-            Ok(_) => {}
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                finish_cancelled_loop(config, sink).await;
+                return;
+            }
             Err(e) => loop_support::send_compaction_failed_status(sink, &e.message),
+        }
+        if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+            finish_cancelled_loop(config, sink).await;
+            return;
         }
         // ── On-done hook (manual compaction) ─────────────────────────────────
         lifecycle::on_done(config).await;
@@ -70,11 +84,10 @@ async fn run_agent_loop_inner(
         // ── Cancellation check ────────────────────────────────────────────────
         let cancel_level = *cancel_rx.borrow();
         if cancel_level >= CancelLevel::HardAbort {
-            lifecycle::on_cancel(config).await;
-            // App clears its runner handle only on Done. Every cooperative
-            // cancellation exit must emit it, including a cancel observed
-            // before the next turn begins.
-            send_agent_event(sink, AgentEvent::Done);
+            lifecycle::on_cancel_and_idle(config).await;
+            // Every cooperative cancellation exit emits one terminal event,
+            // including cancellation observed before a new turn begins.
+            send_agent_event(sink, AgentEvent::Cancelled);
             return;
         }
 
@@ -194,12 +207,19 @@ async fn run_agent_loop_inner(
                 hook_ipc: &config.hook_ipc,
                 session_id: &config.session_id,
             },
+            &mut cancel_rx,
         )
         .await;
 
         send_agent_event(sink, AgentEvent::ActivityChanged(AgentActivity::LocalWork));
 
         match turn {
+            turn::TurnOutcome::Cancelled => {
+                send_agent_event(sink, AgentEvent::TurnEnd);
+                finish_cancelled_loop(config, sink).await;
+                return;
+            }
+
             turn::TurnOutcome::Error(e) => {
                 let error_message = e.message.clone();
                 lifecycle::on_error(config, sink, &error_message, e).await;
@@ -232,10 +252,16 @@ async fn run_agent_loop_inner(
                     config,
                     CompactionTrigger::OverflowRetry,
                     None,
+                    &mut cancel_rx,
                 )
                 .await
                 {
-                    Ok(outcome) => {
+                    Ok(None) => {
+                        send_agent_event(sink, AgentEvent::TurnEnd);
+                        finish_cancelled_loop(config, sink).await;
+                        return;
+                    }
+                    Ok(Some(outcome)) => {
                         session_events.push(SessionEvent::CompactionSummary {
                             summary: outcome.summary.clone(),
                             trigger_reason: outcome.trigger_reason,
@@ -249,6 +275,11 @@ async fn run_agent_loop_inner(
                             modified_files: outcome.modified_files,
                             timestamp: 0,
                         });
+                        if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+                            send_agent_event(sink, AgentEvent::TurnEnd);
+                            finish_cancelled_loop(config, sink).await;
+                            return;
+                        }
                         continue;
                     }
                     Err(compaction_error) => {
@@ -296,6 +327,20 @@ async fn run_agent_loop_inner(
                 )
                 .await;
 
+                let cancel_level = *cancel_rx.borrow();
+                match cancel_level {
+                    CancelLevel::HardAbort | CancelLevel::ForceKill => {
+                        finish_cancelled_loop(config, sink).await;
+                        return;
+                    }
+                    CancelLevel::SoftStop => {
+                        lifecycle::on_done(config).await;
+                        send_agent_event(sink, AgentEvent::Done);
+                        return;
+                    }
+                    CancelLevel::None => {}
+                }
+
                 // If a steering message arrived while the LLM was generating,
                 // consume it only after the completed assistant turn has been
                 // committed via TurnEnd so transcript order remains natural.
@@ -311,7 +356,31 @@ async fn run_agent_loop_inner(
                 )
                 .await
                 {
+                    if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+                        finish_cancelled_loop(config, sink).await;
+                        return;
+                    }
+                    if *cancel_rx.borrow() >= CancelLevel::SoftStop {
+                        lifecycle::on_done(config).await;
+                        send_agent_event(sink, AgentEvent::Done);
+                        return;
+                    }
                     continue;
+                }
+
+                // Cancellation may arrive while the steering-consumed hook runs.
+                let cancel_level = *cancel_rx.borrow();
+                match cancel_level {
+                    CancelLevel::HardAbort | CancelLevel::ForceKill => {
+                        finish_cancelled_loop(config, sink).await;
+                        return;
+                    }
+                    CancelLevel::SoftStop => {
+                        lifecycle::on_done(config).await;
+                        send_agent_event(sink, AgentEvent::Done);
+                        return;
+                    }
+                    CancelLevel::None => {}
                 }
 
                 // Threshold-based auto-compaction after a completed turn.
@@ -329,13 +398,23 @@ async fn run_agent_loop_inner(
                             config,
                             CompactionTrigger::Threshold,
                             None,
+                            &mut cancel_rx,
                         )
                         .await
                         {
-                            Ok(_) => {}
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                finish_cancelled_loop(config, sink).await;
+                                return;
+                            }
                             Err(e) => loop_support::send_compaction_failed_status(sink, &e.message),
                         }
                     }
+                }
+
+                if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+                    finish_cancelled_loop(config, sink).await;
+                    return;
                 }
 
                 // ── On-done hook (final answer) ──────────────────────────────
@@ -352,6 +431,19 @@ async fn run_agent_loop_inner(
                 usage,
                 calls,
             } => {
+                if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+                    session_events.push(SessionEvent::AssistantMessage {
+                        content: text,
+                        thinking,
+                        phase,
+                        usage,
+                        timestamp: 0,
+                    });
+                    send_agent_event(sink, AgentEvent::TurnEnd);
+                    finish_cancelled_loop(config, sink).await;
+                    return;
+                }
+
                 session_events.push(SessionEvent::AssistantMessage {
                     content: text,
                     thinking,
@@ -391,9 +483,10 @@ async fn run_agent_loop_inner(
                 )
                 .await;
 
-                if let tool_batch::BatchOutcome::Cancelled = batch_outcome {
-                    lifecycle::on_cancel_and_idle(config).await;
-                    send_agent_event(sink, AgentEvent::Done);
+                if matches!(batch_outcome, tool_batch::BatchOutcome::Cancelled)
+                    || *cancel_rx.borrow() >= CancelLevel::HardAbort
+                {
+                    finish_cancelled_loop(config, sink).await;
                     return;
                 }
 
