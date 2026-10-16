@@ -2608,6 +2608,42 @@ mod tests {
     }
 
     #[test]
+    fn typing_does_not_filter_ask_user_options_without_freeform() {
+        let mut app = make_app();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "Choose one".to_string(),
+            context: None,
+            options: vec![
+                AskUserOption {
+                    title: "Alpha".to_string(),
+                    description: None,
+                },
+                AskUserOption {
+                    title: "Beta".to_string(),
+                    description: None,
+                },
+            ],
+            allow_multiple: false,
+            allow_freeform: false,
+            reply: reply_tx,
+        });
+
+        app.selection_add_char('z');
+
+        assert!(app.selection.active);
+        assert_eq!(app.selection.query, "");
+        assert_eq!(
+            app.selection
+                .items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Alpha", "Beta"]
+        );
+    }
+
+    #[test]
     fn format_provider_error_uses_natural_english_and_message() {
         let err = ProviderError::server_error("OpenAI", 524, "error code: 524");
         let rendered = format_provider_error_for_display("Open WebUI", &err);

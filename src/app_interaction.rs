@@ -487,8 +487,13 @@ impl App {
     }
 
     pub fn selection_add_char(&mut self, c: char) {
-        // The login action menu is a small fixed list; filtering adds no value.
-        if self.selection.kind == Some(SelectionKind::LoginAction) {
+        // These fixed menus have no useful filter input. Ask-user choices also
+        // hide the input field when freeform answers are disabled, so typing
+        // must not filter away the visible choices.
+        if self.selection.kind == Some(SelectionKind::LoginAction)
+            || (self.selection.kind == Some(SelectionKind::AskUser)
+                && !self.pending_ask_allows_freeform())
+        {
             return;
         }
         self.selection.query.push(c);
