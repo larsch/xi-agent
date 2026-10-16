@@ -77,7 +77,8 @@ pub(crate) async fn emit_compaction(
     config: &AgentLoopConfig,
     trigger_reason: CompactionTrigger,
     user_instructions: Option<String>,
-) -> Result<compaction::CompactionOutcome, crate::llm::ProviderError> {
+    cancel_rx: &mut tokio::sync::watch::Receiver<crate::agent::types::CancelLevel>,
+) -> Result<Option<compaction::CompactionOutcome>, crate::llm::ProviderError> {
     // ── Pre-turn hook equivalent for compaction ────────────────────────────
     config.hook_ipc.publish(
         &config.session_id,
@@ -95,14 +96,18 @@ pub(crate) async fn emit_compaction(
     .await;
 
     send_agent_event(sink, AgentEvent::Compacting);
-    let outcome = compaction::compact_events(
+    let Some(outcome) = compaction::compact_events(
         provider,
         session_events,
         &config.current_model,
         trigger_reason,
         user_instructions,
+        cancel_rx,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(None);
+    };
     send_agent_event(sink, AgentEvent::CompactionDone(outcome.clone()));
     config.hook_ipc.publish(
         &config.session_id,
@@ -126,5 +131,5 @@ pub(crate) async fn emit_compaction(
         None,
     )
     .await;
-    Ok(outcome)
+    Ok(Some(outcome))
 }

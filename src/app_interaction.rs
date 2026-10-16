@@ -1014,7 +1014,7 @@ impl App {
             return;
         }
         self.finish_pending_ask(AskUserResponse::Cancelled);
-        self.abort_agent_loop();
+        self.request_hard_abort();
     }
 
     pub(crate) fn clear_pending_ask_after_agent_exit(&mut self) {

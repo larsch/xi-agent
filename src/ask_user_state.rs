@@ -15,7 +15,7 @@ use crate::agent::types::{AskUserOption, AskUserResponse};
 /// - `cancel_ask_freeform_typing` — calls `reset_textarea`
 /// - `submit_pending_ask_answer` — reads `textarea`
 /// - `select_pending_ask_option` — calls `finish_pending_ask`
-/// - `cancel_pending_ask` — calls `finish_pending_ask`, `abort_agent_loop`
+/// - `cancel_pending_ask` — calls `finish_pending_ask`, `request_hard_abort`
 /// - `finish_pending_ask` (private) — calls `exit_selection_mode`,
 ///   `reset_textarea`
 ///

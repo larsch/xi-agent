@@ -555,7 +555,7 @@ async fn cancellation_beats_steering_at_same_tool_boundary() {
         events.get(events.len().saturating_sub(2)),
         Some(AgentEvent::TurnEnd)
     ));
-    assert!(matches!(events.last(), Some(AgentEvent::Done)));
+    assert!(matches!(events.last(), Some(AgentEvent::Cancelled)));
 }
 
 #[tokio::test]
@@ -1074,8 +1074,8 @@ async fn agent_loop_pre_cancelled_exits_immediately() {
         }
     }
     assert!(
-        matches!(events.as_slice(), [AgentEvent::Done]),
-        "expected exactly one Done event, got: {events:?}"
+        matches!(events.as_slice(), [AgentEvent::Cancelled]),
+        "expected exactly one Cancelled event, got: {events:?}"
     );
 }
 
@@ -1408,7 +1408,7 @@ fn runner_events(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> Vec<AgentEvent> 
 }
 
 #[tokio::test]
-async fn runner_hard_abort_during_model_streaming_stops_without_done() {
+async fn runner_hard_abort_during_model_streaming_emits_cancelled() {
     let stream_started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let provider = SynchronizedMockProvider {
@@ -1438,14 +1438,201 @@ async fn runner_hard_abort_during_model_streaming_stops_without_done() {
     stream_started.notified().await;
     cancel_tx.send(CancelLevel::HardAbort).unwrap();
     release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
         .await
         .unwrap()
         .unwrap();
+    let events = runner_events(&mut app_rx);
     assert!(
-        !runner_events(&mut app_rx)
+        events
             .iter()
-            .any(|event| matches!(event, AgentEvent::Done))
+            .any(|event| matches!(event, AgentEvent::TextToken { text, .. } if text == "partial"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnEnd))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Cancelled))
+    );
+    assert!(!events.iter().any(|event| matches!(event, AgentEvent::Done)));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runner_cancellation_waits_for_active_hook_to_finish() {
+    use crate::hooks::{HookConfig, HookPoint};
+
+    let marker = std::env::temp_dir().join(format!(
+        "xi-agent-cancel-hook-{}-{}.marker",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let provider = MockProvider::new(vec![vec![
+        LlmEvent::Token {
+            text: "after-hook".into(),
+            phase: AssistantPhase::Unknown,
+        },
+        LlmEvent::Done,
+    ]]);
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let mut config = runner_config(HashMap::new(), make_executor());
+    config.hooks.insert(
+        HookPoint::OnFirstTextToken,
+        vec![HookConfig {
+            command: Some("sh".into()),
+            args: vec![
+                "-c".into(),
+                format!("touch '{}'; sleep 0.25", marker.display()),
+            ],
+            ..Default::default()
+        }],
+    );
+    let mut runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        config,
+        Arc::new(provider),
+        app_tx,
+        cancel_tx.clone(),
+        cancel_rx,
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !marker.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("hook should start");
+    cancel_tx.send(CancelLevel::HardAbort).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut runner._task)
+            .await
+            .is_err(),
+        "active hook must not be interrupted by cancellation"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = std::fs::remove_file(marker);
+
+    let events = runner_events(&mut app_rx);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Cancelled))
+    );
+}
+
+#[tokio::test]
+async fn runner_hard_abort_after_tool_intent_never_starts_tool() {
+    let stream_started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = SynchronizedMockProvider {
+        events: Arc::new(Mutex::new(
+            vec![
+                LlmEvent::ToolCall {
+                    id: "call-1".into(),
+                    name: "slow_tool".into(),
+                    args: serde_json::json!({"value": "x"}),
+                },
+                LlmEvent::Done,
+            ]
+            .into_iter()
+            .collect(),
+        )),
+        stream_started: Arc::clone(&stream_started),
+        release: Arc::clone(&release),
+    };
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert("slow_tool".into(), Arc::new(SlowTool));
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        runner_config(tools, make_executor()),
+        Arc::new(provider),
+        app_tx,
+        cancel_tx.clone(),
+        cancel_rx,
+    );
+    stream_started.notified().await;
+    cancel_tx.send(CancelLevel::HardAbort).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = runner_events(&mut app_rx);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallStart { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Cancelled))
+    );
+}
+
+#[tokio::test]
+async fn runner_hard_abort_during_manual_compaction_drops_summary_stream() {
+    let stream_started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = SynchronizedMockProvider {
+        events: Arc::new(Mutex::new(
+            vec![
+                LlmEvent::Token {
+                    text: "partial summary".into(),
+                    phase: AssistantPhase::Unknown,
+                },
+                LlmEvent::Done,
+            ]
+            .into_iter()
+            .collect(),
+        )),
+        stream_started: Arc::clone(&stream_started),
+        release: Arc::clone(&release),
+    };
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let mut config = runner_config(HashMap::new(), make_executor());
+    config.manual_compaction_requested = true;
+    config
+        .session_events
+        .push(crate::session_event::SessionEvent::UserMessage {
+            content: "history to summarize".into(),
+            timestamp: 1,
+        });
+    let runner = crate::agent::runner::AgentHandle::spawn_with_cancel(
+        config,
+        Arc::new(provider),
+        app_tx,
+        cancel_tx.clone(),
+        cancel_rx,
+    );
+    stream_started.notified().await;
+    cancel_tx.send(CancelLevel::HardAbort).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = runner_events(&mut app_rx);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionDone(_)))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Cancelled))
     );
 }
 
@@ -1472,14 +1659,20 @@ async fn runner_hard_abort_during_tool_execution_reports_tool_end() {
     );
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     cancel_tx.send(CancelLevel::HardAbort).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
         .await
         .unwrap()
         .unwrap();
+    let events = runner_events(&mut app_rx);
     assert!(
-        runner_events(&mut app_rx)
+        events
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolCallEnd { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Cancelled))
     );
 }
 
@@ -1513,7 +1706,7 @@ async fn runner_soft_stop_after_tool_batch_does_not_start_next_turn() {
         cancel_tx,
         cancel_rx,
     );
-    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
         .await
         .unwrap()
         .unwrap();
@@ -1564,7 +1757,7 @@ async fn runner_steering_during_final_answer_stream_is_consumed_next_turn() {
         ))
         .unwrap();
     release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
         .await
         .unwrap()
         .unwrap();
@@ -1619,7 +1812,7 @@ async fn runner_waits_for_executor_shutdown_before_task_completion() {
         cancel_tx,
         cancel_rx,
     );
-    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
         .await
         .unwrap()
         .unwrap();
@@ -1645,7 +1838,7 @@ async fn runner_completes_when_event_receiver_is_dropped() {
         cancel_tx,
         cancel_rx,
     );
-    tokio::time::timeout(std::time::Duration::from_secs(1), runner.task)
+    tokio::time::timeout(std::time::Duration::from_secs(1), runner._task)
         .await
         .unwrap()
         .unwrap();

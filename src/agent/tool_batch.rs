@@ -89,17 +89,21 @@ pub(crate) async fn execute_tool_batch(
                 },
             );
 
-            let result = config
-                .executor
-                .execute_tool(
-                    &id,
-                    &name,
-                    args.clone(),
-                    &config.tools,
-                    &config.tool_output_log,
-                    Some(tx.clone()),
-                )
-                .await;
+            let result = if *cancel_rx.borrow() >= CancelLevel::HardAbort {
+                ToolResult::err("Interrupted by user")
+            } else {
+                config
+                    .executor
+                    .execute_tool(
+                        &id,
+                        &name,
+                        args.clone(),
+                        &config.tools,
+                        &config.tool_output_log,
+                        Some(tx.clone()),
+                    )
+                    .await
+            };
 
             crate::hooks::maybe_run_hook(
                 &config.hooks,

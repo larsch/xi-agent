@@ -82,17 +82,13 @@ impl AgentRuntime {
         self.agent_handle.as_ref().map(|h| h.cancel_sender())
     }
 
-    pub(crate) fn take_agent_handle(&mut self) -> Option<AgentHandle> {
-        self.agent_handle.take()
-    }
-
     pub(crate) fn clear_agent_handle(&mut self) {
         self.agent_handle = None;
     }
 
     #[cfg(test)]
     pub(crate) fn take_agent_task(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        self.agent_handle.take().map(|handle| handle.task)
+        self.agent_handle.take().map(|handle| handle._task)
     }
 
     pub(crate) fn is_running(&self) -> bool {

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use tokio::sync::watch;
 
 use crate::context_window::{context_window_for_model, scaled_token_budget};
 use crate::llm::{AssistantPhase, LlmEvent, LlmProvider, LlmRequestContext, Message};
@@ -86,7 +87,8 @@ pub async fn compact_events(
     model: &str,
     trigger_reason: CompactionTrigger,
     user_instructions: Option<String>,
-) -> Result<CompactionOutcome, crate::llm::ProviderError> {
+    cancel_rx: &mut watch::Receiver<crate::agent::types::CancelLevel>,
+) -> Result<Option<CompactionOutcome>, crate::llm::ProviderError> {
     let (context_window, reserve_tokens, keep_recent_tokens) = context_window_and_budgets(model);
     let tokens_before = estimate_session_tokens(events);
 
@@ -120,7 +122,9 @@ pub async fn compact_events(
         &summarized_events,
         user_instructions.as_deref(),
     );
-    let summary_core = collect_summary(provider, summary_prompt).await?;
+    let Some(summary_core) = collect_summary(provider, summary_prompt, cancel_rx).await? else {
+        return Ok(None);
+    };
     let summary = append_file_sections(summary_core.trim(), &merged_files);
 
     let mut after_messages = Vec::new();
@@ -128,7 +132,7 @@ pub async fn compact_events(
     after_messages.extend(kept_messages);
     let tokens_after = estimate_messages_tokens(&after_messages);
 
-    Ok(CompactionOutcome {
+    Ok(Some(CompactionOutcome {
         summary,
         trigger_reason,
         context_window,
@@ -139,7 +143,7 @@ pub async fn compact_events(
         retained_event_count,
         read_files: merged_files.read_files,
         modified_files: merged_files.modified_files,
-    })
+    }))
 }
 
 fn split_at_latest_compaction(
@@ -444,7 +448,11 @@ fn serialize_events_for_summary(events: &[SessionEvent]) -> String {
 async fn collect_summary(
     provider: Arc<dyn LlmProvider>,
     messages: Vec<Message>,
-) -> Result<String, crate::llm::ProviderError> {
+    cancel_rx: &mut watch::Receiver<crate::agent::types::CancelLevel>,
+) -> Result<Option<String>, crate::llm::ProviderError> {
+    if *cancel_rx.borrow() >= crate::agent::types::CancelLevel::HardAbort {
+        return Ok(None);
+    }
     let mut stream = provider.stream_chat(
         messages,
         LlmRequestContext {
@@ -452,8 +460,28 @@ async fn collect_summary(
         },
     );
     let mut summary = String::new();
+    let mut cancel_open = true;
 
-    while let Some(ev) = stream.next().await {
+    loop {
+        let next_event = tokio::select! {
+            biased;
+            changed = cancel_rx.changed(), if cancel_open => {
+                match changed {
+                    Ok(()) if *cancel_rx.borrow() >= crate::agent::types::CancelLevel::HardAbort => {
+                        return Ok(None);
+                    }
+                    Ok(()) => continue,
+                    Err(_) => {
+                        cancel_open = false;
+                        continue;
+                    }
+                }
+            }
+            event = stream.next() => event,
+        };
+        let Some(ev) = next_event else {
+            break;
+        };
         match ev {
             LlmEvent::Token { text, .. } => summary.push_str(&text),
             LlmEvent::ThinkingToken(_) => {}
@@ -474,7 +502,7 @@ async fn collect_summary(
             "Compaction summary was empty.",
         ))
     } else {
-        Ok(trimmed.to_string())
+        Ok(Some(trimmed.to_string()))
     }
 }
 
