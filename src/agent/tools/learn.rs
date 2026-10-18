@@ -73,11 +73,15 @@ impl Tool for LearnTool {
                 .skills
                 .iter()
                 .filter(|skill| skill.name == name)
-                .min_by_key(|skill| match skill.scope {
-                    crate::skills::SkillScope::AlwaysLoadable => 0,
-                    crate::skills::SkillScope::AlwaysPresent => 1,
-                    crate::skills::SkillScope::Standard => 2,
-                    crate::skills::SkillScope::Agent(_) => 3,
+                .min_by_key(|skill| {
+                    (
+                        !skill.path.starts_with("__embedded__"),
+                        match skill.scope {
+                            crate::skills::SkillScope::AlwaysPresent => 0,
+                            crate::skills::SkillScope::Standard => 1,
+                            crate::skills::SkillScope::Agent(_) => 2,
+                        },
+                    )
                 });
 
             let skill = match skill {
@@ -179,6 +183,7 @@ mod tests {
             scope: crate::skills::SkillScope::Standard,
             name: name.to_string(),
             description: "test skill".to_string(),
+            hidden: false,
             path: path.clone(),
             base_dir: skill_dir,
             embedded_body: None,
@@ -250,9 +255,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let standard = write_skill_file(dir.path(), "xi-config-hooks", "# User guide");
         let embedded = SkillMeta {
-            scope: crate::skills::SkillScope::AlwaysLoadable,
+            scope: crate::skills::SkillScope::Standard,
             name: "xi-config-hooks".to_string(),
             description: "Built-in hook guide".to_string(),
+            hidden: true,
             path: PathBuf::from("__embedded__/xi-config-hooks/SKILL.md"),
             base_dir: PathBuf::from("__embedded__/xi-config-hooks"),
             embedded_body: Some("# Embedded guide".to_string()),
@@ -308,6 +314,7 @@ mod tests {
             scope: crate::skills::SkillScope::Standard,
             name: "ghost".to_string(),
             description: "missing file".to_string(),
+            hidden: false,
             path: PathBuf::from("/nonexistent/path/SKILL.md"),
             base_dir: PathBuf::from("/nonexistent/path"),
             embedded_body: None,

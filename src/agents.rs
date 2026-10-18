@@ -408,22 +408,11 @@ pub fn select_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<Ski
     let include_scoped_skill = |name: &str| {
         !is_specialized || (!include.is_empty() && matches_any(name, &include_globs, include))
     };
-    let hidden_builtin_names: HashSet<&str> = skills
-        .iter()
-        .filter(|skill| skill.scope == SkillScope::AlwaysLoadable)
-        .map(|skill| skill.name.as_str())
-        .collect();
-
     let mut active: Vec<&SkillMeta> = skills
         .iter()
-        .filter(|skill| {
-            skill.scope != SkillScope::AlwaysLoadable
-                && (skill.scope == SkillScope::AlwaysPresent
-                    || !hidden_builtin_names.contains(skill.name.as_str()))
-        })
+        .filter(|skill| !skill.hidden)
         .filter(|skill| match &skill.scope {
             SkillScope::AlwaysPresent => true,
-            SkillScope::AlwaysLoadable => false,
             SkillScope::Standard => {
                 !is_specialized
                     || exclude.is_empty()
@@ -447,7 +436,7 @@ pub fn select_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<Ski
     // never shadow an available broader-scope definition.
     active.sort_by(|a, b| {
         let rank = |skill: &SkillMeta| match &skill.scope {
-            SkillScope::AlwaysPresent | SkillScope::AlwaysLoadable => 3,
+            SkillScope::AlwaysPresent => 3,
             SkillScope::Standard => 0,
             SkillScope::Agent(name) if name == selected_name => 2,
             SkillScope::Agent(_) => 1,
@@ -462,19 +451,15 @@ pub fn select_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<Ski
         .collect()
 }
 
-/// Select skills available to `/skill:` invocation. Hidden built-in guidance
-/// is invokable regardless of the active agent's skill filters.
+/// Select skills available to `/skill:` invocation. Hidden skills are
+/// invokable regardless of the active agent's skill filters.
 pub fn select_invokable_skills(skills: &[SkillMeta], agent: Option<&AgentMeta>) -> Vec<SkillMeta> {
-    let hidden_builtins: Vec<_> = skills
+    let mut invokable: Vec<SkillMeta> = skills
         .iter()
-        .filter(|skill| skill.scope == SkillScope::AlwaysLoadable)
+        .filter(|skill| skill.hidden)
         .cloned()
         .collect();
-    let mut names: HashSet<String> = hidden_builtins
-        .iter()
-        .map(|skill| skill.name.clone())
-        .collect();
-    let mut invokable = hidden_builtins;
+    let mut names: HashSet<String> = invokable.iter().map(|skill| skill.name.clone()).collect();
     invokable.extend(
         select_skills(skills, agent)
             .into_iter()
@@ -571,6 +556,7 @@ mod tests {
                 scope: SkillScope::Standard,
                 name: n.to_string(),
                 description: format!("desc: {n}"),
+                hidden: false,
                 path: PathBuf::from(format!("/tmp/skills/{n}/SKILL.md")),
                 base_dir: PathBuf::from(format!("/tmp/skills/{n}")),
                 embedded_body: None,
@@ -836,7 +822,11 @@ No skills here.
     fn hidden_builtin_skills_are_invokable_under_agent_filters_but_not_prompt_selected() {
         let skills = vec![
             scoped_skill("xi-customization", SkillScope::AlwaysPresent),
-            scoped_skill("xi-config-hooks", SkillScope::AlwaysLoadable),
+            {
+                let mut hidden = scoped_skill("xi-config-hooks", SkillScope::Standard);
+                hidden.hidden = true;
+                hidden
+            },
             scoped_skill("ordinary", SkillScope::Standard),
             scoped_skill("other-agent-skill", SkillScope::Agent("other".into())),
         ];

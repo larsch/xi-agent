@@ -1,3 +1,10 @@
+---
+name: xi-config-hooks
+description: Explains xi hook configuration, points, payloads, precedence, and loading behavior.
+metadata:
+  hidden: "true"
+---
+
 # Hooks in xi
 
 Hooks are configured commands that xi runs at named agent lifecycle, interaction, and notification points. Hook files and the global config are additive.

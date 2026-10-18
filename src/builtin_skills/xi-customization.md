@@ -1,3 +1,8 @@
+---
+name: xi-customization
+description: Helps create, write, edit, or troubleshoot xi skills, AGENTS.md instructions, rule files, hooks, agent profiles, and custom tools. Use when asked to customize xi, make behavior persistent, or add global or project-local instructions for future sessions.
+---
+
 # Changing how xi behaves
 
 This guide maps requests about xi's behavior to the relevant mechanism. The focused guides below describe each mechanism's discovered files, format, scope, precedence, and loading point. These `xi-config-*` guides are hidden from the available-skills list, but they are loadable by calling the `learn` tool with the exact name:

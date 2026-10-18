@@ -487,6 +487,7 @@ mod tests {
             scope: crate::skills::SkillScope::Standard,
             name: name.to_string(),
             description: description.to_string(),
+            hidden: false,
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             base_dir: PathBuf::from(format!("/tmp/{name}")),
             embedded_body: None,
@@ -606,7 +607,7 @@ mod tests {
     #[test]
     fn hidden_builtin_skill_can_be_completed_by_slash_name() {
         let mut topic = skill("xi-config-hooks", "Hook guide");
-        topic.scope = crate::skills::SkillScope::AlwaysLoadable;
+        topic.hidden = true;
 
         let items = completions_for(
             "/skill:xi-config-h",

@@ -1,3 +1,10 @@
+---
+name: xi-config-agents
+description: Explains xi agent profile discovery, format, filters, and loading behavior.
+metadata:
+  hidden: "true"
+---
+
 # Agent profiles in xi
 
 Agent profiles are directory-based definitions that change the system-prompt identity and can filter the available tools and skills. An agent profile is distinct from `AGENTS.md`, which supplies persistent instructions.

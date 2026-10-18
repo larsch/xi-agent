@@ -83,7 +83,7 @@ fn inventory_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         let active = active_skill_paths.contains(&skill.path);
         let reason = if active {
             String::new()
-        } else if skill.scope == crate::skills::SkillScope::AlwaysLoadable {
+        } else if skill.hidden {
             "hidden, but available".into()
         } else {
             "excluded by selected agent or shadowed by a higher-precedence skill".into()
@@ -3226,8 +3226,9 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
         let mut app = make_app();
         app.loaded_skills.push(crate::skills::SkillMeta {
             name: "xi-config-hooks".to_string(),
-            scope: crate::skills::SkillScope::AlwaysLoadable,
+            scope: crate::skills::SkillScope::Standard,
             description: "Hook guide".to_string(),
+            hidden: true,
             path: std::path::PathBuf::from("__embedded__/xi-config-hooks/SKILL.md"),
             base_dir: std::path::PathBuf::from("__embedded__/xi-config-hooks"),
             embedded_body: Some("# Hooks".to_string()),

@@ -1,3 +1,10 @@
+---
+name: xi-config-rules
+description: Explains persistent rule-file discovery, precedence, format, and loading behavior in xi.
+metadata:
+  hidden: "true"
+---
+
 # Rule files in xi
 
 Rule files are Markdown documents included as persistent instructions in the system prompt. They are separate from `AGENTS.md` entries and from on-demand skills.

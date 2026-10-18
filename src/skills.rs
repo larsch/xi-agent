@@ -9,11 +9,8 @@ use std::{
 pub enum SkillScope {
     /// Discovered through a standard skill root; available to every agent.
     Standard,
-    /// Built in and advertised to every agent regardless of skill filters.
+    /// Built in and available to every agent regardless of skill filters.
     AlwaysPresent,
-    /// Built in and available for explicit loading/invocation, but omitted from
-    /// the system-prompt skill listing.
-    AlwaysLoadable,
     /// Discovered under the named agent's `skills/` directory.
     Agent(String),
 }
@@ -24,6 +21,8 @@ pub struct SkillMeta {
     /// Availability scope determined by how the skill is provided, never its name.
     pub scope: SkillScope,
     pub description: String,
+    /// Whether frontmatter `metadata.hidden` omits the skill from prompt listings.
+    pub hidden: bool,
     /// Absolute path to the `SKILL.md` file.
     pub path: PathBuf,
     /// Directory containing the `SKILL.md` file (base for relative references).
@@ -167,7 +166,6 @@ fn build_embedded_skill_locations(
                 let scope = match &s.scope {
                     SkillScope::Agent(agent) => format!("agent: {agent}"),
                     SkillScope::AlwaysPresent => "built-in".to_string(),
-                    SkillScope::AlwaysLoadable => "built-in (hidden)".to_string(),
                     SkillScope::Standard => {
                         let base = s
                             .base_dir
@@ -185,93 +183,83 @@ fn build_embedded_skill_locations(
                         .to_string()
                     }
                 };
+                let scope = if s.hidden {
+                    format!("{scope}, hidden")
+                } else {
+                    scope
+                };
                 format!("- `{}` [{scope}] → {}", s.name, s.path.display())
             })
             .collect::<Vec<_>>()
             .join("\n")
     };
 
-    let body = format!(
-        "{}\n\n## Current session discovery snapshot\n\nThe following roots and filesystem skill files were discovered when xi loaded this context. This snapshot is not a live filesystem listing.\n\n### Search roots\n\n{dirs_section}\n\n### Agent-specific roots\n\n{agent_dirs_section}\n\n### Discovered filesystem skills\n\n{skills_section}\n\n- `[global]`: discovered under a home-directory skill root.\n- `[project]`: discovered under a skill root in the working directory or an ancestor.\n- `[agent: name]`: discovered under that agent's `skills/` directory.\n\nRoots marked “in use” contributed skills to this startup's discovery results. The marker is informational.\n",
-        include_str!("builtin_skills/xi-config-skills.md")
+    let snapshot = format!(
+        "## Current session discovery snapshot\n\nThe following roots and filesystem skill files were discovered when xi loaded this context. This snapshot is not a live filesystem listing.\n\n### Search roots\n\n{dirs_section}\n\n### Agent-specific roots\n\n{agent_dirs_section}\n\n### Discovered filesystem skills\n\n{skills_section}\n\n- `[global]`: discovered under a home-directory skill root.\n- `[project]`: discovered under a skill root in the working directory or an ancestor.\n- `[agent: name]`: discovered under that agent's `skills/` directory.\n\nRoots marked “in use” contributed skills to this startup's discovery results. The marker is informational."
     );
+    let mut skill = parse_embedded_skill(
+        "xi-config-skills",
+        SkillScope::Standard,
+        include_str!("builtin_skills/xi-config-skills.md"),
+    );
+    skill.embedded_body = Some(format!("{}\n\n{snapshot}", skill.embedded_body.unwrap()));
+    skill
+}
 
-    SkillMeta {
-        name: "xi-config-skills".to_string(),
-        description:
-            "Explains xi skill discovery, format, scope, precedence, and loading behavior, with a snapshot of skills discovered in this session."
-                .to_string(),
-        scope: SkillScope::AlwaysLoadable,
-        // Dummy path — never read from disk; learn uses embedded_body.
-        path: PathBuf::from("__embedded__/xi-config-skills/SKILL.md"),
-        base_dir: PathBuf::from("__embedded__/xi-config-skills"),
-        embedded_body: Some(body),
-    }
+fn parse_embedded_skill(name: &str, scope: SkillScope, content: &str) -> SkillMeta {
+    let path = PathBuf::from(format!("__embedded__/{name}/SKILL.md"));
+    let mut skill = parse_skill_meta(content, path)
+        .unwrap_or_else(|| panic!("invalid frontmatter in embedded skill {name}"));
+    skill.scope = scope;
+    skill.embedded_body = Some(strip_frontmatter(content).trim().to_string());
+    skill
 }
 
 fn build_embedded_session_ipc_skill() -> SkillMeta {
-    SkillMeta {
-        name: SESSION_IPC_SKILL_NAME.to_string(),
-        scope: SkillScope::AlwaysPresent,
-        description: "Launching and controlling separate xi sessions over session IPC. Use when starting, contacting, or stopping an xi worker session.".to_string(),
-        path: PathBuf::from("__embedded__/xi-subagent-sessions/SKILL.md"),
-        base_dir: PathBuf::from("__embedded__/xi-subagent-sessions"),
-        embedded_body: Some(include_str!("builtin_skills/xi-subagent-sessions.md").to_string()),
-    }
+    parse_embedded_skill(
+        SESSION_IPC_SKILL_NAME,
+        SkillScope::AlwaysPresent,
+        include_str!("builtin_skills/xi-subagent-sessions.md"),
+    )
 }
 
-/// Build the visible router and hidden built-in guides for xi customization.
+/// Load embedded customization guides from their SKILL.md frontmatter.
 fn build_embedded_customization_skills() -> Vec<SkillMeta> {
-    let entries = [
+    [
         (
             "xi-customization",
-            "Helps create, write, edit, or troubleshoot xi skills, `AGENTS.md` instructions, rule files, hooks, agent profiles, and custom tools. Use when asked to customize xi, make behavior persistent, or add global or project-local instructions for future sessions.",
-            SkillScope::AlwaysPresent,
             include_str!("builtin_skills/xi-customization.md"),
+            SkillScope::AlwaysPresent,
         ),
         (
             "xi-config-agents-md",
-            "Explains persistent AGENTS.md instruction discovery, precedence, and loading behavior in xi.",
-            SkillScope::AlwaysLoadable,
             include_str!("builtin_skills/xi-agents-md.md"),
+            SkillScope::Standard,
         ),
         (
             "xi-config-rules",
-            "Explains persistent rule-file discovery, precedence, format, and loading behavior in xi.",
-            SkillScope::AlwaysLoadable,
             include_str!("builtin_skills/xi-rules.md"),
+            SkillScope::Standard,
         ),
         (
             "xi-config-hooks",
-            "Explains xi hook configuration, points, payloads, precedence, and loading behavior.",
-            SkillScope::AlwaysLoadable,
             include_str!("builtin_skills/xi-hooks.md"),
+            SkillScope::Standard,
         ),
         (
             "xi-config-agents",
-            "Explains xi agent profile discovery, format, filters, and loading behavior.",
-            SkillScope::AlwaysLoadable,
             include_str!("builtin_skills/xi-agents.md"),
+            SkillScope::Standard,
         ),
         (
             "xi-config-tools",
-            "Explains xi custom tool discovery, executable protocol, precedence, and loading behavior.",
-            SkillScope::AlwaysLoadable,
             include_str!("builtin_skills/xi-custom-tools.md"),
+            SkillScope::Standard,
         ),
-    ];
-
-    entries
-        .into_iter()
-        .map(|(name, description, scope, body)| SkillMeta {
-            name: name.to_string(),
-            scope,
-            description: description.to_string(),
-            path: PathBuf::from(format!("__embedded__/{name}/SKILL.md")),
-            base_dir: PathBuf::from(format!("__embedded__/{name}")),
-            embedded_body: Some(body.to_string()),
-        })
-        .collect()
+    ]
+    .into_iter()
+    .map(|(name, content, scope)| parse_embedded_skill(name, scope, content))
+    .collect()
 }
 
 fn skill_dirs() -> Vec<PathBuf> {
@@ -424,15 +412,26 @@ fn parse_skill_meta(content: &str, path: PathBuf) -> Option<SkillMeta> {
 
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;
+    let mut metadata_section = false;
+    let mut hidden = false;
 
     for line in lines {
         if line.trim() == "---" {
             break;
         }
+        if line == "metadata:" {
+            metadata_section = true;
+            continue;
+        }
+        if !line.starts_with([' ', '\t']) {
+            metadata_section = false;
+        }
         if let Some(v) = line.strip_prefix("name:") {
             name = Some(v.trim().to_string());
         } else if let Some(v) = line.strip_prefix("description:") {
             description = Some(v.trim().to_string());
+        } else if metadata_section && let Some(v) = line.trim().strip_prefix("hidden:") {
+            hidden = v.trim().trim_matches(['"', '\'']) == "true";
         }
     }
 
@@ -442,6 +441,7 @@ fn parse_skill_meta(content: &str, path: PathBuf) -> Option<SkillMeta> {
         name: name?,
         description: description?,
         scope: SkillScope::Standard,
+        hidden,
         path,
         base_dir,
         embedded_body: None,
@@ -639,8 +639,26 @@ mod tests {
         assert!(
             customization
                 .iter()
+                .any(|skill| { skill.name == "xi-customization" && !skill.hidden })
+        );
+        assert!(
+            customization
+                .iter()
                 .filter(|skill| skill.name != "xi-customization")
-                .all(|skill| skill.scope == SkillScope::AlwaysLoadable)
+                .all(|skill| skill.hidden)
+        );
+        let prompt_skills = crate::agents::select_skills(&skills, None);
+        assert!(
+            prompt_skills
+                .iter()
+                .any(|skill| skill.name == "xi-customization")
+        );
+        assert!(prompt_skills.iter().all(|skill| !skill.hidden));
+        let invokable = crate::agents::select_invokable_skills(&skills, None);
+        assert!(
+            invokable
+                .iter()
+                .any(|skill| skill.name == "xi-config-hooks")
         );
         assert!(customization.iter().any(|skill| {
             skill.name == "xi-config-hooks"
@@ -743,6 +761,17 @@ description: guides most non-trivial coding work.
         assert_eq!(meta.name, "work-loop");
         assert_eq!(meta.description, "guides most non-trivial coding work.");
         assert_eq!(meta.base_dir, PathBuf::from("/tmp/skills/work-loop"));
+    }
+
+    #[test]
+    fn parses_hidden_from_metadata_and_ignores_other_metadata() {
+        let content = "---\nname: hidden-example\ndescription: Hidden example.\nmetadata:\n  author: example\n  hidden: \"true\"\n---\n# Body\n";
+        let meta = parse_skill_meta(content, dummy_path()).expect("should parse");
+        assert!(meta.hidden);
+        assert_eq!(meta.name, "hidden-example");
+
+        let visible = "---\nname: visible-example\ndescription: Visible example.\nmetadata:\n  hidden: \"false\"\n---\n";
+        assert!(!parse_skill_meta(visible, dummy_path()).unwrap().hidden);
     }
 
     #[test]

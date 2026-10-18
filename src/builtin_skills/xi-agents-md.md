@@ -1,3 +1,10 @@
+---
+name: xi-config-agents-md
+description: Explains persistent AGENTS.md instruction discovery, precedence, and loading behavior in xi.
+metadata:
+  hidden: "true"
+---
+
 # AGENTS.md instructions in xi
 
 `AGENTS.md` files contain instructions included in the system prompt. They are not on-demand skills or hook commands.

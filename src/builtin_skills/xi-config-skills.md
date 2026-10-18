@@ -1,3 +1,10 @@
+---
+name: xi-config-skills
+description: Explains xi skill discovery, format, scope, precedence, and loading behavior, with a snapshot of skills discovered in this session.
+metadata:
+  hidden: "true"
+---
+
 # Skills in xi
 
 A skill is reusable guidance loaded on demand. It is not automatically applied as a persistent instruction merely because xi discovered it.
@@ -26,7 +33,11 @@ description: Explains how to summarize tabular data.
 Skill body in Markdown. Relative references resolve from this directory.
 ```
 
-`name` and `description` are required and non-empty. Only these frontmatter fields are recognized. The closing `---` is required. Invalid files are skipped. The directory name does not determine the skill name.
+`name` and `description` are required and non-empty. The closing `---` is required. Invalid files are skipped. The directory name does not determine the skill name. `metadata` is a mapping of string keys to string values; xi reads `metadata.hidden` when its value is `"true"`.
+
+## Visibility
+
+A skill with `metadata.hidden: "true"` is omitted from the prompt's available-skills list. It remains loadable by exact name through `learn`, can be invoked as `/skill:<name>`, and appears in the F3 inventory as hidden but available. Hidden status does not change its scope or discovery.
 
 ## Loading
 

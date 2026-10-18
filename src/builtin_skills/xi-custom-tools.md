@@ -1,3 +1,10 @@
+---
+name: xi-config-tools
+description: Explains xi custom tool discovery, executable protocol, precedence, and loading behavior.
+metadata:
+  hidden: "true"
+---
+
 # Custom tools in xi
 
 Custom tools are executables that extend xi's tool registry. Each executable runs with the permissions of the xi process.

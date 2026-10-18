@@ -1,3 +1,8 @@
+---
+name: xi-subagent-sessions
+description: Launches and controls separate xi sessions over session IPC. Use when starting, contacting, or stopping an xi worker session.
+---
+
 # Working with separate xi sessions
 
 This skill covers the mechanics of running separate xi sessions and contacting them over session IPC. Follow the user's workflow for whether to delegate, what work to assign, how to review results, and other lifecycle decisions.
