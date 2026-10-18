@@ -132,7 +132,7 @@ pub(crate) async fn run_print_mode(
     } else {
         tools
     };
-    crate::agent::tools::set_active_skills(&mut tools, skills.clone());
+    crate::agent::tools::set_learnable_skills(&mut tools, (*loaded_skills).clone());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -167,7 +167,13 @@ pub(crate) async fn run_print_mode(
         name: &provider_name,
     };
 
-    let exit_code = run_print_mode_loop(loop_config, skills, provider, &provider_ctx).await;
+    let exit_code = run_print_mode_loop(
+        loop_config,
+        (*loaded_skills).clone(),
+        provider,
+        &provider_ctx,
+    )
+    .await;
 
     std::process::exit(exit_code);
 }
@@ -348,7 +354,7 @@ async fn run_print_mode_loop_inner(
         custom_tools,
         false,
     );
-    crate::agent::tools::set_active_skills(&mut retry_tools, active_skills);
+    crate::agent::tools::set_learnable_skills(&mut retry_tools, active_skills);
     let retry_config = AgentLoopConfig {
         tools: retry_tools,
         file_tracker: retry_tracker,

@@ -478,7 +478,10 @@ impl App {
         let agent = self.resolve_current_agent().cloned();
         let agent = agent.as_ref();
         let skills = crate::agents::select_skills(&self.loaded_skills, agent);
-        crate::agent::tools::set_active_skills(&mut self.agent_config.tools, skills.clone());
+        crate::agent::tools::set_learnable_skills(
+            &mut self.agent_config.tools,
+            self.loaded_skills.clone(),
+        );
         let system_prompt =
             crate::agent::build_system_prompt(&self.agent_config.tools, cwd, &skills, agent);
         self.agent_config.system_prompt = Some(system_prompt);
@@ -1269,7 +1272,7 @@ impl App {
         let cwd = self.session.current_cwd.clone();
         let active_agent = self.resolve_current_agent().cloned();
         let active_skills =
-            crate::agents::select_skills(&self.loaded_skills, active_agent.as_ref());
+            crate::agents::select_invokable_skills(&self.loaded_skills, active_agent.as_ref());
         self.completion.update(
             &self.textarea,
             &active_skills,

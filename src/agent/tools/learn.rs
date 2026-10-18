@@ -8,9 +8,9 @@ use crate::skills::SkillMeta;
 
 /// A built-in tool that teaches the model a skill's instructions by name.
 ///
-/// Takes the skill name (as listed in the available-skills block) and returns
-/// the SKILL.md body with frontmatter stripped. Errors if the name is not
-/// found in the loaded skill registry.
+/// Takes a discovered skill name and returns the SKILL.md body with
+/// frontmatter stripped. Skills need not be listed in the system prompt.
+/// Errors if the name is not found in the loaded skill registry.
 pub struct LearnTool {
     skills: Arc<Vec<SkillMeta>>,
 }
@@ -32,11 +32,13 @@ impl Tool for LearnTool {
     }
 
     fn description(&self) -> &str {
-        "Learn a skill's specialized instructions by name. Use the skill name exactly as listed in the available skills."
+        "Load the body of any discovered skill by its exact name. This includes hidden skills omitted from the available-skills list; use learn when another skill or the user names a hidden skill."
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        Some("Load specialized instructions for a skill")
+        Some(
+            "Load any discovered skill by exact name, including hidden skills omitted from the available-skills list",
+        )
     }
 
     fn parameters_schema(&self) -> Value {
@@ -45,7 +47,7 @@ impl Tool for LearnTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The skill name to load (e.g. \"workflow\", \"build\")"
+                    "description": "Exact name of any discovered skill, including hidden skills not shown in the available-skills list"
                 }
             },
             "required": ["name"]
@@ -67,7 +69,16 @@ impl Tool for LearnTool {
                 Err(e) => return *e,
             };
 
-            let skill = self.skills.iter().find(|s| s.name == name);
+            let skill = self
+                .skills
+                .iter()
+                .filter(|skill| skill.name == name)
+                .min_by_key(|skill| match skill.scope {
+                    crate::skills::SkillScope::AlwaysLoadable => 0,
+                    crate::skills::SkillScope::AlwaysPresent => 1,
+                    crate::skills::SkillScope::Standard => 2,
+                    crate::skills::SkillScope::Agent(_) => 3,
+                });
 
             let skill = match skill {
                 Some(s) => s,
@@ -174,6 +185,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn learn_tool_prompt_explains_hidden_skill_access() {
+        let tool = make_tool(vec![]);
+        assert!(tool.description().contains("hidden skills"));
+        assert!(tool.prompt_snippet().unwrap().contains("hidden skills"));
+        assert!(
+            tool.parameters_schema()["properties"]["name"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("hidden skills")
+        );
+    }
+
     #[tokio::test]
     async fn loads_skill_body_strips_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
@@ -201,6 +225,50 @@ mod tests {
             !text.contains("description:"),
             "frontmatter not stripped: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn loads_skill_scoped_to_inactive_agent_when_in_full_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut skill = write_skill_file(dir.path(), "private-guide", "# Inactive guide");
+        skill.scope = crate::skills::SkillScope::Agent("inactive-agent".into());
+        let tool = make_tool(vec![skill]);
+
+        let result = tool
+            .execute(serde_json::json!({"name": "private-guide"}))
+            .await;
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
+        assert!(result.content.as_text().contains("# Inactive guide"));
+    }
+
+    #[tokio::test]
+    async fn embedded_topic_guide_wins_name_collision_when_learned() {
+        let dir = tempfile::tempdir().unwrap();
+        let standard = write_skill_file(dir.path(), "xi-config-hooks", "# User guide");
+        let embedded = SkillMeta {
+            scope: crate::skills::SkillScope::AlwaysLoadable,
+            name: "xi-config-hooks".to_string(),
+            description: "Built-in hook guide".to_string(),
+            path: PathBuf::from("__embedded__/xi-config-hooks/SKILL.md"),
+            base_dir: PathBuf::from("__embedded__/xi-config-hooks"),
+            embedded_body: Some("# Embedded guide".to_string()),
+        };
+        let tool = make_tool(vec![standard, embedded]);
+
+        let result = tool
+            .execute(serde_json::json!({"name": "xi-config-hooks"}))
+            .await;
+        assert!(
+            !result.is_error,
+            "unexpected error: {}",
+            result.content.as_text()
+        );
+        assert!(result.content.as_text().contains("# Embedded guide"));
+        assert!(!result.content.as_text().contains("# User guide"));
     }
 
     #[tokio::test]

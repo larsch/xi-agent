@@ -330,7 +330,7 @@ async fn main() -> io::Result<()> {
             ctx.tools
         };
         let loaded_skills = agents::select_skills(&ctx.skills, agent);
-        agent::tools::set_active_skills(&mut tools, loaded_skills.clone());
+        agent::tools::set_learnable_skills(&mut tools, ctx.skills.clone());
         let system_prompt = agent::build_system_prompt(&tools, &cwd, &loaded_skills, agent);
         println!("{system_prompt}");
         return Ok(());

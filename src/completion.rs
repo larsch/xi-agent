@@ -604,6 +604,26 @@ mod tests {
     }
 
     #[test]
+    fn hidden_builtin_skill_can_be_completed_by_slash_name() {
+        let mut topic = skill("xi-config-hooks", "Hook guide");
+        topic.scope = crate::skills::SkillScope::AlwaysLoadable;
+
+        let items = completions_for(
+            "/skill:xi-config-h",
+            None,
+            false,
+            None,
+            &[topic],
+            true,
+            &[],
+            cwd(),
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].complete_to, "/skill:xi-config-hooks ");
+    }
+
+    #[test]
     fn command_name_completion_includes_matching_commands_and_skills() {
         let skills = vec![skill("plan", "Planning"), skill("build", "Build things")];
 

@@ -204,9 +204,8 @@ use crate::app_event::AppEventTx;
 ///
 /// `custom` tools are appended after built-ins; any custom tool whose name
 /// collides with a built-in is silently dropped (logged at debug).
-/// Replace the registry's `learn` tool with one restricted to the skills
-/// active for the current agent.
-pub fn set_active_skills(registry: &mut ToolRegistry, skills: Vec<crate::skills::SkillMeta>) {
+/// Replace the registry's `learn` tool with the complete discovered skill set.
+pub fn set_learnable_skills(registry: &mut ToolRegistry, skills: Vec<crate::skills::SkillMeta>) {
     registry.insert(
         "learn".to_string(),
         Arc::new(LearnTool::new(Arc::new(skills))),

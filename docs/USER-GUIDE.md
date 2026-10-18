@@ -97,9 +97,8 @@ Place `AGENTS.md` instructions in a project to give xi context about its
 conventions and workflow. Skills are reusable `SKILL.md` guides invoked with
 `/skill:<name>`. xi discovers skills in `.xi/skills` and `.agents/skills`
 folders in the current directory and its ancestors, as well as user-level
-skill folders. See the
-[skill locations guide](https://github.com/larsch/xi-agent/blob/main/.xi/skills/xi-skill-locations/SKILL.md)
-for the exact search order and precedence.
+skill folders. The built-in `xi-config-skills` guide describes discovery,
+precedence, file format, and the skills discovered for the current session.
 
 Agent profiles can customize instructions, tools, and skills. Select one with
 `--agent` or `/agent`. See the [architecture guide](ARCHITECTURE.md#user-definable-agents)

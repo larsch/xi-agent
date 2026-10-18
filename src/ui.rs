@@ -83,6 +83,8 @@ fn inventory_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         let active = active_skill_paths.contains(&skill.path);
         let reason = if active {
             String::new()
+        } else if skill.scope == crate::skills::SkillScope::AlwaysLoadable {
+            "hidden, but available".into()
         } else {
             "excluded by selected agent or shadowed by a higher-precedence skill".into()
         };
@@ -216,6 +218,8 @@ fn inventory_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         .flat_map(|(path, active, reason)| {
             let (status, color) = if active {
                 ("ACTIVE", Color::Green)
+            } else if reason == "hidden, but available" {
+                ("HIDDEN", Color::Yellow)
             } else {
                 ("inactive", Color::DarkGray)
             };
@@ -3215,6 +3219,26 @@ Some prose with **bold**, *italic*, and `inline code`. Here is a table:
         );
         assert_eq!(context_view_max_scroll(6, 4), 2);
         assert_eq!(context_view_max_scroll(2, 4), 0);
+    }
+
+    #[test]
+    fn inventory_marks_hidden_skills_as_available() {
+        let mut app = make_app();
+        app.loaded_skills.push(crate::skills::SkillMeta {
+            name: "xi-config-hooks".to_string(),
+            scope: crate::skills::SkillScope::AlwaysLoadable,
+            description: "Hook guide".to_string(),
+            path: std::path::PathBuf::from("__embedded__/xi-config-hooks/SKILL.md"),
+            base_dir: std::path::PathBuf::from("__embedded__/xi-config-hooks"),
+            embedded_body: Some("# Hooks".to_string()),
+        });
+
+        let lines = inventory_lines(&app, 120);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("HIDDEN"));
+        assert!(rendered.contains("xi-config-hooks"));
+        assert!(rendered.contains("(hidden, but available)"));
     }
 
     #[test]

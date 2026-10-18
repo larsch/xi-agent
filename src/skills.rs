@@ -9,8 +9,11 @@ use std::{
 pub enum SkillScope {
     /// Discovered through a standard skill root; available to every agent.
     Standard,
-    /// Built in and available to every agent regardless of skill filters.
+    /// Built in and advertised to every agent regardless of skill filters.
     AlwaysPresent,
+    /// Built in and available for explicit loading/invocation, but omitted from
+    /// the system-prompt skill listing.
+    AlwaysLoadable,
     /// Discovered under the named agent's `skills/` directory.
     Agent(String),
 }
@@ -40,8 +43,8 @@ pub const SESSION_IPC_SKILL_NAME: &str = "xi-subagent-sessions";
 /// `~/.xi/skills`, `~/.agents/skills`, and Windows `%USERPROFILE%\\.agents\\skills`.
 /// Duplicate names within standard roots use the first matching root. Agent-local
 /// duplicates are retained for active-scope resolution after filters are applied.
-/// `xi-skill-locations` is always embedded; session IPC guidance is embedded only
-/// when session IPC is enabled.
+/// The generated `xi-config-skills` guide includes a startup inventory; session
+/// IPC guidance is embedded only when session IPC is enabled.
 pub fn load_skills_for_agents(
     agents: &[crate::agents::AgentMeta],
     session_ipc_enabled: bool,
@@ -55,7 +58,9 @@ fn load_skills_for_agents_from_dirs(
     session_ipc_enabled: bool,
 ) -> Vec<SkillMeta> {
     let mut skills = load_scoped_skills(standard_dirs, agents);
-    skills.push(build_embedded_skill_locations(&skills, agents));
+    let skill_locations = build_embedded_skill_locations(&skills, agents);
+    skills.extend(build_embedded_customization_skills());
+    skills.push(skill_locations);
     if session_ipc_enabled {
         skills.retain(|skill| skill.name != SESSION_IPC_SKILL_NAME);
         skills.push(build_embedded_session_ipc_skill());
@@ -162,6 +167,7 @@ fn build_embedded_skill_locations(
                 let scope = match &s.scope {
                     SkillScope::Agent(agent) => format!("agent: {agent}"),
                     SkillScope::AlwaysPresent => "built-in".to_string(),
+                    SkillScope::AlwaysLoadable => "built-in (hidden)".to_string(),
                     SkillScope::Standard => {
                         let base = s
                             .base_dir
@@ -186,99 +192,19 @@ fn build_embedded_skill_locations(
     };
 
     let body = format!(
-        "\
-# xi skill locations
-
-This built-in skill provides technical guidance about xi’s skill discovery,
-file locations, and supported format. It does not define skill-authoring
-policy or override user direction or applicable system, developer, or
-project instructions.
-
-For authoring workflows and quality guidance, use applicable authoring
-skills when available.
-
-## Where this guidance lives
-
-xi generates this skill at startup. It has no `SKILL.md` file on disk.
-Its implementation lives in `src/skills.rs` in the xi source repository.
-
-## Search directories
-
-xi recursively searches these directories for subdirectories containing
-`SKILL.md`. Missing directories are skipped. Roots are listed in precedence
-order:
-
-{dirs_section}
-
-When standard filesystem skills share a frontmatter name, the first search root
-containing that name takes precedence.
-
-Agent-specific roots (separate from the standard-root precedence above):
-
-{agent_dirs_section}
-
-Agent-specific skills are discovered under each agent’s `skills/` directory.
-Availability and duplicate-name resolution depend on the active agent and
-its skill filters.
-
-Directories marked “in use” contributed skills to this startup’s discovery
-results. That marker is informational, not a recommendation about scope.
-
-## Discovered skill files
-
-These paths identify the filesystem skills xi discovered at startup:
-
-{skills_section}
-
-- `[global]`: discovered under a home-directory skill root.
-- `[project]`: discovered under a skill root in the working directory or
-  an ancestor. An ancestor root may apply to multiple repositories.
-- `[agent: name]`: discovered under that agent’s `skills/` directory.
-
-This inventory is a startup snapshot, not a live filesystem listing.
-
-## File format
-
-Each filesystem skill lives in a subdirectory containing `SKILL.md`.
-The YAML frontmatter determines its identity; the directory name need not
-match.
-
-```markdown
----
-name: my-skill
-description: Describes the capability and when to use it.
----
-
-# Skill instructions
-```
-
-## Locating or modifying a skill
-
-Use the listed absolute path to locate an existing skill. Read its current
-contents and applicable instructions before editing.
-
-## Choosing a location for a new skill
-
-Choose scope according to user intent and applicable guidance:
-
-- Use a project root for repository- or subtree-specific guidance.
-- Use a global root for guidance intended to apply across projects.
-
-An existing active directory may be convenient within the chosen scope,
-but activity alone does not determine placement. A supported search
-directory need not already exist.
-",
+        "{}\n\n## Current session discovery snapshot\n\nThe following roots and filesystem skill files were discovered when xi loaded this context. This snapshot is not a live filesystem listing.\n\n### Search roots\n\n{dirs_section}\n\n### Agent-specific roots\n\n{agent_dirs_section}\n\n### Discovered filesystem skills\n\n{skills_section}\n\n- `[global]`: discovered under a home-directory skill root.\n- `[project]`: discovered under a skill root in the working directory or an ancestor.\n- `[agent: name]`: discovered under that agent's `skills/` directory.\n\nRoots marked “in use” contributed skills to this startup's discovery results. The marker is informational.\n",
+        include_str!("builtin_skills/xi-config-skills.md")
     );
 
     SkillMeta {
-        name: "xi-skill-locations".to_string(),
+        name: "xi-config-skills".to_string(),
         description:
-            "Explains where xi discovers skills, locates loaded skill files, and describes the supported SKILL.md format. Use when locating skills or choosing where to store one."
+            "Explains xi skill discovery, format, scope, precedence, and loading behavior, with a snapshot of skills discovered in this session."
                 .to_string(),
-        scope: SkillScope::Standard,
+        scope: SkillScope::AlwaysLoadable,
         // Dummy path — never read from disk; learn uses embedded_body.
-        path: PathBuf::from("__embedded__/xi-skill-locations/SKILL.md"),
-        base_dir: PathBuf::from("__embedded__/xi-skill-locations"),
+        path: PathBuf::from("__embedded__/xi-config-skills/SKILL.md"),
+        base_dir: PathBuf::from("__embedded__/xi-config-skills"),
         embedded_body: Some(body),
     }
 }
@@ -292,6 +218,60 @@ fn build_embedded_session_ipc_skill() -> SkillMeta {
         base_dir: PathBuf::from("__embedded__/xi-subagent-sessions"),
         embedded_body: Some(include_str!("builtin_skills/xi-subagent-sessions.md").to_string()),
     }
+}
+
+/// Build the visible router and hidden built-in guides for xi customization.
+fn build_embedded_customization_skills() -> Vec<SkillMeta> {
+    let entries = [
+        (
+            "xi-customization",
+            "Helps create, write, edit, or troubleshoot xi skills, `AGENTS.md` instructions, rule files, hooks, agent profiles, and custom tools. Use when asked to customize xi, make behavior persistent, or add global or project-local instructions for future sessions.",
+            SkillScope::AlwaysPresent,
+            include_str!("builtin_skills/xi-customization.md"),
+        ),
+        (
+            "xi-config-agents-md",
+            "Explains persistent AGENTS.md instruction discovery, precedence, and loading behavior in xi.",
+            SkillScope::AlwaysLoadable,
+            include_str!("builtin_skills/xi-agents-md.md"),
+        ),
+        (
+            "xi-config-rules",
+            "Explains persistent rule-file discovery, precedence, format, and loading behavior in xi.",
+            SkillScope::AlwaysLoadable,
+            include_str!("builtin_skills/xi-rules.md"),
+        ),
+        (
+            "xi-config-hooks",
+            "Explains xi hook configuration, points, payloads, precedence, and loading behavior.",
+            SkillScope::AlwaysLoadable,
+            include_str!("builtin_skills/xi-hooks.md"),
+        ),
+        (
+            "xi-config-agents",
+            "Explains xi agent profile discovery, format, filters, and loading behavior.",
+            SkillScope::AlwaysLoadable,
+            include_str!("builtin_skills/xi-agents.md"),
+        ),
+        (
+            "xi-config-tools",
+            "Explains xi custom tool discovery, executable protocol, precedence, and loading behavior.",
+            SkillScope::AlwaysLoadable,
+            include_str!("builtin_skills/xi-custom-tools.md"),
+        ),
+    ];
+
+    entries
+        .into_iter()
+        .map(|(name, description, scope, body)| SkillMeta {
+            name: name.to_string(),
+            scope,
+            description: description.to_string(),
+            path: PathBuf::from(format!("__embedded__/{name}/SKILL.md")),
+            base_dir: PathBuf::from(format!("__embedded__/{name}")),
+            embedded_body: Some(body.to_string()),
+        })
+        .collect()
 }
 
 fn skill_dirs() -> Vec<PathBuf> {
@@ -624,7 +604,52 @@ mod tests {
         assert!(body.contains("`beta` [agent: default]"));
         assert!(body.contains("`gamma` [agent: specialist]"));
         assert!(body.contains(&default_dir.join("skills").display().to_string()));
-        assert!(body.contains("active agent and\nits skill filters"));
+        assert!(body.contains("active agent's selected list"));
+    }
+
+    #[test]
+    fn customization_guides_load_as_one_visible_router_and_hidden_topics() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills = load_skills_for_agents_from_dirs(vec![temp.path().to_path_buf()], &[], false);
+        let customization: Vec<_> = skills
+            .iter()
+            .filter(|skill| {
+                skill.name == "xi-customization"
+                    || skill.name == "xi-config-skills"
+                    || skill.name == "xi-config-agents-md"
+                    || skill.name == "xi-config-rules"
+                    || skill.name == "xi-config-hooks"
+                    || skill.name == "xi-config-agents"
+                    || skill.name == "xi-config-tools"
+            })
+            .collect();
+        assert_eq!(customization.len(), 7);
+        assert!(
+            customization
+                .iter()
+                .all(|skill| skill.embedded_body.is_some())
+        );
+        assert!(customization.iter().any(|skill| {
+            skill.name == "xi-customization"
+                && skill.scope == SkillScope::AlwaysPresent
+                && skill.description.contains("AGENTS.md")
+                && skill.description.contains("make behavior persistent")
+                && skill.description.contains("project-local instructions")
+        }));
+        assert!(
+            customization
+                .iter()
+                .filter(|skill| skill.name != "xi-customization")
+                .all(|skill| skill.scope == SkillScope::AlwaysLoadable)
+        );
+        assert!(customization.iter().any(|skill| {
+            skill.name == "xi-config-hooks"
+                && skill
+                    .embedded_body
+                    .as_deref()
+                    .unwrap()
+                    .contains("does not reload hook configuration")
+        }));
     }
 
     #[test]
@@ -663,23 +688,22 @@ mod tests {
     }
 
     #[test]
-    fn embedded_skill_locations_explains_origin_and_authority() {
+    fn embedded_skill_guide_combines_procedure_and_session_inventory() {
         let skill = build_embedded_skill_locations(&[], &[]);
-        assert_eq!(skill.name, "xi-skill-locations");
+        assert_eq!(skill.name, "xi-config-skills");
         assert_eq!(
             skill.path,
-            PathBuf::from("__embedded__/xi-skill-locations/SKILL.md")
+            PathBuf::from("__embedded__/xi-config-skills/SKILL.md")
         );
         let body = skill.embedded_body.unwrap();
-        assert!(body.contains("It has no `SKILL.md` file on disk."));
-        assert!(body.contains("policy or override user direction"));
-        assert!(body.contains("activity alone does not determine placement"));
+        assert!(body.contains("# Skills in xi"));
+        assert!(body.contains("## Current session discovery snapshot"));
         assert!(body.contains("(none loaded)"));
-        assert!(!body.contains("Put new skills in an already-active directory"));
+        assert!(body.contains("This snapshot is not a live filesystem listing."));
     }
 
     #[test]
-    fn embedded_skill_locations_lists_files_even_with_old_builtin_name() {
+    fn embedded_skill_guide_lists_files_even_with_old_builtin_name() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_skill(dir.path(), "custom", "edit_skill", "User guidance");
         let loaded = load_skills_from_dirs(vec![dir.path().to_path_buf()]);
@@ -688,11 +712,11 @@ mod tests {
             .unwrap();
         assert!(body.contains("`edit_skill` [global]"));
         assert!(body.contains(&path.display().to_string()));
-        assert!(body.contains("startup snapshot, not a live filesystem listing"));
+        assert!(body.contains("This snapshot is not a live filesystem listing."));
     }
 
     #[test]
-    fn embedded_skill_locations_preserves_search_precedence() {
+    fn embedded_skill_guide_preserves_search_precedence() {
         let body = build_embedded_skill_locations(&[], &[])
             .embedded_body
             .unwrap();
@@ -702,7 +726,7 @@ mod tests {
             let offset = body[previous_end..].find(&entry).unwrap();
             previous_end += offset + entry.len();
         }
-        assert!(body.contains("first search root"));
+        assert!(body.contains("first skill with a given `name` wins"));
     }
 
     #[test]
