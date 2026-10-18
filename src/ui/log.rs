@@ -3444,6 +3444,107 @@ mod tests {
     }
 
     #[test]
+    fn user_enumerated_list_with_indented_lines_keeps_item_markers() {
+        let msg = Message::user(
+            "1. First item\n   With indented text\n\n2. Second item\n   With more indented text",
+        );
+        let lines = build_log_layout(
+            std::slice::from_ref(&msg),
+            false,
+            120,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        // User messages are framed by colored half-block lines; assert only
+        // the Markdown content between those framing lines.
+        let rendered = lines[1..lines.len() - 1]
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "1. First item",
+                "   With indented text",
+                "2. Second item",
+                "   With more indented text",
+            ],
+        );
+    }
+
+    #[test]
+    fn assistant_enumerated_list_with_indented_lines_keeps_item_markers() {
+        let msg = Message::assistant(
+            "1. First item\n   With indented text\n\n2. Second item\n   With more indented text",
+        );
+        let lines = build_log_layout(
+            std::slice::from_ref(&msg),
+            false,
+            80,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "💬 1. First item With indented text",
+                " ╰ 2. Second item With more indented text",
+            ],
+        );
+    }
+
+    #[test]
+    fn assistant_ordered_list_hard_break_keeps_marker_on_first_line() {
+        let msg = Message::assistant("1. First item  \n   With indented text");
+        let lines = build_log_layout(
+            std::slice::from_ref(&msg),
+            false,
+            80,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec!["💬 1. First item", " ╰    With indented text"],
+        );
+    }
+
+    #[test]
     fn session_notification_renders_markdown_without_turn_metadata() {
         let raw = "External worker completed (success).\nWorkspace: /work/worker\nTurn: secret\n\n**Worker answer**";
         let msg = Message::user(raw);

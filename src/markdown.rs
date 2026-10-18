@@ -605,11 +605,14 @@ pub fn render_with_theme(
                         &list_stack,
                         &list_item_counters,
                     );
-                    let p = if list_item_first_para_done {
+                    let mut p = if list_item_first_para_done {
                         " ".repeat(item_prefix.len())
                     } else {
                         item_prefix
                     };
+                    if in_blockquote {
+                        p.push_str("│ ");
+                    }
                     flush_inline!(&p);
                     list_item_first_para_done = true;
                 } else {
@@ -906,8 +909,33 @@ pub fn render_with_theme(
             }
 
             Event::HardBreak if !in_table && !in_code_block => {
-                let prefix = if in_blockquote { "│ " } else { "" };
-                flush_inline!(prefix);
+                if in_list_item {
+                    // A hard break ends the current rendered line, not the
+                    // list item. Apply the item's marker on its first line and
+                    // continuation indentation on subsequent lines, just as
+                    // paragraph-end rendering does. Mark the first paragraph
+                    // as flushed so its remaining text cannot receive the
+                    // marker again at End(Paragraph).
+                    let ancestor_indent = list_ancestor_indent(&list_stack, &list_item_counters);
+                    let item_prefix = current_ordered_item_prefix(
+                        &ancestor_indent,
+                        &list_stack,
+                        &list_item_counters,
+                    );
+                    let mut line_prefix = if list_item_first_para_done {
+                        " ".repeat(item_prefix.len())
+                    } else {
+                        item_prefix
+                    };
+                    if in_blockquote {
+                        line_prefix.push_str("│ ");
+                    }
+                    flush_inline!(&line_prefix);
+                    list_item_first_para_done = true;
+                } else {
+                    let prefix = if in_blockquote { "│ " } else { "" };
+                    flush_inline!(prefix);
+                }
             }
 
             Event::Rule => {
@@ -1253,6 +1281,22 @@ mod tests {
     }
 
     #[test]
+    fn loose_ordered_list_with_indented_soft_break_keeps_marker_on_first_line() {
+        // Regression for loose ordered lists: each item's marker must remain
+        // attached to its first paragraph, not migrate to the continuation.
+        let md =
+            "1. First item\n   With indented text\n\n2. Second item\n   With more indented text";
+        let got = lines_text(&render(md, 80, ""));
+        assert_eq!(
+            got,
+            vec![
+                "1. First item With indented text",
+                "2. Second item With more indented text",
+            ],
+        );
+    }
+
+    #[test]
     fn separated_ordered_lists_preserve_explicit_start_numbers() {
         let md = "1. First section item\n\nSome intervening paragraph.\n\n2. Second section item\n\n3. Third section item";
         let texts: Vec<String> = render(md, 80, "").iter().map(line_text).collect();
@@ -1310,6 +1354,280 @@ mod tests {
         assert_eq!(texts[0], "1. First paragraph.");
         assert_eq!(texts[1], "   Second paragraph.");
         assert_eq!(texts[2], "2. Item two.");
+    }
+
+    /// Return list start numbers and item counts using the renderer's parser
+    /// options. This distinguishes adjacent lists whose rendered prefixes match.
+    fn list_structure(md: &str) -> Vec<(Option<u64>, usize)> {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+
+        let mut lists = Vec::new();
+        let mut active_lists = Vec::new();
+        for event in Parser::new_ext(md, options) {
+            match event {
+                Event::Start(Tag::List(start)) => {
+                    active_lists.push(lists.len());
+                    lists.push((start, 0));
+                }
+                Event::Start(Tag::Item) => {
+                    if let Some(&index) = active_lists.last() {
+                        lists[index].1 += 1;
+                    }
+                }
+                Event::End(TagEnd::List(_)) => {
+                    active_lists.pop();
+                }
+                _ => {}
+            }
+        }
+        lists
+    }
+
+    #[test]
+    fn enumerated_list_paragraph_and_line_break_cases() {
+        let cases = [
+            (
+                "multiple paragraphs in one item",
+                "1. First paragraph.\n\n   Second paragraph.\n\n   Third paragraph.\n2. Next item.",
+                vec![
+                    "1. First paragraph.",
+                    "   Second paragraph.",
+                    "   Third paragraph.",
+                    "2. Next item.",
+                ],
+            ),
+            (
+                "soft line break",
+                "1. First source line\n   continued source line\n2. Next item",
+                vec!["1. First source line continued source line", "2. Next item"],
+            ),
+            (
+                "two-space hard break",
+                "1. First line  \n   second line\n2. Next item",
+                // Regression expectation: the hard break must remain inside
+                // this item, not lose the prefix or attach it to line two.
+                vec!["1. First line", "   second line", "2. Next item"],
+            ),
+            (
+                "backslash hard break",
+                "1. First line\\\n   second line\n2. Next item",
+                vec!["1. First line", "   second line", "2. Next item"],
+            ),
+        ];
+        for (name, md, expected) in cases {
+            let got = lines_text(&render(md, 100, ""));
+            assert_eq!(got, expected, "{name}: {md:?}");
+        }
+    }
+
+    #[test]
+    fn enumerated_hard_break_syntax_is_parsed_as_hard_break_events() {
+        let cases = [
+            "1. Two spaces  \n   continuation",
+            "1. Backslash\\\n   continuation",
+        ];
+        for md in cases {
+            let mut options = Options::empty();
+            options.insert(Options::ENABLE_TABLES);
+            options.insert(Options::ENABLE_STRIKETHROUGH);
+            let hard_breaks = Parser::new_ext(md, options)
+                .filter(|event| matches!(event, Event::HardBreak))
+                .count();
+            assert_eq!(hard_breaks, 1, "{md:?}");
+        }
+    }
+
+    #[test]
+    fn enumerated_list_fenced_code_preserves_blank_lines_and_ownership() {
+        let md = "1. Example:\n\n   ```rust\n   let x = 1;\n\n   let y = 2;\n   ```\n\n   After code.\n2. Next item.";
+        assert_renders_to(
+            md,
+            100,
+            &[
+                "1. Example:",
+                "  let x = 1;",
+                "",
+                "  let y = 2;",
+                "   After code.",
+                "2. Next item.",
+            ],
+        );
+    }
+
+    #[test]
+    fn enumerated_list_nested_mixed_lists_preserve_depth_and_ownership() {
+        let md = "1. Outer\n   - Unordered child\n     1. Ordered grandchild\n        - Third level\n   - Second unordered child\n2. Second outer";
+        assert_renders_to(
+            md,
+            100,
+            &[
+                "1. Outer",
+                "   • Unordered child",
+                "     1. Ordered grandchild",
+                "        • Third level",
+                "   • Second unordered child",
+                "2. Second outer",
+            ],
+        );
+        assert_eq!(
+            list_structure(md),
+            vec![(Some(1), 2), (None, 2), (Some(1), 1), (None, 1)]
+        );
+    }
+
+    #[test]
+    fn enumerated_list_blockquotes_and_fenced_blocks_stay_in_item() {
+        let md = "1. Outer item\n\n   > Quoted paragraph.\n   >\n   > Second quoted paragraph.\n\n   ```text\n   nested block\n   ```\n\n2. Next item";
+        let rendered = lines_text(&render(md, 100, ""));
+        let joined = rendered.join("\\n");
+        for expected in [
+            "1. Outer item",
+            // Regression expectation: retain the quote marker while composing
+            // it with the containing list-item indentation.
+            "   │ Quoted paragraph.",
+            "   │ Second quoted paragraph.",
+            "  nested block",
+            "2. Next item",
+        ] {
+            assert!(
+                joined.contains(expected),
+                "missing {expected:?}: {rendered:?}"
+            );
+        }
+        let position = |needle: &str| joined.find(needle).unwrap();
+        assert!(position("1. Outer item") < position("Quoted paragraph."));
+        assert!(position("Second quoted paragraph.") < position("nested block"));
+        assert!(position("nested block") < position("2. Next item"));
+    }
+
+    #[test]
+    fn enumerated_list_continuation_and_termination_boundaries() {
+        let md = "1. Item paragraph\n   continuation in same paragraph\n\n   Second paragraph in item\n\nunindented paragraph\n\n2. Next item\n   its continuation\n\nOutside again";
+        assert_renders_to(
+            md,
+            100,
+            &[
+                "1. Item paragraph continuation in same paragraph",
+                "   Second paragraph in item",
+                "",
+                "unindented paragraph",
+                "",
+                "2. Next item its continuation",
+                "",
+                "Outside again",
+            ],
+        );
+    }
+
+    #[test]
+    fn enumerated_list_numbering_and_adjacent_list_structure() {
+        let cases = [
+            (
+                "sequential markers",
+                "1. One\n2. Two\n3. Three",
+                vec!["1. One", "2. Two", "3. Three"],
+                vec![(Some(1), 3)],
+            ),
+            (
+                "explicit number normalizes within same list",
+                "3. Three\n8. Four",
+                vec!["3. Three", "4. Four"],
+                vec![(Some(3), 2)],
+            ),
+            (
+                "non-one start",
+                "7. Seven\n8. Eight",
+                vec!["7. Seven", "8. Eight"],
+                vec![(Some(7), 2)],
+            ),
+            (
+                "after paragraph and another list",
+                "3. First section\n\nParagraph between.\n\n- Unordered\n\n5. Later section\n6. Next",
+                vec![
+                    "3. First section",
+                    "",
+                    "Paragraph between.",
+                    "",
+                    "• Unordered",
+                    "",
+                    "5. Later section",
+                    "6. Next",
+                ],
+                vec![(Some(3), 1), (None, 1), (Some(5), 2)],
+            ),
+            (
+                "different delimiters form separate lists",
+                "1. Dot list\n2. Still dot\n1) Parenthesis list\n2) Still parenthesis",
+                vec![],
+                vec![(Some(1), 2), (Some(1), 2)],
+            ),
+            (
+                "paragraph separates lists",
+                "1. First list\n\nParagraph boundary.\n\n4. New list",
+                vec![],
+                vec![(Some(1), 1), (Some(4), 1)],
+            ),
+        ];
+        for (name, md, expected, structure) in cases {
+            if !expected.is_empty() {
+                assert_eq!(lines_text(&render(md, 100, "")), expected, "{name}");
+            }
+            assert_eq!(list_structure(md), structure, "{name}: {md:?}");
+        }
+    }
+
+    #[test]
+    fn enumerated_list_edge_cases_preserve_content_and_parser_grouping() {
+        let cases = [
+            (
+                "empty item",
+                "1.\n2. Has content",
+                vec![(Some(1), 2)],
+                vec!["2. Has content"],
+            ),
+            (
+                "whitespace-only continuation",
+                "1. First\n   \n   Continued\n2. Next",
+                vec![(Some(1), 2)],
+                vec!["1. First", "   Continued", "2. Next"],
+            ),
+            (
+                "tab indentation",
+                "1. Parent\n\tcontinued\n2. Next",
+                vec![(Some(1), 2)],
+                vec!["1. Parent continued", "2. Next"],
+            ),
+            (
+                "inconsistent indentation",
+                "1. Parent\n  continuation\n    indented continuation\n2. Next",
+                vec![(Some(1), 2)],
+                vec!["1. Parent continuation indented continuation", "2. Next"],
+            ),
+            (
+                "deep nesting",
+                "1. One\n   1. Two\n      1. Three\n         1. Four\n2. Next",
+                vec![(Some(1), 2), (Some(1), 1), (Some(1), 1), (Some(1), 1)],
+                vec![
+                    "1. One",
+                    "   1. Two",
+                    "      1. Three",
+                    "         1. Four",
+                    "2. Next",
+                ],
+            ),
+            (
+                "end of input after item",
+                "9. Final",
+                vec![(Some(9), 1)],
+                vec!["9. Final"],
+            ),
+        ];
+        for (name, md, structure, expected) in cases {
+            assert_eq!(list_structure(md), structure, "{name}: parser structure");
+            assert_eq!(lines_text(&render(md, 100, "")), expected, "{name}: {md:?}");
+        }
     }
 
     // ── Nested list indentation ─────────────────────────────────────────────────
