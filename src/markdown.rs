@@ -492,8 +492,8 @@ pub fn render_with_theme(
 
     // Are we inside a code block?
     let mut in_code_block = false;
-    // Are we inside a blockquote?
-    let mut in_blockquote = false;
+    // Nesting depth of blockquotes, used to render one marker per level.
+    let mut blockquote_depth = 0usize;
     // List depth (for nested lists) and ordered-list item counter.
     let mut list_stack: Vec<Option<u64>> = Vec::new(); // None = unordered, Some(n) = ordered starting at n
     // Current list item number when ordered.
@@ -561,7 +561,7 @@ pub fn render_with_theme(
                 && !prefix.is_empty()
                 && block_prefix.is_empty()
                 && !in_list_item
-                && !in_blockquote;
+                && blockquote_depth == 0;
             // Decide the effective line-0 prefix:
             // • If we haven't emitted anything yet AND caller-supplied `prefix`
             //   is non-empty, prepend it (plus the block's own prefix).
@@ -574,8 +574,15 @@ pub fn render_with_theme(
             } else {
                 std::borrow::Cow::Borrowed(block_prefix)
             };
+            let quote_marker = "│ ".repeat(blockquote_depth);
             let indent = if first_plain_paragraph {
                 String::new()
+            } else if blockquote_depth > 0 && effective_prefix.ends_with(&quote_marker) {
+                format!(
+                    "{}{}",
+                    " ".repeat(effective_prefix.width() - quote_marker.width()),
+                    quote_marker
+                )
             } else {
                 " ".repeat(effective_prefix.width())
             };
@@ -610,15 +617,18 @@ pub fn render_with_theme(
                     } else {
                         item_prefix
                     };
-                    if in_blockquote {
-                        p.push_str("│ ");
-                    }
+                    p.push_str(&"│ ".repeat(blockquote_depth));
                     flush_inline!(&p);
                     list_item_first_para_done = true;
                 } else {
-                    let prefix = if in_blockquote { "│ " } else { "" };
-                    flush_inline!(prefix);
-                    out.push(Line::default());
+                    let prefix = "│ ".repeat(blockquote_depth);
+                    flush_inline!(&prefix);
+                    if blockquote_depth > 0 {
+                        let blank_quote = "│ ".repeat(blockquote_depth);
+                        out.push(Line::from(Span::raw(blank_quote.trim_end().to_string())));
+                    } else {
+                        out.push(Line::default());
+                    }
                 }
             }
 
@@ -693,12 +703,29 @@ pub fn render_with_theme(
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
-                in_blockquote = true;
+                blockquote_depth += 1;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                in_blockquote = false;
-                // No explicit blank here: the last inner paragraph already
-                // pushes a blank, so an extra one would double the gap.
+                let closing_depth = blockquote_depth;
+                blockquote_depth = blockquote_depth.saturating_sub(1);
+                // The paragraph end emits a marked blank line. As the quote
+                // closes, reduce that marker to the remaining quote depth (or
+                // an ordinary separator when leaving the outermost quote).
+                let closing_marker = "│ ".repeat(closing_depth).trim_end().to_string();
+                if out.last().is_some_and(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                        == closing_marker
+                }) {
+                    if blockquote_depth == 0 {
+                        *out.last_mut().unwrap() = Line::default();
+                    } else {
+                        let remaining_marker = "│ ".repeat(blockquote_depth).trim_end().to_string();
+                        *out.last_mut().unwrap() = Line::from(Span::raw(remaining_marker));
+                    }
+                }
             }
 
             Event::Start(Tag::List(start)) => {
@@ -927,14 +954,12 @@ pub fn render_with_theme(
                     } else {
                         item_prefix
                     };
-                    if in_blockquote {
-                        line_prefix.push_str("│ ");
-                    }
+                    line_prefix.push_str(&"│ ".repeat(blockquote_depth));
                     flush_inline!(&line_prefix);
                     list_item_first_para_done = true;
                 } else {
-                    let prefix = if in_blockquote { "│ " } else { "" };
-                    flush_inline!(prefix);
+                    let prefix = "│ ".repeat(blockquote_depth);
+                    flush_inline!(&prefix);
                 }
             }
 
@@ -1788,6 +1813,44 @@ mod tests {
     #[test]
     fn blockquote_then_paragraph_one_blank_between() {
         assert_renders_to("> quote\n\nPara after", 80, &["│ quote", "", "Para after"]);
+    }
+
+    #[test]
+    fn blockquote_multiple_paragraphs_keep_quote_marker() {
+        assert_renders_to(
+            "> First quoted paragraph.\n>\n> Second quoted paragraph.",
+            80,
+            &[
+                "│ First quoted paragraph.",
+                "│",
+                "│ Second quoted paragraph.",
+            ],
+        );
+    }
+
+    #[test]
+    fn wrapped_blockquote_lines_repeat_quote_marker() {
+        let rendered = render("> one two three four five", 12, "");
+        let texts: Vec<String> = lines_text(&rendered)
+            .into_iter()
+            .map(|line| line.trim_end().to_string())
+            .collect();
+        assert_eq!(texts, ["│ one two", "│ three four", "│ five"]);
+    }
+
+    #[test]
+    fn nested_blockquotes_show_each_nesting_level() {
+        assert_renders_to(
+            "> Outer paragraph.\n>\n> > Nested paragraph.\n>\n> Back in the outer quote.",
+            80,
+            &[
+                "│ Outer paragraph.",
+                "│",
+                "│ │ Nested paragraph.",
+                "│",
+                "│ Back in the outer quote.",
+            ],
+        );
     }
 
     #[test]
