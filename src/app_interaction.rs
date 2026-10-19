@@ -43,6 +43,8 @@ impl App {
             | Some(SelectionKind::ProviderApiType)
             | Some(SelectionKind::KeybindingHelp)
             | None => None,
+            #[cfg(unix)]
+            Some(SelectionKind::SudoApproval) => None,
         };
 
         if let Some(target) = target
