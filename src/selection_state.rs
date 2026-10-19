@@ -78,6 +78,7 @@ pub(crate) enum SelectionKind {
     LoginProvider,
     ResumeSession,
     AskUser,
+    #[cfg(unix)]
     SudoApproval,
     LoginAction,
     ConfirmProviderRemoval,

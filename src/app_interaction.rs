@@ -38,7 +38,6 @@ impl App {
             Some(SelectionKind::LoginProvider)
             | Some(SelectionKind::ResumeSession)
             | Some(SelectionKind::AskUser)
-            | Some(SelectionKind::SudoApproval)
             | Some(SelectionKind::LoginAction)
             | Some(SelectionKind::ConfirmProviderRemoval)
             | Some(SelectionKind::ProviderApiType)

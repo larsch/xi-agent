@@ -966,6 +966,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             } else {
                 "↑↓ navigate   Enter select   Esc cancel  "
             };
+            #[cfg(unix)]
             let sudo_prompt = if app.selection.kind == Some(SelectionKind::SudoApproval) {
                 app.sudo
                     .prompt
@@ -981,7 +982,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             } else {
                 String::new()
             };
+            #[cfg(unix)]
             let title = format!("{}{}", app.selection.title, sudo_prompt);
+            #[cfg(not(unix))]
+            let title = app.selection.title.to_string();
             let gap = width.saturating_sub(title.width() + hints.width());
             let header_line = Line::from(vec![
                 Span::styled(
