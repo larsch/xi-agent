@@ -849,7 +849,7 @@ impl App {
 
                         CompletionItem {
                             label: format!("[{scope}] {when}  —  {prompt_hint}"),
-                            detail: format!("{} msgs • {}", meta.message_count, meta.cwd),
+                            detail: meta.cwd.clone(),
                             complete_to: format!("/resume_session {}", meta.id),
                             loading: false,
                             error: false,

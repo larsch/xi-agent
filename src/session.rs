@@ -17,7 +17,6 @@ pub struct SessionMeta {
     pub cwd: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
-    pub message_count: usize,
     /// First line of the first user prompt in this session, if any.
     pub first_prompt: Option<String>,
 }
@@ -66,20 +65,12 @@ impl SessionStore {
                 continue;
             };
 
-            let message_count = match count_non_empty_lines(&path) {
-                Ok(count) => count,
-                Err(e) => {
-                    log::debug!(
-                        "Failed to count session messages for {}: {}",
-                        path.display(),
-                        e
-                    );
-                    continue;
-                }
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
             };
             let cwd_value = cwd.as_deref().unwrap_or_default();
             let has_stash = self.stash_file_path(cwd_value, &id).exists();
-            if message_count == 0 && !has_stash {
+            if metadata.len() == 0 && !has_stash {
                 continue;
             }
 
@@ -97,14 +88,16 @@ impl SessionStore {
                 .unwrap_or_else(|| Utc::now().timestamp_millis());
             let created_at_ms = session_created_at_ms.unwrap_or(updated_at_ms);
 
-            let first_prompt = read_first_user_prompt(&path);
+            let (first_prompt, has_content) = read_first_user_prompt(&path);
+            if !has_content && !has_stash {
+                continue;
+            }
 
             let meta = SessionMeta {
                 id: id.clone(),
                 cwd: cwd.unwrap_or_default(),
                 created_at_ms,
                 updated_at_ms,
-                message_count,
                 first_prompt,
             };
 
@@ -238,9 +231,6 @@ impl SessionStore {
             cwd,
             created_at_ms: created,
             updated_at_ms: updated,
-            // Only used as an "a resumable session exists" sentinel by callers;
-            // the exact count is computed lazily by `list_sessions`.
-            message_count: 1,
             first_prompt: None,
         })
     }
@@ -405,48 +395,31 @@ fn is_session_jsonl_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
 
-fn count_non_empty_lines(path: &Path) -> anyhow::Result<usize> {
-    let file = fs::File::open(path).with_context(|| {
-        format!(
-            "Failed to open session file for counting: {}",
-            path.display()
-        )
-    })?;
+/// Read the first user prompt and note whether the log contains any nonblank line.
+fn read_first_user_prompt(path: &Path) -> (Option<String>, bool) {
+    let Ok(file) = fs::File::open(path) else {
+        return (None, false);
+    };
     let reader = std::io::BufReader::new(file);
-    let mut count = 0usize;
+    let mut has_content = false;
     for line in reader.lines() {
-        let line = line?;
-        if !line.trim().is_empty() {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Read the first line of the first user prompt in a session file.
-fn read_first_user_prompt(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.ok()?;
+        let Ok(line) = line else {
+            return (None, has_content);
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        has_content = true;
 
         if let Ok(crate::session_event::SessionEvent::UserMessage { content, .. }) =
             serde_json::from_str::<crate::session_event::SessionEvent>(line)
+            && let Some(first_line) = content.lines().find(|l| !l.trim().is_empty())
         {
-            let first_line = content
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim().to_string());
-            if first_line.is_some() {
-                return first_line;
-            }
+            return (Some(first_line.trim().to_string()), true);
         }
     }
-    None
+    (None, has_content)
 }
 
 fn file_modified_at_ms(path: &Path) -> Option<i64> {
@@ -489,8 +462,7 @@ mod tests {
         let cwd_a = "/a";
         let cwd_b = "/b";
 
-        // Seed three sessions by creating them and writing a minimal event log
-        // line so they register as non-empty (message_count > 0).
+        // Seed three sessions with a minimal event log line so they are resumable.
         let minimal_event = "{\"type\":\"user_message\",\"content\":\"hi\",\"timestamp\":1}\n";
         for (id, cwd) in [
             ("20260328T120000-aaaaaaaa", cwd_a),
@@ -533,8 +505,22 @@ mod tests {
             .into_iter()
             .find(|meta| meta.id == id)
             .expect("stash-only session listed");
-        assert_eq!(session.message_count, 0);
+        assert!(session.first_prompt.is_none());
         assert_eq!(store.latest_for_cwd("/repo").unwrap().id, id);
+    }
+
+    #[test]
+    fn blank_only_log_is_not_listed_without_stash() {
+        let tmp = tempdir().expect("tempdir");
+        let mut store = SessionStore::open_at(tmp.path().to_path_buf()).expect("open store");
+        let id = store.create_session("/repo").expect("create session");
+        fs::write(store.session_file_path("/repo", &id), " \n\t\n").unwrap();
+        assert!(store.list_sessions().iter().all(|session| session.id != id));
+
+        store
+            .save_stash("/repo", &id, &["draft".to_string()])
+            .unwrap();
+        assert!(store.list_sessions().iter().any(|session| session.id == id));
     }
 
     #[test]
