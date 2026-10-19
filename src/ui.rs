@@ -799,16 +799,26 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
             let raw_start = anchor_top.min(total_lines);
             let raw_end = total_lines;
             let raw_lines = raw_end.saturating_sub(raw_start);
-            let bottom_padding = block_padding.saturating_sub(height_decrease);
+            // Use the bottom-most padding row for the throbber rather than
+            // inserting it before the padding and moving existing blocks.
+            let bottom_padding = block_padding
+                .saturating_sub(height_decrease)
+                .saturating_sub(usize::from(throbber.is_some()));
             let top_padding = inner_height.saturating_sub(raw_lines + bottom_padding);
 
             let mut lines: Vec<Line<'static>> = vec![Line::default(); top_padding];
             let mut sources: Vec<LineSource> = vec![empty_line_source(); top_padding];
-            let (wl, ws) = layout.visible_window(raw_start, raw_end);
+            let (wl, ws) = layout.visible_window(raw_start, raw_end.min(content_len));
             lines.extend(wl);
             sources.extend(ws);
             lines.extend(std::iter::repeat_n(Line::default(), bottom_padding));
             sources.extend(std::iter::repeat_n(empty_line_source(), bottom_padding));
+            if let Some(throbber) = &throbber
+                && content_len >= raw_start
+            {
+                lines.push(throbber.clone());
+                sources.push(empty_line_source());
+            }
             (lines, sources)
         } else if total_lines <= inner_height {
             let padding = inner_height - total_lines;
@@ -1812,6 +1822,43 @@ mod tests {
             "bottom padding should fill the shrunk row, got {:?}",
             shrunk.get(shrunk_last + 1)
         );
+    }
+
+    #[test]
+    fn throbber_replaces_bottom_padding_without_moving_blocks() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        for i in 0..20 {
+            app.session
+                .append_user_message(format!("user message {i:02}"), 0);
+        }
+        app.begin_agent_turn();
+        app.agent_turn.activity_visible = false;
+        render_to_plain_lines(&mut app, 80, 20);
+        let content_len = app
+            .log_view
+            .log_cache
+            .cached_layout
+            .as_ref()
+            .unwrap()
+            .3
+            .total_lines();
+        app.log_view.last_block_padding = Some(PaddingState {
+            max_total_lines: content_len + 2,
+            inner_height_when_set: app.log_view.last_log_height,
+            remaining: 2,
+        });
+        let before = render_to_plain_lines(&mut app, 80, 20);
+        app.agent_turn.activity_visible = true;
+        let after = render_to_plain_lines(&mut app, 80, 20);
+        let row = app.log_view.last_log_height - 1;
+        assert!(before[row].is_empty());
+        assert!(
+            after[row]
+                .chars()
+                .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+        );
+        assert_eq!(&after[..row], &before[..row]);
     }
 
     #[test]
