@@ -993,7 +993,8 @@ fn render_message_blocks(
         // truncation marker.  Without this check, clicking any completed block
         // toggles expansion state (and can adjust the viewport) even though its
         // visual content cannot change.
-        let foldable = !sources[start].streaming
+        let foldable = msg.tool_name.as_deref() != Some("ask_user")
+            && !sources[start].streaming
             && (expanded_blocks.contains(&identity)
                 || truncated_thinking_blocks.contains(&identity)
                 || lines[start..end].iter().any(is_truncation_marker));
@@ -3772,6 +3773,35 @@ mod tests {
         assert_eq!(text[3], " ╰ Question second line");
         assert!(lines[0].spans.iter().all(|span| span.style.bg.is_none()));
         assert!(lines[1].spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn ask_user_context_is_never_foldable_or_truncated() {
+        let context = (0..30)
+            .map(|i| format!("context line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = Message::tool_call(
+            "c1",
+            "ask_user",
+            serde_json::json!({"context": context, "question": "Choose"}),
+        );
+        let (lines, sources) = build_log_layout(
+            &[call],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        )
+        .flatten();
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect();
+        assert!(rendered.contains("context line 0"));
+        assert!(rendered.contains("context line 29"));
+        assert!(sources.iter().all(|source| !source.foldable));
     }
 
     // ── Regression: finalized write_file headline shows path, not placeholder ─

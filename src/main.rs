@@ -820,14 +820,14 @@ async fn run(
                                 needs_redraw = true;
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
-                                let text = app.mouse_select.handle_mouse_up();
                                 let clicked_block = app.mouse_select.clicked_block();
+                                let text = app.mouse_select.handle_mouse_up();
                                 if let Some(text) = text {
                                     let _ = crate::clipboard::set_clipboard(&text);
-                                } else if let Some(identity) = clicked_block {
+                                } else if let Some((identity, click_row)) = clicked_block {
                                     if !app.log_view.auto_scroll {
                                         let line_idx = app.mouse_select.log_scroll
-                                            + app.mouse_select.drag_start_row
+                                            + click_row
                                                 .saturating_sub(app.mouse_select.log_area_top)
                                                 as usize;
                                         let block_top = app

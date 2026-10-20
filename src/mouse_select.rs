@@ -30,20 +30,18 @@ pub type HitMap = Vec<LineSource>;
 
 // ── MouseSelectState ──────────────────────────────────────────────────────────
 
+/// Coordinates exist only for an accepted, still-active mouse press.
+struct Press {
+    start_col: u16,
+    start_row: u16,
+    end_col: u16,
+    end_row: u16,
+    dragging: bool,
+}
+
 /// Transient state for mouse click-drag selection.
 pub struct MouseSelectState {
-    /// `true` while the left button is held and a drag is in progress.
-    pub button_down: bool,
-    /// `true` while the mouse has moved since button-down (actual drag).
-    pub drag_active: bool,
-    /// Terminal-absolute column of the drag origin.
-    pub drag_start_col: u16,
-    /// Terminal-absolute row of the drag origin.
-    pub drag_start_row: u16,
-    /// Terminal-absolute column of the current drag position.
-    pub drag_end_col: u16,
-    /// Terminal-absolute row of the current drag position.
-    pub drag_end_row: u16,
+    press: Option<Press>,
 
     /// Saved auto-scroll state, restored on mouse-up.
     saved_auto_scroll: Option<bool>,
@@ -71,12 +69,7 @@ pub struct MouseSelectState {
 impl MouseSelectState {
     pub fn new() -> Self {
         Self {
-            button_down: false,
-            drag_active: false,
-            drag_start_col: 0,
-            drag_start_row: 0,
-            drag_end_col: 0,
-            drag_end_row: 0,
+            press: None,
             saved_auto_scroll: None,
             hit_map: Vec::new(),
             visible_lines: Vec::new(),
@@ -95,23 +88,21 @@ impl MouseSelectState {
     /// start_col, end_col)` in terminal-absolute coordinates, or `None`
     /// if no drag is active.
     pub fn selection_range(&self) -> Option<(u16, u16, u16, u16)> {
-        if !self.drag_active {
-            return None;
-        }
-        let start_row = self.drag_start_row.min(self.drag_end_row);
-        let end_row = self.drag_start_row.max(self.drag_end_row);
+        let press = self.press.as_ref().filter(|press| press.dragging)?;
+        let start_row = press.start_row.min(press.end_row);
+        let end_row = press.start_row.max(press.end_row);
         // For single-row drag, handle inverted columns.
         let (start_col, end_col) = if start_row == end_row {
             (
-                self.drag_start_col.min(self.drag_end_col),
-                self.drag_start_col.max(self.drag_end_col),
+                press.start_col.min(press.end_col),
+                press.start_col.max(press.end_col),
             )
         } else {
             // Multi-row: start row uses start col, end row uses end col.
-            if self.drag_start_row <= self.drag_end_row {
-                (self.drag_start_col, self.drag_end_col)
+            if press.start_row <= press.end_row {
+                (press.start_col, press.end_col)
             } else {
-                (self.drag_end_col, self.drag_start_col)
+                (press.end_col, press.start_col)
             }
         };
         Some((start_row, end_row, start_col, end_col))
@@ -241,24 +232,28 @@ impl MouseSelectState {
 
     /// Handle a mouse-down event.  Returns `true` if a drag has begun.
     pub fn handle_mouse_down(&mut self, col: u16, row: u16, auto_scroll: bool) -> bool {
+        self.press = None;
+        self.saved_auto_scroll = None;
         if !self.is_in_log_area(col, row) {
             return false;
         }
 
-        // Exclude streaming lines.
+        // Exclude streaming lines and rows not present in the rendered log.
         let vis_idx = row.saturating_sub(self.log_area_top) as usize;
-        if let Some(src) = self.hit_map.get(vis_idx)
-            && src.streaming
-        {
+        let Some(src) = self.hit_map.get(vis_idx) else {
+            return false;
+        };
+        if src.streaming {
             return false;
         }
 
-        self.button_down = true;
-        self.drag_active = false;
-        self.drag_start_col = col;
-        self.drag_start_row = row;
-        self.drag_end_col = col;
-        self.drag_end_row = row;
+        self.press = Some(Press {
+            start_col: col,
+            start_row: row,
+            end_col: col,
+            end_row: row,
+            dragging: false,
+        });
         self.saved_auto_scroll = Some(auto_scroll);
 
         true
@@ -266,35 +261,29 @@ impl MouseSelectState {
 
     /// Handle a mouse-drag (move while button held).
     pub fn handle_mouse_drag(&mut self, col: u16, row: u16) {
-        if !self.button_down {
-            return;
+        if let Some(press) = &mut self.press {
+            press.dragging = true;
+            press.end_col = col;
+            press.end_row = row;
         }
-        self.drag_active = true;
-        self.drag_end_col = col;
-        self.drag_end_row = row;
     }
 
-    /// Return the logical block clicked, if the button was released without a drag.
-    pub fn clicked_block(&self) -> Option<String> {
-        if self.drag_active {
-            return None;
-        }
-        let vis_idx = self.drag_start_row.saturating_sub(self.log_area_top) as usize;
+    /// Return the logical block and origin row of an accepted click.
+    /// Call before handle_mouse_up clears the press state.
+    pub fn clicked_block(&self) -> Option<(String, u16)> {
+        let press = self.press.as_ref().filter(|press| !press.dragging)?;
+        let vis_idx = press.start_row.checked_sub(self.log_area_top)? as usize;
         self.hit_map
             .get(vis_idx)
             .filter(|source| source.foldable && !source.streaming)
             .and_then(|source| source.block_identity.clone())
+            .map(|identity| (identity, press.start_row))
     }
 
     /// Handle a mouse-up event.  Returns the selected text to copy, if any.
     pub fn handle_mouse_up(&mut self) -> Option<String> {
-        let text = if self.drag_active {
-            self.extract_selected_text()
-        } else {
-            None
-        };
-        self.button_down = false;
-        self.drag_active = false;
+        let text = self.extract_selected_text();
+        self.press = None;
         text
     }
 
@@ -417,6 +406,44 @@ mod tests {
     }
 
     #[test]
+    fn ignored_press_cannot_toggle_previous_block() {
+        let mut state = MouseSelectState::new();
+        state.hit_map = make_hit_map();
+        state.hit_map[0].block_identity = Some("message:0:tool".into());
+        state.hit_map[0].foldable = true;
+        state.log_area_width = 80;
+
+        assert_eq!(state.clicked_block(), None, "no press is not row zero");
+        assert!(state.handle_mouse_down(0, 0, true));
+        assert_eq!(state.clicked_block(), Some(("message:0:tool".into(), 0)));
+        state.handle_mouse_up();
+        state.take_saved_auto_scroll();
+
+        for row in [3, 4] {
+            assert!(!state.handle_mouse_down(0, row, true));
+            assert_eq!(state.clicked_block(), None, "ignored row {row}");
+            state.handle_mouse_up();
+        }
+        assert!(!state.handle_mouse_down(79, 0, true));
+        assert_eq!(state.clicked_block(), None);
+        state.handle_mouse_up();
+    }
+
+    #[test]
+    fn drag_without_copyable_text_is_not_a_click() {
+        let mut state = MouseSelectState::new();
+        state.hit_map = make_hit_map();
+        state.hit_map[0].block_identity = Some("message:0:tool".into());
+        state.hit_map[0].foldable = true;
+        state.log_area_width = 80;
+
+        assert!(state.handle_mouse_down(0, 0, true));
+        state.handle_mouse_drag(1, 0);
+        assert_eq!(state.clicked_block(), None);
+        assert_eq!(state.handle_mouse_up(), None);
+    }
+
+    #[test]
     fn drag_ignores_scrollbar() {
         let mut state = MouseSelectState::new();
         state.hit_map = make_hit_map();
@@ -440,8 +467,8 @@ mod tests {
         state.log_scroll = 0;
 
         state.handle_mouse_down(0, 0, false);
-        assert!(state.button_down);
-        assert!(!state.drag_active);
+        assert!(state.press.is_some());
+        assert!(!state.press.as_ref().unwrap().dragging);
         assert_eq!(state.saved_auto_scroll, Some(false));
     }
 
