@@ -705,17 +705,6 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // The throbber is rendered as a virtual line appended after the last
     // content line, so it scrolls out of view with the rest of the log.
     let throbber_visible = app.throbber_visible();
-    if app.log_view.auto_scroll
-        && app.log_view.last_activity_row_visible == Some(false)
-        && throbber_visible
-        && let Some(padding) = &mut app.log_view.last_block_padding
-        && padding.remaining > 0
-    {
-        // The activity row is optional space: when it appears, consume one
-        // already-created padding row so existing blocks remain anchored.
-        padding.remaining -= 1;
-    }
-    app.log_view.last_activity_row_visible = Some(throbber_visible);
     let throbber = throbber_visible.then(|| status::throbber_line(app));
     let total_lines = if app.context_view.active {
         0

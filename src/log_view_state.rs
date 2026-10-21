@@ -57,9 +57,6 @@ pub struct LogViewState {
     pub(crate) turn_generation: Option<u64>,
     pub(crate) visual_baseline: Option<Vec<(Arc<str>, usize)>>,
     pub(crate) visual_baseline_width: Option<usize>,
-    /// Last rendered activity-row visibility, used to consume one existing
-    /// bottom-padding row when the throbber appears.
-    pub(crate) last_activity_row_visible: Option<bool>,
 }
 
 impl LogViewState {
@@ -78,7 +75,6 @@ impl LogViewState {
             turn_generation: None,
             visual_baseline: None,
             visual_baseline_width: None,
-            last_activity_row_visible: None,
         }
     }
 
@@ -185,7 +181,6 @@ impl LogViewState {
 
     pub fn clear_padding(&mut self) {
         self.last_block_padding = None;
-        self.last_activity_row_visible = None;
     }
 
     pub fn scroll_up(&mut self) {
