@@ -80,6 +80,13 @@ pub(crate) enum TruncationDirection {
     Diff,
 }
 
+/// Per-block visual changes caused by streaming content.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StreamingChange {
+    pub growth: usize,
+    pub shrink: usize,
+}
+
 /// A stable logical subsection and its rendered representation.
 ///
 /// Rendered lines and sources are stored behind `Arc` so an unchanged block
@@ -161,6 +168,33 @@ impl LogLayout {
         }
     }
 
+    /// Classify streaming growth and shrinkage against the previous displayed
+    /// layout. The classification is intentionally per-block: a shrink in one
+    /// streaming block must not be cancelled by growth in another block.
+    pub(crate) fn streaming_change(&self, previous: &[(Arc<str>, usize)]) -> StreamingChange {
+        let mut change = StreamingChange::default();
+        for block in &self.blocks {
+            let old_len = previous
+                .iter()
+                .find(|(identity, _)| identity == &block.identity)
+                .map_or(0, |(_, lines)| *lines);
+            let is_streaming = block.sources.iter().any(|source| source.streaming);
+            if !is_streaming {
+                continue;
+            }
+            match block.lines.len().cmp(&old_len) {
+                std::cmp::Ordering::Greater => {
+                    change.growth += block.lines.len() - old_len;
+                }
+                std::cmp::Ordering::Less => {
+                    change.shrink += old_len - block.lines.len();
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+        change
+    }
+
     /// Compare this rendered logical layout with the previous eligible layout.
     pub(crate) fn visual_update(&self, previous: Option<&[(Arc<str>, usize)]>) -> VisualUpdate {
         let Some(previous) = previous else {
@@ -194,31 +228,9 @@ impl LogLayout {
         VisualUpdate::Delta(delta)
     }
 
-    /// Absorb a streaming shrink by appending blank lines at the bottom of
-    /// the log.
-    ///
-    /// When a streaming block (for example the tail-windowed thinking block)
-    /// loses rendered lines to edge trimming, the total log height would
-    /// otherwise drop by the same amount. With auto-scroll that drop
-    /// re-anchors the viewport one line higher and makes everything on screen
-    /// appear to jump down. Appending the missing lines as bottom padding
-    /// keeps the previous total height, so the viewport stays put and the
-    /// removed lines are replaced by blanks at the bottom of the output log.
-    pub(crate) fn pad_shrink(&mut self, previous: &[(Arc<str>, usize)]) {
-        let before_total = previous.iter().map(|(_, lines)| *lines).sum::<usize>();
-        let after_total = self
-            .blocks
-            .iter()
-            .map(|block| block.lines.len())
-            .sum::<usize>();
-        if after_total >= before_total {
-            return;
-        }
-        let pad = before_total - after_total;
-        log::debug!(
-            target: "throbber.trace",
-            "bottom padding: before={before_total} after={after_total} pad={pad}"
-        );
+    /// Absorb a number of streaming shrink rows by appending blank lines at
+    /// the bottom of the log.
+    pub(crate) fn pad_rows(&mut self, pad: usize) {
         self.append_bottom_padding(pad);
     }
 
@@ -294,7 +306,9 @@ fn tool_block_kind(msg: &Message, body: bool) -> LogBlockKind {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{LogBlock, LogBlockKind, LogLayout, TruncationDirection, TruncationMetadata};
+    use super::{
+        LogBlock, LogBlockKind, LogLayout, StreamingChange, TruncationDirection, TruncationMetadata,
+    };
     use crate::agent_turn_state::VisualUpdate;
     use crate::mouse_select::LineSource;
     use ratatui::text::Line;
@@ -321,6 +335,29 @@ mod layout_tests {
     }
 
     #[test]
+    fn streaming_change_counts_growth_and_shrink_per_streaming_block() {
+        let layout = LogLayout {
+            blocks: vec![
+                block("a", LogBlockKind::AssistantThinking, "a\nb\nc", true),
+                block("b", LogBlockKind::ToolBody, "b", true),
+                block("static", LogBlockKind::UserContent, "x\ny", false),
+            ],
+        };
+        let previous = vec![
+            (Arc::from("a"), 2),
+            (Arc::from("b"), 3),
+            (Arc::from("static"), 1),
+        ];
+        assert_eq!(
+            layout.streaming_change(&previous),
+            StreamingChange {
+                growth: 1,
+                shrink: 2
+            }
+        );
+    }
+
+    #[test]
     fn pad_shrink_appends_bottom_padding() {
         let mut layout = LogLayout {
             blocks: vec![
@@ -333,11 +370,7 @@ mod layout_tests {
                 ),
             ],
         };
-        let previous = vec![
-            (Arc::from("message:0:user"), 1),
-            (Arc::from("message:1:thinking"), 3),
-        ];
-        layout.pad_shrink(&previous);
+        layout.pad_rows(2);
 
         assert_eq!(layout.blocks.len(), 2, "padding extends the last block");
         let last = &layout.blocks[1];
@@ -364,8 +397,7 @@ mod layout_tests {
                 true,
             )],
         };
-        let previous = vec![(Arc::from("message:0:thinking"), 2)];
-        layout.pad_shrink(&previous);
+        layout.pad_rows(0);
         assert_eq!(layout.blocks[0].lines.len(), 3);
     }
 
