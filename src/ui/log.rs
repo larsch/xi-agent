@@ -8,7 +8,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    agent_turn_state::VisualUpdate,
     llm::{AssistantPhase, Message, Role},
     mouse_select::LineSource,
     theme::Theme,
@@ -195,39 +194,6 @@ impl LogLayout {
         change
     }
 
-    /// Compare this rendered logical layout with the previous eligible layout.
-    pub(crate) fn visual_update(&self, previous: Option<&[(Arc<str>, usize)]>) -> VisualUpdate {
-        let Some(previous) = previous else {
-            return VisualUpdate::NonContentLayoutChange;
-        };
-        let before_total = previous.iter().map(|(_, lines)| *lines).sum::<usize>();
-        let after_total = self
-            .blocks
-            .iter()
-            .map(|block| block.lines.len())
-            .sum::<usize>();
-        let delta = after_total as isize - before_total as isize;
-        if delta != 0 {
-            let changes: Vec<_> = self
-                .blocks
-                .iter()
-                .filter_map(|block| {
-                    let before = previous
-                        .iter()
-                        .find(|(identity, _)| identity == &block.identity)
-                        .map_or(0, |(_, lines)| *lines);
-                    (before != block.lines.len())
-                        .then(|| format!("{}:{}->{}", block.identity, before, block.lines.len()))
-                })
-                .collect();
-            log::debug!(
-                target: "throbber.trace",
-                "visual line delta: before={before_total} after={after_total} delta={delta} changes={changes:?}"
-            );
-        }
-        VisualUpdate::Delta(delta)
-    }
-
     /// Absorb a number of streaming shrink rows by appending blank lines at
     /// the bottom of the log.
     pub(crate) fn pad_rows(&mut self, pad: usize) {
@@ -309,30 +275,9 @@ mod layout_tests {
     use super::{
         LogBlock, LogBlockKind, LogLayout, StreamingChange, TruncationDirection, TruncationMetadata,
     };
-    use crate::agent_turn_state::VisualUpdate;
     use crate::mouse_select::LineSource;
     use ratatui::text::Line;
     use std::sync::Arc;
-
-    #[test]
-    fn visual_update_classifies_bottom_growth_and_reflow() {
-        let old = vec![(Arc::from("a"), 1), (Arc::from("b"), 2)];
-        let grown = LogLayout {
-            blocks: vec![
-                block("a", LogBlockKind::UserContent, "a", false),
-                block("b", LogBlockKind::ToolBody, "b\nb\nb", false),
-            ],
-        };
-        assert_eq!(grown.visual_update(Some(&old)), VisualUpdate::Delta(1));
-
-        let replaced = LogLayout {
-            blocks: vec![
-                block("a", LogBlockKind::UserContent, "a", false),
-                block("b", LogBlockKind::ToolBody, "z\nz", false),
-            ],
-        };
-        assert_eq!(replaced.visual_update(Some(&old)), VisualUpdate::Delta(0));
-    }
 
     #[test]
     fn streaming_change_counts_growth_and_shrink_per_streaming_block() {
@@ -358,7 +303,7 @@ mod layout_tests {
     }
 
     #[test]
-    fn pad_shrink_appends_bottom_padding() {
+    fn pad_rows_appends_bottom_padding() {
         let mut layout = LogLayout {
             blocks: vec![
                 block("message:0:user", LogBlockKind::UserContent, "a", false),
@@ -388,7 +333,7 @@ mod layout_tests {
     }
 
     #[test]
-    fn pad_shrink_ignores_growth() {
+    fn pad_rows_with_zero_does_not_change_layout() {
         let mut layout = LogLayout {
             blocks: vec![block(
                 "message:0:thinking",

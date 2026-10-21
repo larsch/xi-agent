@@ -57,6 +57,9 @@ pub struct LogViewState {
     pub(crate) turn_generation: Option<u64>,
     pub(crate) visual_baseline: Option<Vec<(Arc<str>, usize)>>,
     pub(crate) visual_baseline_width: Option<usize>,
+    /// Last rendered activity-row visibility, used to consume one existing
+    /// bottom-padding row when the throbber appears.
+    pub(crate) last_activity_row_visible: Option<bool>,
 }
 
 impl LogViewState {
@@ -75,6 +78,7 @@ impl LogViewState {
             turn_generation: None,
             visual_baseline: None,
             visual_baseline_width: None,
+            last_activity_row_visible: None,
         }
     }
 
@@ -142,6 +146,7 @@ impl LogViewState {
     fn reset_visual_comparison(&mut self) {
         self.visual_baseline = None;
         self.visual_baseline_width = None;
+        self.clear_padding();
         self.invalidate();
         // `full_output` / `expanded_blocks` affect rendering but are not part
         // of the block cache key, so clear it on any toggle that changes them.
@@ -180,6 +185,7 @@ impl LogViewState {
 
     pub fn clear_padding(&mut self) {
         self.last_block_padding = None;
+        self.last_activity_row_visible = None;
     }
 
     pub fn scroll_up(&mut self) {
@@ -188,10 +194,13 @@ impl LogViewState {
 
     pub fn scroll_up_lines(&mut self, n: usize) {
         self.auto_scroll = false;
+        self.clear_padding();
         self.log_scroll = self.log_scroll.saturating_sub(n);
     }
 
     pub fn scroll_down_lines(&mut self, n: usize) {
+        self.auto_scroll = false;
+        self.clear_padding();
         self.log_scroll = self.log_scroll.saturating_add(n);
     }
 
@@ -303,8 +312,9 @@ mod tests {
         state.toggle_full_output();
         state.toggle_expanded("block:1".into());
         state.scroll_up();
+        assert!(state.last_block_padding.is_none());
         state.scroll_down();
-        assert!(state.last_block_padding.is_some());
+        assert!(state.last_block_padding.is_none());
     }
 
     #[test]
