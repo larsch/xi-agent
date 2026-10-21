@@ -442,10 +442,13 @@ fn build_log_layout_cached(
             app.log_view.visual_baseline_width = Some(width);
             None
         };
-        if let Some(previous) = previous.as_deref()
-            && streaming
-        {
-            layout.pad_shrink(previous);
+        let streaming_change = previous
+            .as_deref()
+            .filter(|_| streaming && app.log_view.auto_scroll)
+            .map(|previous| layout.streaming_change(previous))
+            .unwrap_or_default();
+        if streaming_change.shrink > 0 {
+            layout.pad_rows(streaming_change.shrink);
         }
         let baseline: Vec<(std::sync::Arc<str>, usize)> = layout
             .blocks
@@ -454,17 +457,32 @@ fn build_log_layout_cached(
             .collect();
         let update = if previous.is_none() {
             VisualUpdate::NonContentLayoutChange
+        } else if streaming && app.log_view.auto_scroll {
+            VisualUpdate::Delta(streaming_change.growth as isize)
         } else {
-            layout.visual_update(previous.as_deref())
+            VisualUpdate::NonContentLayoutChange
         };
         let baseline_blocks = baseline.len();
         let previous_blocks = previous.as_ref().map_or(0, Vec::len);
         ::log::debug!(
             target: "throbber.trace",
-            "layout update: revision={} width={} step_cursor={step_cursor:?} streaming={streaming} previous_blocks={previous_blocks} new_blocks={baseline_blocks} update={update:?}",
+            "layout update: revision={} width={} step_cursor={step_cursor:?} streaming={streaming} previous_blocks={previous_blocks} new_blocks={baseline_blocks} update={update:?} streaming_change={streaming_change:?}",
             app.log_view.log_cache.revision,
             width,
         );
+        if streaming && app.log_view.auto_scroll && streaming_change.shrink > 0 {
+            if let Some(padding) = &mut app.log_view.last_block_padding {
+                padding.remaining = padding
+                    .remaining
+                    .saturating_add(streaming_change.shrink as isize);
+            } else {
+                app.log_view.last_block_padding = Some(PaddingState {
+                    max_total_lines: layout.total_lines(),
+                    inner_height_when_set: inner_height,
+                    remaining: streaming_change.shrink as isize,
+                });
+            }
+        }
         let padding_before = app
             .log_view
             .last_block_padding
@@ -476,13 +494,13 @@ fn build_log_layout_cached(
             anchor_padding,
             std::time::Instant::now(),
         );
-        if let VisualUpdate::Delta(delta) = update
+        if streaming
+            && app.log_view.auto_scroll
             && let Some(padding) = &mut app.log_view.last_block_padding
         {
-            padding.remaining -= delta;
-            if padding.remaining < 0 {
-                padding.remaining = 0;
-            }
+            padding.remaining = padding
+                .remaining
+                .saturating_sub(streaming_change.growth as isize);
         }
         let padding_after = app
             .log_view
