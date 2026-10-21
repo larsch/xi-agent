@@ -212,13 +212,10 @@ impl Tool for ReadFileTool {
                 crate::agent::tools::truncate::DEFAULT_MAX_BYTES,
             );
 
-            // A windowed read still carries range metadata for the UI, but a
-            // note in the model-visible content is only useful when content
-            // was actually omitted (by the output cap or by reaching EOF
-            // before the requested limit).
-            let requested_end = limit.map(|l| start.saturating_add(l));
-            let needs_notice =
-                tr.truncated || requested_end.is_some_and(|requested_end| requested_end > total);
+            // A windowed read still carries range metadata for the UI. Add a
+            // model-visible notice only when the output cap actually omitted
+            // content; reaching EOF before the requested limit is not truncation.
+            let needs_notice = tr.truncated;
             let truncated = is_windowed || tr.truncated;
 
             // Compute the effective displayed line range (1-indexed, inclusive).
@@ -371,6 +368,31 @@ mod tests {
         let tr = result.truncation.expect("range metadata expected");
         assert_eq!(tr.first_kept_line, 2);
         assert_eq!(tr.total_lines, 3);
+    }
+
+    #[tokio::test]
+    async fn read_small_file_with_limit_past_eof_has_no_notice() {
+        let f = write_temp("small file\n");
+        let tool = make_tool();
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "limit": 2000
+        });
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert_eq!(result.content.as_text(), "small file\n");
+    }
+
+    #[tokio::test]
+    async fn read_empty_file_returns_empty_without_notice() {
+        let f = write_temp("");
+        let tool = make_tool();
+        let args = serde_json::json!({"path": f.path().to_str().unwrap()});
+        let result = tool.execute(args).await;
+
+        assert!(!result.is_error);
+        assert_eq!(result.content.as_text(), "");
     }
 
     #[tokio::test]
