@@ -439,6 +439,7 @@ fn build_log_layout_cached(
                 app.log_view.visual_baseline.is_some(),
                 app.log_view.last_block_padding.map(|padding| padding.remaining),
             );
+            app.log_view.clear_padding();
             app.log_view.visual_baseline_width = Some(width);
             None
         };
@@ -447,14 +448,17 @@ fn build_log_layout_cached(
             .filter(|_| streaming && app.log_view.auto_scroll)
             .map(|previous| layout.streaming_change(previous))
             .unwrap_or_default();
-        if streaming_change.shrink > 0 {
-            layout.pad_rows(streaming_change.shrink);
-        }
+        // Keep the comparison snapshot free of synthetic bottom padding. The
+        // cached display layout may contain padding, but the next frame must
+        // compare real block heights only.
         let baseline: Vec<(std::sync::Arc<str>, usize)> = layout
             .blocks
             .iter()
             .map(|block| (block.identity.clone(), block.lines.len()))
             .collect();
+        if streaming_change.shrink > 0 {
+            layout.pad_rows(streaming_change.shrink);
+        }
         let update = if previous.is_none() {
             VisualUpdate::NonContentLayoutChange
         } else if streaming && app.log_view.auto_scroll {
@@ -701,6 +705,17 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // The throbber is rendered as a virtual line appended after the last
     // content line, so it scrolls out of view with the rest of the log.
     let throbber_visible = app.throbber_visible();
+    if app.log_view.auto_scroll
+        && app.log_view.last_activity_row_visible == Some(false)
+        && throbber_visible
+        && let Some(padding) = &mut app.log_view.last_block_padding
+        && padding.remaining > 0
+    {
+        // The activity row is optional space: when it appears, consume one
+        // already-created padding row so existing blocks remain anchored.
+        padding.remaining -= 1;
+    }
+    app.log_view.last_activity_row_visible = Some(throbber_visible);
     let throbber = throbber_visible.then(|| status::throbber_line(app));
     let total_lines = if app.context_view.active {
         0

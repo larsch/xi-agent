@@ -343,6 +343,23 @@ mod tests {
     }
 
     #[test]
+    fn growth_consumes_padding_before_hiding_throbber() {
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
+        state.start();
+        let now = Instant::now();
+
+        state.update_visual_state_with_padding(Some(VisualUpdate::Delta(2)), 2, now);
+        assert!(state.throbber_visible(false));
+
+        state.update_visual_state_with_padding(
+            Some(VisualUpdate::Delta(3)),
+            2,
+            now + Duration::from_millis(1),
+        );
+        assert!(!state.throbber_visible(false));
+    }
+
+    #[test]
     fn regular_growth_keeps_throbber_hidden_after_interval_estimation() {
         let mut state = AgentTurnState::new(ThrobberConfig::default());
         state.start();
