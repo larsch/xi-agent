@@ -118,7 +118,7 @@ pub fn extract_partial_field(partial_json: &str, field: &str) -> Option<String> 
 /// Build the user-facing tool invocation label.
 ///
 /// Uses the tool's `streaming_field` to select which argument to display.
-/// Applies per-tool formatting (multiline shell, shell-quoted exec, find_files
+/// Applies per-tool formatting (multiline shell and shell-quoted exec, find_files
 /// pattern+path, ask_user no-truncation, 1-line compact for others).
 /// Always shows the **head** (beginning) of the selected value.
 ///
@@ -135,14 +135,21 @@ pub fn tool_invocation_label(
     // Shell and script tools: multiline invocation, head-truncated with continuation marker.
     if matches!(
         name,
-        "bash" | "cmd" | "powershell" | "run_python" | "python_repl_execute"
+        "bash" | "cmd" | "powershell" | "run_python" | "python_repl_execute" | "exec"
     ) {
-        let field = streaming_field.unwrap_or("command");
-        let text = args.get(field).and_then(|v| v.as_str()).unwrap_or("");
-        if text.is_empty() {
+        let detail = if name == "exec" {
+            exec_command_detail(args)
+        } else {
+            let field = streaming_field.unwrap_or("command");
+            args.get(field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        if detail.is_empty() {
             return (tool_pending_label(name), true);
         }
-        let detail = multiline_head_truncated(text, display);
+        let detail = multiline_head_truncated(&detail, display);
         return (format!("{emoji} {detail}"), false);
     }
 
@@ -168,15 +175,6 @@ pub fn tool_invocation_label(
             label.push_str(&format!("\n{}", compact(prompt, display)));
         }
         return (label, false);
-    }
-
-    // exec: full shell-quoted command (program + args).
-    if name == "exec" {
-        let detail = exec_command_detail(args, display);
-        if detail.is_empty() {
-            return (tool_pending_label(name), true);
-        }
-        return (format!("{emoji} {detail}"), false);
     }
 
     // ask_user: full question on one line, never truncated.
@@ -465,7 +463,7 @@ fn multiline_head_truncated(input: &str, display: &DisplayConfig) -> String {
     shown.join("\n")
 }
 
-fn exec_command_detail(args: &Value, display: &DisplayConfig) -> String {
+fn exec_command_detail(args: &Value) -> String {
     let Some(program) = args.get("program").and_then(|v| v.as_str()) else {
         return String::new();
     };
@@ -482,8 +480,8 @@ fn exec_command_detail(args: &Value, display: &DisplayConfig) -> String {
     }
 
     match shlex::try_join(words.iter().copied()) {
-        Ok(command) => compact(&command, display),
-        Err(_) => compact(&words.join(" "), display),
+        Ok(command) => command,
+        Err(_) => words.join(" "),
     }
 }
 
@@ -703,6 +701,29 @@ mod tests {
         let (lbl, ph) = label("exec", &json!({"program": "git"}));
         assert!(!ph);
         assert_eq!(lbl, "💻 git");
+    }
+
+    #[test]
+    fn exec_label_preserves_multiline_arguments_up_to_five_lines() {
+        let (lbl, ph) = label(
+            "exec",
+            &json!({
+                "program": "printf",
+                "args": ["one\ntwo\nthree\nfour\nfive"]
+            }),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "💻 printf 'one\ntwo\nthree\nfour\nfive'");
+    }
+
+    #[test]
+    fn exec_label_truncates_after_five_lines_with_line_count() {
+        let (lbl, ph) = label(
+            "exec",
+            &json!({"program": "printf", "args": ["l1\nl2\nl3\nl4\nl5\nl6"]}),
+        );
+        assert!(!ph);
+        assert_eq!(lbl, "💻 printf 'l1\nl2\nl3\nl4\nl5\n… 6 total lines");
     }
 
     #[test]
