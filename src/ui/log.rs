@@ -1124,6 +1124,14 @@ fn render_tool_call(
 ) {
     let msg = messages[idx];
     let name = msg.tool_name.as_deref().unwrap_or("unknown");
+    let expanded_display = if cfg.full_output {
+        let mut expanded = display.clone();
+        expanded.max_shell_command_lines = usize::MAX;
+        Some(expanded)
+    } else {
+        None
+    };
+    let display = expanded_display.as_ref().unwrap_or(display);
 
     if name == "ask_user" {
         // During streaming, tool_args is still empty; extract question and context
@@ -2792,6 +2800,52 @@ mod tests {
             !text.iter().any(|t| t.contains("total lines")),
             "expanded tool block must not show a truncation marker"
         );
+    }
+
+    #[test]
+    fn expanded_exec_block_shows_full_multiline_command_label() {
+        let call = Message::tool_call(
+            "c1",
+            "exec",
+            serde_json::json!({
+                "program": "printf",
+                "args": ["l1\nl2\nl3\nl4\nl5\nl6"]
+            }),
+        );
+        let result = Message::tool_result("c1", "ok", false);
+        let render = |expanded: &HashSet<String>| {
+            build_log_layout_with_expansion(
+                &[],
+                &[call.clone(), result.clone()],
+                0,
+                false,
+                120,
+                &cfg(),
+                &Theme::default(),
+                &DisplayConfig::default(),
+                expanded,
+                &mut LogBlockCache::default(),
+            )
+            .flatten()
+            .0
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+
+        let collapsed = render(&HashSet::new());
+        assert!(collapsed.contains("… 6 total lines"));
+        assert!(!collapsed.contains("l6"));
+
+        let expanded = render(&HashSet::from(["message:0:tool".to_string()]));
+        assert!(expanded.contains("l6"));
+        assert!(!expanded.contains("… 6 total lines"));
     }
 
     #[test]
