@@ -366,7 +366,7 @@ fn render_skills_block(skills: &[SkillMeta]) -> String {
 
     format!(
         "\n\
-<skills>\nAvailable skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it.\n\
+<skills>\nThink of skills as capabilities you can acquire: learning one levels you up. Once learned, that capability is yours for the rest of the conversation—draw on it when relevant instead of treating each use as a fresh need to learn. Use the learn tool to acquire a skill.\n\
 <available_skills>\n{entries}\n</available_skills>\n</skills>"
     )
 }
@@ -652,8 +652,13 @@ mod tests {
             "location should not appear in listing"
         );
         assert!(prompt.contains(
-            "Available skills provide specialized instructions. Use the learn tool to read a relevant skill before applying it."
+            "Think of skills as capabilities you can acquire: learning one levels you up."
         ));
+        assert!(
+            prompt.contains(
+                "Once learned, that capability is yours for the rest of the conversation"
+            )
+        );
     }
 
     #[test]
