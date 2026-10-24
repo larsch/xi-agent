@@ -1,11 +1,13 @@
-use crate::llm::{copilot::CopilotProvider, ollama::OllamaProvider};
+use crate::llm::{copilot::CopilotProvider, ollama::OllamaProvider, openai::OpenAiProvider};
 
 /// Return the context-window size (in tokens) for a known model name.
 ///
 /// Checks the Copilot model metadata cache first (populated by
 /// `CopilotProvider::list_models()`), then the Ollama `/api/ps` runtime
-/// cache (actual context for currently loaded models), and finally a
-/// hard-coded fallback table for providers and models not covered above.
+/// cache (actual context for currently loaded models), then the cache
+/// populated from OpenAI-compatible `/models` responses (DeepSeek, OpenRouter,
+/// vLLM, …), and finally a hard-coded fallback table for providers and models
+/// not covered above.
 ///
 /// Returns `None` for unrecognised models or Ollama models that are not
 /// currently loaded (we cannot trust the GGUF `context_length` from
@@ -18,6 +20,13 @@ pub fn context_window_for_model(model: &str) -> Option<usize> {
 
     // Secondary: runtime context from Ollama /api/ps (loaded models only).
     if let Some(cw) = OllamaProvider::cached_context_window(model) {
+        return Some(cw);
+    }
+
+    // Tertiary: context windows reported by any OpenAI-compatible /models
+    // endpoint (DeepSeek `context_window`, OpenRouter `context_length`,
+    // vLLM `max_model_len`).
+    if let Some(cw) = OpenAiProvider::cached_context_window(model) {
         return Some(cw);
     }
 
@@ -71,8 +80,10 @@ fn hardcoded_context_window(model: &str) -> Option<usize> {
     if m.contains("gemini") {
         return Some(1_000_000);
     }
-    // DeepSeek V4 models: 1M context (kludge until upstream metadata is available).
-    if m.starts_with("deepseek-v4-flash") || m.starts_with("deepseek-v4-pro") {
+    // DeepSeek V4 models: 1M context.  `deepseek-flash`, `deepseek-v4-flash`
+    // (legacy alias) and `deepseek-v4-pro` all report 1M via `/models`; this
+    // keeps the first frame correct before discovery completes.
+    if m.starts_with("deepseek-flash") || m.starts_with("deepseek-v4-") {
         return Some(1_000_000);
     }
     if m.contains("claude-3-5") || m.contains("claude-3.5") {
@@ -125,6 +136,7 @@ pub fn scaled_token_budget(context_window: usize, floor: usize, scale: usize) ->
 mod tests {
     use super::{context_window_for_model, scaled_token_budget};
     use crate::llm::copilot::test_helpers;
+    use crate::llm::openai::test_helpers as openai_helpers;
 
     // ── Cache-driven context window ──────────────────────────────────────────
 
@@ -135,6 +147,17 @@ mod tests {
         assert_eq!(
             context_window_for_model("__gpt_4o_cache_test__"),
             Some(999_999)
+        );
+    }
+
+    #[test]
+    fn context_window_uses_openai_compatible_metadata_cache() {
+        // Models discovered via an OpenAI-compatible /models endpoint (e.g.
+        // DeepSeek's `context_window`) need no hard-coded table entry.
+        openai_helpers::seed_context_window("__openai_metadata_test__", 1_048_576);
+        assert_eq!(
+            context_window_for_model("__openai_metadata_test__"),
+            Some(1_048_576)
         );
     }
 
@@ -173,6 +196,7 @@ mod tests {
 
     #[test]
     fn context_window_deepseek_v4_returns_1m() {
+        assert_eq!(context_window_for_model("deepseek-flash"), Some(1_000_000));
         assert_eq!(
             context_window_for_model("deepseek-v4-flash"),
             Some(1_000_000)

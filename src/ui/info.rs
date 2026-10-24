@@ -131,9 +131,34 @@ pub(super) fn format_context_value(
 }
 
 fn format_context_size(n: usize) -> String {
-    if n >= 1_000 {
+    if n >= 1_000_000 {
+        // Round to the nearest million: 1_048_576 → "1M", 2_000_000 → "2M".
+        format!("{}M", (n + 500_000) / 1_000_000)
+    } else if n >= 1_000 {
         format!("{}k", n / 1_000)
     } else {
         n.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_context_size, format_context_value};
+
+    #[test]
+    fn context_size_formats_kilotokens_and_megatokens() {
+        assert_eq!(format_context_size(512), "512");
+        assert_eq!(format_context_size(128_000), "128k");
+        assert_eq!(format_context_size(1_048_576), "1M");
+        assert_eq!(format_context_size(2_000_000), "2M");
+    }
+
+    #[test]
+    fn context_value_renders_used_and_max() {
+        assert_eq!(
+            format_context_value(Some(1_048_576), Some(52_000), None, false),
+            "52k / 1M (4%)"
+        );
+        assert_eq!(format_context_value(None, None, None, false), "unknown");
     }
 }

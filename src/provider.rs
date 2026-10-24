@@ -235,6 +235,7 @@ pub fn build_provider_for_instance(
             } else {
                 log::debug!("provider build: skipping reasoning_effort (backend is not OpenAi)");
             }
+            p.spawn_context_window_refresh();
             Ok(Arc::new(p))
         }
         BackendPreset::OpenRouter => {
@@ -258,6 +259,7 @@ pub fn build_provider_for_instance(
                 ],
             );
             p = p.with_reasoning_effort(thinking.to_reasoning_effort_string());
+            p.spawn_context_window_refresh();
             Ok(Arc::new(p))
         }
 

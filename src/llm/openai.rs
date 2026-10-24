@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use super::{
     AssistantPhase, LlmEvent, LlmProvider, LlmRequestContext, LlmStream, Message, ModelListFuture,
@@ -74,6 +76,39 @@ impl OpenAiProvider {
             _ => Some(serde_json::json!({"type": "enabled"})),
         };
         self
+    }
+
+    /// Look up the context-window size for `model` in the cache populated from
+    /// an OpenAI-compatible `/models` response.
+    ///
+    /// Returns `None` when discovery has not run yet or the endpoint does not
+    /// report a context window for this model.
+    pub fn cached_context_window(model: &str) -> Option<usize> {
+        let map = context_cache().read().ok()?;
+        map.get(model).copied()
+    }
+
+    /// Spawn a background `/models` fetch that records context-window sizes.
+    ///
+    /// Called at provider build time so the size is known before the first
+    /// turn instead of only after the model picker has been opened.  No-op when
+    /// the current model's window is already cached, or when there is no tokio
+    /// runtime to spawn on (the background refresh is an optimisation only).
+    pub fn spawn_context_window_refresh(&self) {
+        if Self::cached_context_window(&self.model).is_some() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            log::debug!("context-window discovery skipped: no tokio runtime");
+            return;
+        };
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let api_key = self.api_key.clone();
+        let extra_headers = self.extra_headers.clone();
+        handle.spawn(async move {
+            fetch_and_cache_model_contexts(&client, &base_url, &api_key, &extra_headers).await;
+        });
     }
 
     fn stream_inner(
@@ -387,6 +422,87 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     id: String,
+    /// Context window as reported by DeepSeek and several other
+    /// OpenAI-compatible gateways.
+    #[serde(default)]
+    context_window: Option<usize>,
+    /// OpenRouter's spelling of the same field.
+    #[serde(default)]
+    context_length: Option<usize>,
+    /// vLLM's spelling of the same field.
+    #[serde(default)]
+    max_model_len: Option<usize>,
+}
+
+impl ModelEntry {
+    /// Best available context window for this model, ignoring zero values.
+    fn context_size(&self) -> Option<usize> {
+        self.context_window
+            .or(self.context_length)
+            .or(self.max_model_len)
+            .filter(|n| *n > 0)
+    }
+}
+
+// ── Context-window cache ──────────────────────────────────────────────────────
+
+/// Process-global cache of context windows reported by an OpenAI-compatible
+/// `/models` endpoint, keyed by the exact model `id`.
+///
+/// Populated by [`OpenAiProvider::list_models`] and by the background refresh
+/// spawned from [`OpenAiProvider::spawn_context_window_refresh`].  Models whose
+/// entry omits every context-window field are not inserted, so the caller's
+/// hard-coded fallback still applies.
+static MODEL_CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, usize>>> = OnceLock::new();
+
+fn context_cache() -> &'static RwLock<HashMap<String, usize>> {
+    MODEL_CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn record_model_contexts(entries: &[ModelEntry]) {
+    let discovered: Vec<(String, usize)> = entries
+        .iter()
+        .filter_map(|e| Some((e.id.clone(), e.context_size()?)))
+        .collect();
+    if discovered.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = context_cache().write() {
+        for (id, context_window) in discovered {
+            log::debug!("openai model {id} context_window={context_window}");
+            map.insert(id, context_window);
+        }
+    }
+}
+
+/// Fetch `{base_url}/models` and record the context windows it reports.
+///
+/// Best-effort: failures (offline endpoint, 401, gateways that omit the field)
+/// are logged at debug level and leave the caller's fallback untouched.
+async fn fetch_and_cache_model_contexts(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    extra_headers: &[(String, String)],
+) {
+    let url = format!("{base_url}/models");
+    let result = super::common::fetch_model_list::<ModelsResponse, _>(
+        client,
+        &url,
+        "OpenAI",
+        Some(api_key),
+        extra_headers,
+        |r| {
+            record_model_contexts(&r.data);
+            r.data.into_iter().map(|m| m.id).collect()
+        },
+    )
+    .await;
+
+    match result {
+        Ok(ids) => log::debug!("context-window discovery: {} models from {url}", ids.len()),
+        Err(e) => log::debug!("context-window discovery failed for {url}: {e}"),
+    }
 }
 
 // ── Serialisation helpers ─────────────────────────────────────────────────────
@@ -430,10 +546,29 @@ impl LlmProvider for OpenAiProvider {
                 "OpenAI",
                 Some(&api_key),
                 &extra_headers,
-                |r| r.data.into_iter().map(|m| m.id).collect(),
+                |r| {
+                    record_model_contexts(&r.data);
+                    r.data.into_iter().map(|m| m.id).collect()
+                },
             )
             .await
         })
+    }
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::context_cache;
+
+    /// Insert a synthetic entry into the global context-window cache.
+    /// Use unique model names in tests to avoid cross-test pollution.
+    pub fn seed_context_window(model: &str, context_window: usize) {
+        context_cache()
+            .write()
+            .expect("context cache poisoned")
+            .insert(model.to_string(), context_window);
     }
 }
 
@@ -523,5 +658,97 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "system");
         assert_eq!(out[1]["role"], "user");
+    }
+
+    // ── Context-window discovery ──────────────────────────────────────────
+
+    use super::OpenAiProvider;
+    use crate::llm::LlmProvider;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    /// `/models` bodies with every context-window spelling xi understands,
+    /// plus one entry that reports none.  The first entry mirrors a real
+    /// DeepSeek response (extra and nested fields must not break parsing).
+    const MODELS_BODY: &str = r#"{
+        "object": "list",
+        "data": [
+            {
+                "id": "__oai_ctx_window__",
+                "object": "model",
+                "owned_by": "deepseek",
+                "name": "DeepSeek-V4.1-Flash",
+                "context_window": 1048576,
+                "max_output_tokens": 393216,
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"],
+                "effort": {"supported_levels": ["low", "high", "max"], "default_level": "high"},
+                "api_capabilities": {"anthropic_messages": {"tool_update": "addition-only"}}
+            },
+            {"id": "__oai_ctx_length__", "context_length": 131072},
+            {"id": "__oai_max_model_len__", "max_model_len": 32768},
+            {"id": "__oai_no_ctx__", "object": "model"}
+        ]
+    }"#;
+
+    async fn mock_models_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(MODELS_BODY, "application/json"))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn list_models_caches_reported_context_windows() {
+        let server = mock_models_server().await;
+        let provider = OpenAiProvider::new(server.uri(), "__oai_ctx_window__", "test-key");
+
+        let models = provider.list_models().await.expect("list models");
+
+        assert_eq!(models.len(), 4);
+        assert_eq!(
+            OpenAiProvider::cached_context_window("__oai_ctx_window__"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            OpenAiProvider::cached_context_window("__oai_ctx_length__"),
+            Some(131_072)
+        );
+        assert_eq!(
+            OpenAiProvider::cached_context_window("__oai_max_model_len__"),
+            Some(32_768)
+        );
+        assert_eq!(
+            OpenAiProvider::cached_context_window("__oai_no_ctx__"),
+            None,
+            "entries without a context-window field must not be cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_context_window_refresh_populates_cache_in_background() {
+        let server = mock_models_server().await;
+        let provider = OpenAiProvider::new(server.uri(), "__oai_max_model_len__", "test-key");
+
+        provider.spawn_context_window_refresh();
+
+        // The refresh runs in a spawned task, so poll instead of assuming it
+        // has completed by the time we look.
+        for _ in 0..100 {
+            if OpenAiProvider::cached_context_window("__oai_ctx_window__").is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            OpenAiProvider::cached_context_window("__oai_ctx_window__"),
+            Some(1_048_576)
+        );
     }
 }
