@@ -1611,6 +1611,10 @@ fn render_tool_result(
     }
 
     // Custom / unknown tools: tail-truncated, green/red.
+    //
+    // xi does not truncate a custom tool's *result* — the tool owns its output
+    // bounds — but the log still shows only a preview so a chatty tool cannot
+    // flood the display. Expanding the block reveals the full output.
     let color = if msg.is_error {
         theme.log.diff.removed.fg.unwrap_or(Color::Red)
     } else {
@@ -2761,6 +2765,52 @@ mod tests {
         );
         assert_eq!(layout.blocks.len(), 1);
         assert_eq!(layout.blocks[0].identity.as_ref(), "message:0:tool");
+    }
+
+    #[test]
+    fn custom_tool_body_is_windowed_in_the_log() {
+        let content = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = Message::tool_call("c1", "my_custom_tool", serde_json::json!({"q": "x"}));
+        let result = Message::tool_result("c1", &content, false);
+        let render = |expanded: &HashSet<String>| {
+            build_log_layout_with_expansion(
+                &[],
+                &[call.clone(), result.clone()],
+                0,
+                false,
+                120,
+                &cfg(),
+                &crate::theme::Theme::default(),
+                &crate::config::DisplayConfig::default(),
+                expanded,
+                &mut LogBlockCache::default(),
+            )
+            .flatten()
+            .0
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+
+        // The result is never truncated for the model, but the log still shows
+        // a tail preview so a chatty tool cannot flood the display.
+        let collapsed = render(&HashSet::new());
+        assert!(collapsed.contains("… 20 total lines"), "{collapsed}");
+        assert!(collapsed.contains("line 20"), "{collapsed}");
+        assert!(!collapsed.contains("line 1\n"), "{collapsed}");
+
+        let expanded = render(&HashSet::from(["message:0:tool".to_string()]));
+        assert!(expanded.contains("line 1\n"), "{expanded}");
+        assert!(!expanded.contains("total lines"), "{expanded}");
     }
 
     #[test]

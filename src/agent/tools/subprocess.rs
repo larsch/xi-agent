@@ -20,8 +20,9 @@
 //!    sender is available via [`ToolCallContext`].
 //! 5. Applies [`apply_terminal_render`] to the final accumulated output.
 //! 6. Strips trailing whitespace.
-//! 7. Merges stdout+stderr, appends `exit N` for non-zero exits, truncates,
-//!    and returns a [`ToolResult`].
+//! 7. Merges stdout+stderr, appends `exit N` for non-zero exits, optionally
+//!    truncates (see [`SubprocessCommand::no_truncate`]), and returns a
+//!    [`ToolResult`].
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -49,6 +50,9 @@ pub struct SubprocessCommand {
     stdin_data: Option<Vec<u8>>,
     /// When `true`, a non-zero exit code promotes the result to `is_error`.
     error_on_nonzero: bool,
+    /// When `true` (the default), the collected output is truncated to the
+    /// shared line/byte limits before it reaches the model or the session log.
+    truncate_output: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +89,7 @@ impl SubprocessCommand {
             current_dir: None,
             stdin_data: None,
             error_on_nonzero: false,
+            truncate_output: true,
         }
     }
 
@@ -143,6 +148,16 @@ impl SubprocessCommand {
     /// exit with an error code.
     pub fn error_on_nonzero_exit(mut self) -> Self {
         self.error_on_nonzero = true;
+        self
+    }
+
+    /// Return the full output without applying xi's line/byte limits.
+    ///
+    /// Use this for tools that bound their own output: truncation is then the
+    /// tool's responsibility, both for the model projection and for the
+    /// session log, so xi must not shorten the output on the tool's behalf.
+    pub fn no_truncate(mut self) -> Self {
+        self.truncate_output = false;
         self
     }
 
@@ -205,7 +220,7 @@ impl SubprocessCommand {
         // If no cancel receiver, use the simple path.
         let cancel_rx_opt = ctx.cancel_rx.clone();
         if cancel_rx_opt.is_none() {
-            return collect_output(child, ctx, self.error_on_nonzero)
+            return collect_output(child, ctx, self.error_on_nonzero, self.truncate_output)
                 .await
                 .result;
         }
@@ -218,7 +233,7 @@ impl SubprocessCommand {
         let child_pid = child.id();
         let ctx_tx = ctx.tx.clone();
 
-        let collect_fut = collect_output(child, ctx, self.error_on_nonzero);
+        let collect_fut = collect_output(child, ctx, self.error_on_nonzero, self.truncate_output);
         tokio::pin!(collect_fut);
 
         // Track whether we've requested termination and whether the user has
@@ -298,6 +313,7 @@ async fn collect_output(
     child: tokio::process::Child,
     ctx: ToolCallContext,
     error_on_nonzero: bool,
+    truncate_output: bool,
 ) -> ProcessOutcome {
     let collected = collect_output_inner(child, &ctx).await;
 
@@ -318,11 +334,17 @@ async fn collect_output(
         merged.push_str(&format!("exit {}\n", collected.exit_code));
     }
 
-    let tr = truncate_tail(&merged);
-    let result = if tr.truncated {
-        ToolResult::ok_truncated(tr, collected.stdout, collected.stderr)
+    let result = if truncate_output {
+        let tr = truncate_tail(&merged);
+        if tr.truncated {
+            ToolResult::ok_truncated(tr, collected.stdout, collected.stderr)
+        } else {
+            ToolResult::ok(tr)
+        }
     } else {
-        ToolResult::ok(tr)
+        // The tool owns its output bounds — pass the merged stdout/stderr
+        // through untouched.
+        ToolResult::ok_str(merged)
     };
 
     let result = if error_on_nonzero && collected.exit_code != 0 {

@@ -15,6 +15,10 @@ use crate::agent::types::{Tool, ToolCallContext, ToolResult};
 ///
 /// Rich or structured write parameters must document and prefer a UTF-8
 /// `--patch-file`, `--fields-file`, or stdin interface.
+///
+/// Custom tool output is passed through verbatim: xi applies no truncation, so
+/// the tool owns its output bounds and is responsible for keeping the response
+/// a reasonable size.
 pub struct CustomTool {
     /// Absolute path to the executable.
     path: PathBuf,
@@ -52,6 +56,9 @@ impl Tool for CustomTool {
             SubprocessCommand::new(self.path.to_string_lossy())
                 .stdin_data(args_json.into_bytes())
                 .error_on_nonzero_exit()
+                // A custom tool decides how much output it produces, so xi
+                // must not truncate it for the model or the session log.
+                .no_truncate()
                 .run(ctx)
                 .await
         })
@@ -431,6 +438,41 @@ exit 1
             "expected 'exit 1' in content, got: {:?}",
             result.content.as_text()
         );
+    }
+
+    #[tokio::test]
+    async fn execute_does_not_truncate_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("verbose_tool");
+        write_script(
+            &script_path,
+            r#"#!/bin/sh
+if [ "$1" = "--describe" ]; then
+  printf '{"name":"verbose_tool","description":"Prints a lot.","parameters_schema":{"type":"object","properties":{}}}'
+  exit 0
+fi
+cat > /dev/null
+# One line well past the single-line cap, then more lines than the default
+# line limit: xi must return all of it.
+printf 'x%.0s' $(seq 1 300)
+printf '\n'
+seq 1 2500
+"#,
+        );
+
+        let tools = load_custom_tools(&[dir.path().to_path_buf()]);
+        assert_eq!(tools.len(), 1);
+
+        let result = tools[0].execute(serde_json::json!({})).await;
+        assert!(!result.is_error);
+        assert!(
+            !result.is_truncated,
+            "custom tool output must not be truncated"
+        );
+        let text = result.content.as_text();
+        assert_eq!(text.lines().count(), 2501, "all lines are returned");
+        assert_eq!(text.lines().next().unwrap().len(), 300);
+        assert!(!text.contains("[Output truncated"));
     }
 
     #[test]

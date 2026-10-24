@@ -92,6 +92,12 @@ Custom tools are executable code and run with the permissions of the xi
 process. xi does not request confirmation before invoking them. Install only
 tools you trust and consider what filesystem and network access they need.
 
+xi passes custom tool output through unchanged: it applies no line or byte
+truncation to the result sent to the model. A custom tool owns its output
+bounds, so keep responses a reasonable size yourself (for example, summarise or
+page large results). The session log still shows only a preview of a long body;
+expanding the block reveals the full output.
+
 ## Built-in sudo tool (Unix)
 
 Interactive Unix sessions also provide a built-in `sudo` tool. It accepts a

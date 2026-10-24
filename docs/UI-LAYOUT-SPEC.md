@@ -118,7 +118,7 @@ Truncated logical blocks are independently unfoldable with the mouse:
 #### Custom and unknown tools
 
 - Intent: `🔧 <tool-name> · <parameter>: <value>, …` — shows the actual tool name and readable scalar parameter values, compacted onto one line. Nested object values are omitted rather than rendered as raw JSON. If no readable parameters are available, shows only the tool name; before arguments arrive, shows the tool name with `working…`.
-- Body: tool result content, tail-truncated to 8 lines.
+- Body: tool result content, tail-truncated to 8 lines. xi never truncates a custom tool's *result* (the tool owns its output bounds), but the body is still shown as a preview; expanding the block reveals the full output.
 
 #### `ask_user`
 
