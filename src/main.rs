@@ -790,11 +790,20 @@ async fn run(
                     Event::Mouse(mouse) => {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
-                                app.scroll_up_lines(3);
+                                if app.context_view.active {
+                                    app.context_view.scroll_up(3);
+                                } else {
+                                    app.scroll_up_lines(3);
+                                }
                                 needs_redraw = true;
                             }
                             MouseEventKind::ScrollDown => {
-                                app.scroll_down_lines(3);
+                                if app.context_view.active {
+                                    app.context_view
+                                        .scroll_down(3, app.context_view.max_scroll);
+                                } else {
+                                    app.scroll_down_lines(3);
+                                }
                                 needs_redraw = true;
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
