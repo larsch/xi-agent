@@ -173,6 +173,7 @@ fn push_llm_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
         }
         // Not sent to the LLM.
         SessionEvent::TurnError { .. }
+        | SessionEvent::LoopInterrupted { .. }
         | SessionEvent::CompactionSummary { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::ThinkingLevelChanged { .. }
@@ -277,8 +278,8 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
             msg.include_in_llm = false;
             msgs.push(msg);
         }
-        SessionEvent::TurnError { message, .. } => {
-            // Visible in the UI so the user knows what went wrong on resume,
+        SessionEvent::TurnError { message, .. } | SessionEvent::LoopInterrupted { message, .. } => {
+            // Visible in the UI so the user knows what happened on resume,
             // but not forwarded to the LLM.
             let mut msg = Message::assistant(message.clone());
             msg.include_in_llm = false;
@@ -922,6 +923,22 @@ mod tests {
         let msgs = project_display_messages(&events);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::Assistant);
+        assert!(!msgs[0].include_in_llm);
+        assert!(!msgs[0].hidden);
+    }
+
+    #[test]
+    fn display_loop_interruption_is_visible_but_not_in_llm() {
+        let events = vec![SessionEvent::LoopInterrupted {
+            message: "Agent loop stopped after turn by user request".to_string(),
+            timestamp: ts(),
+        }];
+        let msgs = project_display_messages(&events);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0].content,
+            "Agent loop stopped after turn by user request"
+        );
         assert!(!msgs[0].include_in_llm);
         assert!(!msgs[0].hidden);
     }

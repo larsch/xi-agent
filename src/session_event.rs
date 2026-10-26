@@ -197,6 +197,12 @@ pub enum SessionEvent {
     /// resume.
     TurnError { message: String, timestamp: u64 },
 
+    /// The agent loop was finally stopped by a user-requested interruption.
+    ///
+    /// The message is stored verbatim so resumed sessions render the same
+    /// outcome as the original session.
+    LoopInterrupted { message: String, timestamp: u64 },
+
     /// A compaction was performed.
     ///
     /// The `project_llm_messages` projection treats this as a boundary:
@@ -417,6 +423,21 @@ mod tests {
             matches!(decoded, SessionEvent::TurnError { ref message, .. }
                 if message == "rate limit exceeded")
         );
+    }
+
+    #[test]
+    fn loop_interrupted_round_trips() {
+        let ev = SessionEvent::LoopInterrupted {
+            message: "Agent loop interrupted by user request".to_string(),
+            timestamp: ts(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            SessionEvent::LoopInterrupted { ref message, .. }
+                if message == "Agent loop interrupted by user request"
+        ));
     }
 
     #[test]

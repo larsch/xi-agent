@@ -768,6 +768,13 @@ impl App {
         });
     }
 
+    fn append_loop_interruption(&mut self, message: &str) {
+        self.append_event_immediate(SessionEvent::LoopInterrupted {
+            message: message.to_string(),
+            timestamp: Self::now_ts(),
+        });
+    }
+
     fn on_agent_cancelled(&mut self) {
         let steering_preserved = self.preserve_queued_steering();
         self.clear_pending_ask_after_agent_exit();
@@ -783,6 +790,7 @@ impl App {
                 "[agent loop aborted]".to_string(),
             )));
         self.agent_turn.holdoff_started_at = None;
+        self.append_loop_interruption("🛑 Agent loop interrupted by user request");
         self.persist_messages();
     }
 
@@ -806,6 +814,9 @@ impl App {
         if steering_preserved {
             self.runtime.queue_selection = None;
             self.runtime.queue_saved_input = None;
+        }
+        if interrupted {
+            self.append_loop_interruption("🛑 Agent loop stopped after turn by user request");
         }
         // The final TurnEnd already flushed the turn buffer.
         // Done only cleans up live streaming state.
@@ -896,7 +907,7 @@ impl App {
             self.session.pending_turn_events.clear();
             self.session.live_turn.clear_turn();
             self.append_event_immediate(SessionEvent::TurnError {
-                message: format!("[Error: {rendered}]"),
+                message: format!("⚠️ [Error: {rendered}]"),
                 timestamp: Self::now_ts(),
             });
             self.persist_messages();

@@ -252,6 +252,7 @@ fn build_units(events: &[SessionEvent]) -> Vec<Unit> {
                 idx += 1;
             }
             SessionEvent::TurnError { .. }
+            | SessionEvent::LoopInterrupted { .. }
             | SessionEvent::EnvironmentNotification { .. }
             | SessionEvent::CompactionSummary { .. }
             | SessionEvent::ModelChanged { .. }
@@ -422,6 +423,11 @@ fn serialize_events_for_summary(events: &[SessionEvent]) -> String {
             }
             SessionEvent::TurnError { message, .. } => {
                 out.push_str("[turn-error]\n");
+                out.push_str(message);
+                out.push_str("\n\n");
+            }
+            SessionEvent::LoopInterrupted { message, .. } => {
+                out.push_str("[loop-interrupted]\n");
                 out.push_str(message);
                 out.push_str("\n\n");
             }
