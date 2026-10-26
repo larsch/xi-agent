@@ -907,7 +907,7 @@ impl App {
             self.session.pending_turn_events.clear();
             self.session.live_turn.clear_turn();
             self.append_event_immediate(SessionEvent::TurnError {
-                message: format!("⚠️ [Error: {rendered}]"),
+                message: format!("🚨 [Error: {rendered}]"),
                 timestamp: Self::now_ts(),
             });
             self.persist_messages();
