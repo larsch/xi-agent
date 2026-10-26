@@ -2,6 +2,26 @@
 
 const MAX_CONTENT_CHARS: usize = 200;
 
+/// Keep COM alive for the lifetime of the cached WinRT notification factories.
+#[cfg(windows)]
+pub(crate) fn pin_com_mta() {
+    use windows::Win32::System::Com::CoIncrementMTAUsage;
+
+    // An activation can borrow a transient MTA and bypass windows-core's own
+    // initialization fallback. When that MTA ends, COM can unload msxml6.dll
+    // while windows-core still holds its cached XML activation factory pointer.
+    // SAFETY: this acquires a process-wide MTA reference without changing the
+    // calling thread's apartment. The cookie has no automatic cleanup.
+    // ponytail: deliberately retain the reference until process exit, matching
+    // the static factory cache; revisit if windows-core owns that lifetime.
+    match unsafe { CoIncrementMTAUsage() } {
+        Ok(_cookie) => log::debug!(target: "desktop_notification", "COM MTA pinned"),
+        Err(error) => {
+            log::debug!(target: "desktop_notification", "COM MTA pin failed: {error:?}");
+        }
+    }
+}
+
 fn notification_title(cwd: &std::path::Path) -> String {
     let project = cwd
         .file_name()

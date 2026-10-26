@@ -271,6 +271,8 @@ async fn main() -> io::Result<()> {
     timer.mark("migrate::run");
     debug_log::init_logging();
     timer.mark("debug_log::init_logging");
+    #[cfg(windows)]
+    desktop_notification::pin_com_mta();
 
     let cli = Cli::parse();
     timer.mark("Cli::parse");
