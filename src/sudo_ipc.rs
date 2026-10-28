@@ -337,7 +337,7 @@ impl HelperContext {
 #[cfg(unix)]
 pub fn random_hex(bytes: usize) -> std::io::Result<String> {
     let mut data = vec![0_u8; bytes];
-    getrandom::getrandom(&mut data)
+    getrandom::fill(&mut data)
         .map_err(|error| std::io::Error::other(format!("random generation failed: {error}")))?;
     let mut result = String::with_capacity(bytes * 2);
     for byte in data {

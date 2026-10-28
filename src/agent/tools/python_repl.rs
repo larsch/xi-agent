@@ -648,7 +648,7 @@ fn normalize_dependencies(with: Option<Vec<String>>) -> Result<Option<Vec<String
 
 fn random_token() -> Result<String, String> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|error| error.to_string())?;
+    getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 

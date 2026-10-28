@@ -356,7 +356,7 @@ impl SessionStore {
 fn new_session_id() -> String {
     let ts = Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let mut bytes = [0u8; 4];
-    if getrandom::getrandom(&mut bytes).is_err() {
+    if getrandom::fill(&mut bytes).is_err() {
         return format!("{ts}-00000000");
     }
     let suffix = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();

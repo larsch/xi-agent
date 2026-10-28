@@ -220,7 +220,7 @@ async fn wait_for_callback(state: &str, cancel: Arc<AtomicBool>) -> anyhow::Resu
 
 fn random_urlsafe(len: usize) -> anyhow::Result<String> {
     let mut bytes = vec![0u8; len];
-    getrandom::getrandom(&mut bytes).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 

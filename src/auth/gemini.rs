@@ -435,7 +435,7 @@ pub(crate) async fn discover_project_with_endpoint(
 
 fn random_urlsafe(len: usize) -> anyhow::Result<String> {
     let mut bytes = vec![0u8; len];
-    getrandom::getrandom(&mut bytes).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 

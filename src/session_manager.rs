@@ -198,7 +198,7 @@ impl SessionManager {
 /// while avoiding collisions between concurrent processes.
 fn ephemeral_session_id() -> String {
     let mut bytes = [0u8; 4];
-    if getrandom::getrandom(&mut bytes).is_err() {
+    if getrandom::fill(&mut bytes).is_err() {
         // Last resort: use timestamp to avoid complete collision.
         return format!(
             "ephemeral-{}",
