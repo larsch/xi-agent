@@ -278,10 +278,18 @@ fn push_display_message(msgs: &mut Vec<Message>, ev: &SessionEvent) {
             msg.include_in_llm = false;
             msgs.push(msg);
         }
-        SessionEvent::TurnError { message, .. } | SessionEvent::LoopInterrupted { message, .. } => {
+        SessionEvent::TurnError { message, .. } => {
             // Visible in the UI so the user knows what happened on resume,
-            // but not forwarded to the LLM.
+            // but not forwarded to the LLM. The indicator is display metadata,
+            // not part of the durable message text.
             let mut msg = Message::assistant(message.clone());
+            msg.display_prefix = Some("🚨 ".to_string());
+            msg.include_in_llm = false;
+            msgs.push(msg);
+        }
+        SessionEvent::LoopInterrupted { message, .. } => {
+            let mut msg = Message::assistant(message.clone());
+            msg.display_prefix = Some("🛑 ".to_string());
             msg.include_in_llm = false;
             msgs.push(msg);
         }
@@ -923,6 +931,8 @@ mod tests {
         let msgs = project_display_messages(&events);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[0].content, "[Error: rate limit]");
+        assert_eq!(msgs[0].display_prefix.as_deref(), Some("🚨 "));
         assert!(!msgs[0].include_in_llm);
         assert!(!msgs[0].hidden);
     }
@@ -939,6 +949,7 @@ mod tests {
             msgs[0].content,
             "Agent loop stopped after turn by user request"
         );
+        assert_eq!(msgs[0].display_prefix.as_deref(), Some("🛑 "));
         assert!(!msgs[0].include_in_llm);
         assert!(!msgs[0].hidden);
     }

@@ -185,6 +185,10 @@ pub(crate) fn demo_events() -> Vec<SessionEvent> {
             message: "[demo turn error: provider request failed]".to_string(),
             timestamp: ts,
         },
+        SessionEvent::LoopInterrupted {
+            message: "Agent loop interrupted by user request".to_string(),
+            timestamp: ts,
+        },
         SessionEvent::ToolCall {
             id: "demo_ask".to_string(),
             name: "ask_user".to_string(),

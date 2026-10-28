@@ -606,6 +606,7 @@ fn message_render_fingerprint(msg: &Message) -> u64 {
     msg.content.hash(&mut h);
     msg.thinking.hash(&mut h);
     msg.assistant_phase.hash(&mut h);
+    msg.display_prefix.hash(&mut h);
     msg.tool_name.hash(&mut h);
     if let Some(args) = &msg.tool_args {
         hash_json(&mut h, args);
@@ -798,43 +799,47 @@ fn render_message_blocks(
                 None if is_streaming_last => AssistantPhase::Unknown,
                 None => AssistantPhase::Final,
             };
-            let answer_icon = match effective_phase {
-                AssistantPhase::Provisional => theme
-                    .log
-                    .assistant
-                    .provisional
-                    .prefix
-                    .text
-                    .as_deref()
-                    .unwrap_or("💭 ")
-                    .trim_end(),
-                AssistantPhase::Final => theme
-                    .log
-                    .assistant
-                    .r#final
-                    .prefix
-                    .text
-                    .as_deref()
-                    .unwrap_or("💬 ")
-                    .trim_end(),
-                AssistantPhase::Unknown if is_streaming_last => theme
-                    .log
-                    .assistant
-                    .provisional
-                    .prefix
-                    .text
-                    .as_deref()
-                    .unwrap_or("💭 ")
-                    .trim_end(),
-                AssistantPhase::Unknown => theme
-                    .log
-                    .assistant
-                    .r#final
-                    .prefix
-                    .text
-                    .as_deref()
-                    .unwrap_or("💬 ")
-                    .trim_end(),
+            let answer_icon = if let Some(prefix) = msg.display_prefix.as_deref() {
+                prefix.trim_end()
+            } else {
+                match effective_phase {
+                    AssistantPhase::Provisional => theme
+                        .log
+                        .assistant
+                        .provisional
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💭 ")
+                        .trim_end(),
+                    AssistantPhase::Final => theme
+                        .log
+                        .assistant
+                        .r#final
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💬 ")
+                        .trim_end(),
+                    AssistantPhase::Unknown if is_streaming_last => theme
+                        .log
+                        .assistant
+                        .provisional
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💭 ")
+                        .trim_end(),
+                    AssistantPhase::Unknown => theme
+                        .log
+                        .assistant
+                        .r#final
+                        .prefix
+                        .text
+                        .as_deref()
+                        .unwrap_or("💬 ")
+                        .trim_end(),
+                }
             };
             let deco_width = unicode_width::UnicodeWidthStr::width(answer_icon) as u16 + 1;
 

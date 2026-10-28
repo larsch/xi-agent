@@ -110,6 +110,10 @@ pub struct Message {
     /// `None` also preserves compatibility for old persisted sessions.
     #[serde(default)]
     pub assistant_phase: Option<AssistantPhase>,
+    /// Optional display-only block indicator for durable assistant notices.
+    /// Derived from session events and never persisted as message content.
+    #[serde(skip)]
+    pub display_prefix: Option<String>,
     /// When true, this message is sent to the LLM and persisted in the session
     /// but is not rendered in the chat log UI.
     #[serde(default)]
@@ -175,6 +179,7 @@ impl Default for Message {
             content: String::new(),
             thinking: None,
             assistant_phase: None,
+            display_prefix: None,
             hidden: false,
             include_in_llm: true,
             tool_call_id: None,
