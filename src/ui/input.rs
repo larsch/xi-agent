@@ -43,7 +43,7 @@ pub(super) fn style_textarea(app: &mut App) {
             .borders(Borders::NONE)
             .style(Style::default().bg(bg)),
     );
-    active.set_style(Style::default().fg(Color::White).bg(bg));
+    active.set_style(Style::default().bg(bg));
     active.set_cursor_line_style(Style::default().bg(bg));
 }
 
@@ -393,7 +393,7 @@ pub(super) fn render_input_panel(
     let visible_end = (scroll + viewport_h).min(total);
     let visible_lines: Vec<String> = wrapped_lines[scroll..visible_end].to_vec();
 
-    let input_style = Style::default().fg(Color::White).bg(panel_bg);
+    let input_style = Style::default().bg(panel_bg);
     let selected_style = input_style.patch(selection_style);
     let mut lines: Vec<Line<'static>> = visible_lines
         .into_iter()
@@ -504,7 +504,7 @@ pub(super) fn render_input_panel(
                 .borders(Borders::NONE)
                 .style(Style::default().bg(panel_bg)),
         )
-        .style(Style::default().fg(Color::White).bg(panel_bg));
+        .style(Style::default().bg(panel_bg));
 
     f.render_widget(paragraph, area);
 
