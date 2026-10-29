@@ -1154,21 +1154,10 @@ fn render_tool_call(
             .or(streaming_question.as_deref())
             .unwrap_or("");
 
-        // Context always renders in the log — the selection header only
-        // shows the question, so there is no duplication risk.
-        if let Some(ctx) = context {
-            let md_width = width.saturating_sub(3).max(1);
-            let md_lines = crate::markdown::render_with_theme(ctx, md_width, "", &theme.markdown);
-            append_markdown_answer(out, "📋", md_lines, false);
-        }
-
-        // The question always renders in the log body.
-        if !question.is_empty() {
-            let md_width = width.saturating_sub(3).max(1);
-            let md_lines =
-                crate::markdown::render_with_theme(question, md_width, "", &theme.markdown);
-            append_markdown_answer(out, "❓", md_lines, false);
-        }
+        let resolved = messages
+            .get(idx + 1)
+            .is_some_and(|next| next.role == Role::ToolResult);
+        append_ask_user_prompt(out, context, question, width, theme, !resolved);
 
         // Response is rendered in render_tool_result; nothing more here.
         return;
@@ -2083,6 +2072,62 @@ fn placeholder_result_line(text: impl Into<String>, color: Color) -> Line<'stati
 }
 
 // ── ask_user block helpers ────────────────────────────────────────────────────
+
+/// Keep wrapping stable after resolution; emphasis and separating rows are pending-only.
+fn append_ask_user_prompt(
+    out: &mut Vec<Line<'static>>,
+    context: Option<&str>,
+    question: &str,
+    width: usize,
+    theme: &Theme,
+    pending: bool,
+) {
+    if context.is_none() && question.is_empty() {
+        return;
+    }
+
+    let bg = if pending { theme.log.ask_user.bg } else { None };
+    let style = bg.map_or_else(Style::default, |bg| Style::default().bg(bg));
+    let md_width = width.saturating_sub(3).max(1);
+    let mut body = Vec::new();
+    if let Some(context) = context {
+        let md_lines = crate::markdown::render_with_theme(context, md_width, "", &theme.markdown);
+        append_markdown_answer(&mut body, "📋", md_lines, false);
+    }
+    if !question.is_empty() {
+        if pending && !body.is_empty() {
+            body.push(Line::default());
+        }
+        let mut md_lines =
+            crate::markdown::render_with_theme(question, md_width, "", &theme.markdown);
+        if pending {
+            for line in &mut md_lines {
+                for span in &mut line.spans {
+                    span.style = span.style.add_modifier(Modifier::BOLD);
+                }
+            }
+        }
+        append_markdown_answer(&mut body, "❓", md_lines, false);
+    }
+
+    if pending {
+        out.push(Line::default());
+    }
+    for mut line in body {
+        let text_width: usize = line.spans.iter().map(|span| span.content.width()).sum();
+        if let Some(bg) = bg {
+            for span in &mut line.spans {
+                span.style = span.style.bg(bg);
+            }
+        }
+        line.spans.push(Span::styled(
+            " ".repeat(width.saturating_sub(text_width)),
+            style,
+        ));
+        line.style = style;
+        out.push(line);
+    }
+}
 
 /// Response block: rendered like a normal user message but with the ask_user background color.
 fn append_ask_user_response(out: &mut Vec<Line<'static>>, content: &str, width: usize, bg: Color) {
@@ -3734,6 +3779,68 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_resolved_prompt_preserves_wrapping_without_emphasis_or_separators() {
+        let call = Message::tool_call(
+            "c1",
+            "ask_user",
+            serde_json::json!({
+                "context": "Context first line  \nContext second line",
+                "question": "Question first line  \nQuestion second line"
+            }),
+        );
+        let pending = build_log_layout(
+            std::slice::from_ref(&call),
+            false,
+            24,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let pending_text: Vec<String> = pending
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        assert_eq!(pending.len(), pending_text.len() + 2);
+        for is_error in [false, true] {
+            let result = Message::tool_result("c1", "Done", is_error);
+            let lines = build_log_layout(
+                &[call.clone(), result],
+                false,
+                24,
+                &cfg(),
+                &crate::theme::Theme::default(),
+                &crate::config::DisplayConfig::default(),
+            )
+            .flatten()
+            .0;
+            let text: Vec<String> = lines[..pending_text.len()]
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect()
+                })
+                .collect();
+            assert_eq!(text, pending_text, "resolution must not reflow the prompt");
+            for line in &lines[..pending_text.len()] {
+                assert!(line.style.bg.is_none());
+                assert!(line.spans.iter().all(|span| {
+                    span.style.bg.is_none() && !span.style.add_modifier.contains(Modifier::BOLD)
+                }));
+            }
+        }
+    }
+
+    #[test]
     fn ask_user_renders_question_from_partial_snapshot_during_streaming() {
         // During streaming, tool_args is empty but tool_partial_snapshot has
         // the question. The question must render in the log.
@@ -3824,7 +3931,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_context_matches_question_block_formatting() {
+    fn ask_user_context_and_question_share_shading_and_spacing() {
         let call = Message::tool_call(
             "c1",
             "ask_user",
@@ -3853,12 +3960,63 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(text[0], "📋 Context first line");
-        assert_eq!(text[1], " ╰ Context second line");
-        assert_eq!(text[2], "❓ Question first line");
-        assert_eq!(text[3], " ╰ Question second line");
-        assert!(lines[0].spans.iter().all(|span| span.style.bg.is_none()));
-        assert!(lines[1].spans.iter().all(|span| span.style.bg.is_none()));
+        assert_eq!(text[0], "");
+        assert_eq!(text[1].trim_end(), "📋 Context first line");
+        assert_eq!(text[2].trim_end(), " ╰ Context second line");
+        assert_eq!(text[3].trim(), "");
+        assert_eq!(text[4].trim_end(), "❓ Question first line");
+        assert_eq!(text[5].trim_end(), " ╰ Question second line");
+        let bg = crate::theme::Theme::default().log.ask_user.bg;
+        for line in &lines[1..] {
+            assert_eq!(line.style.bg, bg);
+            assert!(line.spans.iter().all(|span| span.style.bg == bg));
+            assert_eq!(line.width(), 120);
+        }
+        let context_span = lines[1]
+            .spans
+            .iter()
+            .find(|span| span.content.contains("Context"))
+            .unwrap();
+        assert!(!context_span.style.add_modifier.contains(Modifier::BOLD));
+        let question_span = lines[4]
+            .spans
+            .iter()
+            .find(|span| span.content.contains("Question"))
+            .unwrap();
+        assert!(question_span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn ask_user_prompt_wraps_and_uses_the_theme_background() {
+        let mut theme = crate::theme::Theme::default();
+        theme.log.ask_user.bg = Some(Color::Blue);
+        let mut lines = Vec::new();
+        super::append_ask_user_prompt(
+            &mut lines,
+            None,
+            "A longer question that should wrap onto multiple lines?",
+            24,
+            &theme,
+            true,
+        );
+        assert!(lines.len() > 2);
+        assert!(lines[0].spans.is_empty());
+        for line in &lines[1..] {
+            assert_eq!(line.width(), 24);
+            assert_eq!(line.style.bg, Some(Color::Blue));
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|span| span.style.bg == Some(Color::Blue))
+            );
+        }
+
+        let mut empty = Vec::new();
+        super::append_ask_user_prompt(&mut empty, None, "", 24, &theme, true);
+        assert!(
+            empty.is_empty(),
+            "do not show an empty box while args stream"
+        );
     }
 
     #[test]
