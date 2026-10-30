@@ -33,6 +33,7 @@ serde_json = { version = "1.0.149", features = ["preserve_order"] }
 textwrap = "0.16"
 ignore = "0.4"
 globset = "0.4"
+regex = "1"
 chrono = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "signal"] }
 ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }

@@ -4387,6 +4387,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "ratatui-textarea",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

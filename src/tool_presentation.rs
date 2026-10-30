@@ -22,6 +22,7 @@ pub fn tool_pending_label(name: &str) -> String {
         "write" | "write_file" => "writing…",
         "edit" | "edit_file" => "editing…",
         "find" | "find_files" => "finding…",
+        "search" => "searching…",
         "restart_host" => "restarting…",
         "agent_session" => "contacting worker…",
         _ if !is_builtin_tool(name) => return format!("{emoji} {name} · working…"),
@@ -60,6 +61,7 @@ fn is_builtin_tool(name: &str) -> bool {
             | "python_repl_execute"
             | "find"
             | "find_files"
+            | "search"
             | "ask_user"
             | "learn"
             | "restart_host"
@@ -76,7 +78,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "edit" | "edit_file" => "📝",
         "bash" | "cmd" | "powershell" | "exec" => "💻",
         "run_python" | "python_repl_execute" => "🐍",
-        "find" | "find_files" => "🔍",
+        "find" | "find_files" | "search" => "🔍",
         "ask_user" => "❓",
         "learn" => "🎓",
         "restart_host" => "🔄",

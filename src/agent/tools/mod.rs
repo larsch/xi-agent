@@ -168,6 +168,7 @@ pub mod python_repl;
 pub mod read;
 #[cfg(all(feature = "restart", unix))]
 pub mod restart_host;
+pub mod search;
 pub mod subprocess;
 #[cfg(unix)]
 pub mod sudo;
@@ -194,6 +195,7 @@ use python_repl::PythonReplTool;
 use read::ReadFileTool;
 #[cfg(all(feature = "restart", unix))]
 use restart_host::RestartHostTool;
+use search::SearchTool;
 #[cfg(unix)]
 use sudo::SudoTool;
 use write::WriteTool;
@@ -244,6 +246,7 @@ pub fn register_builtin_tools(
         Arc::new(WriteTool::new(Arc::clone(&file_tracker))),
         Arc::new(EditTool::new(Arc::clone(&file_tracker))),
         Arc::new(FindTool),
+        Arc::new(SearchTool),
         Arc::new(LearnTool::new(Arc::clone(&skills))),
         Arc::new(AskUserTool::new(
             app_event_tx.clone(),
