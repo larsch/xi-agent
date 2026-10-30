@@ -356,12 +356,12 @@ fn split_panel(
         .to_vec()
 }
 
-fn build_log_layout_cached(
-    app: &mut App,
-    width: usize,
-    inner_height: usize,
-    display: &DisplayConfig,
-) -> usize {
+/// Sum of the rendered line counts in a visual baseline.
+fn total_lines_of(baseline: &[(std::sync::Arc<str>, usize)]) -> usize {
+    baseline.iter().map(|(_, lines)| lines).sum()
+}
+
+fn build_log_layout_cached(app: &mut App, width: usize, display: &DisplayConfig) -> usize {
     // Flush any pending session-mutation dirty flag into the log cache.
     if app.session.take_dirty() {
         app.log_view.invalidate();
@@ -375,7 +375,7 @@ fn build_log_layout_cached(
             full_output: app.log_view.full_output,
             ..ToolBodyConfig::default()
         };
-        let mut layout = if let Some((kept, discarded)) = app.display_messages_split() {
+        let layout = if let Some((kept, discarded)) = app.display_messages_split() {
             let mut layout = build_log_layout_with_expansion(
                 &[],
                 &kept,
@@ -429,40 +429,43 @@ fn build_log_layout_cached(
                 &mut app.log_view.block_cache,
             )
         };
+        // A width change reflows every block, so the row counts (and with them
+        // the anchor) no longer describe this layout.
         let previous = if app.log_view.visual_baseline_width == Some(width) {
             app.log_view.take_visual_baseline()
         } else {
             ::log::debug!(
                 target: "throbber.trace",
-                "visual baseline dropped on width change: old_width={:?} new_width={width} baseline_present={} padding_remaining={:?}",
+                "visual baseline dropped on width change: old_width={:?} new_width={width} baseline_present={} anchor={:?}",
                 app.log_view.visual_baseline_width,
                 app.log_view.visual_baseline.is_some(),
-                app.log_view.last_block_padding.map(|padding| padding.remaining),
+                app.log_view
+                    .last_block_padding
+                    .map(|padding| padding.rows()),
             );
             app.log_view.clear_padding();
             app.log_view.visual_baseline_width = Some(width);
             None
         };
-        let streaming_change = previous
-            .as_deref()
-            .filter(|_| streaming && app.log_view.auto_scroll)
-            .map(|previous| layout.streaming_change(previous))
-            .unwrap_or_default();
-        // Keep the comparison snapshot free of synthetic bottom padding. The
-        // cached display layout may contain padding, but the next frame must
-        // compare real block heights only.
         let baseline: Vec<(std::sync::Arc<str>, usize)> = layout
             .blocks
             .iter()
             .map(|block| (block.identity.clone(), block.lines.len()))
             .collect();
-        if streaming_change.shrink > 0 {
-            layout.pad_rows(streaming_change.shrink);
-        }
+        // 1. Rerender the blocks and note the line delta of the whole log. The
+        //    delta covers every block, not just the streaming ones: a tool batch
+        //    that commits usually shrinks its block (preview replaced by the
+        //    result), and that shrink needs padding like any other.
+        let previous_lines = previous.as_deref().map_or(0, total_lines_of);
+        let delta = if previous.is_some() && streaming && app.log_view.auto_scroll {
+            layout.total_lines() as isize - previous_lines as isize
+        } else {
+            0
+        };
         let update = if previous.is_none() {
             VisualUpdate::NonContentLayoutChange
         } else if streaming && app.log_view.auto_scroll {
-            VisualUpdate::Delta(streaming_change.growth as isize)
+            VisualUpdate::Delta(delta.max(0))
         } else {
             VisualUpdate::NonContentLayoutChange
         };
@@ -470,61 +473,49 @@ fn build_log_layout_cached(
         let previous_blocks = previous.as_ref().map_or(0, Vec::len);
         ::log::debug!(
             target: "throbber.trace",
-            "layout update: revision={} width={} step_cursor={step_cursor:?} streaming={streaming} previous_blocks={previous_blocks} new_blocks={baseline_blocks} update={update:?} streaming_change={streaming_change:?}",
+            "layout update: revision={} width={} step_cursor={step_cursor:?} streaming={streaming} previous_blocks={previous_blocks} new_blocks={baseline_blocks} previous_lines={previous_lines} current_lines={} update={update:?}",
             app.log_view.log_cache.revision,
             width,
+            layout.total_lines(),
         );
-        if streaming && app.log_view.auto_scroll && streaming_change.shrink > 0 {
-            if let Some(padding) = &mut app.log_view.last_block_padding {
-                padding.remaining = padding
-                    .remaining
-                    .saturating_add(streaming_change.shrink as isize);
-            } else {
-                app.log_view.last_block_padding = Some(PaddingState {
-                    max_total_lines: layout.total_lines(),
-                    inner_height_when_set: inner_height,
-                    remaining: streaming_change.shrink as isize,
-                });
-            }
-        }
+        // Streaming geometry, one delta per frame:
+        //   1. the rendered blocks changed by `delta` rows (computed above),
+        //   2. padding absorbs that delta (shrink adds padding, growth spends
+        //      it),
+        //   3. growth the padding could not absorb steals the throbber row, and
+        //      only what is left over scrolls.
         let padding_before = app
             .log_view
             .last_block_padding
-            .map(|padding| padding.remaining);
-        let anchor_padding = padding_before.map_or(0, |remaining| remaining.max(0) as usize);
-        app.log_view.set_visual_baseline(baseline);
-        app.agent_turn.update_visual_state_with_padding(
-            Some(update),
-            anchor_padding,
-            std::time::Instant::now(),
-        );
-        if streaming
-            && app.log_view.auto_scroll
-            && let Some(padding) = &mut app.log_view.last_block_padding
-        {
-            padding.remaining = padding
-                .remaining
-                .saturating_sub(streaming_change.growth as isize);
+            .map_or(0, |padding| padding.rows());
+        let mut leftover_growth = 0;
+        if streaming && app.log_view.auto_scroll && delta != 0 {
+            let padding = app
+                .log_view
+                .last_block_padding
+                .get_or_insert_with(PaddingState::new);
+            if delta < 0 {
+                padding.absorb_shrink(delta.unsigned_abs());
+            } else {
+                leftover_growth = padding.consume_growth(delta as usize);
+            }
         }
         let padding_after = app
             .log_view
             .last_block_padding
-            .map(|padding| padding.remaining);
+            .map_or(0, |padding| padding.rows());
         ::log::debug!(
             target: "throbber.trace",
-            "layout anchor padding: update={update:?} before={padding_before:?} after={padding_after:?} streaming={streaming}",
+            "layout padding: update={update:?} delta={delta} padding={padding_before}->{padding_after} leftover_growth={leftover_growth} streaming={streaming}",
         );
-        let content_len = layout.total_lines();
-
-        // The initial total is the anchor. Subsequent positive visual deltas
-        // consume this padding; do not raise the anchor after each update.
-        if streaming && app.log_view.last_block_padding.is_none() {
-            app.log_view.last_block_padding = Some(PaddingState {
-                max_total_lines: content_len,
-                inner_height_when_set: inner_height,
-                remaining: 0,
-            });
-        }
+        app.log_view.set_visual_baseline(baseline);
+        // Handing over the pre-growth padding makes the activity row give way
+        // exactly when the growth exceeded it (step 3).
+        app.agent_turn.update_visual_state_with_padding(
+            Some(update),
+            padding_before,
+            std::time::Instant::now(),
+        );
 
         let rev = app.log_view.log_cache.revision;
         app.log_view.log_cache.cached_layout = Some((rev, width, step_cursor, layout));
@@ -556,6 +547,48 @@ fn anchored_block_scroll(
         .saturating_add(block_len)
         .saturating_sub(viewport_height);
     anchored_scroll.max(bottom_visible_scroll).min(block_top)
+}
+
+/// Vertical layout of the streaming log.
+///
+/// The content is bottom-anchored above the rows reserved below it: the padding
+/// rows, or the activity row when it has to use a row of its own. That is the
+/// whole of the padding mechanism — a block that shrinks adds padding rows,
+/// which simply move the content up by nothing, and a block that grows spends
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogWindow {
+    /// First content line drawn.
+    first_line: usize,
+    /// Content rows drawn.
+    content_rows: usize,
+    /// Blank rows above the content.
+    top_padding: usize,
+    /// Blank rows below the content, excluding the activity row.
+    bottom_padding: usize,
+    /// Rows reserved below the content (padding, or the activity row).
+    reserved_below: usize,
+}
+
+fn log_window(
+    inner_height: usize,
+    content_len: usize,
+    padding: usize,
+    throbber: bool,
+) -> LogWindow {
+    let throbber_row = usize::from(throbber);
+    // The activity row takes one of the padding rows when there is one.
+    let reserved_below = padding.max(throbber_row);
+    let content_rows = inner_height.saturating_sub(reserved_below).min(content_len);
+    LogWindow {
+        first_line: content_len.saturating_sub(content_rows),
+        content_rows,
+        top_padding: inner_height
+            .saturating_sub(reserved_below)
+            .saturating_sub(content_len),
+        bottom_padding: reserved_below.saturating_sub(throbber_row),
+        reserved_below,
+    }
 }
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
@@ -639,7 +672,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         previous_log_height,
         app.log_view.auto_scroll,
         app.log_view.log_scroll,
-        app.log_view.last_block_padding.as_ref().map(|p| (p.max_total_lines, p.inner_height_when_set)),
+        app.log_view
+            .last_block_padding
+            .as_ref()
+            .map(|padding| padding.rows()),
     );
 
     let content_len = if app.context_view.active {
@@ -653,7 +689,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         }
         0
     } else {
-        build_log_layout_cached(app, log_width, inner_height, &display)
+        build_log_layout_cached(app, log_width, &display)
     };
 
     // The logical layout update above may change activity-row visibility. Recompute
@@ -773,71 +809,54 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let has_scrollbar = total_lines > inner_height && !app.log_view.auto_scroll;
     let log_scroll = app.log_view.log_scroll;
 
-    let stored_height = app
-        .log_view
-        .last_block_padding
-        .as_ref()
-        .map(|ps| ps.inner_height_when_set)
-        .unwrap_or(inner_height);
-
-    // When the log area shrinks (e.g. throbber appears), the bottom
-    // padding absorbs it so the content position stays stable.
-    let height_decrease = stored_height.saturating_sub(inner_height);
-
-    let max_total = app
-        .log_view
-        .last_block_padding
-        .as_ref()
-        .map(|ps| ps.max_total_lines)
-        .unwrap_or(0);
-
-    let block_padding = if app.log_view.auto_scroll {
+    // Rows kept free below the content. The activity row takes one of the
+    // padding rows when there is one, otherwise it needs a row of its own.
+    let padding = if app.log_view.auto_scroll {
         app.log_view
             .last_block_padding
-            .as_ref()
-            .map_or(0, |padding| padding.remaining.max(0) as usize)
+            .map_or(0, |padding| padding.rows())
     } else {
         0
+    };
+    let window = log_window(inner_height, content_len, padding, throbber.is_some());
+    let content_top_row = window.top_padding as isize - window.first_line as isize;
+    let (first_line, reserved_below) = if app.log_view.auto_scroll {
+        (window.first_line, window.reserved_below)
+    } else {
+        (log_scroll, 0)
     };
 
     ::log::debug!(
         target: "throbber.trace",
-        "render geometry: total_lines={} inner_height={} stored_height={} max_total={} height_decrease={} block_padding={} throbber_visible={}",
+        "render geometry: total_lines={} content_len={} inner_height={} padding={} reserved_below={} first_line={first_line} content_top_row={content_top_row} throbber_visible={}",
         total_lines,
+        content_len,
         inner_height,
-        stored_height,
-        max_total,
-        height_decrease,
-        block_padding,
+        padding,
+        reserved_below,
         app.throbber_visible(),
     );
 
     let (visible_lines, visible_sources): (Vec<Line<'static>>, Vec<LineSource>) = {
         let layout = &app.log_view.log_cache.cached_layout.as_ref().unwrap().3;
-        if block_padding > 0 {
-            // Anchor against the stored height so content stays put when the
-            // log area resizes.  Bottom padding absorbs any shrinkage.
-            let anchor_top = max_total.saturating_sub(stored_height);
-            let raw_start = anchor_top.min(total_lines);
-            let raw_end = total_lines;
-            let raw_lines = raw_end.saturating_sub(raw_start);
-            // Use the bottom-most padding row for the throbber rather than
-            // inserting it before the padding and moving existing blocks.
-            let bottom_padding = block_padding
-                .saturating_sub(height_decrease)
-                .saturating_sub(usize::from(throbber.is_some()));
-            let top_padding = inner_height.saturating_sub(raw_lines + bottom_padding);
-
-            let mut lines: Vec<Line<'static>> = vec![Line::default(); top_padding];
-            let mut sources: Vec<LineSource> = vec![empty_line_source(); top_padding];
-            let (wl, ws) = layout.visible_window(raw_start, raw_end.min(content_len));
+        if app.log_view.auto_scroll {
+            let mut lines: Vec<Line<'static>> = vec![Line::default(); window.top_padding];
+            let mut sources: Vec<LineSource> = vec![empty_line_source(); window.top_padding];
+            let (wl, ws) = layout.visible_window(
+                window.first_line,
+                window
+                    .first_line
+                    .saturating_add(window.content_rows)
+                    .min(content_len),
+            );
             lines.extend(wl);
             sources.extend(ws);
-            lines.extend(std::iter::repeat_n(Line::default(), bottom_padding));
-            sources.extend(std::iter::repeat_n(empty_line_source(), bottom_padding));
-            if let Some(throbber) = &throbber
-                && content_len >= raw_start
-            {
+            lines.extend(std::iter::repeat_n(Line::default(), window.bottom_padding));
+            sources.extend(std::iter::repeat_n(
+                empty_line_source(),
+                window.bottom_padding,
+            ));
+            if let Some(throbber) = &throbber {
                 lines.push(throbber.clone());
                 sources.push(empty_line_source());
             }
@@ -1847,6 +1866,142 @@ mod tests {
     }
 
     #[test]
+    fn thinking_shrink_keeps_viewport_anchored_in_a_short_log() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        app.session
+            .append_user_message("short log prompt".to_string(), 0);
+        app.begin_agent_turn();
+        // Keep the activity row out of the geometry so rows are comparable.
+        app.agent_turn.activity_visible = false;
+
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2".to_string());
+        let short = render_to_plain_lines(&mut app, 80, 20);
+        let short_top = short.iter().position(|l| l.contains("t0")).unwrap();
+
+        // Growing the block scrolls the content up by the added row.
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2\nt3".to_string());
+        let tall = render_to_plain_lines(&mut app, 80, 20);
+        let tall_top = tall.iter().position(|l| l.contains("t0")).unwrap();
+        assert_eq!(
+            short_top,
+            tall_top + 1,
+            "growth of one row scrolls the content up by one row"
+        );
+
+        // Shrinking back must not pull the content down again: the freed row
+        // is absorbed as bottom padding.
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2".to_string());
+        let shrunk = render_to_plain_lines(&mut app, 80, 20);
+        let shrunk_top = shrunk.iter().position(|l| l.contains("t0")).unwrap();
+        assert_eq!(
+            shrunk_top, tall_top,
+            "a shrinking block must keep the content on the same rows"
+        );
+        let t2_row = shrunk.iter().position(|l| l.contains("t2")).unwrap();
+        assert!(
+            shrunk.get(t2_row + 1).is_some_and(|l| l.trim().is_empty()),
+            "the freed row should be blank, got {:?}",
+            shrunk.get(t2_row + 1)
+        );
+    }
+
+    #[test]
+    fn anchor_padding_survives_a_frame_without_a_detected_shrink() {
+        // Regression: padding used to be re-derived from per-frame shrink
+        // deltas, so any frame that rebuilt the layout without a height change
+        // (reflow, cache invalidation, repeated identical content) lost the
+        // padding and dropped the whole transcript by the shrunk rows.
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        app.session
+            .append_user_message("short log prompt".to_string(), 0);
+        app.begin_agent_turn();
+        app.agent_turn.activity_visible = false;
+
+        let marker_row = |lines: &[String]| {
+            lines
+                .iter()
+                .position(|l| l.contains("short log prompt"))
+                .unwrap()
+        };
+
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2".to_string());
+        let short_row = marker_row(&render_to_plain_lines(&mut app, 80, 20));
+
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2\nt3\nt4".to_string());
+        let tall_row = marker_row(&render_to_plain_lines(&mut app, 80, 20));
+        assert_eq!(short_row, tall_row + 2, "growth scrolls the content up");
+
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2".to_string());
+        let shrunk_row = marker_row(&render_to_plain_lines(&mut app, 80, 20));
+        assert_eq!(shrunk_row, tall_row, "the shrink is padded");
+
+        // Rebuild the layout without any height change: the padding must stay.
+        app.log_view.invalidate();
+        let repeated_row = marker_row(&render_to_plain_lines(&mut app, 80, 20));
+        assert_eq!(
+            repeated_row, shrunk_row,
+            "padding must not depend on a per-frame shrink delta"
+        );
+    }
+
+    #[test]
+    fn padding_tour_deltas_keep_the_content_row_stable() {
+        // Delta script produced by the `padding-tour` test-provider command
+        // (docs/PADDING-RULES.md). Positive = rows added by streaming, negative
+        // = rows a block gave up, 0 = layout rebuilt without a size change.
+        let script: [isize; 37] = [
+            1, 1, 1, 1, 1, 1, // step 1: shell body grows a line at a time
+            0, // step 1 tail: idle, activity row returns with no padding
+            1, -1, 1, -1, 1, -1, 1, -1, -1, // step 2: streaming thinking grows and
+            // trims its trailing row, leaving one padding row behind
+            1, 1, 1, // step 3: growth spends the padding, then steals the row
+            1, 1, 7, // step 4: thinking drift plus a taller read_file body
+            0, // step 4 tail: idle, activity row returns onto the padding
+            1, 1, -1, // step 5: partial consumption, then another trim
+            0,  // step 5 tail: idle again
+            1, 7, -6, 1, 1, 1, 1, 1, // step 6: async multi-tool interleaving
+            0, // step 7: local work, no output
+            2, // step 8: answer text
+        ];
+
+        let inner_height = 40;
+        let mut content_len = 20usize;
+        let mut padding = PaddingState::new();
+        let row = |content_len: usize, padding: &PaddingState| {
+            let window = log_window(inner_height, content_len, padding.rows(), false);
+            window.top_padding as isize - window.first_line as isize
+        };
+
+        let mut previous_row = row(content_len, &padding);
+        for (i, delta) in script.into_iter().enumerate() {
+            content_len = (content_len as isize + delta) as usize;
+
+            // Step 2/3: padding absorbs the delta, then reports what is left.
+            let leftover = if delta < 0 {
+                padding.absorb_shrink(delta.unsigned_abs());
+                0
+            } else {
+                padding.consume_growth(delta as usize)
+            };
+
+            let current_row = row(content_len, &padding);
+            assert_eq!(
+                current_row,
+                previous_row - leftover as isize,
+                "frame {i}: delta {delta} with padding {} must move the content by {leftover} rows",
+                padding.rows()
+            );
+            assert!(
+                current_row <= previous_row,
+                "frame {i}: the content must never move down"
+            );
+            previous_row = current_row;
+        }
+    }
+
+    #[test]
     fn throbber_replaces_bottom_padding_without_moving_blocks() {
         let mut app = make_app();
         app.session.ensure_event_log_for_submit();
@@ -1857,19 +2012,7 @@ mod tests {
         app.begin_agent_turn();
         app.agent_turn.activity_visible = false;
         render_to_plain_lines(&mut app, 80, 20);
-        let content_len = app
-            .log_view
-            .log_cache
-            .cached_layout
-            .as_ref()
-            .unwrap()
-            .3
-            .total_lines();
-        app.log_view.last_block_padding = Some(PaddingState {
-            max_total_lines: content_len + 2,
-            inner_height_when_set: app.log_view.last_log_height,
-            remaining: 2,
-        });
+        app.log_view.last_block_padding = Some(PaddingState { padding: 2 });
         let before = render_to_plain_lines(&mut app, 80, 20);
         app.agent_turn.activity_visible = true;
         let after = render_to_plain_lines(&mut app, 80, 20);

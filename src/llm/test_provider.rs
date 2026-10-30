@@ -39,6 +39,10 @@ pub struct TestProvider {
     edit_padding_step: Arc<AtomicU8>,
     /// Unique temp file path used by the edit-padding repro.
     edit_padding_path: Arc<std::sync::Mutex<String>>,
+    /// Tracks the padding tour: 0 = idle, otherwise the step being streamed.
+    padding_tour_step: Arc<AtomicU8>,
+    /// Unique temp file path used by the padding tour.
+    padding_tour_path: Arc<std::sync::Mutex<String>>,
 }
 
 impl TestProvider {
@@ -53,6 +57,8 @@ impl TestProvider {
             write_edit_throbber: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             edit_padding_step: Arc::new(AtomicU8::new(0)),
             edit_padding_path: Arc::new(std::sync::Mutex::new(String::new())),
+            padding_tour_step: Arc::new(AtomicU8::new(0)),
+            padding_tour_path: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 }
@@ -242,7 +248,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `echo <text>` | Stream text back token by token |
 | `slow <text>` | Stream text with artificial delays |
 | `stream-lines <seconds>` | Stream 10 numbered lines with the given delay between each |
-| `stream-thinking <interval>` | Stream thinking tokens for 10 seconds at the given interval |
+| `stream-thinking <interval>` | Stream thinking tokens for 5 seconds with variable-length chunks and occasional line breaks/blank lines; `interval` overrides the base tick (default 0.02 s) |
 | `thinking <text>` | Emit thinking tokens then a text answer |
 | `status <msg>` | Emit a `StatusUpdate` event then confirm |
 | `error` | Emit a provider error |
@@ -288,6 +294,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `write-edit-throbber` | Same as `write-edit` but waits 4 s after edit result before summary — exercises throbber-after-shrink rendering |
 | `edit-padding-repro` | Write/read an 8-line fixture, replace it with the same 8 lines plus a blank line, then run Python sleep 10 s |
 | `long-lines` | 3-step sequence: write 10 very long lines (~200 chars each), grep all, read back (exercises wrapped-line limit in shell and read_file output) |
+| `padding-tour` | 9-step tour of the streaming padding rules: growth, commit shrink/grow, padded growth, async multi-tool batch, idle activity row (see `docs/PADDING-RULES.md`) |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
 | `learn [name]` | Issue a `learn` tool call (defaults to `xi-config-skills` if no name given) |
@@ -296,7 +303,59 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `edit-long` | Issue an `edit_file` tool call with 6 lines per side (exercises per-side truncation markers) |
 "#;
 
+// ── Thinking stream fixture ───────────────────────────────────────────────────
+
+/// Prose used by `stream-thinking`. It is cut into randomly sized chunks and
+/// restarted from the beginning when exhausted, so the stream never runs dry
+/// during the 5 second run.
+const THINKING_STREAM_FIXTURE: &str = "\
+Let me work through this step by step. The request is to exercise the thinking \
+renderer under a fast, uneven token cadence, so the interesting part is not \
+the content but the shape of the stream itself. First, consider what the UI \
+does with each incoming chunk: it appends the text, re-wraps the affected \
+lines, and schedules a repaint. That means both very small chunks and \
+occasional larger bursts are worth exercising, because they stress different \
+paths. Second, the cadence should be far higher than a real provider so any \
+per-chunk overhead becomes visible during a short session; a twenty millisecond \
+default tick yields roughly five hundred chunks in five seconds. Third, chunk \
+boundaries should not follow word boundaries, because real tokenizers split \
+mid-word all the time and the renderer must not assume otherwise. So the \
+generator picks a random length, snaps it forward to a character boundary, \
+and emits that slice, which occasionally lands in the middle of a word or \
+even inside a multi-byte character. That covers the awkward cases without \
+special-casing them. Finally, summarize: fast tick, variable chunk length, \
+smooth wrapping, no assumptions about token boundaries. ";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Minimal xorshift PRNG so the test provider can vary chunk sizes and timing
+/// without pulling in a random-number dependency.
+struct TestRng(u64);
+
+impl TestRng {
+    fn new() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15);
+        Self(seed | 1)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    /// Uniform value in the inclusive range `lo..=hi` (`lo < hi`).
+    fn range(&mut self, lo: usize, hi: usize) -> usize {
+        debug_assert!(lo < hi);
+        lo + (self.next_u64() % ((hi - lo + 1) as u64)) as usize
+    }
+}
 
 /// Stream a static string as word-sized tokens with an optional per-word delay.
 fn stream_text(text: &'static str, delay: Option<Duration>) -> LlmStream {
@@ -413,6 +472,23 @@ line 3: It is short enough to display without truncation\n\
 line 4: End of short fixture\n\
 ";
 
+/// Fixture for the padding tour: twelve numbered lines, enough for the
+/// head-truncated preview to be much taller than the `write_file` result.
+const TOUR_FIXTURE: &str = "\
+tour line 01\n\
+tour line 02\n\
+tour line 03\n\
+tour line 04\n\
+tour line 05\n\
+tour line 06\n\
+tour line 07\n\
+tour line 08\n\
+tour line 09\n\
+tour line 10\n\
+tour line 11\n\
+tour line 12\n\
+";
+
 /// Long fixture content (>8 lines) for `read-long` command.
 const READ_LONG_FIXTURE: &str = "\
 line 01: The quick brown fox\n\
@@ -436,6 +512,96 @@ line 18: who zaps\n\
 line 19: quickly foxing\n\
 line 20: the dizzy dog\n\
 ";
+
+/// Stream thinking tokens for `duration_ms`, then a tool call.
+///
+/// The text is emitted in short chunks with deliberate line terminators: a
+/// chunk that ends a line removes the provisional trailing row (the renderer
+/// trims empty edges), so the block gets **shorter** between frames. The next
+/// chunk adds a row again. That trailing-edge trim is the only shrink source a
+/// provider can drive, and it is what the padding rules have to absorb.
+fn tour_thinking_step(
+    duration_ms: u64,
+    tool_name: &'static str,
+    args: serde_json::Value,
+) -> LlmStream {
+    Box::pin(stream! {
+        let text = THINKING_STREAM_FIXTURE;
+        let mut pos = 0usize;
+        let mut tick = 0u32;
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(duration_ms) {
+            if pos >= text.len() {
+                pos = 0;
+            }
+            let end = (pos + 6..=text.len())
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(text.len());
+            yield LlmEvent::ThinkingToken(text[pos..end].to_string());
+            pos = end;
+            tick += 1;
+            // Finish the line now and then: this shrinks the block by a row.
+            // Every so often take two rows at once.
+            if tick.is_multiple_of(13) {
+                yield LlmEvent::ThinkingToken("\n\n".to_string());
+            } else if tick.is_multiple_of(4) {
+                yield LlmEvent::ThinkingToken("\n".to_string());
+            }
+            sleep(Duration::from_millis(12)).await;
+        }
+        // Finish the line so the block shrinks once more, deterministically,
+        // right before the tool call: the tour can rely on one padding row here.
+        yield LlmEvent::ThinkingToken("\n".to_string());
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: tool_name.to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: tool_name.to_string(),
+            args,
+        };
+        yield LlmEvent::Done;
+    })
+}
+
+/// Asynchronous multi-tool batch for the padding tour: a shell body that grows
+/// line by line, a `read_file` whose result is much taller than its arguments,
+/// and a `write_file` whose preview streams while the other two run.
+fn tour_batch_stream(bash_command: &str, path: String) -> LlmStream {
+    let command = bash_command.to_string();
+    let read_path = path.clone();
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "tour-bash".to_string(),
+            name: "bash".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "tour-bash".to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({ "command": command }),
+        };
+        yield LlmEvent::ToolCallStart {
+            id: "tour-read".to_string(),
+            name: "read_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "tour-read".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({ "path": read_path }),
+        };
+        yield LlmEvent::ToolCallStart {
+            id: "tour-write".to_string(),
+            name: "write_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "tour-write".to_string(),
+            name: "write_file".to_string(),
+            args: serde_json::json!({ "path": path, "content": TOUR_FIXTURE }),
+        };
+        yield LlmEvent::Done;
+    })
+}
 
 /// Write content to the test temp file and return a read_file tool call stream.
 fn read_file_stream(content: &'static str) -> LlmStream {
@@ -1034,6 +1200,87 @@ impl TestProvider {
             }
         }
     }
+
+    /// Drive the padding tour (see `docs/PADDING-RULES.md`).
+    ///
+    /// Each step streams some content and ends with a tool call so the loop
+    /// continues; the tour advances when the result arrives. The last step
+    /// answers and the loop ends.
+    fn advance_padding_tour(&self, step: u8) -> LlmStream {
+        let next = |step: u8| self.padding_tour_step.store(step, Ordering::SeqCst);
+        let path = self.padding_tour_path.lock().unwrap().clone();
+        match step {
+            // Growth only: six lines, one a frame, then an idle gap that brings
+            // the activity row back with no padding available.
+            1 => {
+                next(2);
+                shell_tool_stream(
+                    "bash".to_string(),
+                    format!(
+                        "for i in 1 2 3 4 5 6; do echo \"tour 1: line $i\"; sleep 0.3; done; \
+                         for i in $(seq 1 12); do echo \"tour line $i\"; done > '{path}'; sleep 2"
+                    ),
+                )
+            }
+            // Streaming thinking wraps and its tail window trims: the block
+            // both grows and shrinks while it renders.
+            2 => {
+                next(3);
+                tour_thinking_step(2_000, "bash", serde_json::json!({ "command": "true" }))
+            }
+            // Seven growths that must be swallowed by the padding.
+            3 => {
+                next(4);
+                shell_tool_stream(
+                    "bash".to_string(),
+                    "for i in 1 2 3 4 5 6 7; do echo \"tour 3: line $i\"; sleep 0.25; done"
+                        .to_string(),
+                )
+            }
+            // More thinking drift, then a result whose body is much taller than
+            // its one-line arguments.
+            4 => {
+                next(5);
+                tour_thinking_step(1_500, "read_file", serde_json::json!({ "path": path }))
+            }
+            // Partial consumption, then an idle gap: the activity row comes
+            // back while padding is still available and must not move anything.
+            5 => {
+                next(6);
+                shell_tool_stream(
+                    "bash".to_string(),
+                    "for i in 1 2 3; do echo \"tour 5: line $i\"; sleep 0.4; done; sleep 4"
+                        .to_string(),
+                )
+            }
+            // Asynchronous multi-tool batch: a growing shell body, a taller
+            // read_file result and a fresh write preview overlap in frames.
+            6 => {
+                next(7);
+                tour_batch_stream(
+                    "for i in 1 2 3 4 5 6 7 8; do echo \"tour 6: line $i\"; sleep 0.4; done",
+                    path,
+                )
+            }
+            // Local work with no output, then the answer.
+            7 => {
+                next(8);
+                shell_tool_stream(
+                    "bash".to_string(),
+                    "sleep 5; echo 'tour 7: local work done'".to_string(),
+                )
+            }
+            _ => {
+                next(0);
+                stream_owned(
+                    "Padding tour complete. The content should never have moved down except one row when \
+                     the activity row appeared without padding, and one row when growth exactly consumed the \
+                     last padding row.\n"
+                        .to_string(),
+                )
+            }
+        }
+    }
 }
 
 impl super::LlmProvider for TestProvider {
@@ -1106,6 +1353,12 @@ impl super::LlmProvider for TestProvider {
             let ll_step = self.long_lines_step.load(Ordering::SeqCst);
             if ll_step > 0 {
                 return self.advance_long_lines(ll_step, &last.content.clone());
+            }
+
+            // Check padding tour.
+            let tour_step = self.padding_tour_step.load(Ordering::SeqCst);
+            if tour_step > 0 {
+                return self.advance_padding_tour(tour_step);
             }
 
             let step = self.sequence_step.load(Ordering::SeqCst);
@@ -1194,29 +1447,58 @@ impl super::LlmProvider for TestProvider {
             }
 
             "stream-thinking" => {
-                // Stream simulated thinking tokens for 10 seconds, emitting one
-                // token every `interval` seconds (float). `rest` is the interval.
+                // Stream simulated thinking tokens for 5 seconds. The default
+                // tick is 20 ms — far faster than a real provider — so per-chunk
+                // overhead shows up quickly. Chunk lengths vary: mostly short
+                // slices, with occasional larger bursts, and boundaries fall
+                // anywhere (including mid-word and mid-character).
+                //
+                // `rest` overrides the base tick in seconds. A single tick may
+                // emit several chunks, and every chunk is followed by a delay of
+                // 0.5×–1.5× the tick so the cadence is uneven as well.
                 let interval = rest
                     .parse::<f64>()
                     .ok()
-                    .filter(|s| s.is_finite() && *s > 0.0)
-                    .unwrap_or(0.25);
-                let tick = Duration::from_secs_f64(interval);
-                let total = Duration::from_secs(10);
+                    .filter(|s| s.is_finite() && *s > 0.0 && *s <= 1.0)
+                    .unwrap_or(0.02);
+                let total = Duration::from_secs(5);
                 Box::pin(stream! {
                     let start = tokio::time::Instant::now();
-                    let mut n = 0u64;
-                    loop {
-                        let elapsed = start.elapsed();
-                        if elapsed >= total {
-                            break;
+                    let mut rng = TestRng::new();
+                    let text = THINKING_STREAM_FIXTURE;
+                    let mut pos = 0usize;
+                    while start.elapsed() < total {
+                        // 1–3 chunks per tick.
+                        let chunks = rng.range(1, 3);
+                        for _ in 0..chunks {
+                            if pos >= text.len() {
+                                pos = 0;
+                            }
+                            // Most chunks are 1–12 chars; roughly one in six is
+                            // a larger burst of 20–100 chars.
+                            let want = if rng.range(0, 5) == 0 {
+                                rng.range(20, 100)
+                            } else {
+                                rng.range(1, 12)
+                            };
+                            let end = (pos + want..=text.len())
+                                .find(|&i| text.is_char_boundary(i))
+                                .unwrap_or(text.len());
+                            // Every so often end the chunk with a line break,
+                            // and more rarely with a blank line, so the
+                            // renderer also sees multi-line thinking output.
+                            let trailer = match rng.range(0, 19) {
+                                0 => "\n\n",
+                                1..=6 => "\n",
+                                _ => "",
+                            };
+                            let chunk = format!("{}{trailer}", &text[pos..end]);
+                            pos = end;
+                            yield LlmEvent::ThinkingToken(chunk);
                         }
-                        n += 1;
-                        yield LlmEvent::ThinkingToken(format!(
-                            "thinking {n} ({:.2}s) ",
-                            elapsed.as_secs_f64()
-                        ));
-                        sleep(tick).await;
+                        // Jitter the delay between 0.5× and 1.5× the base tick.
+                        let factor = 0.5 + rng.range(0, 1000) as f64 / 1000.0;
+                        sleep(Duration::from_secs_f64(interval * factor)).await;
                     }
                     yield LlmEvent::Done;
                 })
@@ -1476,6 +1758,25 @@ impl super::LlmProvider for TestProvider {
                 self.advance_long_lines(1, "")
             }
 
+            "padding-tour" => {
+                // Nine-step tour of the streaming padding rules; see
+                // docs/PADDING-RULES.md for the expected geometry per step.
+                let fname = format!(
+                    "xi-test-padding-tour-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0)
+                );
+                let path = std::env::temp_dir()
+                    .join(fname)
+                    .to_string_lossy()
+                    .into_owned();
+                *self.padding_tour_path.lock().unwrap() = path;
+                self.padding_tour_step.store(1, Ordering::SeqCst);
+                self.advance_padding_tour(1)
+            }
+
             "read" => read_file_stream(READ_SHORT_FIXTURE),
 
             "read-long" => read_file_stream(READ_LONG_FIXTURE),
@@ -1723,6 +2024,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn padding_tour_walks_every_step() {
+        let provider = TestProvider::new();
+        let mut messages = vec![Message::user("padding-tour")];
+        let mut batches: Vec<Vec<String>> = Vec::new();
+
+        // Seven tool steps; the tour advances on their results and then answers.
+        for _ in 0..7 {
+            let events: Vec<LlmEvent> = provider
+                .stream_chat(messages.clone(), LlmRequestContext::default())
+                .collect()
+                .await;
+            let calls: Vec<String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    LlmEvent::ToolCall { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(!calls.is_empty(), "every tour step issues a tool call");
+            messages.push(Message::assistant(""));
+            for (i, name) in calls.iter().enumerate() {
+                let id = format!("tour-{i}");
+                messages.push(Message::tool_call(&id, name, serde_json::json!({})));
+                messages.push(Message::tool_result(&id, "ok", false));
+            }
+            batches.push(calls);
+        }
+
+        assert_eq!(
+            batches[5].len(),
+            3,
+            "the multi-tool batch streams three tool calls"
+        );
+
+        // The final step ends the turn with text.
+        let events: Vec<LlmEvent> = provider
+            .stream_chat(messages, LlmRequestContext::default())
+            .collect()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::Token { .. })),
+            "the tour ends with a summary"
+        );
+    }
+
+    #[tokio::test]
     async fn stream_thinking_command_emits_thinking_tokens() {
         let provider = TestProvider::new();
         let mut stream = std::pin::pin!(provider.stream_chat(
@@ -1731,6 +2080,44 @@ mod tests {
         ));
         let first = stream.next().await;
         assert!(matches!(first, Some(LlmEvent::ThinkingToken(_))));
+    }
+
+    #[tokio::test]
+    async fn stream_thinking_chunks_vary_in_length() {
+        let provider = TestProvider::new();
+        let mut stream = std::pin::pin!(provider.stream_chat(
+            vec![Message::user("stream-thinking 0.001")],
+            LlmRequestContext::default(),
+        ));
+
+        let mut lengths = Vec::new();
+        let mut text = String::new();
+        while lengths.len() < 300 {
+            match stream.next().await {
+                Some(LlmEvent::ThinkingToken(chunk)) => {
+                    lengths.push(chunk.chars().count());
+                    text.push_str(&chunk);
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!(lengths.len(), 300, "expected 300 thinking chunks");
+        let min = *lengths.iter().min().unwrap();
+        let max = *lengths.iter().max().unwrap();
+        assert!(min < max, "chunk lengths should vary, got {lengths:?}");
+        assert!(
+            max >= 20,
+            "expected at least one burst chunk, got {lengths:?}"
+        );
+        assert!(
+            text.contains('\n'),
+            "expected occasional line breaks in the thinking stream"
+        );
+        assert!(
+            text.contains("\n\n"),
+            "expected the occasional blank line in the thinking stream"
+        );
     }
 
     #[tokio::test]

@@ -79,13 +79,6 @@ pub(crate) enum TruncationDirection {
     Diff,
 }
 
-/// Per-block visual changes caused by streaming content.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StreamingChange {
-    pub growth: usize,
-    pub shrink: usize,
-}
-
 /// A stable logical subsection and its rendered representation.
 ///
 /// Rendered lines and sources are stored behind `Arc` so an unchanged block
@@ -167,64 +160,6 @@ impl LogLayout {
         }
     }
 
-    /// Classify streaming growth and shrinkage against the previous displayed
-    /// layout. The classification is intentionally per-block: a shrink in one
-    /// streaming block must not be cancelled by growth in another block.
-    pub(crate) fn streaming_change(&self, previous: &[(Arc<str>, usize)]) -> StreamingChange {
-        let mut change = StreamingChange::default();
-        for block in &self.blocks {
-            let old_len = previous
-                .iter()
-                .find(|(identity, _)| identity == &block.identity)
-                .map_or(0, |(_, lines)| *lines);
-            let is_streaming = block.sources.iter().any(|source| source.streaming);
-            if !is_streaming {
-                continue;
-            }
-            match block.lines.len().cmp(&old_len) {
-                std::cmp::Ordering::Greater => {
-                    change.growth += block.lines.len() - old_len;
-                }
-                std::cmp::Ordering::Less => {
-                    change.shrink += old_len - block.lines.len();
-                }
-                std::cmp::Ordering::Equal => {}
-            }
-        }
-        change
-    }
-
-    /// Absorb a number of streaming shrink rows by appending blank lines at
-    /// the bottom of the log.
-    pub(crate) fn pad_rows(&mut self, pad: usize) {
-        self.append_bottom_padding(pad);
-    }
-
-    fn append_bottom_padding(&mut self, pad: usize) {
-        if pad == 0 {
-            return;
-        }
-        let Some(last) = self.blocks.last_mut() else {
-            return;
-        };
-        let identity = last.identity.clone();
-        let foldable = last.foldable;
-        let mut lines = last.lines.to_vec();
-        lines.extend(std::iter::repeat_n(Line::default(), pad));
-        last.lines = Arc::from(lines);
-        let mut sources = last.sources.to_vec();
-        sources.extend(std::iter::repeat_n(
-            LineSource {
-                decoration_width: 0,
-                streaming: false,
-                block_identity: Some(identity.to_string()),
-                foldable,
-            },
-            pad,
-        ));
-        last.sources = Arc::from(sources);
-    }
-
     #[cfg(test)]
     pub fn flatten(&self) -> (Vec<Line<'static>>, Vec<LineSource>) {
         let line_count = self.blocks.iter().map(|b| b.lines.len()).sum();
@@ -272,79 +207,10 @@ fn tool_block_kind(msg: &Message, body: bool) -> LogBlockKind {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{
-        LogBlock, LogBlockKind, LogLayout, StreamingChange, TruncationDirection, TruncationMetadata,
-    };
+    use super::{LogBlock, LogBlockKind, LogLayout, TruncationDirection, TruncationMetadata};
     use crate::mouse_select::LineSource;
     use ratatui::text::Line;
     use std::sync::Arc;
-
-    #[test]
-    fn streaming_change_counts_growth_and_shrink_per_streaming_block() {
-        let layout = LogLayout {
-            blocks: vec![
-                block("a", LogBlockKind::AssistantThinking, "a\nb\nc", true),
-                block("b", LogBlockKind::ToolBody, "b", true),
-                block("static", LogBlockKind::UserContent, "x\ny", false),
-            ],
-        };
-        let previous = vec![
-            (Arc::from("a"), 2),
-            (Arc::from("b"), 3),
-            (Arc::from("static"), 1),
-        ];
-        assert_eq!(
-            layout.streaming_change(&previous),
-            StreamingChange {
-                growth: 1,
-                shrink: 2
-            }
-        );
-    }
-
-    #[test]
-    fn pad_rows_appends_bottom_padding() {
-        let mut layout = LogLayout {
-            blocks: vec![
-                block("message:0:user", LogBlockKind::UserContent, "a", false),
-                block(
-                    "message:1:thinking",
-                    LogBlockKind::AssistantThinking,
-                    "b",
-                    true,
-                ),
-            ],
-        };
-        layout.pad_rows(2);
-
-        assert_eq!(layout.blocks.len(), 2, "padding extends the last block");
-        let last = &layout.blocks[1];
-        assert_eq!(last.lines.len(), 3);
-        assert_eq!(last.sources.len(), 3);
-        assert_eq!(last.lines[0].spans[0].content, "b");
-        assert!(
-            last.lines[1].spans.is_empty(),
-            "bottom row is blank padding"
-        );
-        assert!(
-            last.lines[2].spans.is_empty(),
-            "bottom row is blank padding"
-        );
-    }
-
-    #[test]
-    fn pad_rows_with_zero_does_not_change_layout() {
-        let mut layout = LogLayout {
-            blocks: vec![block(
-                "message:0:thinking",
-                LogBlockKind::AssistantThinking,
-                "a\nb\nc",
-                true,
-            )],
-        };
-        layout.pad_rows(0);
-        assert_eq!(layout.blocks[0].lines.len(), 3);
-    }
 
     fn block(identity: &str, kind: LogBlockKind, text: &str, streaming: bool) -> LogBlock {
         LogBlock {

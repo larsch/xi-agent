@@ -35,12 +35,38 @@ impl Default for LogCache {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Rows of blank space held below the streaming log.
+///
+/// A block that shrinks adds its lost rows to the padding so the content on
+/// screen keeps its rows; a block that grows consumes padding before anything
+/// scrolls. Only the end of the agent loop (or a user scroll / view change)
+/// drops it.
+#[derive(Clone, Copy, Default)]
 pub(crate) struct PaddingState {
-    pub(crate) max_total_lines: usize,
-    pub(crate) inner_height_when_set: usize,
-    /// Remaining anchor padding after applying visual line deltas.
-    pub(crate) remaining: isize,
+    pub(crate) padding: usize,
+}
+
+impl PaddingState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn rows(&self) -> usize {
+        self.padding
+    }
+
+    /// Add the rows a shrinking block gave up.
+    pub(crate) fn absorb_shrink(&mut self, rows: usize) {
+        self.padding = self.padding.saturating_add(rows);
+    }
+
+    /// Consume padding with the rows a growing block added. Returns the growth
+    /// that the padding could not absorb.
+    pub(crate) fn consume_growth(&mut self, rows: usize) -> usize {
+        let consumed = self.padding.min(rows);
+        self.padding -= consumed;
+        rows - consumed
+    }
 }
 
 pub struct LogViewState {
@@ -88,10 +114,10 @@ impl LogViewState {
     pub fn begin_turn(&mut self, generation: u64) {
         ::log::debug!(
             target: "throbber.trace",
-            "log view begin turn: generation={generation} baseline_present={} baseline_width={:?} padding_remaining={:?}",
+            "log view begin turn: generation={generation} baseline_present={} baseline_width={:?} padding={:?}",
             self.visual_baseline.is_some(),
             self.visual_baseline_width,
-            self.last_block_padding.map(|padding| padding.remaining),
+            self.last_block_padding.map(|padding| padding.rows()),
         );
         self.turn_generation = Some(generation);
         self.visual_baseline = None;
@@ -103,10 +129,10 @@ impl LogViewState {
     pub fn clear_turn_baseline(&mut self) {
         ::log::debug!(
             target: "throbber.trace",
-            "log view clear turn baseline: generation={:?} baseline_present={} padding_remaining={:?}",
+            "log view clear turn baseline: generation={:?} baseline_present={} padding={:?}",
             self.turn_generation,
             self.visual_baseline.is_some(),
-            self.last_block_padding.map(|padding| padding.remaining),
+            self.last_block_padding.map(|padding| padding.rows()),
         );
         self.turn_generation = None;
         self.visual_baseline = None;
@@ -122,11 +148,11 @@ impl LogViewState {
     pub(crate) fn begin_tool_continuation(&mut self) {
         ::log::debug!(
             target: "throbber.trace",
-            "log view begin tool continuation: generation={:?} baseline_present={} baseline_width={:?} padding_remaining={:?}",
+            "log view begin tool continuation: generation={:?} baseline_present={} baseline_width={:?} padding={:?}",
             self.turn_generation,
             self.visual_baseline.is_some(),
             self.visual_baseline_width,
-            self.last_block_padding.map(|padding| padding.remaining),
+            self.last_block_padding.map(|padding| padding.rows()),
         );
         self.invalidate();
         // The committed session and live overlay may have changed, so discard
@@ -183,6 +209,7 @@ impl LogViewState {
         self.last_block_padding = None;
     }
 
+    // User scrolling takes control of the viewport, so it drops the anchor.
     pub fn scroll_up(&mut self) {
         self.scroll_up_lines(self.last_log_height.max(1));
     }
@@ -201,6 +228,7 @@ impl LogViewState {
 
     pub fn scroll_down(&mut self) {
         self.auto_scroll = false;
+        self.clear_padding();
         self.log_scroll = self.log_scroll.saturating_add(self.last_log_height.max(1));
     }
 
@@ -221,11 +249,28 @@ mod tests {
     use super::{LogViewState, PaddingState};
 
     fn set_anchor_padding(state: &mut LogViewState) {
-        state.last_block_padding = Some(PaddingState {
-            max_total_lines: 40,
-            inner_height_when_set: 20,
-            remaining: 3,
-        });
+        state.last_block_padding = Some(PaddingState { padding: 3 });
+    }
+
+    #[test]
+    fn padding_absorbs_shrink_and_is_spent_by_growth() {
+        let mut state = PaddingState::new();
+        assert_eq!(state.rows(), 0);
+
+        // A shrinking block adds its rows to the padding.
+        state.absorb_shrink(2);
+        assert_eq!(state.rows(), 2);
+
+        // Growth spends padding first and reports only what is left over.
+        assert_eq!(state.consume_growth(1), 0);
+        assert_eq!(state.rows(), 1);
+        assert_eq!(state.consume_growth(3), 2);
+        assert_eq!(state.rows(), 0);
+
+        // With no padding left, all growth is left over (it steals the
+        // throbber row and then scrolls).
+        assert_eq!(state.consume_growth(1), 1);
+        assert_eq!(state.rows(), 0);
     }
 
     #[test]
