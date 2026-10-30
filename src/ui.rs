@@ -484,6 +484,8 @@ fn build_log_layout_cached(app: &mut App, width: usize, display: &DisplayConfig)
         //      it),
         //   3. growth the padding could not absorb steals the throbber row, and
         //      only what is left over scrolls.
+        // The activity row's own space is accounted for in `draw`, which also
+        // runs on frames where this layout cache hits.
         let padding_before = app
             .log_view
             .last_block_padding
@@ -552,10 +554,10 @@ fn anchored_block_scroll(
 /// Vertical layout of the streaming log.
 ///
 /// The content is bottom-anchored above the rows reserved below it: the padding
-/// rows, or the activity row when it has to use a row of its own. That is the
-/// whole of the padding mechanism — a block that shrinks adds padding rows,
-/// which simply move the content up by nothing, and a block that grows spends
-/// them.
+/// rows plus the activity row, which keeps a row of its own (appearing consumes
+/// a padding row from the counter instead). That is the whole of the padding
+/// mechanism — a block that shrinks adds padding rows, which keep the content
+/// where it is, and a block that grows spends them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LogWindow {
     /// First content line drawn.
@@ -566,7 +568,7 @@ struct LogWindow {
     top_padding: usize,
     /// Blank rows below the content, excluding the activity row.
     bottom_padding: usize,
-    /// Rows reserved below the content (padding, or the activity row).
+    /// Rows reserved below the content (padding plus the activity row).
     reserved_below: usize,
 }
 
@@ -576,9 +578,7 @@ fn log_window(
     padding: usize,
     throbber: bool,
 ) -> LogWindow {
-    let throbber_row = usize::from(throbber);
-    // The activity row takes one of the padding rows when there is one.
-    let reserved_below = padding.max(throbber_row);
+    let reserved_below = padding.saturating_add(usize::from(throbber));
     let content_rows = inner_height.saturating_sub(reserved_below).min(content_len);
     LogWindow {
         first_line: content_len.saturating_sub(content_rows),
@@ -586,7 +586,7 @@ fn log_window(
         top_padding: inner_height
             .saturating_sub(reserved_below)
             .saturating_sub(content_len),
-        bottom_padding: reserved_below.saturating_sub(throbber_row),
+        bottom_padding: padding,
         reserved_below,
     }
 }
@@ -809,8 +809,28 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let has_scrollbar = total_lines > inner_height && !app.log_view.auto_scroll;
     let log_scroll = app.log_view.log_scroll;
 
-    // Rows kept free below the content. The activity row takes one of the
-    // padding rows when there is one, otherwise it needs a row of its own.
+    // The activity row keeps its own row: when it appears it takes a padding
+    // row with it, and when it disappears it gives that row back.
+    if app.log_view.auto_scroll && app.streaming() {
+        let visible = throbber.is_some();
+        let was_visible = std::mem::replace(&mut app.log_view.last_throbber_visible, visible);
+        match (was_visible, visible) {
+            (false, true) => {
+                if let Some(padding) = &mut app.log_view.last_block_padding {
+                    padding.shrink_by(1);
+                }
+            }
+            (true, false) => {
+                if let Some(padding) = &mut app.log_view.last_block_padding {
+                    padding.absorb_shrink(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Rows kept free below the content: the padding rows, plus the activity row
+    // when it is visible.
     let padding = if app.log_view.auto_scroll {
         app.log_view
             .last_block_padding
@@ -1817,6 +1837,10 @@ mod tests {
                 .append_user_message(format!("user message {i:02}"), 0);
         }
         app.begin_agent_turn();
+        // Keep the activity row out of the geometry: this test is about the
+        // padding rule only.
+        app.agent_turn.activity_visible = false;
+        app.log_view.last_throbber_visible = false;
 
         // First streaming frame: no thinking yet. This freezes the anchor
         // total at the committed-history height.
@@ -2002,7 +2026,24 @@ mod tests {
     }
 
     #[test]
-    fn throbber_replaces_bottom_padding_without_moving_blocks() {
+    fn activity_row_keeps_its_own_space() {
+        // Appearing consumes one padding row from the counter and gets a row of
+        // its own, so the reserved space - and the content position - is
+        // unchanged.
+        let inner_height = 40;
+        let content_len = 20;
+        let without = log_window(inner_height, content_len, 5, false);
+        let with = log_window(inner_height, content_len, 4, true);
+        assert_eq!(without.reserved_below, 5);
+        assert_eq!(with.reserved_below, 5);
+        assert_eq!(without.top_padding, with.top_padding);
+        assert_eq!(without.first_line, with.first_line);
+        assert_eq!(without.bottom_padding, 5);
+        assert_eq!(with.bottom_padding, 4);
+    }
+
+    #[test]
+    fn throbber_takes_a_padding_row_when_it_appears() {
         let mut app = make_app();
         app.session.ensure_event_log_for_submit();
         for i in 0..20 {
@@ -2013,9 +2054,20 @@ mod tests {
         app.agent_turn.activity_visible = false;
         render_to_plain_lines(&mut app, 80, 20);
         app.log_view.last_block_padding = Some(PaddingState { padding: 2 });
+        app.log_view.last_throbber_visible = false;
         let before = render_to_plain_lines(&mut app, 80, 20);
+
+        // Appearing consumes a padding row, so the activity row gets its own
+        // space without moving the content.
         app.agent_turn.activity_visible = true;
         let after = render_to_plain_lines(&mut app, 80, 20);
+        assert_eq!(
+            app.log_view
+                .last_block_padding
+                .map(|padding| padding.rows()),
+            Some(1),
+            "the activity row takes one padding row with it"
+        );
         let row = app.log_view.last_log_height - 1;
         assert!(before[row].is_empty());
         assert!(

@@ -60,6 +60,11 @@ impl PaddingState {
         self.padding = self.padding.saturating_add(rows);
     }
 
+    /// Give rows back without a rendered shrink (the activity row disappearing).
+    pub(crate) fn shrink_by(&mut self, rows: usize) {
+        self.padding = self.padding.saturating_sub(rows);
+    }
+
     /// Consume padding with the rows a growing block added. Returns the growth
     /// that the padding could not absorb.
     pub(crate) fn consume_growth(&mut self, rows: usize) -> usize {
@@ -83,6 +88,10 @@ pub struct LogViewState {
     pub(crate) turn_generation: Option<u64>,
     pub(crate) visual_baseline: Option<Vec<(Arc<str>, usize)>>,
     pub(crate) visual_baseline_width: Option<usize>,
+    /// Activity-row visibility at the last streaming frame. The row keeps its
+    /// own space, so appearing takes a padding row with it and disappearing
+    /// gives it back.
+    pub(crate) last_throbber_visible: bool,
 }
 
 impl LogViewState {
@@ -101,6 +110,7 @@ impl LogViewState {
             turn_generation: None,
             visual_baseline: None,
             visual_baseline_width: None,
+            last_throbber_visible: false,
         }
     }
 
@@ -207,6 +217,7 @@ impl LogViewState {
 
     pub fn clear_padding(&mut self) {
         self.last_block_padding = None;
+        self.last_throbber_visible = false;
     }
 
     // User scrolling takes control of the viewport, so it drops the anchor.

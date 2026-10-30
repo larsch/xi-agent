@@ -513,6 +513,22 @@ line 19: quickly foxing\n\
 line 20: the dizzy dog\n\
 ";
 
+/// `read_file` tool call for a file that already exists.
+fn read_file_stream_at(path: String) -> LlmStream {
+    Box::pin(stream! {
+        yield LlmEvent::ToolCallStart {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+        };
+        yield LlmEvent::ToolCall {
+            id: "test-1".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({ "path": path }),
+        };
+        yield LlmEvent::Done;
+    })
+}
+
 /// Stream thinking tokens for `duration_ms`, then a tool call.
 ///
 /// The text is emitted in short chunks with deliberate line terminators: a
@@ -1218,56 +1234,72 @@ impl TestProvider {
                     "bash".to_string(),
                     format!(
                         "for i in 1 2 3 4 5 6; do echo \"tour 1: line $i\"; sleep 0.3; done; \
-                         for i in $(seq 1 12); do echo \"tour line $i\"; done > '{path}'; sleep 2"
+                         {{ for i in 1 2 3 4 5 6 7 8; do echo \"prefix line $i\"; done; \
+                         for i in 1 2 3 4 5 6 7 8; do echo \"target line $i\"; done; }} > '{path}'; \
+                         sleep 2"
                     ),
                 )
             }
-            // Streaming thinking wraps and its tail window trims: the block
-            // both grows and shrinks while it renders.
+            // Freshness read for the edit below; the body is much taller than
+            // the one-line arguments.
             2 => {
                 next(3);
-                tour_thinking_step(2_000, "bash", serde_json::json!({ "command": "true" }))
+                read_file_stream_at(path)
             }
-            // Seven growths that must be swallowed by the padding.
+            // streaming edit_file: the diff collapses as the new text arrives,
+            // leaving several rows of padding.
             3 => {
                 next(4);
+                let original = format!("{EDIT_PADDING_PREFIX}{EDIT_PADDING_TARGET}");
+                streaming_tool_call(
+                    "edit_file".to_string(),
+                    serde_json::json!({
+                        "path": path,
+                        "old_text": original,
+                        "new_text": format!("{original}\n"),
+                    }),
+                    80,
+                )
+            }
+            // Growth: the first rows are spent on the padding, the next steals
+            // the activity row, the rest scrolls.
+            4 => {
+                next(5);
                 shell_tool_stream(
                     "bash".to_string(),
-                    "for i in 1 2 3 4 5 6 7; do echo \"tour 3: line $i\"; sleep 0.25; done"
+                    "for i in 1 2 3 4 5 6 7; do echo \"tour 4: line $i\"; sleep 0.35; done"
                         .to_string(),
                 )
             }
-            // More thinking drift, then a result whose body is much taller than
-            // its one-line arguments.
-            4 => {
-                next(5);
-                tour_thinking_step(1_500, "read_file", serde_json::json!({ "path": path }))
-            }
-            // Partial consumption, then an idle gap: the activity row comes
-            // back while padding is still available and must not move anything.
+            // The other shrink source: a streaming block that trims its
+            // trailing row, leaving one padding row.
             5 => {
                 next(6);
+                tour_thinking_step(2_000, "bash", serde_json::json!({ "command": "true" }))
+            }
+            // Idle: the activity row returns onto the padding row.
+            6 => {
+                next(7);
                 shell_tool_stream(
                     "bash".to_string(),
-                    "for i in 1 2 3; do echo \"tour 5: line $i\"; sleep 0.4; done; sleep 4"
-                        .to_string(),
+                    "echo 'tour 6: line 1'; sleep 4".to_string(),
                 )
             }
             // Asynchronous multi-tool batch: a growing shell body, a taller
-            // read_file result and a fresh write preview overlap in frames.
-            6 => {
-                next(7);
+            // read_file result and a write_file preview overlap in frames.
+            7 => {
+                next(8);
                 tour_batch_stream(
-                    "for i in 1 2 3 4 5 6 7 8; do echo \"tour 6: line $i\"; sleep 0.4; done",
+                    "for i in 1 2 3 4 5 6 7 8; do echo \"tour 7: line $i\"; sleep 0.4; done",
                     path,
                 )
             }
             // Local work with no output, then the answer.
-            7 => {
-                next(8);
+            8 => {
+                next(9);
                 shell_tool_stream(
                     "bash".to_string(),
-                    "sleep 5; echo 'tour 7: local work done'".to_string(),
+                    "sleep 5; echo 'tour 8: local work done'".to_string(),
                 )
             }
             _ => {
@@ -2029,8 +2061,8 @@ mod tests {
         let mut messages = vec![Message::user("padding-tour")];
         let mut batches: Vec<Vec<String>> = Vec::new();
 
-        // Seven tool steps; the tour advances on their results and then answers.
-        for _ in 0..7 {
+        // Eight tool steps; the tour advances on their results and then answers.
+        for _ in 0..8 {
             let events: Vec<LlmEvent> = provider
                 .stream_chat(messages.clone(), LlmRequestContext::default())
                 .collect()
@@ -2053,7 +2085,7 @@ mod tests {
         }
 
         assert_eq!(
-            batches[5].len(),
+            batches[6].len(),
             3,
             "the multi-tool batch streams three tool calls"
         );
