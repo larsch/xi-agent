@@ -1411,6 +1411,16 @@ mod tests {
             })
             .collect()
     }
+    /// True for a line that consists solely of braille glyphs, which is how the
+    /// activity row is rendered.
+    fn is_braille_line(line: &str) -> bool {
+        !line.trim().is_empty()
+            && line
+                .trim()
+                .chars()
+                .all(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
+    }
+
     #[test]
     fn input_wrap_prefers_word_boundaries() {
         let chunks = input::wrap_input_line("hello world from xi", 11);
@@ -2079,6 +2089,31 @@ mod tests {
     }
 
     #[test]
+    fn throbber_renders_on_the_first_frame_of_a_model_request() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        for i in 0..20 {
+            app.session
+                .append_user_message(format!("user message {i:02}"), 0);
+        }
+
+        let before = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            !before.iter().any(|l| is_braille_line(l)),
+            "no throbber before the request starts, got {before:?}"
+        );
+
+        // No manual `activity_visible` forcing: the row must come from the
+        // model-request start alone.
+        app.begin_agent_turn();
+        let after = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            after.iter().any(|l| is_braille_line(l)),
+            "expected the throbber on the first frame of the request, got {after:?}"
+        );
+    }
+
+    #[test]
     fn throbber_scrolls_out_of_view_when_scrolling_up() {
         let mut app = make_app();
         app.session.ensure_event_log_for_submit();
@@ -2089,13 +2124,6 @@ mod tests {
         app.begin_agent_turn();
         // Force the throbber visible immediately for this layout test.
         app.agent_turn.activity_visible = true;
-
-        let is_braille_line = |l: &str| {
-            !l.trim().is_empty()
-                && l.trim()
-                    .chars()
-                    .all(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
-        };
 
         // Auto-scrolled to the bottom: the throbber is rendered within the log.
         let bottom = render_to_plain_lines(&mut app, 80, 20);

@@ -3824,6 +3824,37 @@ mod tests {
         assert_eq!(app.agent_turn.activity, AgentActivity::ModelRequest);
     }
 
+    /// The end-to-end condition behind "the model throbber always appears at
+    /// the start of a model request": checked immediately, with no clock
+    /// advance and no UI-tick assistance.
+    #[test]
+    fn model_request_start_shows_throbber_immediately() {
+        let mut app = make_app();
+        assert!(!app.throbber_visible(), "no turn is active yet");
+
+        app.begin_agent_turn();
+        assert!(
+            app.throbber_visible(),
+            "the first model request shows the throbber at once"
+        );
+
+        // Hide it the way the renderer does: growth beyond available padding.
+        app.agent_turn.update_visual_state_with_padding(
+            Some(crate::agent_turn_state::VisualUpdate::Delta(1)),
+            0,
+            std::time::Instant::now(),
+        );
+        assert!(!app.throbber_visible());
+
+        // The tool-result boundary starts the next model request, which must
+        // show the throbber again immediately.
+        app.continue_agent_turn_after_tool();
+        assert!(
+            app.throbber_visible(),
+            "a continuation model request shows the throbber at once"
+        );
+    }
+
     #[test]
     fn model_request_activity_preserves_throbber_holdoff_after_tool_output() {
         let mut app = make_app();

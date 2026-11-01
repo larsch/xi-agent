@@ -322,6 +322,32 @@ mod tests {
         assert!(state.throbber_visible(false));
     }
 
+    /// A tool-result boundary starts another model request. If the throbber was
+    /// hidden by streamed growth, the new request must show it again at once
+    /// instead of waiting for the hidden hold-off to expire.
+    #[test]
+    fn tool_continuation_restores_hidden_throbber_immediately() {
+        let mut state = AgentTurnState::new(ThrobberConfig::default());
+        state.start();
+        let now = Instant::now();
+
+        // Growth beyond the available padding hides the activity row.
+        state.update_visual_state_with_padding(Some(VisualUpdate::Delta(1)), 0, now);
+        assert!(!state.throbber_visible(false));
+        assert!(state.holdoff_started_at.is_some());
+
+        state.continue_turn();
+
+        assert!(
+            state.throbber_visible(false),
+            "a new model request shows the throbber without a clock advance"
+        );
+        assert!(
+            state.holdoff_started_at.is_none(),
+            "the hidden hold-off must not survive the request boundary"
+        );
+    }
+
     #[test]
     fn output_growth_hides_visible_throbber_and_restarts_holdoff() {
         let mut state = AgentTurnState::new(ThrobberConfig::default());
