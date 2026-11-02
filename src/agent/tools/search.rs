@@ -51,6 +51,12 @@ where
 {
     let mut matches = Vec::new();
     let mut truncated = false;
+    let root = std::path::Path::new(root);
+    let base = if root.is_file() {
+        root.parent().unwrap_or(root)
+    } else {
+        root
+    };
     let walker = WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
@@ -71,7 +77,7 @@ where
         }
 
         let absolute = entry.path();
-        let relative = match absolute.strip_prefix(root) {
+        let relative = match absolute.strip_prefix(base) {
             Ok(path) => path.to_string_lossy().replace('\\', "/"),
             Err(_) => absolute.to_string_lossy().replace('\\', "/"),
         };
@@ -116,6 +122,12 @@ fn format_matches(
     before: usize,
     after: usize,
 ) -> (String, usize) {
+    let root = std::path::Path::new(root);
+    let base = if root.is_file() {
+        root.parent().unwrap_or(root)
+    } else {
+        root
+    };
     let mut output = String::new();
     let mut unique_files = std::collections::HashSet::new();
     let mut start = 0;
@@ -132,7 +144,7 @@ fn format_matches(
         }
         output.push_str(path);
         output.push('\n');
-        let absolute = std::path::Path::new(root).join(path);
+        let absolute = base.join(path);
         let content = match std::fs::read_to_string(absolute) {
             Ok(content) => content,
             Err(_) => {
@@ -184,7 +196,7 @@ impl Tool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search text files synchronously for a literal string or regular expression. Defaults to literal matching with smart case (uppercase query is case-sensitive). Respects ignore files and skips hidden and binary files. Supports a path, file glob, before/after context, and a result limit."
+        "Search a text file or directory synchronously for a literal string or regular expression. Defaults to literal matching with smart case (uppercase query is case-sensitive). Directory searches respect ignore files and skip hidden files; all searches skip binary files. Supports a file or directory path, file glob, before/after context, and a result limit."
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
@@ -196,7 +208,7 @@ impl Tool for SearchTool {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "Text to find; interpreted literally unless mode is 'regex'" },
-                "path": { "type": "string", "description": "Directory to search (default: current directory)" },
+                "path": { "type": "string", "description": "File or directory to search (default: current directory). A file path searches only that file." },
                 "mode": { "type": "string", "enum": ["literal", "regex"], "description": "Search mode (default: literal)" },
                 "glob": { "type": "string", "description": "Optional glob to restrict files, e.g. '*.rs'" },
                 "case_sensitive": { "type": "boolean", "description": "Override smart case (default: uppercase queries are case-sensitive; others are not)" },
@@ -235,8 +247,8 @@ impl Tool for SearchTool {
                 return ToolResult::err("Search query must not be empty");
             }
             let root = path.unwrap_or_else(|| ".".to_string());
-            if !std::path::Path::new(&root).is_dir() {
-                return ToolResult::err(format!("Search directory not found: {root}"));
+            if !std::path::Path::new(&root).exists() {
+                return ToolResult::err(format!("Search path not found: {root}"));
             }
             let max_results = max_results.unwrap_or(DEFAULT_MAX_RESULTS);
             if max_results == 0 {
@@ -336,6 +348,79 @@ mod tests {
         assert!(!uppercase.is_error);
         assert!(uppercase.content.as_text().contains("> 4 | HELLO"));
         assert!(!uppercase.content.as_text().contains("> 2 | hello"));
+    }
+
+    #[tokio::test]
+    async fn file_path_search_supports_glob_and_context_without_searching_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.rs");
+        std::fs::write(&path, "before\nhello\nafter\n").unwrap();
+        std::fs::write(dir.path().join("two.rs"), "hello from sibling\n").unwrap();
+
+        let result = SearchTool
+            .execute(serde_json::json!({
+                "query": "hello",
+                "path": path,
+                "glob": "*.rs",
+                "context_before": 1,
+                "context_after": 1
+            }))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        let text = result.content.as_text();
+        assert!(text.starts_with("one.rs\n"), "{text}");
+        assert!(text.contains("  1 | before"));
+        assert!(text.contains("> 2 | hello"));
+        assert!(text.contains("  3 | after"));
+        assert!(!text.contains("sibling"));
+        assert!(text.contains("1 match in 1 file"));
+
+        let excluded = SearchTool
+            .execute(serde_json::json!({ "query": "hello", "path": path, "glob": "*.txt" }))
+            .await;
+        assert!(!excluded.is_error, "{}", excluded.content.as_text());
+        assert_eq!(excluded.content.as_text(), "No matches found");
+    }
+
+    #[tokio::test]
+    async fn file_path_search_accepts_relative_paths() {
+        let file = tempfile::NamedTempFile::new_in(".").unwrap();
+        let path = file.path().file_name().unwrap().to_str().unwrap();
+        std::fs::write(file.path(), "hello\n").unwrap();
+
+        let result = SearchTool
+            .execute(serde_json::json!({ "query": "hello", "path": path }))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        let text = result.content.as_text();
+        assert!(text.starts_with(&format!("{path}\n")), "{text}");
+        assert!(text.contains("> 1 | hello"));
+        assert!(text.contains("1 match in 1 file"));
+    }
+
+    #[tokio::test]
+    async fn file_path_search_skips_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binary.bin");
+        std::fs::write(&path, b"hello\0world\n").unwrap();
+
+        let result = SearchTool
+            .execute(serde_json::json!({ "query": "hello", "path": path }))
+            .await;
+        assert!(!result.is_error, "{}", result.content.as_text());
+        assert_eq!(result.content.as_text(), "No matches found");
+    }
+
+    #[tokio::test]
+    async fn missing_search_path_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = SearchTool
+            .execute(
+                serde_json::json!({ "query": "hello", "path": dir.path().join("missing.txt") }),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.as_text().contains("Search path not found"));
     }
 
     #[tokio::test]
