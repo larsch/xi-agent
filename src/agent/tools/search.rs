@@ -200,7 +200,7 @@ impl Tool for SearchTool {
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        Some("Search file contents")
+        Some("Search text recursively in directories or within a single file")
     }
 
     fn parameters_schema(&self) -> Value {
@@ -208,7 +208,7 @@ impl Tool for SearchTool {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "Text to find; interpreted literally unless mode is 'regex'" },
-                "path": { "type": "string", "description": "File or directory to search (default: current directory). A file path searches only that file." },
+                "path": { "type": "string", "description": "File or directory to search (default: current directory). Directories are searched recursively; a file path searches only that file." },
                 "mode": { "type": "string", "enum": ["literal", "regex"], "description": "Search mode (default: literal)" },
                 "glob": { "type": "string", "description": "Optional glob to restrict files, e.g. '*.rs'" },
                 "case_sensitive": { "type": "boolean", "description": "Override smart case (default: uppercase queries are case-sensitive; others are not)" },
