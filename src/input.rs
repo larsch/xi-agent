@@ -129,12 +129,56 @@ fn should_insert_markdown_code_fence(textarea: &ratatui_textarea::TextArea<'_>) 
             .is_none_or(|character| character != '`')
 }
 
-fn insert_markdown_code_fence(textarea: &mut ratatui_textarea::TextArea<'_>) {
-    textarea.insert_str("\n\n```");
-    // Leave the cursor on the blank line between the opening and closing fences.
-    for _ in 0..4 {
+/// True when the fence ending at the cursor follows visible text on its line, so
+/// it has to be moved onto a line of its own to form a proper block.
+fn markdown_code_fence_needs_leading_newline(textarea: &ratatui_textarea::TextArea<'_>) -> bool {
+    let cursor = textarea.cursor();
+    let Some(line) = textarea.lines().get(cursor.0) else {
+        return false;
+    };
+    let before_fence = cursor.1.saturating_sub(3);
+    line.chars()
+        .take(before_fence)
+        .any(|character| !character.is_whitespace())
+}
+
+/// Remove whitespace immediately before the cursor on its line.
+fn trim_trailing_whitespace(textarea: &mut ratatui_textarea::TextArea<'_>) {
+    let cursor = textarea.cursor();
+    let Some(line) = textarea.lines().get(cursor.0) else {
+        return;
+    };
+    let prefix: String = line.chars().take(cursor.1).collect();
+    let trailing = prefix
+        .chars()
+        .rev()
+        .take_while(|character| character.is_whitespace())
+        .count();
+    for _ in 0..trailing {
         textarea.move_cursor(CursorMove::Back);
     }
+    textarea.delete_str(trailing);
+}
+
+fn insert_markdown_code_fence(textarea: &mut ratatui_textarea::TextArea<'_>) {
+    // The third backtick is already in the buffer. Step back over it so the
+    // typed fence becomes the closing fence, then insert the opening fence in
+    // front of it — preceded by a newline only when it would otherwise share a
+    // line with text, which would stop it from opening a code block.
+    let leading_newline = markdown_code_fence_needs_leading_newline(textarea);
+    for _ in 0..3 {
+        textarea.move_cursor(CursorMove::Back);
+    }
+    if leading_newline {
+        trim_trailing_whitespace(textarea);
+    }
+    textarea.insert_str(if leading_newline {
+        "\n```\n\n"
+    } else {
+        "```\n\n"
+    });
+    // Leave the cursor on the blank line between the opening and closing fences.
+    textarea.move_cursor(CursorMove::Back);
 }
 
 pub(crate) fn cancel_ask_freeform_if_off_sentinel(app: &mut App) {
@@ -1103,4 +1147,63 @@ fn handle_slash_submit(
     }
 
     KeyDispatch::Continue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Simulate typing text into the textarea with the fence auto-completion
+    /// applied after every character, as the key handler does.
+    fn type_str(textarea: &mut ratatui_textarea::TextArea<'static>, text: &str) {
+        for character in text.chars() {
+            textarea.insert_char(character);
+            if character == '`' && should_insert_markdown_code_fence(textarea) {
+                insert_markdown_code_fence(textarea);
+            }
+        }
+    }
+
+    fn lines(textarea: &ratatui_textarea::TextArea<'static>) -> Vec<String> {
+        textarea.lines().to_vec()
+    }
+
+    #[test]
+    fn fence_at_line_start_gets_no_leading_newline() {
+        let mut textarea = ratatui_textarea::TextArea::default();
+        type_str(&mut textarea, "```");
+        assert_eq!(lines(&textarea), vec!["```", "", "```"]);
+        // Cursor rests on the blank line between the fences.
+        assert_eq!(textarea.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn fence_after_text_moves_to_its_own_line() {
+        let mut textarea = ratatui_textarea::TextArea::default();
+        type_str(&mut textarea, "Look: ```");
+        assert_eq!(lines(&textarea), vec!["Look:", "```", "", "```"]);
+        assert_eq!(textarea.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn fence_after_text_trims_trailing_whitespace() {
+        let mut textarea = ratatui_textarea::TextArea::default();
+        type_str(&mut textarea, "Look:   ```");
+        assert_eq!(lines(&textarea), vec!["Look:", "```", "", "```"]);
+    }
+
+    #[test]
+    fn fence_at_start_of_second_line_gets_no_leading_newline() {
+        let mut textarea = ratatui_textarea::TextArea::default();
+        type_str(&mut textarea, "Look:\n```");
+        assert_eq!(lines(&textarea), vec!["Look:", "```", "", "```"]);
+        assert_eq!(textarea.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn indented_fence_keeps_its_position() {
+        let mut textarea = ratatui_textarea::TextArea::default();
+        type_str(&mut textarea, "- item\n\n  ```");
+        assert_eq!(lines(&textarea), vec!["- item", "", "  ```", "", "```"]);
+    }
 }
