@@ -100,6 +100,7 @@ pub fn tool_streaming_field(name: &str) -> Option<&'static str> {
         "write" | "write_file" => Some("path"),
         "edit" | "edit_file" => Some("path"),
         "find" | "find_files" => Some("pattern"),
+        "search" => Some("query"),
         "learn" => Some("name"),
         _ => None,
     }
@@ -121,7 +122,8 @@ pub fn extract_partial_field(partial_json: &str, field: &str) -> Option<String> 
 ///
 /// Uses the tool's `streaming_field` to select which argument to display.
 /// Applies per-tool formatting (multiline shell and shell-quoted exec, find_files
-/// pattern+path, ask_user no-truncation, 1-line compact for others).
+/// pattern+path, search query+target+filters, ask_user no-truncation, 1-line
+/// compact for others).
 /// Always shows the **head** (beginning) of the selected value.
 ///
 /// Returns `(label, is_placeholder)` where `is_placeholder` is `true` when
@@ -217,6 +219,29 @@ pub fn tool_invocation_label(
             return (tool_pending_label(name), true);
         }
         return (format!("{emoji} {detail}"), false);
+    }
+
+    // search: distinguish the query from its target and optional filters.
+    if name == "search" {
+        let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+        if query.is_empty() {
+            return (tool_pending_label(name), true);
+        }
+        let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let mut label = format!(
+            "{emoji} “{}” in {}",
+            compact(query, display),
+            compact(path, display)
+        );
+        if let Some(glob) = args.get("glob").and_then(Value::as_str)
+            && !glob.trim().is_empty()
+        {
+            label.push_str(&format!(" · glob: {}", compact(glob, display)));
+        }
+        if args.get("mode").and_then(Value::as_str) == Some("regex") {
+            label.push_str(" · regex");
+        }
+        return (label, false);
     }
 
     // Preserve the existing streaming-field behavior for built-ins that do not
@@ -801,6 +826,79 @@ mod tests {
         let (lbl, ph) = label("find_files", &json!({"pattern": "", "path": ""}));
         assert!(ph);
         assert_eq!(lbl, "🔍 finding…");
+    }
+
+    // ── search ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_label_shows_query_and_target_without_streaming_metadata() {
+        assert_eq!(tool_streaming_field("search"), Some("query"));
+        for (args, expected) in [
+            (json!({"query": "hello world"}), "🔍 “hello world” in ."),
+            (json!({"query": "hello\nworld"}), "🔍 “hello world” in ."),
+            (
+                json!({"query": "hello", "path": "src"}),
+                "🔍 “hello” in src",
+            ),
+            (
+                json!({"query": "hello", "path": "src/main.rs"}),
+                "🔍 “hello” in src/main.rs",
+            ),
+            (
+                json!({"query": "hello", "mode": "literal", "glob": ""}),
+                "🔍 “hello” in .",
+            ),
+            (
+                json!({"query": "fn\\s+main", "path": "src", "glob": "*.rs", "mode": "regex"}),
+                "🔍 “fn\\s+main” in src · glob: *.rs · regex",
+            ),
+        ] {
+            let (label, placeholder) = label("search", &args);
+            assert!(!placeholder);
+            assert_eq!(label, expected);
+        }
+    }
+
+    #[test]
+    fn search_label_is_compact_without_hiding_target_or_filters() {
+        let display = DisplayConfig {
+            max_one_line_chars: 8,
+            ..DisplayConfig::default()
+        };
+        let (label, placeholder) = tool_invocation_label(
+            "search",
+            &json!({"query": "αβγδεζηθικ\nmore", "path": "src/main.rs", "glob": "*.rs", "mode": "regex"}),
+            Some("query"),
+            &display,
+        );
+        assert!(!placeholder);
+        assert_eq!(label, "🔍 “αβγδεζηθ…” in src/main… · glob: *.rs · regex");
+    }
+
+    #[test]
+    fn search_label_waits_for_query() {
+        for args in [json!({}), json!({"query": "", "path": "src"})] {
+            let (label, placeholder) = label("search", &args);
+            assert!(placeholder);
+            assert_eq!(label, "🔍 searching…");
+        }
+    }
+
+    #[test]
+    fn partial_search_label_uses_the_same_format_as_complete_arguments() {
+        for partial in [
+            r#"{"query":"hello","path":"src","glob":"*.r"#,
+            r#"{"query":"hello","path":"src","glob":"*.r"}"#,
+        ] {
+            let (label, placeholder) = tool_invocation_label_from_partial(
+                "search",
+                partial,
+                Some("query"),
+                &DisplayConfig::default(),
+            );
+            assert!(!placeholder);
+            assert_eq!(label, "🔍 “hello” in src · glob: *.r");
+        }
     }
 
     // ── learn ────────────────────────────────────────────────────────────

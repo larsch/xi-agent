@@ -3035,6 +3035,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn search_intent_shows_query_target_and_filters_in_replayed_transcript() {
+        let call = Message::tool_call(
+            "c1",
+            "search",
+            serde_json::json!({
+                "query": "fn.*main",
+                "path": "src/main.rs",
+                "glob": "*.rs",
+                "mode": "regex"
+            }),
+        );
+        let result = Message::tool_result("c1", "No matches found", false);
+        let lines = build_log_layout(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &Theme::default(),
+            &DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let intent = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(intent, "🔍 “fn.*main” in src/main.rs · glob: *.rs · regex");
+    }
+
     // ── find_files ────────────────────────────────────────────────────────────
 
     #[test]
