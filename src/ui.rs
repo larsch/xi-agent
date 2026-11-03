@@ -500,6 +500,12 @@ fn build_log_layout_cached(app: &mut App, width: usize, display: &DisplayConfig)
                 padding.absorb_shrink(delta.unsigned_abs());
             } else {
                 leftover_growth = padding.consume_growth(delta as usize);
+                // Growth beyond padding consumes the visible activity row before
+                // it can scroll existing content upward.
+                if leftover_growth > 0 && app.log_view.last_throbber_visible {
+                    leftover_growth -= 1;
+                    app.log_view.throbber_row_consumed = true;
+                }
             }
         }
         let padding_after = app
@@ -511,8 +517,6 @@ fn build_log_layout_cached(app: &mut App, width: usize, display: &DisplayConfig)
             "layout padding: update={update:?} delta={delta} padding={padding_before}->{padding_after} leftover_growth={leftover_growth} streaming={streaming}",
         );
         app.log_view.set_visual_baseline(baseline);
-        // Handing over the pre-growth padding makes the activity row give way
-        // exactly when the growth exceeded it (step 3).
         app.agent_turn.update_visual_state_with_padding(
             Some(update),
             padding_before,
@@ -819,11 +823,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 if let Some(padding) = &mut app.log_view.last_block_padding {
                     padding.shrink_by(1);
                 }
+                app.log_view.throbber_row_consumed = false;
             }
             (true, false) => {
-                if let Some(padding) = &mut app.log_view.last_block_padding {
+                if !app.log_view.throbber_row_consumed
+                    && let Some(padding) = &mut app.log_view.last_block_padding
+                {
                     padding.absorb_shrink(1);
                 }
+                app.log_view.throbber_row_consumed = false;
             }
             _ => {}
         }
@@ -1982,9 +1990,10 @@ mod tests {
 
     #[test]
     fn padding_tour_deltas_keep_the_content_row_stable() {
-        // Delta script produced by the `padding-tour` test-provider command
-        // (docs/PADDING-RULES.md). Positive = rows added by streaming, negative
-        // = rows a block gave up, 0 = layout rebuilt without a size change.
+        // Abstract delta script for padding arithmetic. Positive = rows added
+        // by streaming, negative = rows a block gave up, 0 = layout rebuilt
+        // without a size change. This is intentionally not a frame-for-frame
+        // replay of the timing-sensitive provider tour.
         let script: [isize; 37] = [
             1, 1, 1, 1, 1, 1, // step 1: shell body grows a line at a time
             0, // step 1 tail: idle, activity row returns with no padding
@@ -2086,6 +2095,78 @@ mod tests {
                 .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
         );
         assert_eq!(&after[..row], &before[..row]);
+    }
+
+    #[test]
+    fn growth_consumes_visible_throbber_row_without_returning_padding() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        for i in 0..20 {
+            app.session
+                .append_user_message(format!("user message {i:02}"), 0);
+        }
+        app.begin_agent_turn();
+        app.agent_turn.activity_visible = true;
+        app.session.live_turn.assistant_thinking = Some("t0".to_string());
+        let before = render_to_plain_lines(&mut app, 80, 20);
+        let marker = |lines: &[String]| {
+            lines
+                .iter()
+                .position(|line| line.contains("user message 19"))
+                .unwrap()
+        };
+        let before_row = marker(&before);
+
+        // The first new row consumes the only padding row; the second must
+        // consume the visible activity row rather than returning it as padding.
+        app.log_view.last_block_padding = Some(PaddingState { padding: 1 });
+        app.log_view.last_throbber_visible = true;
+        app.session.live_turn.assistant_thinking = Some("t0\nt1\nt2".to_string());
+        let after = render_to_plain_lines(&mut app, 80, 20);
+
+        assert_eq!(marker(&after), before_row - 1);
+        assert_eq!(
+            app.log_view
+                .last_block_padding
+                .map(|padding| padding.rows()),
+            Some(0)
+        );
+        assert!(!app.agent_turn.activity_visible);
+    }
+
+    #[test]
+    fn growth_with_no_padding_consumes_visible_throbber_row() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        for i in 0..20 {
+            app.session
+                .append_user_message(format!("user message {i:02}"), 0);
+        }
+        app.begin_agent_turn();
+        app.agent_turn.activity_visible = true;
+        app.session.live_turn.assistant_thinking = Some("t0".to_string());
+        let before = render_to_plain_lines(&mut app, 80, 20);
+        let marker = |lines: &[String]| {
+            lines
+                .iter()
+                .position(|line| line.contains("user message 19"))
+                .unwrap()
+        };
+        let before_row = marker(&before);
+
+        app.log_view.last_block_padding = Some(PaddingState { padding: 0 });
+        app.log_view.last_throbber_visible = true;
+        app.session.live_turn.assistant_thinking = Some("t0\nt1".to_string());
+        let after = render_to_plain_lines(&mut app, 80, 20);
+
+        assert_eq!(marker(&after), before_row);
+        assert_eq!(
+            app.log_view
+                .last_block_padding
+                .map(|padding| padding.rows()),
+            Some(0)
+        );
+        assert!(!app.agent_turn.activity_visible);
     }
 
     #[test]

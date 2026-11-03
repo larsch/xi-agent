@@ -1305,9 +1305,8 @@ impl TestProvider {
             _ => {
                 next(0);
                 stream_owned(
-                    "Padding tour complete. The content should never have moved down except one row when \
-                     the activity row appeared without padding, and one row when growth exactly consumed the \
-                     last padding row.\n"
+                    "Padding tour complete. Growth should consume padding, then the activity row, and only \
+                     residual growth should move existing content upward. The activity row keeps its own space.\n"
                         .to_string(),
                 )
             }
@@ -2062,7 +2061,17 @@ mod tests {
         let mut batches: Vec<Vec<String>> = Vec::new();
 
         // Eight tool steps; the tour advances on their results and then answers.
-        for _ in 0..8 {
+        let expected = [
+            vec!["bash"],
+            vec!["read_file"],
+            vec!["edit_file"],
+            vec!["bash"],
+            vec!["bash"],
+            vec!["bash"],
+            vec!["bash", "read_file", "write_file"],
+            vec!["bash"],
+        ];
+        for (step, expected_calls) in expected.iter().enumerate() {
             let events: Vec<LlmEvent> = provider
                 .stream_chat(messages.clone(), LlmRequestContext::default())
                 .collect()
@@ -2074,7 +2083,15 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert!(!calls.is_empty(), "every tour step issues a tool call");
+            assert_eq!(
+                calls,
+                expected_calls
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>(),
+                "padding tour tool sequence drifted at step {}",
+                step + 1
+            );
             messages.push(Message::assistant(""));
             for (i, name) in calls.iter().enumerate() {
                 let id = format!("tour-{i}");

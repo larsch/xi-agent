@@ -90,8 +90,11 @@ pub struct LogViewState {
     pub(crate) visual_baseline_width: Option<usize>,
     /// Activity-row visibility at the last streaming frame. The row keeps its
     /// own space, so appearing takes a padding row with it and disappearing
-    /// gives it back.
+    /// gives it back unless growth consumed the row in the same frame.
     pub(crate) last_throbber_visible: bool,
+    /// A growth update hid the activity row after consuming its reserved row.
+    /// The draw pass must not return that row to padding again.
+    pub(crate) throbber_row_consumed: bool,
 }
 
 impl LogViewState {
@@ -111,6 +114,7 @@ impl LogViewState {
             visual_baseline: None,
             visual_baseline_width: None,
             last_throbber_visible: false,
+            throbber_row_consumed: false,
         }
     }
 
@@ -218,6 +222,7 @@ impl LogViewState {
     pub fn clear_padding(&mut self) {
         self.last_block_padding = None;
         self.last_throbber_visible = false;
+        self.throbber_row_consumed = false;
     }
 
     // User scrolling takes control of the viewport, so it drops the anchor.

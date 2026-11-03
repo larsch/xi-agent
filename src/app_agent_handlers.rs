@@ -422,6 +422,10 @@ impl App {
 
     fn on_tool_call_args_delta(&mut self, id: String, partial_json: String) {
         if let Some(entry) = self.session.live_turn.find_tool_entry_mut(&id) {
+            // Argument deltas are streamed model output too. Refresh the
+            // throbber hold-off even when the rendered tool preview has not
+            // gained another visual row.
+            self.agent_turn.record_chunk(std::time::Instant::now());
             entry.partial_args.push_str(&partial_json);
             if let Ok(completed) = jawohl::complete_json(&entry.partial_args)
                 && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&completed)

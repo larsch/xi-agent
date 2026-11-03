@@ -25,17 +25,19 @@ XI_DEBUG=1 xi --provider test --prompt padding-tour
 | Step | Content, then tool call | Rules exercised |
 |------|-------------------------|-----------------|
 | 1 | `bash` printing 6 lines at 300 ms (and writing the fixture), then 2 s idle | growth scrolls; activity row returns with **no padding** |
-| 2 | `read_file` on the fixture | commit growth into an eight-row body (also consumes the activity row row) |
-| 3 | streaming `edit_file` whose diff collapses section by section | **multi-row shrink**: five diff rows disappear, padding grows to 5 |
-| 4 | `bash` printing 7 lines at 350 ms | growth spent on the padding row by row, content does not move |
-| 5 | 2 s streaming thinking, ending on a line break | the other shrink source: a streaming block trims its trailing row |
-| 6 | `bash` 1 line, then 4 s idle | activity row returns onto the padding |
+| 2 | `read_file` on the fixture | result growth consumes available padding/activity space |
+| 3 | streaming `edit_file` whose diff collapses section by section | **multi-row shrink**: diff rows disappear and padding grows |
+| 4 | `bash` printing 7 lines at 350 ms | growth spends padding row by row, content does not move |
+| 5 | 2 s streaming thinking/tool sequence, ending on a line break | a streaming block trims its trailing row |
+| 6 | `bash` printing 1 line, then 4 s idle | activity row returns onto the padding |
 | 7 | batch: `bash` (8 lines at 400 ms) + `read_file` + `write_file` | asynchronous multi-tool growth in overlapping frames |
-| 8 | `bash` sleeping 5 s, then the answer | idle activity row, padding dropped at the end of the loop |
+| 8 | `bash` sleeping 5 s, then printing 1 line | local work with an idle activity row |
+| 9 | final textual summary | end-of-loop padding cleanup and final answer |
 
-A reference run (`XI_DEBUG=1`, 512 frames) reports: 16 shrinks (padding up to 5),
-18 growths absorbed by padding, 3 activity rows consumed by growth, **0**
-state-machine violations, **0** downward moves of the content.
+An illustrative debug run reported 16 shrinks (padding up to 5), 18 growths
+absorbed by padding, and 3 activity rows consumed by growth. These counts are
+not deterministic acceptance criteria: terminal size, scheduling, and frame
+cadence affect timing-sensitive provider output.
 
 Notes:
 
@@ -49,17 +51,19 @@ Notes:
   (step 3, several rows) and the trailing line of a streaming text/thinking block
   (step 5, one row).
 
-Two checks back it up:
+The focused tests cover the accounting primitives and renderer transitions:
 
-- `ui::tests::padding_tour_deltas_keep_the_content_row_stable` replays the tour's
-  delta script (growth, trims, padding consumption, a multi-row shrink, the
-  multi-tool batch) through `PaddingState` and `log_window`, asserting that the
-  content moves by exactly the leftover growth and never moves down.
-  `ui::tests::activity_row_keeps_its_own_space` pins the row accounting above.
-- The debug log records the state machine per frame. `layout padding: delta=…
-  padding=a->b leftover_growth=…` must satisfy `b == a - delta` (clamped at 0),
-  and `render geometry: … first_line=… content_top_row=…` gives the row of
-  content line 0 as `content_top_row - first_line`, which must never increase.
-  The only allowed increase is growth that lands exactly on the last padding
-  row; the activity row appearing with no padding available moves the content up
-  one row, which the rules accept ("try").
+- `ui::tests::padding_tour_deltas_keep_the_content_row_stable` replays a
+  representative delta script through `PaddingState` and `log_window`.
+- `ui::tests::growth_consumes_visible_throbber_row_without_returning_padding`
+  and `growth_with_no_padding_consumes_visible_throbber_row` exercise renderer
+  growth with a visible activity row, asserting both screen position and the
+  remaining padding.
+- `ui::tests::activity_row_keeps_its_own_space` pins independent row accounting.
+- The debug log records the state machine per frame. `layout padding: …
+  padding=a->b leftover_growth=…` reports padding consumption, while
+  `render geometry: … content_top_row=…` already gives the screen row of
+  content line 0. Use `content_top_row` directly; do not subtract `first_line`
+  again. The content should not move down as a result of growth. An activity row
+  appearing without padding consumes its own row and moves content up when no
+  padding is available.

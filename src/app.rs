@@ -3950,6 +3950,68 @@ mod tests {
     }
 
     #[test]
+    fn answering_ask_user_shows_throbber_on_continuation_request() {
+        let mut app = make_app();
+        app.begin_agent_turn();
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
+        app.receive_ask_request(AskRequest {
+            question: "Choose an option".to_string(),
+            context: None,
+            options: vec![AskUserOption {
+                title: "Continue".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_freeform: false,
+            reply: reply_tx,
+        });
+        assert!(
+            !app.throbber_visible(),
+            "hide while waiting for the user's answer"
+        );
+
+        app.select_pending_ask_option("Continue".to_string());
+        assert!(matches!(
+            reply_rx.try_recv(),
+            Ok(AskUserResponse::Answer(answer)) if answer == "Continue"
+        ));
+        assert!(!app.has_pending_ask());
+
+        // The loop emits this continuation start after the ask_user tool
+        // returns; the model request should show its throbber immediately.
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnStart { continuation: true });
+        assert!(app.throbber_visible());
+    }
+
+    #[test]
+    fn streamed_tool_argument_delta_restarts_throbber_holdoff() {
+        let mut app = make_app();
+        app.begin_agent_turn();
+        let now = std::time::Instant::now();
+        app.agent_turn.update_visual_state(
+            Some(crate::agent_turn_state::VisualUpdate::Delta(1)),
+            now - std::time::Duration::from_secs(3),
+        );
+        assert!(!app.throbber_visible());
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallIntent {
+            id: "streaming-edit".to_string(),
+            name: "edit_file".to_string(),
+            streaming_field: Some("new_text".to_string()),
+        });
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallArgsDelta {
+            id: "streaming-edit".to_string(),
+            partial_json: r#"{"new_text":"updated"#.to_string(),
+        });
+
+        // The last streamed argument delta refreshed the timer. At a poll time
+        // that would expire the older hide time, the throbber is still hidden.
+        app.agent_turn
+            .update_visual_state(None, now + std::time::Duration::from_millis(1_500));
+        assert!(!app.throbber_visible());
+    }
+
+    #[test]
     fn model_request_activity_preserves_throbber_holdoff_after_tool_output() {
         let mut app = make_app();
         app.begin_agent_turn();
