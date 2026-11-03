@@ -667,6 +667,51 @@ impl App {
         self.resume_session_by_id(&meta.id);
     }
 
+    /// Restore the latest provider/model/thinking selection recorded in a session.
+    ///
+    /// Selection events are intentionally replayed only when resuming. Starting
+    /// a new session keeps the process-wide selection unchanged.
+    fn restore_provider_selection_from_events(&mut self, events: &[SessionEvent]) {
+        let mut provider_id = None;
+        let mut model = None;
+        let mut thinking = None;
+        for event in events {
+            match event {
+                SessionEvent::ModelChanged {
+                    model: saved_model,
+                    provider: saved_provider,
+                    ..
+                } => {
+                    provider_id = Some(saved_provider.as_str());
+                    model = Some(saved_model.as_str());
+                }
+                SessionEvent::ThinkingLevelChanged { level, .. } => {
+                    thinking = Some(*level);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(provider_id) = provider_id
+            && let Some(instance) = self
+                .provider
+                .instances
+                .iter()
+                .find(|instance| instance.id == provider_id)
+                .cloned()
+        {
+            self.provider.current_instance = instance;
+            self.provider.provider_selected = true;
+        }
+        if let Some(model) = model {
+            self.provider.current_model = model.to_string();
+            self.provider.current_instance.model = Some(model.to_string());
+        }
+        if let Some(thinking) = thinking {
+            self.provider.current_thinking = thinking;
+        }
+    }
+
     pub fn resume_session_by_id(&mut self, session_id: &str) {
         let Some(store) = self.session.session_store.as_ref() else {
             return;
@@ -679,6 +724,7 @@ impl App {
                 // Capture last known token usage from the loaded events
                 // before moving the event log into session_state.
                 self.latest_usage = Self::find_last_usage_from_events(&log.events);
+                self.restore_provider_selection_from_events(&log.events);
                 self.session.session_state = Some(SessionState::from_event_log(log));
                 if let Some(agent) = self
                     .session
@@ -3470,6 +3516,54 @@ mod tests {
         let combined = app.display_messages_combined();
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].content, "hello");
+    }
+
+    #[test]
+    fn resume_restores_provider_model_and_thinking_level() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().join("sessions"))
+            .expect("open session store");
+        let session_id = store.create_session(&cwd).expect("create session");
+        let mut log = store.load_events(&session_id).expect("load events");
+        log.append_batch(&[
+            SessionEvent::ModelChanged {
+                model: "saved-model".to_string(),
+                provider: "saved-provider".to_string(),
+                timestamp: 1,
+            },
+            SessionEvent::ThinkingLevelChanged {
+                level: ThinkingLevel::High,
+                timestamp: 2,
+            },
+        ])
+        .expect("append selection events");
+
+        let mut app = make_app();
+        app.provider.instances = vec![ProviderInstance::new(
+            "saved-provider",
+            crate::provider_instance::BackendPreset::Test,
+        )];
+        app.session.session_store = Some(store);
+        app.resume_session_by_id(&session_id);
+
+        assert_eq!(app.provider.current_instance.id, "saved-provider");
+        assert_eq!(app.provider.current_model, "saved-model");
+        assert_eq!(app.provider.current_thinking, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn new_session_keeps_provider_model_and_thinking_level() {
+        let mut app = make_app();
+        app.provider.current_model = "selected-model".to_string();
+        app.provider.current_thinking = ThinkingLevel::Medium;
+        let provider = app.provider.current_instance.id.clone();
+
+        app.clear_session_state();
+
+        assert_eq!(app.provider.current_instance.id, provider);
+        assert_eq!(app.provider.current_model, "selected-model");
+        assert_eq!(app.provider.current_thinking, ThinkingLevel::Medium);
     }
 
     #[test]

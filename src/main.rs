@@ -469,6 +469,10 @@ async fn main() -> io::Result<()> {
 
     app.init_session_persistence(cwd.clone());
     timer.mark("init_session_persistence");
+
+    // Resume needs the configured provider definitions available so a saved
+    // provider id can be resolved before the first provider is built.
+    app.provider.instances = config.resolve_effective_providers();
     if cli.resume {
         app.resume_latest_for_current_cwd();
     }
