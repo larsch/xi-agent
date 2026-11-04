@@ -98,6 +98,7 @@ pub(crate) async fn run_print_mode(
     model_override: Option<&str>,
     selected_agent: Option<&crate::agents::AgentMeta>,
     config: &crate::config::XiConfig,
+    features: &crate::features::FeatureState,
 ) -> io::Result<()> {
     let resolved_instance = with_resolved_model(
         model_override,
@@ -150,7 +151,7 @@ pub(crate) async fn run_print_mode(
         tool_output_log: headless_log,
         session_events,
         current_model: resolved_instance.effective_model().to_string(),
-        auto_compaction_enabled: true,
+        auto_compaction_enabled: features.enabled(crate::features::Feature::AutoCompaction),
         manual_compaction_requested: false,
         manual_compaction_instructions: None,
         executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
@@ -189,6 +190,7 @@ async fn run_print_mode_loop(
     ctx: &PrintModeProviderCtx<'_>,
 ) -> i32 {
     // Keep a copy of what we need for the retry path.
+    let auto_compaction_enabled = config.auto_compaction_enabled;
     let session_events_for_retry = config.session_events.clone();
     let system_prompt_for_retry = config.system_prompt.clone();
 
@@ -293,6 +295,7 @@ async fn run_print_mode_loop(
                                         active_skills.clone(),
                                         new_provider,
                                         &provider_display_name(ctx.instance),
+                                        auto_compaction_enabled,
                                     )
                                     .await;
                                 }
@@ -338,6 +341,7 @@ async fn run_print_mode_loop_inner(
     active_skills: Vec<skills::SkillMeta>,
     provider: std::sync::Arc<dyn llm::LlmProvider + Send + Sync>,
     provider_label: &str,
+    auto_compaction_enabled: bool,
 ) -> i32 {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
@@ -361,7 +365,7 @@ async fn run_print_mode_loop_inner(
         tool_output_log: retry_log,
         session_events,
         current_model: String::new(),
-        auto_compaction_enabled: true,
+        auto_compaction_enabled,
         manual_compaction_requested: false,
         manual_compaction_instructions: None,
         executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),

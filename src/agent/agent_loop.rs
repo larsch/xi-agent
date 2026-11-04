@@ -47,7 +47,7 @@ async fn run_agent_loop_inner(
 
     let mut session_events = config.session_events.clone();
     let mut projection = LlmProjection::new();
-    let mut overflow_retry_remaining = 1usize;
+    let mut overflow_retry_remaining = usize::from(config.auto_compaction_enabled);
 
     // ── Manual compaction shortcut ────────────────────────────────────────────
     if config.manual_compaction_requested {

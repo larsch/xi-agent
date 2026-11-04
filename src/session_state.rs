@@ -42,6 +42,7 @@ pub struct SessionState {
     event_log: EventLog,
     display: DisplayProjection,
     llm: LlmProjection,
+    feature_preferences: std::collections::BTreeMap<String, bool>,
 }
 
 impl SessionState {
@@ -54,10 +55,12 @@ impl SessionState {
         display.rebuild(&event_log.events);
         let mut llm = LlmProjection::new();
         llm.apply_new_events(&event_log.events);
+        let feature_preferences = crate::features::session_values(&event_log.events);
         Self {
             event_log,
             display,
             llm,
+            feature_preferences,
         }
     }
 
@@ -80,10 +83,23 @@ impl SessionState {
             })
     }
 
+    pub fn feature_preferences(&self) -> &std::collections::BTreeMap<String, bool> {
+        &self.feature_preferences
+    }
+
+    fn apply_feature_events(&mut self, events: &[SessionEvent]) {
+        for event in events {
+            if let SessionEvent::FeaturesChanged { values, .. } = event {
+                self.feature_preferences.extend(values.clone());
+            }
+        }
+    }
+
     /// Append one complete, self-contained event (e.g. `UserMessage`,
     /// `ModelChanged`) and update read models incrementally.
     pub fn append_immediate(&mut self, ev: SessionEvent) -> anyhow::Result<()> {
         self.event_log.append_batch(std::slice::from_ref(&ev))?;
+        self.apply_feature_events(std::slice::from_ref(&ev));
         self.display.apply_new_events(&self.event_log.events);
         self.llm.apply_new_events(&self.event_log.events);
         Ok(())
@@ -98,6 +114,7 @@ impl SessionState {
     /// projected copy rather than appearing twice.
     pub fn append_batch(&mut self, batch: &[SessionEvent]) -> anyhow::Result<()> {
         self.event_log.append_batch(batch)?;
+        self.apply_feature_events(batch);
         // Rebuild display to reconcile any transient in-flight UI messages
         // that were shown before the turn completed.
         self.display.rebuild(&self.event_log.events);

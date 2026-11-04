@@ -255,6 +255,13 @@ pub enum SessionEvent {
     /// name represents the default agent.
     AgentChanged { agent: String, timestamp: u64 },
 
+    /// Restorable conversation feature values; process settings are never applied.
+    /// String keys preserve unknown features across versions.
+    FeaturesChanged {
+        values: std::collections::BTreeMap<String, bool>,
+        timestamp: u64,
+    },
+
     /// The thinking level was changed during the session.
     ThinkingLevelChanged {
         level: ThinkingLevel,

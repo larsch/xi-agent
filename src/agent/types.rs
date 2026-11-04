@@ -601,7 +601,7 @@ pub struct AgentLoopConfig {
     pub session_events: Vec<crate::session_event::SessionEvent>,
     /// Active model name used for context window lookup and summary requests.
     pub current_model: String,
-    /// When true, allow threshold-based auto-compaction after completed turns.
+    /// Allow automatic compaction after completed turns and on context overflow.
     pub auto_compaction_enabled: bool,
     /// When true, run a compaction-only pass immediately when the loop starts,
     /// before any normal assistant turn is requested.

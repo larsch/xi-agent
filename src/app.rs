@@ -178,8 +178,8 @@ pub struct App {
     pub(crate) user_owned: bool,
     pub(crate) ipc_prompt: Option<crate::session_ipc::PendingPrompt>,
     pub(crate) ipc_notifications: Vec<String>,
-    /// Whether the session IPC control endpoint is enabled for this process.
-    pub(crate) session_ipc_enabled: bool,
+    /// Invocation defaults/overrides and active conversation preferences.
+    pub(crate) features: crate::features::FeatureState,
 
     // ── Step-back state ──────────────────────────────────────────────────────
     pub(crate) step_back: StepBackState,
@@ -204,7 +204,7 @@ impl App {
         agent_config: AgentLoopConfig,
         display: DisplayConfig,
         throbber: ThrobberConfig,
-        session_ipc_enabled: bool,
+        features: crate::features::FeatureState,
     ) -> Self {
         let throbber = throbber.normalized();
         let initial_model = initial_model.into();
@@ -245,7 +245,7 @@ impl App {
             user_owned: false,
             ipc_prompt: None,
             ipc_notifications: Vec::new(),
-            session_ipc_enabled,
+            features,
             step_back: StepBackState::default(),
             theme: Theme::default(),
             display,
@@ -521,7 +521,7 @@ impl App {
         let ctx = crate::load_context(
             Some(self.app_event_tx()),
             &self.agent_config.file_tracker,
-            self.session_ipc_enabled,
+            self.features.enabled(crate::features::Feature::SessionIpc),
         );
         self.apply_loaded_context(ctx);
     }
@@ -640,6 +640,32 @@ impl App {
         committed + self.session.live_turn.render_overlay(false).len()
     }
 
+    /// Save a snapshot only when behavior differs from the durable preferences.
+    pub(crate) fn persist_feature_preferences(&mut self) {
+        let values = self.features.session_snapshot();
+        let needs_update = self.session.session_state.as_ref().is_some_and(|state| {
+            let saved = state.feature_preferences();
+            values
+                .iter()
+                .any(|(name, enabled)| saved.get(name) != Some(enabled))
+        });
+        if needs_update {
+            self.append_event_immediate(SessionEvent::FeaturesChanged {
+                values,
+                timestamp: Self::now_ts(),
+            });
+        }
+    }
+
+    pub(crate) fn notify_agent_loop_halt(&self, content: &str) {
+        if self
+            .features
+            .enabled(crate::features::Feature::DesktopNotifications)
+        {
+            crate::desktop_notification::notify_agent_loop_halt(content, self.terminal_focused);
+        }
+    }
+
     pub fn should_show_resume_hint(&self) -> bool {
         self.session.resume_available_for_cwd
             && self.display_is_empty()
@@ -725,6 +751,7 @@ impl App {
                 // before moving the event log into session_state.
                 self.latest_usage = Self::find_last_usage_from_events(&log.events);
                 self.restore_provider_selection_from_events(&log.events);
+                self.features.restore(&log.events);
                 self.session.session_state = Some(SessionState::from_event_log(log));
                 if let Some(agent) = self
                     .session
@@ -1738,6 +1765,7 @@ impl App {
             && let Some(store) = &self.session.session_store
             && let Ok(log) = store.load_events(session_id)
         {
+            self.features.restore(&events);
             self.session.current_session_id = Some(session_id.clone());
             self.session.session_state =
                 Some(crate::session_state::SessionState::from_event_log(log));
@@ -1871,7 +1899,7 @@ mod tests {
             },
             crate::config::DisplayConfig::default(),
             crate::config::ThrobberConfig::default(),
-            false,
+            crate::features::FeatureState::default(),
         )
     }
 
@@ -3516,6 +3544,110 @@ mod tests {
         let combined = app.display_messages_combined();
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].content, "hello");
+    }
+
+    #[test]
+    fn session_features_persist_restore_and_reset_without_enabling_ipc() {
+        use crate::features::{Feature, FeatureOverrides, FeatureState};
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let store = crate::session::SessionStore::open_at(tmp.path().join("sessions")).unwrap();
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = cwd;
+        app.features = FeatureState::new(
+            FeatureOverrides::from([(Feature::AutoCompaction, false)]),
+            FeatureOverrides::new(),
+        );
+        app.ensure_event_log_for_submit();
+        let id = app.session.current_session_id.clone().unwrap();
+        app.ensure_event_log_for_submit();
+        let state = app.session.session_state.as_ref().unwrap();
+        assert!(!state.feature_preferences()["auto-compaction"]);
+        assert_eq!(
+            state
+                .events()
+                .iter()
+                .filter(|event| matches!(event, SessionEvent::FeaturesChanged { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(state.feature_preferences().len(), 1);
+
+        app.features = FeatureState::default();
+        app.resume_session_by_id(&id);
+        assert!(!app.features.enabled(Feature::AutoCompaction));
+        assert!(!app.features.enabled(Feature::SessionIpc));
+        app.clear_session_state();
+        assert!(app.features.enabled(Feature::AutoCompaction));
+
+        app.features = FeatureState::new(
+            FeatureOverrides::new(),
+            FeatureOverrides::from([(Feature::AutoCompaction, true)]),
+        );
+        app.resume_session_by_id(&id);
+        app.ensure_event_log_for_submit();
+        assert!(
+            app.session
+                .session_state
+                .as_ref()
+                .unwrap()
+                .feature_preferences()["auto-compaction"]
+        );
+        app.features = FeatureState::default();
+        app.resume_session_by_id(&id);
+        assert!(app.features.enabled(Feature::AutoCompaction));
+    }
+
+    #[test]
+    fn feature_preferences_follow_branch_prefix_and_legacy_session_baseline() {
+        use crate::features::{Feature, FeatureOverrides, FeatureState};
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().join("sessions")).unwrap();
+        let id = store
+            .create_session_from_events(
+                &cwd,
+                &[
+                    SessionEvent::FeaturesChanged {
+                        values: std::collections::BTreeMap::from([(
+                            "auto-compaction".into(),
+                            false,
+                        )]),
+                        timestamp: 1,
+                    },
+                    SessionEvent::UserMessage {
+                        content: "first".into(),
+                        timestamp: 2,
+                    },
+                    SessionEvent::FeaturesChanged {
+                        values: std::collections::BTreeMap::from([(
+                            "auto-compaction".into(),
+                            true,
+                        )]),
+                        timestamp: 3,
+                    },
+                ],
+            )
+            .unwrap();
+        let legacy = store.create_session(&cwd).unwrap();
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = cwd;
+        app.resume_session_by_id(&id);
+        assert!(app.features.enabled(Feature::AutoCompaction));
+        app.step_back.cursor = Some(1);
+        app.textarea.insert_str("branch");
+        assert!(app.commit_step_branch().is_some());
+        assert!(!app.features.enabled(Feature::AutoCompaction));
+        app.resume_session_by_id(&legacy);
+        assert!(app.features.enabled(Feature::AutoCompaction));
+        app.features = FeatureState::new(
+            FeatureOverrides::from([(Feature::AutoCompaction, false)]),
+            FeatureOverrides::new(),
+        );
+        app.resume_session_by_id(&legacy);
+        assert!(!app.features.enabled(Feature::AutoCompaction));
     }
 
     #[test]

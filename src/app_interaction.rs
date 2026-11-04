@@ -890,7 +890,7 @@ impl App {
             reply,
         } = req;
 
-        crate::desktop_notification::notify_agent_loop_halt(&question, self.terminal_focused);
+        self.notify_agent_loop_halt(&question);
         self.ask_user.pending = Some(PendingAsk {
             question,
             options: options.clone(),
@@ -1162,6 +1162,7 @@ impl App {
                 timestamp: Self::now_ts(),
             });
         }
+        self.persist_feature_preferences();
         // Seed the file tracker with files the agent previously read or
         // wrote so that write_file/edit_file staleness checks don't
         // spuriously reject them as "never read" after a session reload.
@@ -1236,6 +1237,7 @@ impl App {
 
     /// Clear the conversation history and reset the input area.
     pub fn clear_session_state(&mut self) {
+        self.features.clear_session();
         self.session.current_session_id = None;
         self.session.session_state = None;
         self.session.live_turn.clear_all();

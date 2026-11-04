@@ -1181,7 +1181,7 @@ async fn manual_compaction_without_instructions_runs_compaction_only() {
             timestamp: 0,
         }],
         current_model: "gpt-4o".to_string(),
-        auto_compaction_enabled: true,
+        auto_compaction_enabled: false,
         manual_compaction_requested: true,
         manual_compaction_instructions: None,
         system_prompt: None,
@@ -1374,6 +1374,29 @@ fn tool_defs_are_sorted_alphabetically() {
         let got: HashSet<&str> = names.iter().copied().collect();
         assert_eq!(got, expected);
     }
+}
+
+#[tokio::test]
+async fn disabled_auto_compaction_does_not_retry_context_overflow() {
+    let provider = MockProvider::new(vec![vec![LlmEvent::Error(
+        crate::llm::ProviderError::other("test", "maximum context length exceeded"),
+    )]]);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (_steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(CancelLevel::None);
+    let config = runner_config(HashMap::new(), make_executor());
+    run_agent_loop(config, Arc::new(provider), tx, steering_rx, cancel_rx).await;
+    let events = runner_events(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Compacting))
+    );
 }
 
 // ── Agent runner race coverage ───────────────────────────────────────────────

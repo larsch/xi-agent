@@ -2,12 +2,17 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::Context;
 
+use crate::features::{Feature, FeatureOverrides};
 use crate::hooks::{HookConfig, HookPoint};
 use crate::provider_instance::{BackendClass, BackendPreset, ProviderInstance};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct HookIpcConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
     #[serde(default)]
     pub endpoint: Option<String>,
@@ -133,8 +138,12 @@ pub struct XiConfig {
     #[serde(default)]
     pub hooks: HashMap<HookPoint, Vec<HookConfig>>,
 
-    /// Enable the worktree session IPC control socket.
-    #[serde(default)]
+    /// Explicit runtime feature overrides; omitted entries use their own defaults.
+    #[serde(default, skip_serializing_if = "FeatureOverrides::is_empty")]
+    pub features: FeatureOverrides,
+
+    /// Legacy configuration spelling; new entries in `features` take precedence.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub enable_session_ipc: bool,
 
     /// Best-effort IPC publisher for hook events.
@@ -155,6 +164,23 @@ pub struct XiConfig {
 }
 
 impl XiConfig {
+    /// Resolve legacy switches beneath the canonical feature overrides.
+    pub fn feature_overrides(&self) -> FeatureOverrides {
+        let mut overrides = FeatureOverrides::new();
+        if self.enable_session_ipc {
+            overrides.insert(Feature::SessionIpc, true);
+        }
+        if self.hook_ipc.enabled {
+            overrides.insert(Feature::HookIpc, true);
+        }
+        overrides.extend(
+            self.features
+                .iter()
+                .map(|(feature, enabled)| (*feature, *enabled)),
+        );
+        overrides
+    }
+
     /// Return a reference to the provider instance with the given id, if any.
     pub fn find_provider(&self, id: &str) -> Option<&ProviderInstance> {
         self.providers.iter().find(|p| p.id == id)
@@ -299,7 +325,12 @@ fn save_config(path: &std::path::Path, config: &XiConfig) -> anyhow::Result<()> 
         std::fs::create_dir_all(parent)?;
     }
 
-    let body = toml::to_string_pretty(config)?;
+    // Canonicalize legacy switches without materializing built-in defaults.
+    let mut canonical = config.clone();
+    canonical.features = config.feature_overrides();
+    canonical.enable_session_ipc = false;
+    canonical.hook_ipc.enabled = false;
+    let body = toml::to_string_pretty(&canonical)?;
     crate::atomic_file::save_atomic(path, &body)
 }
 
@@ -313,6 +344,66 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 mod tests {
     use super::{HookIpcConfig, ThrobberConfig, XiConfig, save_config};
     use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
+
+    #[test]
+    fn features_parse_and_override_legacy_switches() {
+        use crate::features::Feature;
+        let cfg = XiConfig::from_toml_str(
+            r#"
+enable_session_ipc = true
+[hook_ipc]
+enabled = true
+endpoint = "custom-endpoint"
+[features]
+session-ipc = false
+hook-ipc = false
+auto-compaction = false
+"#,
+        )
+        .unwrap();
+        let overrides = cfg.feature_overrides();
+        assert_eq!(overrides.len(), 3);
+        assert!(!overrides[&Feature::SessionIpc]);
+        assert!(!overrides[&Feature::HookIpc]);
+        assert!(!overrides[&Feature::AutoCompaction]);
+        assert!(XiConfig::from_toml_str("[features]\ntypo = true").is_err());
+        assert!(XiConfig::from_toml_str("[features]\nsession-ipc = 'yes'").is_err());
+    }
+
+    #[test]
+    fn saving_features_migrates_legacy_without_pinning_defaults() {
+        use crate::features::Feature;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = XiConfig::from_toml_str(
+            r#"
+enable_session_ipc = true
+[hook_ipc]
+enabled = true
+endpoint = "custom-endpoint"
+"#,
+        )
+        .unwrap();
+        save_config(&path, &cfg).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let restored = XiConfig::from_toml_str(&raw).unwrap();
+        assert_eq!(restored.features.len(), 2);
+        assert!(restored.features[&Feature::SessionIpc]);
+        assert!(restored.features[&Feature::HookIpc]);
+        assert_eq!(
+            restored.hook_ipc.endpoint.as_deref(),
+            Some("custom-endpoint")
+        );
+        assert!(!raw.contains("enable_session_ipc"));
+        assert!(!raw.contains("enabled ="));
+        assert!(
+            cfg.features.is_empty(),
+            "saving must not mutate the loaded config"
+        );
+        save_config(&path, &XiConfig::default()).unwrap();
+        let restored = XiConfig::from_toml_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(restored.features.is_empty());
+    }
 
     // ── Instance-format config tests ─────────────────────────────────────────
 

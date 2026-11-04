@@ -64,6 +64,8 @@ cargo install --path .
 | | `--prompt <PROMPT>...` | Start the interactive UI and automatically submit PROMPT. Accepts multiple words without shell quoting |
 | | `--prompt-file <PATH>` | Start the interactive UI and automatically submit the UTF-8 contents of PATH, preserving multiline prompts |
 | | `--resume` | Auto-resume the most recent session for the current working directory |
+| | `--enable <FEATURE>` | Enable a runtime feature (repeatable; last override wins) |
+| | `--disable <FEATURE>` | Disable a runtime feature (repeatable; last override wins) |
 | | `--print-dirs` | Print the file-system paths xi uses and exit |
 | | `--theme-demo` | Start with a representative log using the local test provider |
 | `-h` | `--help` | Print help |
@@ -71,8 +73,8 @@ cargo install --path .
 
 ## Session IPC
 
-Start an interactive session with `--enable-session-ipc` (or set
-`enable_session_ipc = true` in config) to enable the `agent_session` tool for
+Start an interactive session with `--enable=session-ipc` (or set
+`session-ipc = true` in the configuration's `[features]` table) to enable the `agent_session` tool for
 contacting another opted-in session by its worktree directory. It supports
 inspection, runtime state, prompt submission, and completion notifications.
 The first opted-in instance in a worktree owns its endpoint.

@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use crossterm::{
     event::{Event, EventStream, MouseButton, MouseEventKind},
     execute,
@@ -39,6 +39,7 @@ mod desktop_notification;
 mod dirs;
 mod event_log;
 mod export;
+mod features;
 mod hook_ipc;
 mod hooks;
 mod input;
@@ -159,9 +160,8 @@ struct Cli {
     #[arg(long, value_name = "SESSION_ID")]
     resume_session: Option<String>,
 
-    /// Enable the worktree session IPC control socket.
-    #[arg(long)]
-    enable_session_ipc: bool,
+    #[command(flatten)]
+    features: features::FeatureArgs,
 
     /// Print the file-system paths xi uses and exit.
     #[arg(long)]
@@ -274,7 +274,9 @@ async fn main() -> io::Result<()> {
     #[cfg(windows)]
     desktop_notification::pin_com_mta();
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let feature_overrides = cli.features.overrides(&matches);
     timer.mark("Cli::parse");
 
     if cli.print_dirs {
@@ -294,6 +296,8 @@ async fn main() -> io::Result<()> {
         io::Error::other("config load failed")
     })?;
     timer.mark("XiConfig::load");
+    let features = features::FeatureState::new(config.feature_overrides(), feature_overrides);
+    let session_ipc_enabled = features.enabled(features::Feature::SessionIpc);
 
     let discovered_agents = load_agents();
     let selected_agent = agents::select_startup_agent(
@@ -317,11 +321,7 @@ async fn main() -> io::Result<()> {
         let _instance = provider_setup::with_resolved_model(cli.model.as_deref(), &instance);
 
         let tracker = Arc::new(Mutex::new(build_file_tracker()));
-        let ctx = load_context(
-            None,
-            &tracker,
-            cli.enable_session_ipc || config.enable_session_ipc,
-        );
+        let ctx = load_context(None, &tracker, session_ipc_enabled);
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| ".".to_string());
@@ -358,6 +358,7 @@ async fn main() -> io::Result<()> {
 
     // ── Non-interactive (--print / -p) mode ───────────────────────────────────
     if let Some(words) = cli.print {
+        features.validate_print_mode()?;
         let prompt = words.join(" ");
         return print_mode::run_print_mode(
             prompt,
@@ -365,6 +366,7 @@ async fn main() -> io::Result<()> {
             cli.model.as_deref(),
             selected_agent.as_ref(),
             &config,
+            &features,
         )
         .await;
     }
@@ -405,12 +407,13 @@ async fn main() -> io::Result<()> {
     let file_tracker = Arc::new(Mutex::new(build_file_tracker()));
     timer.mark("build_file_tracker");
     let tool_output_log = Arc::new(std::sync::Mutex::new(ToolOutputLog::new("init")));
-    let hook_ipc = HookIpcPublisherHandle::new(&config.hook_ipc);
+    let mut hook_ipc_config = config.hook_ipc.clone();
+    hook_ipc_config.enabled = features.enabled(features::Feature::HookIpc);
+    let hook_ipc = HookIpcPublisherHandle::new(&hook_ipc_config);
 
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let session_ipc_enabled = cli.enable_session_ipc || config.enable_session_ipc;
 
     let mut app = App::new(
         initial_instance,
@@ -422,7 +425,7 @@ async fn main() -> io::Result<()> {
             tool_output_log: Arc::clone(&tool_output_log),
             session_events: initial_session_events.clone(),
             current_model: initial_model.clone(),
-            auto_compaction_enabled: true,
+            auto_compaction_enabled: features.enabled(features::Feature::AutoCompaction),
             manual_compaction_requested: false,
             manual_compaction_instructions: None,
             executor: std::sync::Arc::new(crate::agent::DefaultToolExecutor::new()),
@@ -433,7 +436,7 @@ async fn main() -> io::Result<()> {
         },
         config.display.clone(),
         config.throbber.clone(),
-        session_ipc_enabled,
+        features,
     );
     timer.mark("App::new (incl. load_hooks)");
     app.theme = theme;
@@ -595,7 +598,7 @@ async fn main() -> io::Result<()> {
                 // terminal, then exec the current binary resuming the session.
                 let _ = terminal::shutdown_terminal(&mut terminal, keyboard_enhancements_enabled);
                 let session_id = app.session.current_session_id.clone().unwrap_or_default();
-                let err = crate::restart::exec_self(&session_id);
+                let err = crate::restart::exec_self(&session_id, &app.features.restart_args());
                 // exec() returns only on failure.
                 eprintln!("restart failed: {err}");
                 std::process::exit(1);
@@ -1011,7 +1014,11 @@ fn handle_reload_context(
     file_tracker: &Arc<Mutex<FileTracker>>,
     app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
 ) {
-    let ctx = load_context(Some(app_event_tx), file_tracker, app.session_ipc_enabled);
+    let ctx = load_context(
+        Some(app_event_tx),
+        file_tracker,
+        app.features.enabled(features::Feature::SessionIpc),
+    );
     let skills_count = ctx.skills.len();
     let custom_count = ctx.custom_tool_count;
     app.apply_loaded_context(ctx);
@@ -1033,7 +1040,11 @@ fn handle_new_session(
     file_tracker.lock().unwrap().reset();
     app.clear_session_state();
 
-    let ctx = load_context(Some(app_event_tx), file_tracker, app.session_ipc_enabled);
+    let ctx = load_context(
+        Some(app_event_tx),
+        file_tracker,
+        app.features.enabled(features::Feature::SessionIpc),
+    );
     let skills_count = ctx.skills.len();
     let custom_count = ctx.custom_tool_count;
     app.apply_loaded_context(ctx);
@@ -1294,6 +1305,96 @@ mod tests {
         provider_manager::format_provider_error_for_display,
         thinking::ThinkingLevel,
     };
+
+    fn parse_features(args: &[&str]) -> crate::features::FeatureOverrides {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = super::Cli::command().try_get_matches_from(args).unwrap();
+        super::Cli::from_arg_matches(&matches)
+            .unwrap()
+            .features
+            .overrides(&matches)
+    }
+
+    #[test]
+    fn feature_flags_respect_command_line_order() {
+        use crate::features::Feature;
+        for (args, enabled) in [
+            (
+                vec!["xi", "--enable=session-ipc", "--disable=session-ipc"],
+                false,
+            ),
+            (
+                vec!["xi", "--disable=session-ipc", "--enable=session-ipc"],
+                true,
+            ),
+            (
+                vec!["xi", "--enable-session-ipc", "--disable=session-ipc"],
+                false,
+            ),
+            (
+                vec!["xi", "--disable=session-ipc", "--enable-session-ipc"],
+                true,
+            ),
+            (
+                vec![
+                    "xi",
+                    "--enable-session-ipc",
+                    "--disable=session-ipc",
+                    "--enable-session-ipc",
+                ],
+                true,
+            ),
+        ] {
+            assert_eq!(
+                parse_features(&args)[&Feature::SessionIpc],
+                enabled,
+                "{args:?}"
+            );
+        }
+        let overrides = parse_features(&[
+            "xi",
+            "--enable",
+            "session-ipc",
+            "--disable=auto-compaction",
+            "--enable=hook-ipc",
+            "--enable=auto-compaction",
+            "--disable=desktop-notifications",
+        ]);
+        assert_eq!(overrides.len(), 4);
+        assert!(overrides[&Feature::SessionIpc]);
+        assert!(overrides[&Feature::HookIpc]);
+        assert!(overrides[&Feature::AutoCompaction]);
+        assert!(!overrides[&Feature::DesktopNotifications]);
+        assert!(parse_features(&["xi"]).is_empty());
+    }
+
+    #[test]
+    fn legacy_ipc_flag_works_but_is_hidden_from_help() {
+        use crate::features::Feature;
+        use clap::CommandFactory;
+        assert!(parse_features(&["xi", "--enable-session-ipc"])[&Feature::SessionIpc]);
+        let mut command = super::Cli::command();
+        for help in [
+            command.render_help().to_string(),
+            command.render_long_help().to_string(),
+        ] {
+            assert!(help.contains("--enable <FEATURE>"));
+            assert!(help.contains("--disable <FEATURE>"));
+            assert!(!help.contains("--enable-session-ipc"));
+        }
+    }
+
+    #[test]
+    fn unknown_or_missing_features_are_rejected() {
+        use clap::CommandFactory;
+        for arg in ["--enable=typo", "--disable=typo", "--enable", "--disable"] {
+            assert!(
+                super::Cli::command()
+                    .try_get_matches_from(["xi", arg])
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn normalize_paste_text_converts_crlf_and_cr_to_lf() {

@@ -257,7 +257,8 @@ fn build_units(events: &[SessionEvent]) -> Vec<Unit> {
             | SessionEvent::CompactionSummary { .. }
             | SessionEvent::ModelChanged { .. }
             | SessionEvent::ThinkingLevelChanged { .. }
-            | SessionEvent::AgentChanged { .. } => {
+            | SessionEvent::AgentChanged { .. }
+            | SessionEvent::FeaturesChanged { .. } => {
                 idx += 1;
             }
         }
@@ -445,7 +446,9 @@ fn serialize_events_for_summary(events: &[SessionEvent]) -> String {
                 out.push_str(level.as_str());
                 out.push_str("\n\n");
             }
-            SessionEvent::AgentChanged { .. } | SessionEvent::CompactionSummary { .. } => {}
+            SessionEvent::AgentChanged { .. }
+            | SessionEvent::FeaturesChanged { .. }
+            | SessionEvent::CompactionSummary { .. } => {}
         }
     }
     out

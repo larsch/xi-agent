@@ -1386,7 +1386,7 @@ mod tests {
             },
             DisplayConfig::default(),
             crate::config::ThrobberConfig::default(),
-            false,
+            crate::features::FeatureState::default(),
         )
     }
 

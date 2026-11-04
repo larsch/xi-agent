@@ -22,7 +22,7 @@ If no suitable launcher is evident, use the user's preferred launcher or ask whi
 Use a separate worktree for each worker session. Start xi with its working directory set to that worktree and enable session IPC:
 
 ```text
-xi --enable-session-ipc
+xi --enable=session-ipc
 ```
 
 Adapt the command and working-directory setup to the chosen launcher. Starting a process in another terminal, tab, pane, or service is launcher-specific; do not assume one command works everywhere.

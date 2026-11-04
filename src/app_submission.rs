@@ -113,7 +113,9 @@ impl App {
             tool_output_log: Arc::clone(&self.agent_config.tool_output_log),
             session_events,
             current_model: self.provider.current_model.clone(),
-            auto_compaction_enabled: true,
+            auto_compaction_enabled: self
+                .features
+                .enabled(crate::features::Feature::AutoCompaction),
             manual_compaction_requested: std::mem::take(
                 &mut self.session.pending_manual_compaction_requested,
             ),

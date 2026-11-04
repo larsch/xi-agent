@@ -70,7 +70,7 @@ pub(crate) fn restart_message() -> String {
 /// replaces this process in place.  On success this function never returns; on
 /// failure it returns the underlying [`std::io::Error`].
 #[cfg(unix)]
-pub(crate) fn exec_self(session_id: &str) -> std::io::Error {
+pub(crate) fn exec_self(session_id: &str, feature_args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
 
     let exe = match current_exe_path() {
@@ -81,6 +81,7 @@ pub(crate) fn exec_self(session_id: &str) -> std::io::Error {
     std::process::Command::new(&exe)
         .arg("--resume-session")
         .arg(session_id)
+        .args(feature_args)
         .exec()
 }
 

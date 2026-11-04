@@ -333,9 +333,7 @@ impl App {
                 self.on_external_file_change(changes)
             }
             AgentEvent::TurnEnd => self.on_turn_end(),
-            AgentEvent::FinalResponse { text } => {
-                crate::desktop_notification::notify_agent_loop_halt(&text, self.terminal_focused)
-            }
+            AgentEvent::FinalResponse { text } => self.notify_agent_loop_halt(&text),
             AgentEvent::Done => self.on_agent_done(),
             AgentEvent::Cancelled => self.on_agent_cancelled(),
             AgentEvent::Error(e) => self.on_agent_error(e),

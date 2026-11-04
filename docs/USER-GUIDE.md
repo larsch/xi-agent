@@ -41,7 +41,8 @@ written to stderr. Run `xi --help` for the complete option list, or
 | `--prompt <PROMPT...>` | Open the UI and automatically submit the prompt. |
 | `--prompt-file <PATH>` | Open the UI and submit the UTF-8 file contents as the initial prompt. |
 | `--resume` | Resume the latest session for the current directory. |
-| `--enable-session-ipc` | Enable the worktree session IPC control socket. |
+| `--enable <FEATURE>` | Enable a runtime feature; repeatable. |
+| `--disable <FEATURE>` | Disable a runtime feature; repeatable. |
 | `--print-dirs` | Print the paths xi uses and exit. |
 | `--print-system-prompt` | Print the generated system prompt without starting a session. |
 | `--theme <PATH>` | Use a theme file instead of the configured theme. |
