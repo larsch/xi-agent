@@ -156,21 +156,24 @@ impl LogViewState {
         self.clear_padding();
     }
 
-    /// Invalidate rendered layout after a tool batch is committed while
-    /// preserving the visual baseline so the next streaming frame can compare
-    /// against the previous frame and anchor any shrinkage.
-    pub(crate) fn begin_tool_continuation(&mut self) {
+    /// Invalidate the pre-result visual baseline when a tool result is applied
+    /// or a continuation request begins. Comparing that baseline with the
+    /// updated tool result would mistake it for model-output growth and could
+    /// consume the visible throbber row. Keep existing anchor padding, but
+    /// establish a fresh visual baseline.
+    pub(crate) fn reset_tool_result_visual_baseline(&mut self) {
         ::log::debug!(
             target: "throbber.trace",
-            "log view begin tool continuation: generation={:?} baseline_present={} baseline_width={:?} padding={:?}",
+            "log view reset tool-result visual baseline: generation={:?} baseline_present={} baseline_width={:?} padding={:?}",
             self.turn_generation,
             self.visual_baseline.is_some(),
             self.visual_baseline_width,
             self.last_block_padding.map(|padding| padding.rows()),
         );
         self.invalidate();
-        // The committed session and live overlay may have changed, so discard
-        // cached blocks, but retain visual_baseline for shrink detection.
+        self.visual_baseline = None;
+        self.visual_baseline_width = None;
+        // The committed session and live overlay may have changed.
         self.block_cache.clear();
     }
 
@@ -348,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_padding_and_visual_baseline_survive_tool_continuation() {
+    fn tool_result_and_continuation_keep_padding_but_discard_stale_baseline() {
         let mut state = LogViewState::new();
         set_anchor_padding(&mut state);
 
@@ -357,13 +360,10 @@ mod tests {
         state.set_visual_baseline(vec![("message:0:tool".into(), 12)]);
         state.visual_baseline_width = Some(80);
 
-        state.begin_tool_continuation();
+        state.reset_tool_result_visual_baseline();
         assert!(state.last_block_padding.is_some());
-        assert_eq!(
-            state.take_visual_baseline(),
-            Some(vec![("message:0:tool".into(), 12)])
-        );
-        assert_eq!(state.visual_baseline_width, Some(80));
+        assert!(state.take_visual_baseline().is_none());
+        assert!(state.visual_baseline_width.is_none());
 
         state.toggle_full_output();
         state.toggle_expanded("block:1".into());

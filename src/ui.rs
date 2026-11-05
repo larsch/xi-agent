@@ -2170,6 +2170,88 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_continuation_keeps_throbber_through_tool_result_layout_update() {
+        let mut app = make_app();
+        app.session.ensure_event_log_for_submit();
+        app.session
+            .append_user_message("run ask_user".to_string(), 0);
+        app.begin_agent_turn();
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallIntent {
+            id: "ask-1".to_string(),
+            name: "ask_user".to_string(),
+            streaming_field: None,
+        });
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallStart {
+            id: "ask-1".to_string(),
+            name: "ask_user".to_string(),
+            args: json!({"question": "Choose an option", "options": ["Continue"]}),
+        });
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        app.receive_ask_request(crate::agent::types::AskRequest {
+            question: "Choose an option".to_string(),
+            context: None,
+            options: vec![crate::agent::types::AskUserOption {
+                title: "Continue".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_freeform: false,
+            reply: reply_tx,
+        });
+
+        // Capture the layout while the prompt is open and the tool has not yet
+        // returned. The continuation result will change this layout.
+        let waiting = render_to_plain_lines(&mut app, 80, 20);
+        assert!(!waiting.iter().any(|line| is_braille_line(line)));
+
+        app.select_pending_ask_option("Continue".to_string());
+        assert!(matches!(
+            reply_rx.try_recv(),
+            Ok(crate::agent::types::AskUserResponse::Answer(answer)) if answer == "Continue"
+        ));
+        assert!(
+            app.throbber_visible(),
+            "the answer should reveal the anticipatory throbber before continuation events"
+        );
+        let answered = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            answered.iter().any(|line| is_braille_line(line)),
+            "the immediate answer frame should retain the throbber: {answered:?}"
+        );
+        assert!(
+            answered.iter().any(|line| line.contains("Continue")),
+            "the submitted answer should appear in the tool result immediately: {answered:?}"
+        );
+        app.apply_agent_event(crate::agent::types::AgentEvent::ToolCallEnd {
+            id: "ask-1".to_string(),
+            result: crate::agent::types::ToolResult::ok_str("Continue"),
+        });
+        let confirmed = render_to_plain_lines(&mut app, 80, 20);
+        assert_eq!(
+            confirmed, answered,
+            "the asynchronous tool result should confirm, not visibly replace, the optimistic result"
+        );
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnEnd);
+        app.apply_agent_event(crate::agent::types::AgentEvent::TurnStart { continuation: true });
+
+        let continuation = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            continuation.iter().any(|line| is_braille_line(line)),
+            "the continuation throbber should remain visible during layout reconciliation: {continuation:?}"
+        );
+
+        app.apply_agent_event(crate::agent::types::AgentEvent::TextToken {
+            text: "The continuation response started.\n".to_string(),
+            phase: AssistantPhase::Final,
+        });
+        let streaming = render_to_plain_lines(&mut app, 80, 20);
+        assert!(
+            !streaming.iter().any(|line| is_braille_line(line)),
+            "subsequent model-output growth should still consume the throbber row: {streaming:?}"
+        );
+    }
+
+    #[test]
     fn throbber_renders_on_the_first_frame_of_a_model_request() {
         let mut app = make_app();
         app.session.ensure_event_log_for_submit();

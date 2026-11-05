@@ -10,7 +10,16 @@ A block that grows between frames should first consume padding, and then if poss
 
 The throbber reappears when the stream is unexpectedly idle (chunks are arriving much slower than anticipated).
 
-The model throbber always appears at the start of a model request.
+The model throbber appears at the start of every model request. When the user
+answers an `ask_user` prompt, the throbber row appears immediately in anticipation
+of the continuation's `TurnStart`; the open prompt itself suppresses the row.
+
+When an `ask_user` answer is submitted, its tool result is shown optimistically
+with the throbber in the same frame. The previous visual baseline is discarded
+when that result is applied and again when the continuation request starts, so
+tool-result layout changes aren't counted as model-output growth that consumes
+the newly visible throbber row. Existing anchor padding is retained, and
+subsequent model output follows the normal growth rules.
 
 When the throbber appears, it will also try to consume 1 line of padding, to prevent scrolling.
 

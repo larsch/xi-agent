@@ -270,7 +270,7 @@ impl App {
 
     pub(crate) fn continue_agent_turn_after_tool(&mut self) {
         self.agent_turn.continue_turn();
-        self.log_view.begin_tool_continuation();
+        self.log_view.reset_tool_result_visual_baseline();
     }
 
     /// Advance the throbber animation frame.  Called on every UI tick.
@@ -4082,7 +4082,7 @@ mod tests {
     }
 
     #[test]
-    fn answering_ask_user_shows_throbber_on_continuation_request() {
+    fn answering_ask_user_shows_throbber_immediately_and_on_continuation() {
         let mut app = make_app();
         app.begin_agent_turn();
         let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel::<AskUserResponse>();
@@ -4108,9 +4108,12 @@ mod tests {
             Ok(AskUserResponse::Answer(answer)) if answer == "Continue"
         ));
         assert!(!app.has_pending_ask());
+        assert!(
+            app.throbber_visible(),
+            "anticipate the continuation immediately after the answer clears the prompt"
+        );
 
-        // The loop emits this continuation start after the ask_user tool
-        // returns; the model request should show its throbber immediately.
+        // TurnStart remains the authoritative continuation request event.
         app.apply_agent_event(crate::agent::types::AgentEvent::TurnStart { continuation: true });
         assert!(app.throbber_visible());
     }

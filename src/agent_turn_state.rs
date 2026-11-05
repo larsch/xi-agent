@@ -124,6 +124,19 @@ impl AgentTurnState {
         }
     }
 
+    /// Make the model-request activity row visible as soon as an `ask_user`
+    /// answer clears the prompt. The loop's continuation `TurnStart` remains
+    /// responsible for starting/resetting the request state.
+    pub(crate) fn anticipate_continuation(&mut self) {
+        if !self.is_active() {
+            return;
+        }
+        self.activity = AgentActivity::ModelRequest;
+        self.local_work_started_at = None;
+        self.activity_visible = true;
+        self.holdoff_started_at = None;
+    }
+
     /// End the current turn and hide the activity row.
     pub(crate) fn end(&mut self) {
         self.status = None;

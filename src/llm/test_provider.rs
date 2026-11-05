@@ -3,7 +3,7 @@
 //! Never appears in the provider selection menu.  Never persists to config.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use async_stream::stream;
 use tokio::time::{Duration, sleep};
@@ -18,6 +18,8 @@ pub struct TestProvider {
     /// Tracks the current step for scripted multi-turn sequences.
     /// 0 = idle (no sequence in progress).
     sequence_step: Arc<AtomicU8>,
+    /// Whether a streaming ask_user command is awaiting its response.
+    streaming_ask_response: Arc<AtomicBool>,
     /// PID captured from step 1 of bash-background-job, used in steps 2–4.
     sequence_pid: Arc<std::sync::atomic::AtomicU32>,
     /// Tracks the current step for the write-edit sequence.
@@ -49,6 +51,7 @@ impl TestProvider {
     pub fn new() -> Self {
         Self {
             sequence_step: Arc::new(AtomicU8::new(0)),
+            streaming_ask_response: Arc::new(AtomicBool::new(false)),
             sequence_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             write_edit_step: Arc::new(AtomicU8::new(0)),
             write_edit_path: Arc::new(std::sync::Mutex::new(String::new())),
@@ -376,6 +379,20 @@ fn stream_text(text: &'static str, delay: Option<Duration>) -> LlmStream {
 /// Stream an owned string as word-sized tokens.
 fn stream_owned(text: String) -> LlmStream {
     Box::pin(stream! {
+        for word in text.split_inclusive(' ').map(ToOwned::to_owned).collect::<Vec<_>>() {
+            yield LlmEvent::Token {
+                text: word,
+                phase: AssistantPhase::Final,
+            };
+        }
+        yield LlmEvent::Done;
+    })
+}
+
+/// Stream an owned response after an initial delay.
+fn stream_owned_after_delay(text: String, delay: Duration) -> LlmStream {
+    Box::pin(stream! {
+        sleep(delay).await;
         for word in text.split_inclusive(' ').map(ToOwned::to_owned).collect::<Vec<_>>() {
             yield LlmEvent::Token {
                 text: word,
@@ -1329,6 +1346,14 @@ impl super::LlmProvider for TestProvider {
         if let Some(last) = messages.last()
             && last.role == Role::ToolResult
         {
+            if self.streaming_ask_response.swap(false, Ordering::SeqCst) && !last.is_error {
+                let content = last.content.clone();
+                return stream_owned_after_delay(
+                    format!("Tool result:\n\n```\n{content}\n```\n"),
+                    Duration::from_secs(1),
+                );
+            }
+
             let ep_step = self.edit_padding_step.load(Ordering::SeqCst);
             if ep_step == 1 {
                 self.edit_padding_step.store(2, Ordering::SeqCst);
@@ -1636,6 +1661,7 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
+                self.streaming_ask_response.store(true, Ordering::SeqCst);
                 streaming_ask_stream(question, None)
             }
 
@@ -1645,6 +1671,7 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
+                self.streaming_ask_response.store(true, Ordering::SeqCst);
                 streaming_ask_context_stream(question)
             }
 
@@ -1654,6 +1681,7 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
+                self.streaming_ask_response.store(true, Ordering::SeqCst);
                 streaming_ask_type_stream(question)
             }
 
@@ -1663,6 +1691,7 @@ impl super::LlmProvider for TestProvider {
                 } else {
                     rest
                 };
+                self.streaming_ask_response.store(true, Ordering::SeqCst);
                 streaming_ask_notype_stream(question)
             }
 
@@ -1860,6 +1889,38 @@ mod tests {
     use super::*;
     use crate::llm::LlmProvider;
     use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn streaming_ask_response_waits_one_second_after_user_reply() {
+        let provider = TestProvider::new();
+        let _ask_events: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![Message::user("stream-ask")],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+
+        let start = tokio::time::Instant::now();
+        let response: Vec<LlmEvent> = provider
+            .stream_chat(
+                vec![
+                    Message::user("stream-ask"),
+                    Message::tool_result("test-1", "Option A", false),
+                ],
+                LlmRequestContext::default(),
+            )
+            .collect()
+            .await;
+
+        assert!(start.elapsed() >= Duration::from_secs(1));
+        assert!(
+            response
+                .iter()
+                .any(|event| matches!(event, LlmEvent::Token { .. }))
+        );
+        assert!(response.iter().any(|event| matches!(event, LlmEvent::Done)));
+    }
 
     #[tokio::test]
     async fn ask_context_command_emits_context_argument() {

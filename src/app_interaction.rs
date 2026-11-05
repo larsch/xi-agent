@@ -1083,6 +1083,32 @@ impl App {
             return;
         }
 
+        // Render the ask_user result in the same frame that closes the prompt.
+        // The tool sends its authoritative ToolCallEnd asynchronously after this
+        // reply is delivered, and will confirm this identical result.
+        let optimistic_answer = match &answer {
+            AskUserResponse::Answer(text) => Some(text.clone()),
+            AskUserResponse::Cancelled => None,
+        };
+        if let Some(text) = &optimistic_answer
+            && let Some(entry) = self
+                .session
+                .live_turn
+                .tool_entries
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.name == "ask_user" && entry.result.is_none())
+        {
+            entry.result = Some(crate::live_turn::LiveToolResult {
+                content: text.clone(),
+                is_error: false,
+                display_range: None,
+                image_data: None,
+            });
+        }
+        if optimistic_answer.is_some() {
+            self.log_view.reset_tool_result_visual_baseline();
+        }
         if let Some(reply) = self.ask_user.reply.take() {
             let _ = reply.send(answer);
         }
@@ -1090,6 +1116,9 @@ impl App {
         self.ask_user.freeform_mode = false;
         self.exit_selection_mode();
         self.reset_textarea();
+        if optimistic_answer.is_some() {
+            self.agent_turn.anticipate_continuation();
+        }
     }
 
     // ── Login panel actions ───────────────────────────────────────────────────
