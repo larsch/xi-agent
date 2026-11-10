@@ -144,6 +144,7 @@ pub struct App {
     /// Whether the terminal window is focused. Desktop notifications are only
     /// shown while it is unfocused.
     pub(crate) terminal_focused: bool,
+    pub(crate) notification_backend: crate::desktop_notification::NotificationBackend,
 
     // ── Login panel ───────────────────────────────────────────────────────────
     pub(crate) login: LoginState,
@@ -229,6 +230,7 @@ impl App {
             // A terminal is focused when xi starts; focus reporting only
             // updates this once the terminal sends a focus-change event.
             terminal_focused: true,
+            notification_backend: crate::desktop_notification::NotificationBackend::default(),
             login: LoginState::new(),
             session: Tracked::new(SessionManager::new()),
             ask_user: AskUserState::new(),
@@ -662,7 +664,17 @@ impl App {
             .features
             .enabled(crate::features::Feature::DesktopNotifications)
         {
-            crate::desktop_notification::notify_agent_loop_halt(content, self.terminal_focused);
+            crate::desktop_notification::notify_agent_loop_halt(
+                content,
+                self.terminal_focused,
+                self.notification_backend,
+            );
+        }
+        if self
+            .features
+            .enabled(crate::features::Feature::TerminalBell)
+        {
+            crate::desktop_notification::ring_terminal_bell(self.terminal_focused);
         }
     }
 

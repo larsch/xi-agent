@@ -440,6 +440,7 @@ async fn main() -> io::Result<()> {
     );
     timer.mark("App::new (incl. load_hooks)");
     app.theme = theme;
+    app.notification_backend = config.notification_backend;
 
     let app_event_tx = app.app_event_tx();
     #[cfg(unix)]
@@ -1366,6 +1367,23 @@ mod tests {
         assert!(overrides[&Feature::AutoCompaction]);
         assert!(!overrides[&Feature::DesktopNotifications]);
         assert!(parse_features(&["xi"]).is_empty());
+    }
+
+    #[test]
+    fn terminal_bell_cli_switches_are_independent_and_last_wins() {
+        use crate::features::Feature;
+
+        let overrides = parse_features(&[
+            "xi",
+            "--disable=desktop-notifications",
+            "--enable=terminal-bell",
+        ]);
+        assert!(overrides[&Feature::TerminalBell]);
+        assert!(!overrides[&Feature::DesktopNotifications]);
+        assert!(
+            !parse_features(&["xi", "--enable=terminal-bell", "--disable=terminal-bell",])
+                [&Feature::TerminalBell]
+        );
     }
 
     #[test]

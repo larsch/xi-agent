@@ -26,6 +26,8 @@ pub enum Feature {
     HookIpc,
     /// Desktop notifications while the terminal is unfocused.
     DesktopNotifications,
+    /// Terminal bell for attention while the terminal is unfocused.
+    TerminalBell,
     /// Automatic context compaction (manual /compact remains available).
     AutoCompaction,
 }
@@ -44,6 +46,7 @@ impl Feature {
             Self::SessionIpc => "session-ipc",
             Self::HookIpc => "hook-ipc",
             Self::DesktopNotifications => "desktop-notifications",
+            Self::TerminalBell => "terminal-bell",
             Self::AutoCompaction => "auto-compaction",
         }
     }
@@ -128,12 +131,13 @@ impl FeatureState {
             .unwrap_or_else(|| feature.default_enabled())
     }
 
-    /// Headless mode deliberately has no IPC services or desktop notifications.
+    /// Headless mode deliberately has no IPC services, desktop notifications or bells.
     pub fn validate_print_mode(&self) -> std::io::Result<()> {
         for feature in [
             Feature::SessionIpc,
             Feature::HookIpc,
             Feature::DesktopNotifications,
+            Feature::TerminalBell,
         ] {
             if self.cli.get(&feature) == Some(&true) {
                 return Err(std::io::Error::new(
@@ -214,6 +218,7 @@ mod tests {
             Feature::SessionIpc,
             Feature::HookIpc,
             Feature::DesktopNotifications,
+            Feature::TerminalBell,
         ] {
             let features =
                 FeatureState::new(config.clone(), FeatureOverrides::from([(feature, true)]));
@@ -262,10 +267,27 @@ mod tests {
         assert!(!features.enabled(Feature::SessionIpc));
         assert!(!features.enabled(Feature::HookIpc));
         assert!(features.enabled(Feature::DesktopNotifications));
+        assert!(!features.enabled(Feature::TerminalBell));
         assert!(features.enabled(Feature::AutoCompaction));
         features.config.insert(Feature::SessionIpc, true);
         features.cli.insert(Feature::SessionIpc, false);
         assert!(!features.enabled(Feature::SessionIpc));
+    }
+
+    #[test]
+    fn terminal_bell_is_independent_of_toasts_and_cli_can_disable_it() {
+        let mut features = FeatureState::new(
+            FeatureOverrides::from([
+                (Feature::DesktopNotifications, false),
+                (Feature::TerminalBell, true),
+            ]),
+            FeatureOverrides::new(),
+        );
+        assert!(features.enabled(Feature::TerminalBell));
+        assert!(!features.enabled(Feature::DesktopNotifications));
+        assert!(!features.session_snapshot().contains_key("terminal-bell"));
+        features.cli.insert(Feature::TerminalBell, false);
+        assert!(!features.enabled(Feature::TerminalBell));
     }
 
     #[test]
@@ -274,6 +296,7 @@ mod tests {
             values: BTreeMap::from([
                 ("auto-compaction".into(), false),
                 ("session-ipc".into(), true),
+                ("terminal-bell".into(), true),
                 ("future-feature".into(), true),
             ]),
             timestamp: 1,
@@ -282,6 +305,7 @@ mod tests {
         features.restore(&events);
         assert!(!features.enabled(Feature::AutoCompaction));
         assert!(!features.enabled(Feature::SessionIpc));
+        assert!(!features.enabled(Feature::TerminalBell));
         assert_eq!(
             features.session_snapshot(),
             BTreeMap::from([("auto-compaction".into(), false)])

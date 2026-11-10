@@ -118,6 +118,9 @@ pub struct XiConfig {
     /// Model-response throbber timing.
     #[serde(default)]
     pub throbber: ThrobberConfig,
+    /// Desktop notification transport; terminal OSC 777 is explicitly opt-in.
+    #[serde(default)]
+    pub notification_backend: crate::desktop_notification::NotificationBackend,
 
     /// The id of the currently active provider instance.
     pub provider: Option<String>,
@@ -344,6 +347,56 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 mod tests {
     use super::{HookIpcConfig, ThrobberConfig, XiConfig, save_config};
     use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
+
+    #[test]
+    fn notification_backend_defaults_to_native_and_rejects_unknown_values() {
+        use crate::desktop_notification::NotificationBackend;
+
+        assert_eq!(
+            XiConfig::default().notification_backend,
+            NotificationBackend::Native
+        );
+        assert_eq!(
+            XiConfig::from_toml_str("").unwrap().notification_backend,
+            NotificationBackend::Native
+        );
+        assert!(XiConfig::from_toml_str("notification_backend = 'auto'").is_err());
+    }
+
+    #[test]
+    fn notification_backend_survives_config_save() {
+        use crate::desktop_notification::NotificationBackend;
+
+        for (name, backend) in [
+            ("native", NotificationBackend::Native),
+            ("terminal", NotificationBackend::Terminal),
+        ] {
+            let cfg = XiConfig::from_toml_str(&format!("notification_backend = '{name}'")).unwrap();
+            assert_eq!(cfg.notification_backend, backend);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            save_config(&path, &cfg).unwrap();
+            let restored =
+                XiConfig::from_toml_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(restored.notification_backend, backend);
+        }
+    }
+
+    #[test]
+    fn terminal_bell_feature_survives_config_save() {
+        use crate::features::Feature;
+
+        let cfg = XiConfig::from_toml_str(
+            "[features]\nterminal-bell = true\ndesktop-notifications = false",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&path, &cfg).unwrap();
+        let restored = XiConfig::from_toml_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(restored.feature_overrides()[&Feature::TerminalBell]);
+        assert!(!restored.feature_overrides()[&Feature::DesktopNotifications]);
+    }
 
     #[test]
     fn features_parse_and_override_legacy_switches() {
