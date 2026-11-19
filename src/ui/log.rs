@@ -1423,7 +1423,7 @@ fn render_tool_result(
     // bash / cmd / powershell / exec / python: tail-truncated.
     if matches!(
         prev_name,
-        "bash" | "cmd" | "powershell" | "exec" | "run_python"
+        "bash" | "cmd" | "powershell" | "exec" | "sudo" | "run_python"
     ) {
         let color = if msg.is_error {
             theme.log.diff.removed.fg.unwrap_or(Color::LightRed)
@@ -4428,5 +4428,88 @@ context line 12: jigs vex bud\n\
             final_body.contains("replaced content — edit succeeded!"),
             "final diff must contain new target line:\n{final_body}"
         );
+    }
+
+    // ── sudo ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sudo_result_is_tail_truncated_like_a_shell_command() {
+        let call = Message::tool_call("c1", "sudo", serde_json::json!({"command": "seq 20"}));
+        let content = (1..=20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = Message::tool_result("c1", &content, false);
+        let lines = build_log_layout(
+            &[call, result],
+            false,
+            120,
+            &cfg(),
+            &crate::theme::Theme::default(),
+            &crate::config::DisplayConfig::default(),
+        )
+        .flatten()
+        .0;
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(text[0], "💻 sudo seq 20");
+        // Tail truncation: marker first, newest line last.
+        assert!(
+            text[1].contains("20 total lines"),
+            "expected tail marker, got: {}",
+            text[1]
+        );
+        assert_eq!(text.last().unwrap(), " ╰ 20");
+    }
+
+    #[test]
+    fn sudo_intent_expands_full_multiline_command() {
+        let call = Message::tool_call(
+            "c1",
+            "sudo",
+            serde_json::json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}),
+        );
+        let result = Message::tool_result("c1", "ok", false);
+        let render = |expanded: &HashSet<String>| {
+            build_log_layout_with_expansion(
+                &[],
+                &[call.clone(), result.clone()],
+                0,
+                false,
+                120,
+                &cfg(),
+                &Theme::default(),
+                &DisplayConfig::default(),
+                expanded,
+                &mut LogBlockCache::default(),
+            )
+            .flatten()
+            .0
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+
+        let collapsed = render(&HashSet::new());
+        assert!(collapsed.contains("💻 sudo l1"));
+        assert!(collapsed.contains("… 6 total lines"));
+        assert!(!collapsed.contains("l6"));
+
+        let expanded = render(&HashSet::from(["message:0:tool".to_string()]));
+        assert!(expanded.contains("l6"));
+        assert!(!expanded.contains("… 6 total lines"));
     }
 }

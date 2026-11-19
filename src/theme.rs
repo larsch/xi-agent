@@ -1234,9 +1234,9 @@ fn default_tools_map() -> HashMap<String, ToolTheme> {
 
 /// Resolution order for tool theme lookup:
 /// 1. Named tool entry (e.g. `tools["bash"]`)
-/// 2. `tools["executing"]` — for bash, exec, cmd, powershell
+/// 2. `tools["executing"]` — for bash, exec, sudo, cmd, powershell
 /// 3. `tools["default"]`
-const EXECUTING_TOOLS: &[&str] = &["bash", "exec", "cmd", "powershell", "run_python"];
+const EXECUTING_TOOLS: &[&str] = &["bash", "exec", "sudo", "cmd", "powershell", "run_python"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsTheme(#[serde(default = "default_tools_map")] pub HashMap<String, ToolTheme>);

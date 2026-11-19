@@ -16,7 +16,9 @@ fn max_one_line_chars(cfg: &DisplayConfig) -> usize {
 pub fn tool_pending_label(name: &str) -> String {
     let emoji = tool_emoji(name);
     let action = match name {
-        "bash" | "cmd" | "powershell" | "exec" | "run_python" | "python_repl_execute" => "running…",
+        "bash" | "cmd" | "powershell" | "exec" | "sudo" | "run_python" | "python_repl_execute" => {
+            "running…"
+        }
         "ask_user" => "asking…",
         "read" | "read_file" => "reading…",
         "write" | "write_file" => "writing…",
@@ -57,6 +59,7 @@ fn is_builtin_tool(name: &str) -> bool {
             | "cmd"
             | "powershell"
             | "exec"
+            | "sudo"
             | "run_python"
             | "python_repl_execute"
             | "find"
@@ -76,7 +79,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
         "read" | "read_file" => "👀",
         "write" | "write_file" => "📄",
         "edit" | "edit_file" => "📝",
-        "bash" | "cmd" | "powershell" | "exec" => "💻",
+        "bash" | "cmd" | "powershell" | "exec" | "sudo" => "💻",
         "run_python" | "python_repl_execute" => "🐍",
         "find" | "find_files" | "search" => "🔍",
         "ask_user" => "❓",
@@ -92,7 +95,7 @@ pub fn tool_emoji(name: &str) -> &'static str {
 /// Returns `None` for custom tools that don't declare a streaming field.
 pub fn tool_streaming_field(name: &str) -> Option<&'static str> {
     match name {
-        "bash" | "cmd" | "powershell" => Some("command"),
+        "bash" | "cmd" | "powershell" | "sudo" => Some("command"),
         "run_python" => Some("script"),
         "python_repl_execute" => Some("code"),
         "ask_user" => Some("question"),
@@ -139,10 +142,12 @@ pub fn tool_invocation_label(
     // Shell and script tools: multiline invocation, head-truncated with continuation marker.
     if matches!(
         name,
-        "bash" | "cmd" | "powershell" | "run_python" | "python_repl_execute" | "exec"
+        "bash" | "cmd" | "powershell" | "exec" | "sudo" | "run_python" | "python_repl_execute"
     ) {
         let detail = if name == "exec" {
             exec_command_detail(args)
+        } else if name == "sudo" {
+            sudo_command_detail(args)
         } else {
             let field = streaming_field.unwrap_or("command");
             args.get(field)
@@ -490,6 +495,21 @@ fn multiline_head_truncated(input: &str, display: &DisplayConfig) -> String {
     shown.join("\n")
 }
 
+/// Build the display command for the `sudo` tool.
+///
+/// Shows the command exactly as it would be typed in a shell, prefixed with
+/// `sudo` so an elevated invocation stays distinguishable from a plain shell
+/// command in the transcript.
+fn sudo_command_detail(args: &Value) -> String {
+    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+        return String::new();
+    };
+    if command.trim().is_empty() {
+        return String::new();
+    }
+    format!("sudo {command}")
+}
+
 fn exec_command_detail(args: &Value) -> String {
     let Some(program) = args.get("program").and_then(|v| v.as_str()) else {
         return String::new();
@@ -650,7 +670,7 @@ mod tests {
     fn sf(name: &str) -> Option<&'static str> {
         // streaming_field per tool, matching Tool implementations
         match name {
-            "bash" | "cmd" | "powershell" => Some("command"),
+            "bash" | "cmd" | "powershell" | "sudo" => Some("command"),
             "exec" => Some("program"),
             "run_python" => Some("script"),
             "python_repl_execute" => Some("code"),
@@ -706,6 +726,41 @@ mod tests {
         let (lbl, ph) = label("bash", &json!({}));
         assert!(ph);
         assert_eq!(lbl, "💻 running…");
+    }
+
+    // ── sudo ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sudo_pending_label_reads_as_running_shell_command() {
+        assert_eq!(tool_pending_label("sudo"), "💻 running…");
+        assert_eq!(tool_streaming_field("sudo"), Some("command"));
+    }
+
+    #[test]
+    fn sudo_label_shows_command_prefixed_with_sudo() {
+        let (lbl, ph) = label("sudo", &json!({"command": "systemctl restart nginx"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 sudo systemctl restart nginx");
+    }
+
+    #[test]
+    fn sudo_label_keeps_multiline_commands_and_truncates_after_five_lines() {
+        let (lbl, ph) = label("sudo", &json!({"command": "l1\nl2\nl3\nl4\nl5"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 sudo l1\nl2\nl3\nl4\nl5");
+
+        let (lbl, ph) = label("sudo", &json!({"command": "l1\nl2\nl3\nl4\nl5\nl6"}));
+        assert!(!ph);
+        assert_eq!(lbl, "💻 sudo l1\nl2\nl3\nl4\nl5\n… 6 total lines");
+    }
+
+    #[test]
+    fn sudo_placeholder_when_command_missing_or_blank() {
+        for args in [json!({}), json!({"command": ""}), json!({"command": "  "})] {
+            let (lbl, ph) = label("sudo", &args);
+            assert!(ph, "expected placeholder for {args}");
+            assert_eq!(lbl, "💻 running…");
+        }
     }
 
     // ── exec ──────────────────────────────────────────────────────────────────

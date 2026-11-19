@@ -383,7 +383,7 @@ Per-tool presentation. Each tool entry has four sub-specs:
 
 The special key `default` is the fallback for any tool not explicitly listed,
 including custom tools. The special key `executing` is a group fallback that
-applies to shell-executing tools (`bash`, `exec`, `cmd`, `powershell`) — more
+applies to shell-executing tools (`bash`, `exec`, `sudo`, `cmd`, `powershell`) — more
 specific than `default` but less specific than a named tool entry.
 
 Resolution order for any attribute (first match wins):
@@ -421,7 +421,7 @@ body.fg = "#aaaaaa"
 placeholder.fg = "#666688"
 placeholder.italic = true
 
-# Group default for all shell-executing tools (bash, exec, cmd, powershell)
+# Group default for all shell-executing tools (bash, exec, sudo, cmd, powershell)
 [tools.executing]
 prefix.text = "💻 "
 prefix.fg = "#00ffff"
