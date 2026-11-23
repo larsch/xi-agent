@@ -433,6 +433,7 @@ fn resolve_codex_url(base_url: &str) -> String {
 // ── Message conversion ────────────────────────────────────────────────────────
 
 fn convert_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+    // Responses can make optional properties required when strict is omitted.
     tools
         .iter()
         .map(|t| {
@@ -441,6 +442,7 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
                 "name": t.name,
                 "description": t.description,
                 "parameters": t.parameters,
+                "strict": false,
             })
         })
         .collect()
@@ -536,6 +538,26 @@ impl LlmProvider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_tools_preserve_optional_parameters() {
+        use crate::agent::{tools::search::SearchTool, types::Tool};
+
+        let tool = SearchTool;
+        let definition = ToolDefinition {
+            name: tool.name().into(),
+            description: tool.description().into(),
+            parameters: tool.parameters_schema(),
+            streaming_field: None,
+        };
+        let wire = convert_tools(std::slice::from_ref(&definition));
+        assert_eq!(wire[0]["strict"], serde_json::json!(false));
+        assert_eq!(wire[0]["parameters"], definition.parameters);
+        assert_eq!(
+            wire[0]["parameters"]["required"],
+            serde_json::json!(["query"])
+        );
+    }
 
     fn parse(json: &str) -> CodexEvent {
         serde_json::from_str(json).expect("parse failed")
