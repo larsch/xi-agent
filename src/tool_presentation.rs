@@ -16,9 +16,8 @@ fn max_one_line_chars(cfg: &DisplayConfig) -> usize {
 pub fn tool_pending_label(name: &str) -> String {
     let emoji = tool_emoji(name);
     let action = match name {
-        "bash" | "cmd" | "powershell" | "exec" | "sudo" | "run_python" | "python_repl_execute" => {
-            "running…"
-        }
+        "bash" | "cmd" | "powershell" | "exec" | "sudo" | "run_python" => "running…",
+        "python_repl_execute" => ">>> running…",
         "ask_user" => "asking…",
         "read" | "read_file" => "reading…",
         "write" | "write_file" => "writing…",
@@ -159,7 +158,12 @@ pub fn tool_invocation_label(
             return (tool_pending_label(name), true);
         }
         let detail = multiline_head_truncated(&detail, display);
-        return (format!("{emoji} {detail}"), false);
+        let prompt = if name == "python_repl_execute" {
+            ">>> "
+        } else {
+            ""
+        };
+        return (format!("{emoji} {prompt}{detail}"), false);
     }
 
     if name == "agent_session" {
@@ -1029,10 +1033,19 @@ mod tests {
     // ── python ────────────────────────────────────────────────────────────────
 
     #[test]
-    fn python_emoji() {
-        let (lbl, ph) = label("run_python", &json!({"script": "print('hello')"}));
-        assert!(!ph);
-        assert!(lbl.starts_with("🐍"), "expected 🐍 prefix, got: {lbl}");
+    fn python_labels_distinguish_repl_with_a_prompt() {
+        assert_eq!(
+            label("run_python", &json!({"script": "print(x)"})),
+            ("🐍 print(x)".into(), false)
+        );
+        assert_eq!(
+            label("python_repl_execute", &json!({"code": "print(x)"})),
+            ("🐍 >>> print(x)".into(), false)
+        );
+        assert_eq!(
+            label("python_repl_execute", &json!({})),
+            ("🐍 >>> running…".into(), true)
+        );
     }
 
     #[test]
