@@ -297,7 +297,7 @@ const HELP_TEXT: &str = r#"# Test Provider Commands
 | `write-edit-throbber` | Same as `write-edit` but waits 4 s after edit result before summary — exercises throbber-after-shrink rendering |
 | `edit-padding-repro` | Write/read an 8-line fixture, replace it with the same 8 lines plus a blank line, then run Python sleep 10 s |
 | `long-lines` | 3-step sequence: write 10 very long lines (~200 chars each), grep all, read back (exercises wrapped-line limit in shell and read_file output) |
-| `padding-tour` | 9-step tour of the streaming padding rules: growth, commit shrink/grow, padded growth, async multi-tool batch, idle activity row (see `docs/PADDING-RULES.md`) |
+| `padding-tour` | 9-step tour of the streaming padding rules: growth, commit shrink/grow, padded growth, async multi-tool batch, idle activity row (see `docs/STREAMING-STABILITY-SPEC.md`) |
 | `read` | Issue a `read_file` tool call on a short fixture (≤8 lines) |
 | `read-long` | Issue a `read_file` tool call on a 20-line fixture (exercises head-truncation and range suffix) |
 | `learn [name]` | Issue a `learn` tool call (defaults to `xi-config-skills` if no name given) |
@@ -1234,7 +1234,7 @@ impl TestProvider {
         }
     }
 
-    /// Drive the padding tour (see `docs/PADDING-RULES.md`).
+    /// Drive the padding tour (see `docs/STREAMING-STABILITY-SPEC.md`).
     ///
     /// Each step streams some content and ends with a tool call so the loop
     /// continues; the tour advances when the result arrives. The last step
@@ -1820,7 +1820,7 @@ impl super::LlmProvider for TestProvider {
 
             "padding-tour" => {
                 // Nine-step tour of the streaming padding rules; see
-                // docs/PADDING-RULES.md for the expected geometry per step.
+                // docs/STREAMING-STABILITY-SPEC.md for the expected geometry per step.
                 let fname = format!(
                     "xi-test-padding-tour-{}.txt",
                     std::time::SystemTime::now()

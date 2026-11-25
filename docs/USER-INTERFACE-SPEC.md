@@ -53,6 +53,7 @@
   - If a turn is still active but output is temporarily idle, the activity row may reappear after a short delay.
   - The output viewport remains bottom-aligned at all times. The UI must not render trailing empty rows after the current output.
   - Control-band row toggles (activity row, pending steering rows, provider-status row, interactive rows) should avoid abrupt one-line jumps at stream boundaries; transitions should preserve stable output positioning.
+  - The activity row keeps a row of its own and trades it against anchor padding, so it never shifts the transcript by itself. The full rules for padding, throbber visibility, and their interaction are in [`STREAMING-STABILITY-SPEC.md`](STREAMING-STABILITY-SPEC.md).
 - Assistant block rendering must be stable across streaming and committed states:
   - Leading and trailing empty lines/whitespace are not rendered.
   - If later chunks introduce non-whitespace text that makes previously hidden whitespace interior, that whitespace is rendered as part of the block.

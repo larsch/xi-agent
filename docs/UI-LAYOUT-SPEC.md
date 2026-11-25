@@ -15,6 +15,7 @@ The UI is a vertical stack of components in strict top-to-bottom order:
 - The output area shrinks to accommodate the other components.
 - The output area is scrollable when its content exceeds the available space.
 - The output area automatically scrolls to the bottom when new content is added, unless the user has manually scrolled up. In that case it does not auto-scroll until the user scrolls back to the bottom.
+- The output area stays vertically stable during a streaming turn: anchor padding and the activity row trade rows below the content. The rules are in [`STREAMING-STABILITY-SPEC.md`](STREAMING-STABILITY-SPEC.md).
 
 ## Output area
 
