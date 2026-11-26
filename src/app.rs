@@ -754,11 +754,8 @@ impl App {
         let Some(store) = self.session.session_store.as_ref() else {
             return;
         };
-        let loaded = store
-            .load_events(session_id)
-            .map(|log| (log, store.load_stash_for_session(session_id)));
-        match loaded {
-            Ok((log, stash_result)) => {
+        match store.resume_in_cwd(session_id, &self.session.current_cwd) {
+            Ok(crate::session::ResumedSession { id, log, stash }) => {
                 // Capture last known token usage from the loaded events
                 // before moving the event log into session_state.
                 self.latest_usage = Self::find_last_usage_from_events(&log.events);
@@ -785,8 +782,9 @@ impl App {
                         .unwrap()
                         .seed_from_events(ss.events());
                 }
-                let stash_load_failed = stash_result.is_err();
-                let drafts = match stash_result {
+                self.session.live_turn.clear_all();
+                let stash_load_failed = stash.is_err();
+                let drafts = match stash {
                     Ok(drafts) => drafts,
                     Err(error) => {
                         self.session
@@ -798,8 +796,7 @@ impl App {
                         Vec::new()
                     }
                 };
-                self.session.live_turn.clear_all();
-                self.session.current_session_id = Some(session_id.to_string());
+                self.session.current_session_id = Some(id);
                 self.session.drafts = drafts;
                 self.session.stash_load_failed = stash_load_failed;
                 self.runtime.queue_selection = None;
@@ -3542,6 +3539,7 @@ mod tests {
 
         let mut app = make_app();
         app.session.session_store = Some(store);
+        app.session.current_cwd = cwd;
         app.session.live_turn.assistant_content = "streaming".to_string();
         app.session
             .live_turn
@@ -3839,6 +3837,7 @@ mod tests {
 
         let mut app = make_app();
         app.session.session_store = Some(store);
+        app.session.current_cwd = cwd;
         app.resume_session_by_id(&first_id);
         app.log_view.expanded_blocks.insert("old block".to_string());
         app.log_view.log_scroll = 42;
@@ -4937,6 +4936,61 @@ mod tests {
         app.session.current_cwd = "/repo".to_string();
         app.resume_session_by_id(&session_id);
         assert_eq!(app.session.drafts, ["saved draft"]);
+    }
+
+    #[test]
+    fn resuming_from_another_folder_branches_history_and_drafts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::session::SessionStore::open_at(tmp.path().join("sessions")).unwrap();
+        let original = store
+            .create_session_from_events(
+                "/source",
+                &[SessionEvent::UserMessage {
+                    content: "original prompt".into(),
+                    timestamp: 1,
+                }],
+            )
+            .unwrap();
+        store
+            .save_stash_for_session(&original, &["original draft".into()])
+            .unwrap();
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/destination".into();
+
+        app.resume_session_by_id(&original);
+        let branch = app.session.current_session_id.clone().unwrap();
+        assert_ne!(branch, original);
+        assert_eq!(
+            app.display_messages_combined()[0].content,
+            "original prompt"
+        );
+        assert_eq!(app.session.drafts, ["original draft"]);
+
+        app.session.append_user_message("branch prompt".into(), 2);
+        let store = app.session.session_store.as_ref().unwrap();
+        assert_eq!(store.latest_for_cwd("/source").unwrap().id, original);
+        assert_eq!(store.latest_for_cwd("/destination").unwrap().id, branch);
+        assert_eq!(store.load_events(&original).unwrap().events.len(), 1);
+        assert_eq!(store.load_events(&branch).unwrap().events.len(), 2);
+        assert_eq!(
+            store.load_stash("/destination", &branch).unwrap(),
+            ["original draft"]
+        );
+        store
+            .save_stash_for_session(&branch, &["branch draft".into()])
+            .unwrap();
+        assert_eq!(
+            store.load_stash("/source", &original).unwrap(),
+            ["original draft"]
+        );
+
+        app.resume_latest_for_current_cwd();
+        assert_eq!(
+            app.session.current_session_id.as_deref(),
+            Some(branch.as_str())
+        );
+        assert_eq!(app.session.drafts, ["branch draft"]);
     }
 
     #[test]

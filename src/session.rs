@@ -9,6 +9,7 @@ use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 
 use crate::dirs::project_dirs;
+use crate::event_log::EventLog;
 use crate::llm::Message;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -19,6 +20,12 @@ pub struct SessionMeta {
     pub updated_at_ms: i64,
     /// First line of the first user prompt in this session, if any.
     pub first_prompt: Option<String>,
+}
+
+pub(crate) struct ResumedSession {
+    pub id: String,
+    pub log: EventLog,
+    pub stash: anyhow::Result<Vec<String>>,
 }
 
 pub struct SessionStore {
@@ -126,13 +133,48 @@ impl SessionStore {
         }
     }
 
-    /// Load a stash by session ID, resolving its stored working directory.
-    pub fn load_stash_for_session(&self, session_id: &str) -> anyhow::Result<Vec<String>> {
-        let cwd = self.cwd_for_session(session_id)?;
-        self.load_stash(&cwd, session_id)
+    /// Open a local session in place, or copy a foreign session into `cwd`.
+    pub(crate) fn resume_in_cwd(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> anyhow::Result<ResumedSession> {
+        let (path, source_cwd) = self.locate_session(session_id)?;
+        let log = EventLog::load(path)?;
+        let stash = self.load_stash(&source_cwd, session_id);
+        if normalize_cwd_for_match(&source_cwd) == normalize_cwd_for_match(cwd) {
+            return Ok(ResumedSession {
+                id: session_id.to_owned(),
+                log,
+                stash,
+            });
+        }
+
+        let drafts = stash?;
+        let branch_id = new_session_id();
+        let branch_path = self.session_file_path(cwd, &branch_id);
+        anyhow::ensure!(
+            branch_id != session_id && !branch_path.exists(),
+            "session ID collision: {branch_id}"
+        );
+        // Save the drafts first so the branch isn't listed before both copies exist.
+        fs::create_dir_all(self.sessions_dir.join(cwd_key(cwd)))?;
+        self.save_stash(cwd, &branch_id, &drafts)?;
+        match EventLog::new_from_events(&branch_path, &log.events) {
+            Ok(log) => Ok(ResumedSession {
+                id: branch_id,
+                log,
+                stash: Ok(drafts),
+            }),
+            Err(error) => {
+                let _ = fs::remove_file(&branch_path);
+                let _ = self.save_stash(cwd, &branch_id, &[]);
+                Err(error)
+            }
+        }
     }
 
-    fn cwd_for_session(&self, session_id: &str) -> anyhow::Result<String> {
+    fn locate_session(&self, session_id: &str) -> anyhow::Result<(PathBuf, String)> {
         let path = self
             .find_session_file_by_id(session_id)?
             .ok_or_else(|| anyhow::anyhow!("no session file found for session {session_id}"))?;
@@ -141,8 +183,9 @@ impl SessionStore {
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .ok_or_else(|| anyhow::anyhow!("invalid session path for session {session_id}"))?;
-        decode_cwd_key(key)
-            .ok_or_else(|| anyhow::anyhow!("invalid session working directory for {session_id}"))
+        let cwd = decode_cwd_key(key)
+            .ok_or_else(|| anyhow::anyhow!("invalid session working directory for {session_id}"))?;
+        Ok((path, cwd))
     }
 
     /// Save a stash by session ID using its recorded working directory.
@@ -151,7 +194,7 @@ impl SessionStore {
         session_id: &str,
         drafts: &[String],
     ) -> anyhow::Result<()> {
-        let cwd = self.cwd_for_session(session_id)?;
+        let (_, cwd) = self.locate_session(session_id)?;
         self.save_stash(&cwd, session_id, drafts)
     }
 

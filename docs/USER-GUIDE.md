@@ -92,6 +92,11 @@ Type `/` to see command completions. Common commands include:
 | `/skill:<name> [args]` | Invoke a skill, optionally with arguments. |
 | `/quit` | Quit xi. |
 
+Resuming a session from another directory creates a new session in the current
+directory, with its own copy of the conversation and saved drafts. The original
+session is unchanged. Resuming a session from the current directory continues it
+in place.
+
 ## Instructions, skills, and agents
 
 Place `AGENTS.md` instructions in a project to give xi context about its
