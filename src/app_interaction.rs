@@ -13,7 +13,6 @@ use crate::provider_instance::{ApiType, BackendPreset, ProviderInstance};
 use crate::provider_manager::{PendingProviderRemoval, PendingProviderSetup, ProviderSetupStep};
 use crate::selection_state::{MAX_SELECTION_VISIBLE, SelectionKind};
 use crate::thinking::ThinkingLevel;
-use ratatui_textarea::{CursorMove, TextArea};
 
 impl App {
     // ── Selection menu ────────────────────────────────────────────────────────
@@ -1032,8 +1031,7 @@ impl App {
                 AskUserResponse::Answer(text) => {
                     // Populate textarea with the answer so commit_step_branch
                     // can read it.
-                    self.textarea = TextArea::new(vec![text.clone()]);
-                    self.textarea.move_cursor(CursorMove::End);
+                    self.set_composer_text(&text);
                     // Snapshot the ToolCall id before commit_step_branch
                     // switches sessions.  The cursor points to the ask_user
                     // ToolResult, whose id matches the preceding ToolCall.

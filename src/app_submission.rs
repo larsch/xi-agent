@@ -287,14 +287,13 @@ impl App {
                 text: text.clone(),
                 consumed: false,
             });
-        self.textarea = crate::app::App::make_textarea();
-        self.textarea.insert_str(&text);
+        self.set_composer_text(&text);
         self.completion.clear();
         true
     }
 
     fn select_stashed_draft(&mut self, index: usize) -> bool {
-        let Some(text) = self.session.drafts.get(index) else {
+        let Some(text) = self.session.drafts.get(index).cloned() else {
             return false;
         };
         if self.runtime.queue_saved_input.is_none() {
@@ -302,8 +301,7 @@ impl App {
         }
         self.runtime.queue_selection =
             Some(crate::agent_runtime::QueueSelection::StashedDraft(index));
-        self.textarea = crate::app::App::make_textarea();
-        self.textarea.insert_str(text);
+        self.set_composer_text(&text);
         self.completion.clear();
         true
     }
@@ -311,8 +309,7 @@ impl App {
     fn restore_queue_composer(&mut self) {
         let saved = self.runtime.queue_saved_input.take().unwrap_or_default();
         self.runtime.queue_selection = None;
-        self.textarea = crate::app::App::make_textarea();
-        self.textarea.insert_str(&saved);
+        self.set_composer_text(&saved);
         self.completion.clear();
     }
 
@@ -760,8 +757,7 @@ impl App {
             self.runtime.queue_selection = None;
             self.runtime.queue_saved_input = None;
             if let Some(saved) = restore_input {
-                self.textarea = crate::app::App::make_textarea();
-                self.textarea.insert_str(&saved);
+                self.set_composer_text(&saved);
             }
             return true;
         }
@@ -793,8 +789,7 @@ impl App {
         self.runtime.queue_selection = None;
         self.runtime.queue_saved_input = None;
         if let Some(saved) = restore_input {
-            self.textarea = crate::app::App::make_textarea();
-            self.textarea.insert_str(&saved);
+            self.set_composer_text(&saved);
         }
         true
     }

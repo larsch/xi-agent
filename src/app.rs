@@ -1011,6 +1011,29 @@ impl App {
         TextArea::default()
     }
 
+    /// Build a fresh composer textarea whose contents are `text`, carrying
+    /// over the caller-supplied `yank` buffer.
+    ///
+    /// The yank buffer that Ctrl+Y pastes after a Ctrl+K/Ctrl+W kill lives
+    /// inside the [`TextArea`] itself, so replacing the editor naively (as
+    /// every stash/history/completion swap does) silently drops it. Passing
+    /// the previous buffer through keeps kills usable after navigation.
+    fn textarea_with_yank(yank: String, text: &str) -> TextArea<'static> {
+        let mut textarea = Self::make_textarea();
+        if !text.is_empty() {
+            textarea.insert_str(text);
+        }
+        textarea.set_yank_text(yank);
+        textarea.move_cursor(CursorMove::End);
+        textarea
+    }
+
+    /// Replace the composer contents while preserving the textarea's yank
+    /// buffer, so Ctrl+Y still pastes whatever was killed before the swap.
+    pub(crate) fn set_composer_text(&mut self, text: &str) {
+        self.textarea = Self::textarea_with_yank(self.textarea.yank_text(), text);
+    }
+
     fn provider_supports_token_refresh(&self) -> bool {
         self.provider
             .current_instance
@@ -1100,7 +1123,7 @@ impl App {
     /// Reset the chat input area to a blank state between submissions.
     /// Also clears any active completion state.
     pub fn reset_textarea(&mut self) {
-        self.textarea = Self::make_textarea();
+        self.set_composer_text("");
         self.completion.clear();
     }
 
@@ -1539,11 +1562,11 @@ impl App {
                     &input[range.1..]
                 )
             };
-            self.textarea = TextArea::new(new_text.lines().map(|s| s.to_string()).collect());
+            self.set_composer_text(&new_text);
         } else {
             // Standard completion: replace entire textarea.
             let text = item.complete_to.clone();
-            self.textarea = TextArea::new(vec![text]);
+            self.set_composer_text(&text);
         }
 
         self.textarea.move_cursor(CursorMove::End);
@@ -1585,8 +1608,7 @@ impl App {
 
     /// Replace the textarea while preserving its logical line boundaries.
     fn restore_textarea_content(&mut self, text: &str) {
-        self.textarea = TextArea::new(text.split('\n').map(str::to_owned).collect());
-        self.textarea.move_cursor(CursorMove::End);
+        self.set_composer_text(text);
     }
 
     /// Returns the event indices (into the committed event log) of all
@@ -5013,6 +5035,68 @@ mod tests {
         app.textarea.insert_str("must remain available");
         assert!(!app.stash_input());
         assert_eq!(app.textarea.lines().join("\n"), "must remain available");
+    }
+
+    /// Kill the whole composer line with Ctrl+K so `text` lands in the
+    /// textarea's yank buffer, leaving the composer empty.
+    fn kill_composer_line_into_yank(app: &mut App, text: &str) {
+        app.textarea.insert_str(text);
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+        app.textarea.input(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('k'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ));
+        assert!(app.textarea.lines().join("\n").is_empty());
+        assert_eq!(app.textarea.yank_text(), text);
+    }
+
+    #[test]
+    fn draft_navigation_preserves_yank_buffer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::session::SessionStore::open_at(tmp.path().join("sessions")).expect("open store");
+        let mut app = make_app();
+        app.session.session_store = Some(store);
+        app.session.current_cwd = "/repo".to_string();
+        app.textarea.insert_str("older draft");
+        assert!(app.stash_input());
+        assert!(app.textarea.lines().join("\n").is_empty());
+
+        kill_composer_line_into_yank(&mut app, "killed text");
+
+        // Alt+Down pulls the stashed draft into a fresh textarea; the killed
+        // text must still be pasteable.
+        app.navigate_queue_down();
+        assert_eq!(app.textarea.lines().join("\n"), "older draft");
+        assert_eq!(app.textarea.yank_text(), "killed text");
+
+        app.textarea.paste();
+        assert_eq!(app.textarea.lines().join("\n"), "older draftkilled text");
+    }
+
+    #[test]
+    fn session_history_navigation_preserves_yank_buffer() {
+        let mut app = make_app_with_events(vec![user_ev("first"), assistant_ev("reply")]);
+        kill_composer_line_into_yank(&mut app, "killed text");
+
+        app.step_back();
+        assert_eq!(app.textarea.lines().join("\n"), "first");
+        assert_eq!(app.textarea.yank_text(), "killed text");
+
+        app.step_forward();
+        assert!(app.textarea.lines().join("\n").is_empty());
+        assert_eq!(app.textarea.yank_text(), "killed text");
+    }
+
+    #[test]
+    fn reset_textarea_preserves_yank_buffer() {
+        let mut app = make_app();
+        kill_composer_line_into_yank(&mut app, "killed text");
+        app.reset_textarea();
+        assert!(app.textarea.lines().join("\n").is_empty());
+        assert_eq!(app.textarea.yank_text(), "killed text");
     }
 
     #[tokio::test]
